@@ -32,6 +32,8 @@ yarn-error.*
 
 # local env files
 .env*.local
+.env.deploy
+scripts/gcloud/.env.deploy
 
 # typescript
 *.tsbuildinfo
