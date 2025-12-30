@@ -1,9 +1,10 @@
 import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
+import * as Speech from 'expo-speech';
 import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
@@ -12,6 +13,7 @@ export default function ColeInboxScreen() {
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
   const { width } = useWindowDimensions();
+  const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -54,6 +56,36 @@ export default function ColeInboxScreen() {
       unsubscribe();
     };
   }, []);
+
+  // Auto-play speech when photo with description opens
+  // Using useRef to prevent state loops - only trigger once per photo
+  const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+  useEffect(() => {
+    if (selectedEvent && selectedMetadata && selectedMetadata.description) {
+      // Reset the ref when a new photo opens
+      hasSpokenRef.current = false;
+      
+      // Small delay to ensure modal is fully rendered
+      const timer = setTimeout(() => {
+        if (!hasSpokenRef.current) {
+          hasSpokenRef.current = true;
+          Speech.speak(selectedMetadata.description, {
+            pitch: 0.9,
+            rate: 0.9,
+            language: 'en-US',
+          });
+        }
+      }, 300);
+
+      return () => {
+        clearTimeout(timer);
+        Speech.stop();
+      };
+    } else {
+      // Stop speech if no description
+      Speech.stop();
+    }
+  }, [selectedEvent?.event_id, selectedMetadata?.description]);
 
   const fetchEvents = async () => {
     try {
@@ -143,8 +175,41 @@ export default function ColeInboxScreen() {
     );
   };
 
-  const closeFullScreen = () => {
+  const closeFullScreen = useCallback(() => {
+    // Stop any ongoing speech
+    Speech.stop();
     setSelectedEvent(null);
+  }, []);
+
+  // PanResponder for swipe left or right to close
+  const swipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: (_, gestureState) => {
+          // Only respond to horizontal swipes
+          return Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          // Swipe left or right with minimum distance of 50 pixels
+          if (Math.abs(gestureState.dx) > 50 && Math.abs(gestureState.dy) < 100) {
+            closeFullScreen();
+          }
+        },
+      }),
+    [closeFullScreen]
+  );
+
+  const playDescription = () => {
+    const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+    if (metadata && metadata.description) {
+      Speech.stop(); // Stop any ongoing speech first
+      Speech.speak(metadata.description, {
+        pitch: 0.9,
+        rate: 0.9,
+        language: 'en-US',
+      });
+    }
   };
 
   const deleteEvent = async (event: Event) => {
@@ -181,11 +246,14 @@ export default function ColeInboxScreen() {
                 // Continue even if Firestore delete fails
               }
 
-              // 3. Remove from local state and refresh
+              // 3. Stop any ongoing speech
+              Speech.stop();
+              
+              // 4. Remove from local state and refresh
               setEvents(events.filter(e => e.event_id !== event.event_id));
               setSelectedEvent(null);
               
-              // 4. Refresh the list to ensure consistency
+              // 5. Refresh the list to ensure consistency
               fetchEvents();
               
               Alert.alert("Success", "Event deleted successfully");
@@ -228,8 +296,6 @@ export default function ColeInboxScreen() {
     );
   }
 
-  const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Cole's Inbox</Text>
@@ -251,15 +317,8 @@ export default function ColeInboxScreen() {
         onRequestClose={closeFullScreen}
       >
         {selectedEvent && (
-          <View style={styles.fullScreenContainer}>
+          <View style={styles.fullScreenContainer} {...swipeResponder.panHandlers}>
             <View style={styles.topButtonContainer}>
-              <TouchableOpacity 
-                style={styles.closeButton}
-                onPress={closeFullScreen}
-              >
-                <Text style={styles.closeButtonText}>✕ Close</Text>
-              </TouchableOpacity>
-              
               {/* Delete button - for caregiver mode */}
               <TouchableOpacity 
                 style={styles.deleteButton}
@@ -277,7 +336,25 @@ export default function ColeInboxScreen() {
             
             {selectedMetadata && selectedMetadata.description && (
               <View style={styles.descriptionContainer}>
-                <Text style={styles.descriptionLabel}>From {selectedMetadata.sender}:</Text>
+                <View style={styles.descriptionHeader}>
+                  <Text style={styles.descriptionLabel}>From {selectedMetadata.sender}:</Text>
+                  <View style={styles.buttonRow}>
+                    <TouchableOpacity 
+                      style={styles.playButton}
+                      onPress={playDescription}
+                      activeOpacity={0.7}
+                    >
+                      <FontAwesome name="play" size={24} color="#fff" />
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={styles.closeButtonInline}
+                      onPress={closeFullScreen}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.closeButtonTextInline}>X</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
                 <Text style={styles.descriptionText}>
                   {selectedMetadata.description}
                 </Text>
@@ -414,11 +491,45 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
   },
+  descriptionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
   descriptionLabel: {
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
-    marginBottom: 8,
+    flex: 1,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  playButton: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(46, 120, 183, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  closeButtonInline: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  closeButtonTextInline: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: 'bold',
   },
   descriptionText: {
     color: '#fff',
