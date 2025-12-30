@@ -210,3 +210,73 @@ func ListMirrorPhotos(w http.ResponseWriter, r *http.Request) {
 		"events": events,
 	})
 }
+
+// DeleteMirrorEvent handles deletion of an event bundle (S3 objects)
+func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
+	// 1. Standard CORS
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	ctx := context.TODO()
+
+	// 2. Get event_id from query parameter
+	eventID := r.URL.Query().Get("event_id")
+	if eventID == "" {
+		http.Error(w, "event_id parameter required", 400)
+		return
+	}
+
+	// 3. Load Config with region
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-east-1"),
+	)
+	if err != nil {
+		http.Error(w, "AWS Config Error: "+err.Error(), 500)
+		return
+	}
+
+	// 4. Initialize S3 Client
+	s3Client := s3.NewFromConfig(cfg)
+
+	// 5. Delete both image.jpg and metadata.json
+	bucket := "mirror-uploads-sparago-2026"
+	path := "to" // Events are in cole/to/
+
+	objectsToDelete := []string{
+		fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
+		fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
+	}
+
+	var errors []string
+	for _, key := range objectsToDelete {
+		_, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", key, err))
+			fmt.Printf("Error deleting %s: %v\n", key, err)
+		} else {
+			fmt.Printf("Successfully deleted %s\n", key)
+		}
+	}
+
+	// 6. Return response
+	w.Header().Set("Content-Type", "application/json")
+	if len(errors) > 0 {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"errors":  errors,
+		})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Event deleted successfully",
+		})
+	}
+}

@@ -4,6 +4,8 @@ import { File } from 'expo-file-system';
 import React, { useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, TextInput, TouchableOpacity, View, KeyboardAvoidingView, Platform, Image, TouchableWithoutFeedback, Keyboard, ScrollView } from 'react-native';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
+import { db } from '@/config/firebase';
+import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 export default function CompanionHomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -97,11 +99,31 @@ export default function CompanionHomeScreen() {
       }
       console.log("Metadata uploaded successfully");
 
-      // 4. Cleanup
+      // 4. Cleanup UI first (don't wait for Firestore)
       Alert.alert("Success!", "Photo and description sent to Cole!");
       setPhoto(null);
       setDescription('');
       setShowDescriptionInput(false);
+
+      // 5. Write signal to Firestore in background (non-blocking)
+      // This won't block the UI even if Firestore fails
+      setDoc(doc(collection(db, 'signals'), eventID), {
+        event_id: eventID,
+        sender: "Granddad",
+        status: "ready",
+        timestamp: serverTimestamp(),
+        type: "mirror_event",
+      })
+        .then(() => {
+          console.log("Firestore signal written successfully");
+        })
+        .catch((firestoreError: any) => {
+          // Log error but don't block the user
+          console.error("Failed to write Firestore signal:", firestoreError);
+          console.error("Firestore error code:", firestoreError?.code);
+          console.error("Firestore error message:", firestoreError?.message);
+          console.error("Full error:", JSON.stringify(firestoreError, null, 2));
+        });
 
       // Delete local file
       try {

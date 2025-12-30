@@ -1,6 +1,9 @@
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, StyleSheet, Text, View, useWindowDimensions, TouchableOpacity, Modal } from 'react-native';
+import { db } from '@/config/firebase';
+import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
+import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
@@ -15,6 +18,41 @@ export default function ColeInboxScreen() {
 
   useEffect(() => {
     fetchEvents();
+
+    // Set up Firestore listener for real-time signals
+    const signalsRef = collection(db, 'signals');
+    const q = query(signalsRef, orderBy('timestamp', 'desc'));
+    
+    let isInitialLoad = true;
+    
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot: QuerySnapshot<DocumentData>) => {
+        // Skip the initial load - we already fetched events on mount
+        if (isInitialLoad) {
+          isInitialLoad = false;
+          return;
+        }
+
+        // Check if this is a new document (not just initial load)
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added') {
+            const signalData = change.doc.data();
+            console.log("New Mirror Event Detected!", signalData);
+            // Trigger refresh of the gallery
+            fetchEvents();
+          }
+        });
+      },
+      (error) => {
+        console.error("Firestore listener error:", error);
+      }
+    );
+
+    // Cleanup listener on unmount to prevent memory leaks
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   const fetchEvents = async () => {
@@ -109,6 +147,58 @@ export default function ColeInboxScreen() {
     setSelectedEvent(null);
   };
 
+  const deleteEvent = async (event: Event) => {
+    Alert.alert(
+      "Delete Event",
+      "Are you sure you want to delete this photo and description?",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              // 1. Delete S3 objects
+              const deleteResponse = await fetch(
+                `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}`
+              );
+              
+              if (!deleteResponse.ok) {
+                const errorData = await deleteResponse.json();
+                throw new Error(errorData.errors?.join(', ') || 'Failed to delete S3 objects');
+              }
+
+              // 2. Delete Firestore signal document
+              try {
+                const signalRef = doc(db, 'signals', event.event_id);
+                await deleteDoc(signalRef);
+                console.log("Firestore signal deleted");
+              } catch (firestoreError: any) {
+                console.warn("Failed to delete Firestore signal:", firestoreError);
+                // Continue even if Firestore delete fails
+              }
+
+              // 3. Remove from local state and refresh
+              setEvents(events.filter(e => e.event_id !== event.event_id));
+              setSelectedEvent(null);
+              
+              // 4. Refresh the list to ensure consistency
+              fetchEvents();
+              
+              Alert.alert("Success", "Event deleted successfully");
+            } catch (error: any) {
+              console.error("Delete error:", error);
+              Alert.alert("Delete Failed", error.message || "Failed to delete event");
+            }
+          },
+        },
+      ]
+    );
+  };
+
   if (loading) {
     return (
       <View style={styles.centerContainer}>
@@ -162,12 +252,22 @@ export default function ColeInboxScreen() {
       >
         {selectedEvent && (
           <View style={styles.fullScreenContainer}>
-            <TouchableOpacity 
-              style={styles.closeButton}
-              onPress={closeFullScreen}
-            >
-              <Text style={styles.closeButtonText}>✕ Close</Text>
-            </TouchableOpacity>
+            <View style={styles.topButtonContainer}>
+              <TouchableOpacity 
+                style={styles.closeButton}
+                onPress={closeFullScreen}
+              >
+                <Text style={styles.closeButtonText}>✕ Close</Text>
+              </TouchableOpacity>
+              
+              {/* Delete button - for caregiver mode */}
+              <TouchableOpacity 
+                style={styles.deleteButton}
+                onPress={() => deleteEvent(selectedEvent)}
+              >
+                <FontAwesome name="trash" size={20} color="#fff" />
+              </TouchableOpacity>
+            </View>
             
             <Image
               source={{ uri: selectedEvent.image_url }}
@@ -273,11 +373,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  closeButton: {
+  topButtonContainer: {
     position: 'absolute',
     top: 50,
     right: 20,
     zIndex: 1,
+    flexDirection: 'row',
+    gap: 10,
+  },
+  closeButton: {
     backgroundColor: 'rgba(0,0,0,0.6)',
     padding: 12,
     borderRadius: 8,
@@ -286,6 +390,15 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  deleteButton: {
+    backgroundColor: 'rgba(211, 47, 47, 0.8)',
+    padding: 12,
+    borderRadius: 8,
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   fullScreenImage: {
     flex: 1,
