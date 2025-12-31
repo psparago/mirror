@@ -34,7 +34,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "a21eb601-52c9-4d66-97d9-0891967bedee"
+      }
+    },
+    "owner": "psparago"
   }
 }
-
