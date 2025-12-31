@@ -26,8 +26,15 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Send to Cole',
+          title: 'Reflection',
           tabBarIcon: ({ color }) => <TabBarIcon name="camera" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="history"
+        options={{
+          title: 'History',
+          tabBarIcon: ({ color }) => <TabBarIcon name="history" color={color} />,
         }}
       />
     </Tabs>

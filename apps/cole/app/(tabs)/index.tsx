@@ -1,9 +1,11 @@
 import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
-import { Audio } from 'expo-av';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { File } from 'expo-file-system';
 import * as Speech from 'expo-speech';
-import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
+import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
@@ -13,9 +15,20 @@ export default function ColeInboxScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
+  const [showSelfieMirror, setShowSelfieMirror] = useState(false);
+  const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
+  const cameraRef = useRef<CameraView>(null);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const { width } = useWindowDimensions();
   const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const audioPlayer = useAudioPlayer(undefined);
+  const audioStatus = useAudioPlayerStatus(audioPlayer);
+  const shouldAutoPlayRef = useRef<{ eventId: string | null; url: string | null }>({ eventId: null, url: null });
+  const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
+  const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
+  const audioFinishedRef = useRef<{ [eventId: string]: boolean }>({});
+  const [playButtonPressed, setPlayButtonPressed] = useState(false);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -42,7 +55,6 @@ export default function ColeInboxScreen() {
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             const signalData = change.doc.data();
-            console.log("New Mirror Event Detected!", signalData);
             // Trigger refresh of the gallery
             fetchEvents();
           }
@@ -59,6 +71,44 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
+  // Listen to audio player status to detect when audio finishes
+  useEffect(() => {
+    if (!audioStatus || !selectedEvent) return;
+    
+    if (audioStatus.isLoaded && audioStatus.didJustFinish && !audioStatus.playing) {
+      // Show selfie mirror after audio finishes
+      if (!audioFinishedRef.current[selectedEvent.event_id]) {
+        audioFinishedRef.current[selectedEvent.event_id] = true;
+        setShowSelfieMirror(true);
+      }
+    }
+  }, [audioStatus?.isLoaded, audioStatus?.didJustFinish, audioStatus?.playing, selectedEvent?.event_id]);
+
+  // Auto-play when audio loads (for initial selection and manual play)
+  useEffect(() => {
+    if (!audioStatus || !audioPlayer || !shouldAutoPlayRef.current.eventId) return;
+    
+    // If audio just loaded and we're waiting to auto-play
+    if (audioStatus.isLoaded && !audioStatus.playing && shouldAutoPlayRef.current.eventId) {
+      const waitingEventId = shouldAutoPlayRef.current.eventId;
+      // Check if we're still on the same event
+      if (currentEventIdRef.current === waitingEventId) {
+        // Small delay to ensure everything is ready
+        const playTimer = setTimeout(() => {
+          if (currentEventIdRef.current === waitingEventId && audioStatus.isLoaded && !audioStatus.playing) {
+            audioPlayer.play();
+            shouldAutoPlayRef.current = { eventId: null, url: null };
+          }
+        }, 100);
+        return () => clearTimeout(playTimer);
+      } else {
+        // Event changed, clear the flag
+        shouldAutoPlayRef.current = { eventId: null, url: null };
+      }
+    }
+  }, [audioStatus?.isLoaded, audioStatus?.playing, audioPlayer]);
+
+
   // Auto-play speech/audio when photo with description opens
   // Using useRef to prevent state loops - only trigger once per photo
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
@@ -72,15 +122,13 @@ export default function ColeInboxScreen() {
     // If we're switching to a different photo, stop everything immediately
     if (previousEventId && previousEventId !== newEventId) {
       Speech.stop();
-      const oldSound = soundRef.current;
-      if (oldSound) {
-        // Stop and unload immediately - don't wait, but do both
-        oldSound.stopAsync().catch(() => {});
-        oldSound.unloadAsync().catch(() => {});
-        soundRef.current = null;
+      if (audioPlayer) {
+        // Pause playback (source stays loaded, will be replaced when new audio loads)
+        audioPlayer.pause();
       }
-      // Reset hasSpokenRef when switching photos
+      // Reset hasSpokenRef and clear auto-play flag when switching photos
       hasSpokenRef.current = false;
+      shouldAutoPlayRef.current = { eventId: null, url: null };
     }
     
     // If this is the same event (just a URL refresh), don't restart audio
@@ -122,11 +170,8 @@ export default function ColeInboxScreen() {
             // Play audio file
             try {
               // Stop any existing audio immediately (defensive check)
-              const existingSound = soundRef.current;
-              if (existingSound) {
-                existingSound.stopAsync().catch(() => {});
-                existingSound.unloadAsync().catch(() => {});
-                soundRef.current = null;
+              if (audioPlayer) {
+                audioPlayer.pause();
               }
               
               // Small delay to ensure old audio is stopped before starting new one
@@ -138,27 +183,10 @@ export default function ColeInboxScreen() {
               }
               
               // Load and play the audio using the presigned GET URL from the Event
-              const { sound } = await Audio.Sound.createAsync(
-                { uri: selectedEvent.audio_url },
-                { shouldPlay: true }
-              );
-              
-              // Final check before assigning
-              if (currentEventIdRef.current === eventIdForThisEffect) {
-                soundRef.current = sound;
-                
-                // Cleanup when audio finishes
-                sound.setOnPlaybackStatusUpdate((status) => {
-                  if (status.isLoaded && status.didJustFinish) {
-                    sound.unloadAsync();
-                    if (soundRef.current === sound) {
-                      soundRef.current = null;
-                    }
-                  }
-                });
-              } else {
-                // User switched photos while loading, unload immediately
-                sound.unloadAsync().catch(() => {});
+              if (audioPlayer && currentEventIdRef.current === eventIdForThisEffect) {
+                audioPlayer.replace(selectedEvent.audio_url);
+                // Set flag to auto-play when audio loads
+                shouldAutoPlayRef.current = { eventId: eventIdForThisEffect, url: selectedEvent.audio_url };
               }
             } catch (error) {
               console.error("Error playing audio:", error);
@@ -178,6 +206,15 @@ export default function ColeInboxScreen() {
               rate: 0.9,
               language: 'en-US',
             });
+            // Estimate TTS duration and show mirror (rough estimate: ~150 words per minute)
+            const wordCount = selectedMetadata.description.split(/\s+/).length;
+            const estimatedDuration = (wordCount / 150) * 60 * 1000; // Convert to milliseconds
+            setTimeout(() => {
+              if (selectedEvent?.event_id && currentEventIdRef.current === selectedEvent.event_id && !audioFinishedRef.current[selectedEvent.event_id]) {
+                audioFinishedRef.current[selectedEvent.event_id] = true;
+                setShowSelfieMirror(true);
+              }
+            }, Math.max(estimatedDuration, 2000)); // At least 2 seconds
           }
         }
       }, 100);
@@ -185,25 +222,43 @@ export default function ColeInboxScreen() {
       return () => {
         clearTimeout(timer);
         Speech.stop();
-        // Cleanup audio - stop first, then unload
-        const soundToCleanup = soundRef.current;
-        if (soundToCleanup) {
-          soundToCleanup.stopAsync().catch(() => {});
-          soundToCleanup.unloadAsync().catch(() => {});
-          soundRef.current = null;
+        // Cleanup audio - pause playback
+        if (audioPlayer) {
+          audioPlayer.pause();
         }
       };
     } else {
       // Stop speech/audio if no description
       Speech.stop();
-      const soundToCleanup = soundRef.current;
-      if (soundToCleanup) {
-        soundToCleanup.stopAsync().catch(() => {});
-        soundToCleanup.unloadAsync().catch(() => {});
-        soundRef.current = null;
+      if (audioPlayer) {
+        audioPlayer.pause();
       }
     }
   }, [selectedEvent?.event_id, selectedEvent?.audio_url, selectedMetadata?.description, selectedMetadata?.content_type]);
+
+  // Track engagement: send signal if Star views Reflection for > 5 seconds
+  useEffect(() => {
+    // Clear any existing timer
+    if (engagementTimerRef.current) {
+      clearTimeout(engagementTimerRef.current);
+      engagementTimerRef.current = null;
+    }
+
+    // If a Reflection is selected, start 5-second timer
+    if (selectedEvent?.event_id) {
+      engagementTimerRef.current = setTimeout(() => {
+        sendEngagementSignal(selectedEvent.event_id);
+      }, 5000); // 5 seconds
+    }
+
+    // Cleanup timer on unmount or when selectedEvent changes
+    return () => {
+      if (engagementTimerRef.current) {
+        clearTimeout(engagementTimerRef.current);
+        engagementTimerRef.current = null;
+      }
+    };
+  }, [selectedEvent?.event_id]);
 
   const fetchEvents = async () => {
     try {
@@ -216,7 +271,6 @@ export default function ColeInboxScreen() {
       }
       
       const data: ListEventsResponse = await response.json();
-      console.log('Fetched events:', JSON.stringify(data, null, 2));
       
       // Filter out events without image URLs and log issues
       const validEvents = (data.events || []).filter((event) => {
@@ -353,12 +407,12 @@ export default function ColeInboxScreen() {
   const closeFullScreen = useCallback(async () => {
     // Stop any ongoing speech/audio
     Speech.stop();
-    if (soundRef.current) {
-      await soundRef.current.unloadAsync();
-      soundRef.current = null;
+    if (audioPlayer) {
+      audioPlayer.pause();
     }
+    setShowSelfieMirror(false);
     setSelectedEvent(null);
-  }, []);
+  }, [audioPlayer]);
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
@@ -370,26 +424,16 @@ export default function ColeInboxScreen() {
     // Stop any ongoing speech/audio IMMEDIATELY
     Speech.stop();
     
-    // Stop and unload audio - wait for stop to actually complete
-    const currentSound = soundRef.current;
-    if (currentSound) {
-      try {
-        // Stop playback and wait for it to actually stop
-        await currentSound.stopAsync();
-      } catch (e) {
-        // Ignore errors if already stopped
-      }
-      try {
-        // Unload after stopping
-        await currentSound.unloadAsync();
-      } catch (e) {
-        // Ignore errors
-      }
-      soundRef.current = null;
+    // Pause audio
+    if (audioPlayer) {
+      audioPlayer.pause();
     }
     
     // Reset the hasSpokenRef to prevent new audio from starting too early
     hasSpokenRef.current = false;
+    
+    // Hide selfie mirror when navigating
+    setShowSelfieMirror(false);
     
     // Determine the target event
     let targetEvent: Event | null = null;
@@ -467,9 +511,149 @@ export default function ColeInboxScreen() {
     [navigateToPhoto, closeFullScreen]
   );
 
+  // Send engagement signal to Firestore
+  const sendEngagementSignal = async (eventId: string) => {
+    if (hasEngagedRef.current[eventId]) return; // Already sent
+    
+    try {
+      const signalRef = doc(db, 'signals', eventId);
+      await setDoc(signalRef, {
+        event_id: eventId,
+        status: 'engaged',
+        timestamp: serverTimestamp(),
+        type: 'engagement_heartbeat',
+      }, { merge: true });
+      hasEngagedRef.current[eventId] = true;
+    } catch (error) {
+      console.error('Error sending engagement signal:', error);
+    }
+  };
+
+  // Send replay signal to Firestore
+  const sendReplaySignal = async (eventId: string) => {
+    if (hasReplayedRef.current[eventId]) {
+      return; // Already sent
+    }
+    
+    try {
+      const signalRef = doc(db, 'signals', eventId);
+      await setDoc(signalRef, {
+        event_id: eventId,
+        status: 'replayed',
+        timestamp: serverTimestamp(),
+        type: 'engagement_heartbeat',
+      }, { merge: true });
+      hasReplayedRef.current[eventId] = true;
+    } catch (error) {
+      console.error('Error sending replay signal:', error);
+    }
+  };
+
+  // Capture and upload selfie response
+  const captureSelfieResponse = async () => {
+    if (!selectedEvent || !cameraRef.current || isCapturingSelfie) return;
+    
+    // Check camera permissions
+    if (!cameraPermission?.granted) {
+      const result = await requestCameraPermission();
+      if (!result.granted) {
+        Alert.alert("Camera Permission", "Camera permission is required to take a selfie response.");
+        return;
+      }
+    }
+
+    setIsCapturingSelfie(true);
+    
+    try {
+      // Capture photo
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.8,
+        base64: false,
+      });
+
+      if (!photo) {
+        throw new Error("Failed to capture photo");
+      }
+
+      // Generate event ID for the response
+      const responseEventId = Date.now().toString();
+      
+      // Get presigned URL for upload (path=from for Star to Companion)
+      const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+      const { url: imageUrl } = await imageResponse.json();
+
+      // Upload image
+      const imageBlob = await fetch(photo.uri).then(r => r.blob());
+      const uploadResponse = await fetch(imageUrl, {
+        method: 'PUT',
+        body: imageBlob,
+        headers: { 'Content-Type': 'image/jpeg' },
+      });
+
+      if (uploadResponse.status !== 200) {
+        throw new Error(`Image upload failed: ${uploadResponse.status}`);
+      }
+
+      // Cleanup local file first
+      const file = new File(photo.uri);
+      await file.delete();
+
+      // Hide mirror and show success immediately (don't wait for Firestore)
+      setShowSelfieMirror(false);
+      Alert.alert("Success!", "Your selfie response has been sent!");
+
+      // Create reflection_response document in Firestore (non-blocking)
+      // Use original event_id as document ID for easy lookup
+      const responseRef = doc(db, 'reflection_responses', selectedEvent.event_id);
+      setDoc(responseRef, {
+        event_id: selectedEvent.event_id, // Link to original Reflection
+        response_event_id: responseEventId,
+        timestamp: serverTimestamp(),
+        type: 'selfie_response',
+      })
+        .then(() => {
+        })
+        .catch((firestoreError: any) => {
+          console.error("Failed to save reflection response to Firestore:", firestoreError);
+          console.error("Firestore error code:", firestoreError?.code);
+          console.error("Firestore error message:", firestoreError?.message);
+          // Don't show error to user - S3 upload succeeded, which is the important part
+          // Firestore is just for tracking/display in Companion app
+        });
+      
+    } catch (error: any) {
+      console.error("Error capturing selfie:", error);
+      let errorMessage = "Failed to capture selfie. Please try again.";
+      if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
+        errorMessage = "Permission error. Please check Firestore security rules for 'reflection_responses' collection.";
+      }
+      Alert.alert("Error", errorMessage);
+    } finally {
+      setIsCapturingSelfie(false);
+    }
+  };
+
   const playDescription = async () => {
     const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
     if (!metadata || !selectedEvent) return;
+    
+    // If audio is currently playing, pause it
+    if (audioStatus?.playing) {
+      if (audioPlayer) {
+        audioPlayer.pause();
+      }
+      Speech.stop();
+      return;
+    }
+    
+    // Track replay if this is a manual play after auto-play
+    const eventId = selectedEvent.event_id;
+    // Send replay signal if:
+    // 1. hasSpokenRef is true (meaning audio was auto-played or manually played before)
+    // 2. AND we haven't already sent a replay signal for this event
+    if (hasSpokenRef.current && eventId && !hasReplayedRef.current[eventId]) {
+      sendReplaySignal(eventId);
+    }
     
     // Refresh URLs before playing to ensure they're not expired
     const refreshedEvent = await refreshEventUrls(selectedEvent.event_id);
@@ -477,9 +661,8 @@ export default function ColeInboxScreen() {
     
     // Stop any ongoing speech/audio first
     Speech.stop();
-    if (soundRef.current) {
-      await soundRef.current.unloadAsync();
-      soundRef.current = null;
+    if (audioPlayer) {
+      audioPlayer.pause();
     }
     
     // Check if we have audio_url from Event (presigned GET URL) and content_type is 'audio'
@@ -487,27 +670,19 @@ export default function ColeInboxScreen() {
     if (eventToUse.audio_url && metadata.content_type === 'audio') {
       // Play audio file
       try {
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: eventToUse.audio_url },
-          { shouldPlay: true }
-        );
-        soundRef.current = sound;
-        
-        // Update selectedEvent with fresh URLs
-        if (refreshedEvent) {
-          setSelectedEvent(refreshedEvent);
-        }
-        
-        // Cleanup when audio finishes
-        sound.setOnPlaybackStatusUpdate((status) => {
-          if (status.isLoaded && status.didJustFinish) {
-            sound.unloadAsync();
-            soundRef.current = null;
+        if (audioPlayer && selectedEvent) {
+          audioPlayer.replace(eventToUse.audio_url);
+          // Set flag to auto-play when audio loads
+          shouldAutoPlayRef.current = { eventId: selectedEvent.event_id, url: eventToUse.audio_url };
+          
+          // Update selectedEvent with fresh URLs
+          if (refreshedEvent) {
+            setSelectedEvent(refreshedEvent);
           }
-        });
+        }
       } catch (error) {
         console.error("Error playing audio:", error);
-        Alert.alert("Error", "Failed to play audio message");
+        Alert.alert("Error", "Failed to play audio Reflection");
       }
     } else if (metadata.description) {
       // Use TTS for text descriptions
@@ -521,8 +696,8 @@ export default function ColeInboxScreen() {
 
   const deleteEvent = async (event: Event) => {
     Alert.alert(
-      "Delete Event",
-      "Are you sure you want to delete this photo and description?",
+      "Delete Reflection",
+      "Are you sure you want to delete this Reflection?",
       [
         {
           text: "Cancel",
@@ -547,7 +722,6 @@ export default function ColeInboxScreen() {
               try {
                 const signalRef = doc(db, 'signals', event.event_id);
                 await deleteDoc(signalRef);
-                console.log("Firestore signal deleted");
               } catch (firestoreError: any) {
                 console.warn("Failed to delete Firestore signal:", firestoreError);
                 // Continue even if Firestore delete fails
@@ -555,9 +729,8 @@ export default function ColeInboxScreen() {
 
               // 3. Stop any ongoing speech/audio
               Speech.stop();
-              if (soundRef.current) {
-                await soundRef.current.unloadAsync();
-                soundRef.current = null;
+              if (audioPlayer) {
+                audioPlayer.pause();
               }
               
               // 4. Remove from local state and refresh
@@ -567,10 +740,10 @@ export default function ColeInboxScreen() {
               // 5. Refresh the list to ensure consistency
               fetchEvents();
               
-              Alert.alert("Success", "Event deleted successfully");
+              Alert.alert("Success", "Reflection deleted successfully");
             } catch (error: any) {
               console.error("Delete error:", error);
-              Alert.alert("Delete Failed", error.message || "Failed to delete event");
+              Alert.alert("Delete Failed", error.message || "Failed to delete Reflection");
             }
           },
         },
@@ -582,7 +755,7 @@ export default function ColeInboxScreen() {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#2e78b7" />
-        <Text style={styles.loadingText}>Loading Cole's inbox...</Text>
+        <Text style={styles.loadingText}>Loading Reflections...</Text>
       </View>
     );
   }
@@ -601,15 +774,15 @@ export default function ColeInboxScreen() {
   if (events.length === 0) {
     return (
       <View style={styles.centerContainer}>
-        <Text style={styles.emptyText}>No photos in Cole's inbox yet</Text>
-        <Text style={styles.emptySubtext}>Photos from companions will appear here</Text>
+        <Text style={styles.emptyText}>No Reflections yet</Text>
+        <Text style={styles.emptySubtext}>Reflections from companions will appear here</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Cole's Inbox</Text>
+      <Text style={styles.title}>{selectedEvent ? 'Reflection' : 'Inbox'}</Text>
       <FlatList
         key={numColumns}
         data={events}
@@ -630,6 +803,12 @@ export default function ColeInboxScreen() {
         {selectedEvent && (
           <View style={styles.fullScreenContainer} {...swipeResponder.panHandlers}>
             <View style={styles.topButtonContainer}>
+              {/* Reflection header */}
+              {selectedMetadata && (
+                <Text style={styles.reflectionHeader}>
+                  Reflection from {selectedMetadata.sender}
+                </Text>
+              )}
               {/* Delete button - for caregiver mode */}
         <TouchableOpacity 
                 style={styles.deleteButton}
@@ -645,40 +824,68 @@ export default function ColeInboxScreen() {
               resizeMode="contain"
             />
             
+            {/* Selfie Mirror - appears after audio finishes */}
+            {showSelfieMirror && cameraPermission?.granted && (
+              <View style={styles.selfieMirrorContainer}>
+                <CameraView
+                  ref={cameraRef}
+                  style={styles.selfieMirror}
+                  facing="front"
+                />
+                <TouchableOpacity
+                  style={styles.selfieMirrorButton}
+                  onPress={captureSelfieResponse}
+                  disabled={isCapturingSelfie}
+                  activeOpacity={0.8}
+                >
+                  {isCapturingSelfie ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <View style={styles.selfieMirrorInner} />
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+            
             {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
               <View style={styles.descriptionContainer}>
                 <View style={styles.descriptionHeader}>
-                  <Text style={styles.descriptionLabel}>From {selectedMetadata.sender}:</Text>
+                  {selectedMetadata.content_type === 'audio' ? (
+                    <Text style={styles.descriptionText}>
+                      🎤 Voice message
+                    </Text>
+                  ) : (
+                    <Text style={styles.descriptionText}>
+                      {selectedMetadata.description}
+                    </Text>
+                  )}
                   <View style={styles.buttonRow}>
                     <TouchableOpacity 
-                      style={styles.playButton}
+                      style={[
+                        styles.playButton, 
+                        (audioStatus && audioStatus.playing) ? styles.playButtonPlaying : null,
+                        playButtonPressed && (!audioStatus || !audioStatus.playing) ? styles.playButtonPressed : null
+                      ]}
                       onPress={playDescription}
+                      onPressIn={() => setPlayButtonPressed(true)}
+                      onPressOut={() => setPlayButtonPressed(false)}
                       activeOpacity={0.7}
                     >
                       <FontAwesome 
-                        name={selectedMetadata.content_type === 'audio' ? "volume-up" : "play"} 
+                        name={audioStatus?.playing ? "stop" : "play"} 
                         size={24} 
                         color="#fff" 
                       />
                     </TouchableOpacity>
-        <TouchableOpacity 
+                    <TouchableOpacity 
                       style={styles.closeButtonInline}
                       onPress={closeFullScreen}
                       activeOpacity={0.7}
                     >
                       <Text style={styles.closeButtonTextInline}>X</Text>
-        </TouchableOpacity>
-      </View>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-                {selectedMetadata.content_type === 'audio' ? (
-                  <Text style={styles.descriptionText}>
-                    🎤 Voice message
-                  </Text>
-                ) : (
-                  <Text style={styles.descriptionText}>
-                    {selectedMetadata.description}
-                  </Text>
-                )}
               </View>
             )}
           </View>
@@ -776,10 +983,19 @@ const styles = StyleSheet.create({
   topButtonContainer: {
     position: 'absolute',
     top: 50,
+    left: 20,
     right: 20,
     zIndex: 1,
     flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
     gap: 10,
+  },
+  reflectionHeader: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    flex: 1,
   },
   closeButton: {
     backgroundColor: 'rgba(0,0,0,0.6)',
@@ -819,6 +1035,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 8,
+    gap: 12,
   },
   descriptionLabel: {
     color: '#fff',
@@ -839,6 +1056,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  playButtonPlaying: {
+    backgroundColor: 'rgba(46, 120, 183, 1)',
+  },
+  playButtonPressed: {
+    backgroundColor: 'rgba(46, 120, 183, 0.6)',
+    transform: [{ scale: 0.95 }],
+  },
   closeButtonInline: {
     width: 60,
     height: 60,
@@ -856,8 +1080,50 @@ const styles = StyleSheet.create({
   },
   descriptionText: {
     color: '#fff',
+    flex: 1,
     fontSize: 24,
     fontWeight: '600',
     lineHeight: 32,
+  },
+  selfieMirrorContainer: {
+    position: 'absolute',
+    top: 100,
+    right: 20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  selfieMirror: {
+    width: '100%',
+    height: '100%',
+  },
+  selfieMirrorButton: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    borderRadius: 60,
+  },
+  selfieMirrorInner: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    borderWidth: 3,
+    borderColor: '#fff',
+    backgroundColor: 'transparent',
   },
 });

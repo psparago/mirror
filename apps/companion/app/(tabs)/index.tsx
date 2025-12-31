@@ -1,9 +1,9 @@
 import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
-import { Audio } from 'expo-av';
+import { useAudioRecorder, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
-import { File } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
@@ -16,25 +16,48 @@ export default function CompanionHomeScreen() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [description, setDescription] = useState('');
   const [showDescriptionInput, setShowDescriptionInput] = useState(false);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [audioUri, setAudioUri] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
   const [isSearchModalVisible, setIsSearchModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+  const [isLoadingImage, setIsLoadingImage] = useState(false);
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
+  const lastProcessedUriRef = useRef<string | null>(null);
 
   // Request audio permissions on mount
   useEffect(() => {
     (async () => {
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') {
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
         console.warn('Audio recording permission not granted');
       }
     })();
   }, []);
+
+  // Simple: only update audioUri if we have a NEW URI and we're not recording
+  // This prevents stale URIs from being set when selecting new photos
+  useEffect(() => {
+    const currentUri = audioRecorder.uri;
+    const isNewUri = currentUri && currentUri !== lastProcessedUriRef.current;
+    
+    // Only set audioUri if we have a NEW URI, we're not recording, and audioUri is currently null
+    // Don't include audioUri in dependencies to prevent infinite loops
+    if (isNewUri && !audioRecorder.isRecording) {
+      // Double-check audioUri is null before setting (read from state, not dependency)
+      setAudioUri(prev => {
+        if (prev === null) {
+          lastProcessedUriRef.current = currentUri;
+          return currentUri;
+        }
+        return prev;
+      });
+    }
+  }, [audioRecorder.uri, audioRecorder.isRecording]);
 
   if (!permission) return <View />;
   if (!permission.granted) {
@@ -102,10 +125,12 @@ export default function CompanionHomeScreen() {
 
   const pickImageFromGallery = async () => {
     try {
+      setIsLoadingGallery(true);
       // Request media library permissions
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission Required', 'We need access to your photos to select an image.');
+        setIsLoadingGallery(false);
         return;
       }
 
@@ -118,13 +143,24 @@ export default function CompanionHomeScreen() {
       });
 
       if (!result.canceled && result.assets[0]) {
+        setIsLoadingImage(true);
         // Set the selected image as if it was just taken
         setPhoto({ uri: result.assets[0].uri });
         setShowDescriptionInput(true);
+        // Clear any previous audio recording when selecting a new photo
+        setAudioUri(null);
+        setDescription('');
+        // Reset the last processed URI to prevent stale URIs from being set
+        lastProcessedUriRef.current = null;
+        // Small delay to ensure image loads
+        setTimeout(() => setIsLoadingImage(false), 300);
       }
+      setIsLoadingGallery(false);
     } catch (error: any) {
       console.error("Image picker error:", error);
       Alert.alert("Error", "Failed to pick image from gallery");
+      setIsLoadingGallery(false);
+      setIsLoadingImage(false);
     }
   };
 
@@ -133,9 +169,13 @@ export default function CompanionHomeScreen() {
 
     try {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
-      console.log("Photo captured:", picture.uri);
       setPhoto(picture);
       setShowDescriptionInput(true);
+      // Clear any previous audio recording when taking a new photo
+      setAudioUri(null);
+      setDescription('');
+      // Reset the last processed URI to prevent stale URIs from being set
+      lastProcessedUriRef.current = null;
     } catch (error: any) {
       console.error("Photo capture error:", error);
       Alert.alert("Error", "Failed to capture photo");
@@ -143,43 +183,66 @@ export default function CompanionHomeScreen() {
   };
 
   const startRecording = async () => {
+    // Prevent multiple simultaneous calls
+    if (isStartingRecording || audioRecorder.isRecording) {
+      return;
+    }
+
     try {
-      // Stop any existing recording
-      if (recording) {
-        await stopRecording();
+      setIsStartingRecording(true);
+      // Clear previous audio URI when starting a new recording
+      setAudioUri(null);
+      // Reset the last processed URI so we can detect the new recording
+      lastProcessedUriRef.current = null;
+
+      // Request permissions if needed
+      const permission = await requestRecordingPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert("Permission Required", "Audio recording permission is required.");
+        return;
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
+      // Enable recording mode on iOS
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
       });
 
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(newRecording);
-      setIsRecording(true);
-      setAudioUri(null); // Clear previous audio
+      // Prepare and start recording
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
       setDescription(''); // Clear text description when starting audio
     } catch (error: any) {
       console.error("Failed to start recording:", error);
-      Alert.alert("Error", "Failed to start audio recording");
+      Alert.alert("Error", `Failed to start audio recording: ${error.message || error}`);
+      // Reset state on error
+      setAudioUri(null);
+    } finally {
+      setIsStartingRecording(false);
     }
   };
 
   const stopRecording = async () => {
-    if (!recording) return;
+    if (!audioRecorder.isRecording) {
+      return;
+    }
 
     try {
-      setIsRecording(false);
-      await recording.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
+      await audioRecorder.stop();
+      
+      // Disable recording mode after stopping
+      await setAudioModeAsync({
+        allowsRecording: false,
       });
-      const uri = recording.getURI();
-      setAudioUri(uri || null);
-      setRecording(null);
-      console.log("Recording stopped and stored at", uri);
+      
+      // Wait a bit for URI to be available, then set it directly
+      // The useEffect will also catch it, but setting it here ensures it happens
+      setTimeout(() => {
+        if (audioRecorder.uri && audioRecorder.uri !== lastProcessedUriRef.current) {
+          setAudioUri(audioRecorder.uri);
+          lastProcessedUriRef.current = audioRecorder.uri;
+        }
+      }, 150);
     } catch (error: any) {
       console.error("Failed to stop recording:", error);
       Alert.alert("Error", "Failed to stop audio recording");
@@ -191,7 +254,7 @@ export default function CompanionHomeScreen() {
     
     // Require either text description OR audio recording
     if (!description.trim() && !audioUri) {
-      Alert.alert("Description Required", "Please add a text description or record an audio message before sending.");
+      Alert.alert("Description Required", "Please add a text description or record an audio message before sending this Reflection.");
       return;
     }
 
@@ -205,28 +268,22 @@ export default function CompanionHomeScreen() {
       // 1. Upload image.jpg
       const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
       const { url: imageUrl } = await imageResponse.json();
-      console.log("Image upload URL obtained:", imageUrl);
 
       const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
       if (imageUploadResponse.status !== 200) {
         throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
       }
-      console.log("Image uploaded successfully");
 
       // 2. Upload audio if available
       let audioUrl: string | undefined;
       if (audioUri) {
         const audioResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=audio.m4a`);
         const { url: audioUploadUrl } = await audioResponse.json();
-        console.log("Audio upload URL obtained:", audioUploadUrl);
-
-        // Read audio file as blob and upload
-        const audioFileResponse = await fetch(audioUri);
-        const audioBlob = await audioFileResponse.blob();
+        // Upload audio file directly using FileSystem.uploadAsync
         
-        const audioUploadResponse = await fetch(audioUploadUrl, {
-          method: 'PUT',
-          body: audioBlob,
+        // FileSystem.uploadAsync defaults to binary upload, so we don't need to specify uploadType
+        const audioUploadResponse = await FileSystem.uploadAsync(audioUploadUrl, audioUri, {
+          httpMethod: 'PUT',
           headers: {
             'Content-Type': 'audio/m4a',
           },
@@ -235,7 +292,6 @@ export default function CompanionHomeScreen() {
         if (audioUploadResponse.status !== 200) {
           throw new Error(`Audio upload failed: ${audioUploadResponse.status}`);
         }
-        console.log("Audio uploaded successfully");
       }
 
       // 3. Create metadata.json
@@ -253,7 +309,6 @@ export default function CompanionHomeScreen() {
       // 3. Upload metadata.json
       const metadataResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=metadata.json`);
       const { url: metadataUrl } = await metadataResponse.json();
-      console.log("Metadata upload URL obtained:", metadataUrl);
 
       // Convert metadata to blob
       const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
@@ -268,15 +323,14 @@ export default function CompanionHomeScreen() {
       if (metadataUploadResponse.status !== 200) {
         throw new Error(`Metadata upload failed: ${metadataUploadResponse.status}`);
       }
-      console.log("Metadata uploaded successfully");
 
       // 4. Cleanup UI first (don't wait for Firestore)
-      Alert.alert("Success!", "Photo and description sent to Cole!");
+      Alert.alert("Success!", "Reflection sent!");
       setPhoto(null);
       setDescription('');
       setShowDescriptionInput(false);
       setAudioUri(null);
-      if (recording) {
+      if (audioRecorder.isRecording) {
         await stopRecording();
       }
 
@@ -290,7 +344,6 @@ export default function CompanionHomeScreen() {
         type: "mirror_event",
       })
         .then(() => {
-          console.log("Firestore signal written successfully");
         })
         .catch((firestoreError: any) => {
           // Log error but don't block the user
@@ -303,9 +356,8 @@ export default function CompanionHomeScreen() {
       // Delete local file (only if it's a local file, not a remote URL)
       if (photo.uri && !photo.uri.startsWith('http://') && !photo.uri.startsWith('https://')) {
         try {
-          const file = new File(photo.uri);
-          await file.delete();
-          console.log("Local file deleted:", photo.uri);
+          // Use FileSystem.deleteAsync to delete the local file
+          await FileSystem.deleteAsync(photo.uri, { idempotent: true });
         } catch (cleanupError) {
           console.warn("Failed to delete local file:", cleanupError);
         }
@@ -338,11 +390,17 @@ export default function CompanionHomeScreen() {
             keyboardShouldPersistTaps="handled"
           >
             <View style={styles.previewImageContainer}>
-              <Image
-                source={{ uri: photo.uri }}
-                style={styles.previewImage}
-                resizeMode="contain"
-              />
+              {isLoadingImage ? (
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator size="large" color="#2e78b7" />
+                </View>
+              ) : (
+                <Image
+                  source={{ uri: photo.uri }}
+                  style={styles.previewImage}
+                  resizeMode="contain"
+                />
+              )}
             </View>
             
             <View style={styles.descriptionContainer}>
@@ -361,7 +419,7 @@ export default function CompanionHomeScreen() {
                   returnKeyType="done"
                   blurOnSubmit={true}
                   onSubmitEditing={Keyboard.dismiss}
-                  editable={!isRecording && !audioUri}
+                  editable={!audioRecorder.isRecording && !audioUri}
                 />
                 <TouchableOpacity 
                   style={styles.micButton}
@@ -377,18 +435,20 @@ export default function CompanionHomeScreen() {
               
               {/* Audio Recording Section */}
               <View style={styles.audioSection}>
-                {!audioUri && !isRecording && (
+                {!audioUri && !audioRecorder.isRecording && (
                   <TouchableOpacity 
                     style={styles.recordButton}
                     onPress={startRecording}
-                    disabled={uploading}
+                    disabled={uploading || isStartingRecording}
                   >
                     <FontAwesome name="microphone" size={24} color="#fff" />
-                    <Text style={styles.recordButtonText}>Record Voice</Text>
+                    <Text style={styles.recordButtonText}>
+                      {isStartingRecording ? "Starting..." : "Record Voice"}
+                    </Text>
                   </TouchableOpacity>
                 )}
                 
-                {isRecording && (
+                {audioRecorder.isRecording && (
                   <View style={styles.recordingContainer}>
                     <View style={styles.recordingIndicator} />
                     <Text style={styles.recordingText}>Recording...</Text>
@@ -401,7 +461,7 @@ export default function CompanionHomeScreen() {
                   </View>
                 )}
                 
-                {audioUri && !isRecording && (
+                {audioUri && !audioRecorder.isRecording && (
                   <View style={styles.audioPlaybackContainer}>
                     <FontAwesome name="volume-up" size={20} color="#2e78b7" />
                     <Text style={styles.audioPlaybackText}>Voice message recorded</Text>
@@ -410,6 +470,8 @@ export default function CompanionHomeScreen() {
                       onPress={() => {
                         setAudioUri(null);
                         setDescription('');
+                        // Reset the last processed URI so re-recording works
+                        lastProcessedUriRef.current = null;
                       }}
                     >
                       <Text style={styles.rerecordButtonText}>Re-record</Text>
@@ -436,11 +498,17 @@ export default function CompanionHomeScreen() {
               </TouchableOpacity>
               <TouchableOpacity 
                 style={[styles.actionButton, styles.sendButton]} 
-                onPress={uploadEventBundle}
-                disabled={uploading || (!description.trim() && !audioUri)}
+                onPress={() => {
+                  if (!uploading && (description.trim() || audioUri)) {
+                    uploadEventBundle();
+                  } else {
+                    Alert.alert("Description Required", "Please add a text description or record an audio message before sending this Reflection.");
+                  }
+                }}
+                disabled={uploading}
               >
                 <Text style={styles.actionButtonText}>
-                  {uploading ? "SENDING..." : "SEND TO COLE"}
+                  {uploading ? "SENDING..." : "SEND REFLECTION"}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -473,9 +541,13 @@ export default function CompanionHomeScreen() {
         <TouchableOpacity 
           style={[styles.galleryButtonBase, styles.galleryButton]} 
           onPress={pickImageFromGallery}
-          disabled={uploading}
+          disabled={uploading || isLoadingGallery}
         >
-          <FontAwesome name="photo" size={24} color="white" />
+          {isLoadingGallery ? (
+            <ActivityIndicator size="small" color="white" />
+          ) : (
+            <FontAwesome name="photo" size={24} color="white" />
+          )}
         </TouchableOpacity>
         <TouchableOpacity 
           style={styles.captureButton} 
