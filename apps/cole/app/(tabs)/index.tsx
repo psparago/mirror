@@ -691,19 +691,21 @@ export default function ColeInboxScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#1a1a1a',
   },
   centerContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
+    backgroundColor: '#1a1a1a',
   },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     padding: 16,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#2a2a2a',
+    color: '#fff',
   },
   listContainer: {
     padding: 8,
@@ -716,7 +718,7 @@ const styles = StyleSheet.create({
     flex: 1,
     margin: 4,
     aspectRatio: 1,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: '#2a2a2a',
     borderRadius: 8,
     overflow: 'hidden',
     position: 'relative',
@@ -742,23 +744,23 @@ const styles = StyleSheet.create({
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#666',
+    color: '#ccc',
   },
   errorText: {
     fontSize: 16,
-    color: '#d32f2f',
+    color: '#ff6b6b',
     textAlign: 'center',
     marginBottom: 8,
   },
   retryText: {
     fontSize: 14,
-    color: '#2e78b7',
+    color: '#4a9eff',
     textDecorationLine: 'underline',
   },
   emptyText: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#666',
+    color: '#ccc',
     textAlign: 'center',
     marginBottom: 8,
   },

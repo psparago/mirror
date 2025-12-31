@@ -56,17 +56,31 @@ export default function CompanionHomeScreen() {
     if (!query.trim()) return;
     
     setIsSearching(true);
+    setSearchResults([]); // Clear previous results
+    
     try {
       const response = await fetch(`${API_ENDPOINTS.UNSPLASH_SEARCH}?query=${encodeURIComponent(query)}`);
+      
       if (!response.ok) {
-        throw new Error(`Search failed: ${response.status}`);
+        // Just set empty results - the empty state UI will handle the message
+        setSearchResults([]);
+        return;
       }
+      
       const data = await response.json();
+      
+      // Check if we have results
+      if (!data.results || data.results.length === 0) {
+        // No results found - empty state UI will show the message
+        setSearchResults([]);
+        return;
+      }
+      
       // Unsplash API returns { results: [...] }
       setSearchResults(data.results || []);
     } catch (error: any) {
       console.error("Unsplash search error:", error);
-      Alert.alert("Search Error", "Failed to search for images. Please try again.");
+      // Just set empty results - the empty state UI will handle the message
       setSearchResults([]);
     } finally {
       setIsSearching(false);
@@ -489,96 +503,108 @@ export default function CompanionHomeScreen() {
         onRequestClose={() => setIsSearchModalVisible(false)}
       >
         <View style={styles.searchModalContainer}>
-          {/* Header */}
-          <View style={styles.searchHeader}>
-            <TouchableOpacity 
-              style={styles.closeButton}
-              onPress={() => {
-                setIsSearchModalVisible(false);
-                setSearchQuery('');
-                setSearchResults([]);
-              }}
-            >
-              <FontAwesome name="times" size={24} color="white" />
-            </TouchableOpacity>
-            <Text style={styles.searchTitle}>Search Images</Text>
-            <View style={styles.closeButtonPlaceholder} />
-          </View>
-
-          {/* Search Bar */}
-          <View style={styles.searchBarContainer}>
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search for images..."
-              placeholderTextColor="#999"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              onSubmitEditing={() => searchUnsplash(searchQuery)}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <TouchableOpacity 
-              style={styles.searchSubmitButton}
-              onPress={() => searchUnsplash(searchQuery)}
-              disabled={isSearching || !searchQuery.trim()}
-            >
-              {isSearching ? (
-                <ActivityIndicator size="small" color="white" />
-              ) : (
-                <FontAwesome name="search" size={20} color="white" />
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {/* Quick-Pick Chips */}
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            style={styles.chipsContainer}
-            contentContainerStyle={styles.chipsContent}
-          >
-            {["Sushi", "Ice Cream Truck", "Trains", "Puppies"].map((term) => (
-              <TouchableOpacity
-                key={term}
-                style={styles.chip}
-                onPress={() => handleQuickPick(term)}
+          {/* Fixed Header Section */}
+          <View style={styles.searchFixedHeader}>
+            {/* Header */}
+            <View style={styles.searchHeader}>
+              <TouchableOpacity 
+                style={styles.closeButton}
+                onPress={() => {
+                  setIsSearchModalVisible(false);
+                  setSearchQuery('');
+                  setSearchResults([]);
+                }}
               >
-                <Text style={styles.chipText}>{term}</Text>
+                <FontAwesome name="times" size={24} color="white" />
               </TouchableOpacity>
-            ))}
-          </ScrollView>
+              <Text style={styles.searchTitle}>Search Images</Text>
+              <View style={styles.closeButtonPlaceholder} />
+            </View>
 
-          {/* Results Grid */}
-          {isSearching && searchResults.length === 0 ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#2e78b7" />
-              <Text style={styles.loadingText}>Searching...</Text>
+            {/* Search Bar */}
+            <View style={styles.searchBarContainer}>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search for images..."
+                placeholderTextColor="#999"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                onSubmitEditing={() => searchUnsplash(searchQuery)}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity 
+                style={styles.searchSubmitButton}
+                onPress={() => searchUnsplash(searchQuery)}
+                disabled={isSearching || !searchQuery.trim()}
+              >
+                {isSearching ? (
+                  <ActivityIndicator size="small" color="white" />
+                ) : (
+                  <FontAwesome name="search" size={20} color="white" />
+                )}
+              </TouchableOpacity>
             </View>
-          ) : searchResults.length > 0 ? (
-            <FlatList
-              data={searchResults}
-              numColumns={2}
-              keyExtractor={(item) => item.id}
-              contentContainerStyle={styles.resultsGrid}
-              renderItem={({ item }) => (
+
+            {/* Quick-Pick Chips */}
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              style={styles.chipsContainer}
+              contentContainerStyle={styles.chipsContent}
+            >
+              {["Sushi", "Ice Cream Truck", "Trains", "Puppies"].map((term) => (
                 <TouchableOpacity
-                  style={styles.resultItem}
-                  onPress={() => handleImageSelect(item.urls.regular || item.urls.small)}
-                  activeOpacity={0.8}
+                  key={term}
+                  style={styles.chip}
+                  onPress={() => handleQuickPick(term)}
                 >
-                  <Image
-                    source={{ uri: item.urls.small || item.urls.regular }}
-                    style={styles.resultImage}
-                    resizeMode="cover"
-                  />
+                  <Text style={styles.chipText}>{term}</Text>
                 </TouchableOpacity>
-              )}
-            />
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>Search for images to get started</Text>
-            </View>
-          )}
+              ))}
+            </ScrollView>
+          </View>
+
+          {/* Results Area - Takes remaining space */}
+          <View style={styles.resultsArea}>
+            {isSearching && searchResults.length === 0 ? (
+              <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color="#2e78b7" />
+                <Text style={styles.loadingText}>Searching...</Text>
+              </View>
+            ) : searchResults.length > 0 ? (
+              <FlatList
+                data={searchResults}
+                numColumns={2}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.resultsGrid}
+                renderItem={({ item }) => (
+                  <TouchableOpacity
+                    style={styles.resultItem}
+                    onPress={() => handleImageSelect(item.urls.regular || item.urls.small)}
+                    activeOpacity={0.8}
+                  >
+                    <Image
+                      source={{ uri: item.urls.small || item.urls.regular }}
+                      style={styles.resultImage}
+                      resizeMode="cover"
+                    />
+                  </TouchableOpacity>
+                )}
+              />
+            ) : searchQuery.trim() ? (
+              <View style={styles.emptyContainer}>
+                <FontAwesome name="image" size={48} color="#666" />
+                <Text style={styles.emptyText}>No images found for "{searchQuery}"</Text>
+                <Text style={styles.emptySubtext}>Try a different search term</Text>
+              </View>
+            ) : (
+              <View style={styles.emptyContainer}>
+                <FontAwesome name="search" size={48} color="#666" />
+                <Text style={styles.emptyText}>Search for images to get started</Text>
+              </View>
+            )}
+          </View>
         </View>
       </Modal>
     </View>
@@ -824,6 +850,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#1a1a1a',
   },
+  searchFixedHeader: {
+    backgroundColor: '#1a1a1a',
+    zIndex: 10,
+  },
+  resultsArea: {
+    flex: 1,
+  },
   searchHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -872,18 +905,21 @@ const styles = StyleSheet.create({
     minWidth: 50,
   },
   chipsContainer: {
-    maxHeight: 50,
     marginBottom: 15,
   },
   chipsContent: {
     paddingHorizontal: 20,
+    paddingVertical: 10,
     gap: 10,
+    alignItems: 'center',
   },
   chip: {
     backgroundColor: '#2e78b7',
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 20,
+    minHeight: 40,
+    justifyContent: 'center',
   },
   chipText: {
     color: 'white',
@@ -923,5 +959,13 @@ const styles = StyleSheet.create({
   emptyText: {
     color: '#999',
     fontSize: 16,
+    marginTop: 15,
+    textAlign: 'center',
+  },
+  emptySubtext: {
+    color: '#666',
+    fontSize: 14,
+    marginTop: 8,
+    textAlign: 'center',
   },
 });
