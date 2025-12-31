@@ -83,12 +83,28 @@ export default function ColeInboxScreen() {
       hasSpokenRef.current = false;
     }
     
+    // If this is the same event (just a URL refresh), don't restart audio
+    // This prevents duplicate playback when refreshEventUrls updates selectedEvent
+    if (previousEventId === newEventId && newEventId !== null && hasSpokenRef.current) {
+      // Same event and audio already started - this is just a URL refresh
+      // Update the ref but don't restart playback
+      currentEventIdRef.current = newEventId;
+      return;
+    }
+    
     // Update the current event ID reference
     currentEventIdRef.current = newEventId;
     
     if (selectedEvent && selectedMetadata && (selectedMetadata.description || selectedEvent.audio_url)) {
-      // Reset the ref when a new photo opens
-      hasSpokenRef.current = false;
+      // Reset the ref when opening a new photo
+      if (previousEventId !== newEventId) {
+        hasSpokenRef.current = false;
+      }
+      
+      // If audio is already playing for this event, don't start it again
+      if (hasSpokenRef.current && currentEventIdRef.current === newEventId) {
+        return; // Audio already playing for this event, don't restart
+      }
       
       // Capture the event_id to check if we're still on the same photo
       const eventIdForThisEffect = selectedEvent.event_id;
@@ -96,6 +112,7 @@ export default function ColeInboxScreen() {
       // Small delay (100ms) before speaking to ensure modal is ready
       const timer = setTimeout(async () => {
         // Double-check we're still on the same photo before playing
+        // Also check if audio is already playing for this event
         if (!hasSpokenRef.current && currentEventIdRef.current === eventIdForThisEffect) {
           hasSpokenRef.current = true;
           

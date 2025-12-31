@@ -41,6 +41,15 @@ if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$AWS_
   exit 1
 fi
 
+# Check for Unsplash key (optional, but needed for unsplash-search function)
+if [ -z "$UNSPLASH_KEY" ]; then
+  echo -e "${YELLOW}Warning: UNSPLASH_KEY not found in .env.deploy${NC}"
+  echo "The unsplash-search function will be skipped."
+  SKIP_UNSPLASH=true
+else
+  SKIP_UNSPLASH=false
+fi
+
 echo -e "${GREEN}✓ Environment variables loaded${NC}"
 echo ""
 
@@ -112,6 +121,34 @@ else
 fi
 echo ""
 
+# Function 4: unsplash-search
+if [ "$SKIP_UNSPLASH" = false ]; then
+  echo -e "${YELLOW}Deploying unsplash-search...${NC}"
+  
+  # Set required variables for deploy-unsplash.sh
+  export FUNCTION_NAME="unsplash-search"
+  export RUNTIME="${RUNTIME}"
+  export REGION="${REGION}"
+  export ENTRY_POINT="SearchUnsplash"
+  export UNSPLASH_KEY="${UNSPLASH_KEY}"
+  export PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
+  export SOURCE_DIR="${SOURCE_DIR}"
+  
+  # Call the deploy-unsplash.sh script
+  bash "${SCRIPT_DIR}/deploy-unsplash.sh"
+  
+  if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ unsplash-search deployed successfully${NC}"
+  else
+    echo -e "${RED}✗ unsplash-search deployment failed${NC}"
+    exit 1
+  fi
+  echo ""
+else
+  echo -e "${YELLOW}⚠ Skipping unsplash-search (UNSPLASH_KEY not set)${NC}"
+  echo ""
+fi
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -119,4 +156,7 @@ echo "Deployed functions:"
 echo "  • get-s3-url"
 echo "  • list-mirror-events"
 echo "  • delete-mirror-event"
+if [ "$SKIP_UNSPLASH" = false ]; then
+  echo "  • unsplash-search"
+fi
 

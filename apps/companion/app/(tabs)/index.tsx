@@ -7,7 +7,7 @@ import { File } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Image, Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 
 export default function CompanionHomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -19,6 +19,10 @@ export default function CompanionHomeScreen() {
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [audioUri, setAudioUri] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSearchModalVisible, setIsSearchModalVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
 
@@ -46,6 +50,40 @@ export default function CompanionHomeScreen() {
 
   const toggleCameraFacing = () => {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
+  };
+
+  const searchUnsplash = async (query: string) => {
+    if (!query.trim()) return;
+    
+    setIsSearching(true);
+    try {
+      const response = await fetch(`${API_ENDPOINTS.UNSPLASH_SEARCH}?query=${encodeURIComponent(query)}`);
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.status}`);
+      }
+      const data = await response.json();
+      // Unsplash API returns { results: [...] }
+      setSearchResults(data.results || []);
+    } catch (error: any) {
+      console.error("Unsplash search error:", error);
+      Alert.alert("Search Error", "Failed to search for images. Please try again.");
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleQuickPick = (term: string) => {
+    setSearchQuery(term);
+    searchUnsplash(term);
+  };
+
+  const handleImageSelect = (imageUrl: string) => {
+    setPhoto({ uri: imageUrl });
+    setIsSearchModalVisible(false);
+    setShowDescriptionInput(true);
+    setSearchQuery('');
+    setSearchResults([]);
   };
 
   const pickImageFromGallery = async () => {
@@ -248,13 +286,15 @@ export default function CompanionHomeScreen() {
           console.error("Full error:", JSON.stringify(firestoreError, null, 2));
         });
 
-      // Delete local file
-      try {
-        const file = new File(photo.uri);
-        await file.delete();
-        console.log("Local file deleted:", photo.uri);
-      } catch (cleanupError) {
-        console.warn("Failed to delete local file:", cleanupError);
+      // Delete local file (only if it's a local file, not a remote URL)
+      if (photo.uri && !photo.uri.startsWith('http://') && !photo.uri.startsWith('https://')) {
+        try {
+          const file = new File(photo.uri);
+          await file.delete();
+          console.log("Local file deleted:", photo.uri);
+        } catch (cleanupError) {
+          console.warn("Failed to delete local file:", cleanupError);
+        }
       }
     } catch (error: any) {
       console.error("Full Error:", error);
@@ -432,7 +472,115 @@ export default function CompanionHomeScreen() {
             {uploading ? "UPLOADING..." : "TAKE PHOTO"}
           </Text>
         </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.galleryButtonBase, styles.searchButton]} 
+          onPress={() => setIsSearchModalVisible(true)}
+          disabled={uploading}
+        >
+          <FontAwesome name="search" size={24} color="white" />
+        </TouchableOpacity>
       </View>
+
+      {/* Search Modal */}
+      <Modal
+        visible={isSearchModalVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setIsSearchModalVisible(false)}
+      >
+        <View style={styles.searchModalContainer}>
+          {/* Header */}
+          <View style={styles.searchHeader}>
+            <TouchableOpacity 
+              style={styles.closeButton}
+              onPress={() => {
+                setIsSearchModalVisible(false);
+                setSearchQuery('');
+                setSearchResults([]);
+              }}
+            >
+              <FontAwesome name="times" size={24} color="white" />
+            </TouchableOpacity>
+            <Text style={styles.searchTitle}>Search Images</Text>
+            <View style={styles.closeButtonPlaceholder} />
+          </View>
+
+          {/* Search Bar */}
+          <View style={styles.searchBarContainer}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search for images..."
+              placeholderTextColor="#999"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={() => searchUnsplash(searchQuery)}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity 
+              style={styles.searchSubmitButton}
+              onPress={() => searchUnsplash(searchQuery)}
+              disabled={isSearching || !searchQuery.trim()}
+            >
+              {isSearching ? (
+                <ActivityIndicator size="small" color="white" />
+              ) : (
+                <FontAwesome name="search" size={20} color="white" />
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {/* Quick-Pick Chips */}
+          <ScrollView 
+            horizontal 
+            showsHorizontalScrollIndicator={false}
+            style={styles.chipsContainer}
+            contentContainerStyle={styles.chipsContent}
+          >
+            {["Sushi", "Ice Cream Truck", "Trains", "Puppies"].map((term) => (
+              <TouchableOpacity
+                key={term}
+                style={styles.chip}
+                onPress={() => handleQuickPick(term)}
+              >
+                <Text style={styles.chipText}>{term}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+
+          {/* Results Grid */}
+          {isSearching && searchResults.length === 0 ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#2e78b7" />
+              <Text style={styles.loadingText}>Searching...</Text>
+            </View>
+          ) : searchResults.length > 0 ? (
+            <FlatList
+              data={searchResults}
+              numColumns={2}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.resultsGrid}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.resultItem}
+                  onPress={() => handleImageSelect(item.urls.regular || item.urls.small)}
+                  activeOpacity={0.8}
+                >
+                  <Image
+                    source={{ uri: item.urls.small || item.urls.regular }}
+                    style={styles.resultImage}
+                    resizeMode="cover"
+                  />
+                </TouchableOpacity>
+              )}
+            />
+          ) : (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>Search for images to get started</Text>
+            </View>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -667,5 +815,113 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  searchButton: {
+    // Same as galleryButton
+  },
+  // Search Modal Styles
+  searchModalContainer: {
+    flex: 1,
+    backgroundColor: '#1a1a1a',
+  },
+  searchHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 60,
+    paddingBottom: 20,
+    paddingHorizontal: 20,
+    backgroundColor: '#1a1a1a',
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  closeButtonPlaceholder: {
+    width: 40,
+  },
+  searchTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingBottom: 15,
+    gap: 10,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: '#333',
+    color: 'white',
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    borderRadius: 8,
+    fontSize: 16,
+  },
+  searchSubmitButton: {
+    backgroundColor: '#2e78b7',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    minWidth: 50,
+  },
+  chipsContainer: {
+    maxHeight: 50,
+    marginBottom: 15,
+  },
+  chipsContent: {
+    paddingHorizontal: 20,
+    gap: 10,
+  },
+  chip: {
+    backgroundColor: '#2e78b7',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  chipText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  resultsGrid: {
+    padding: 10,
+  },
+  resultItem: {
+    flex: 1,
+    margin: 5,
+    aspectRatio: 1,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#333',
+  },
+  resultImage: {
+    width: '100%',
+    height: '100%',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 15,
+  },
+  loadingText: {
+    color: 'white',
+    fontSize: 16,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyText: {
+    color: '#999',
+    fontSize: 16,
   },
 });
