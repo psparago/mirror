@@ -3,7 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env.deploy"
-SOURCE_DIR="${PROJECT_ROOT}/backend/s3-signer"
+SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/functions"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "Error: .env.deploy file not found!"
@@ -18,12 +18,12 @@ fi
 
 source "$ENV_FILE"
 
-gcloud functions deploy list-mirror-photos \
+gcloud functions deploy list-mirror-events \
   --gen2 \
   --runtime=go125 \
   --region=us-central1 \
   --source="${SOURCE_DIR}" \
-  --entry-point=ListMirrorPhotos \
+  --entry-point=ListMirrorEvents \
   --trigger-http \
   --allow-unauthenticated \
   --set-env-vars AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION} \

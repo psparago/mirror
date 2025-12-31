@@ -1,6 +1,7 @@
 import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
+import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
 import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -14,6 +15,7 @@ export default function ColeInboxScreen() {
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
   const { width } = useWindowDimensions();
   const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
+  const soundRef = useRef<Audio.Sound | null>(null);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -57,41 +59,140 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
-  // Auto-play speech when photo with description opens
+  // Auto-play speech/audio when photo with description opens
   // Using useRef to prevent state loops - only trigger once per photo
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+  const currentEventIdRef = useRef<string | null>(null);
+  
   useEffect(() => {
-    if (selectedEvent && selectedMetadata && selectedMetadata.description) {
+    // IMMEDIATELY stop any existing audio/speech when event changes
+    const previousEventId = currentEventIdRef.current;
+    const newEventId = selectedEvent?.event_id || null;
+    
+    // If we're switching to a different photo, stop everything immediately
+    if (previousEventId && previousEventId !== newEventId) {
+      Speech.stop();
+      const oldSound = soundRef.current;
+      if (oldSound) {
+        // Stop and unload immediately - don't wait, but do both
+        oldSound.stopAsync().catch(() => {});
+        oldSound.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
+      // Reset hasSpokenRef when switching photos
+      hasSpokenRef.current = false;
+    }
+    
+    // Update the current event ID reference
+    currentEventIdRef.current = newEventId;
+    
+    if (selectedEvent && selectedMetadata && (selectedMetadata.description || selectedEvent.audio_url)) {
       // Reset the ref when a new photo opens
       hasSpokenRef.current = false;
       
-      // Small delay to ensure modal is fully rendered
-      const timer = setTimeout(() => {
-        if (!hasSpokenRef.current) {
+      // Capture the event_id to check if we're still on the same photo
+      const eventIdForThisEffect = selectedEvent.event_id;
+      
+      // Small delay (100ms) before speaking to ensure modal is ready
+      const timer = setTimeout(async () => {
+        // Double-check we're still on the same photo before playing
+        if (!hasSpokenRef.current && currentEventIdRef.current === eventIdForThisEffect) {
           hasSpokenRef.current = true;
-          Speech.speak(selectedMetadata.description, {
-            pitch: 0.9,
-            rate: 0.9,
-            language: 'en-US',
-          });
+          
+          // Check if we have audio_url from Event (presigned GET URL) and content_type is 'audio'
+          // Use selectedEvent.audio_url (from ListMirrorEvents) not selectedMetadata.audio_url (from metadata.json)
+          if (selectedEvent.audio_url && selectedMetadata.content_type === 'audio') {
+            // Play audio file
+            try {
+              // Stop any existing audio immediately (defensive check)
+              const existingSound = soundRef.current;
+              if (existingSound) {
+                existingSound.stopAsync().catch(() => {});
+                existingSound.unloadAsync().catch(() => {});
+                soundRef.current = null;
+              }
+              
+              // Small delay to ensure old audio is stopped before starting new one
+              await new Promise(resolve => setTimeout(resolve, 50));
+              
+              // Check again if we're still on the same photo
+              if (currentEventIdRef.current !== eventIdForThisEffect) {
+                return; // User switched photos, don't start audio
+              }
+              
+              // Load and play the audio using the presigned GET URL from the Event
+              const { sound } = await Audio.Sound.createAsync(
+                { uri: selectedEvent.audio_url },
+                { shouldPlay: true }
+              );
+              
+              // Final check before assigning
+              if (currentEventIdRef.current === eventIdForThisEffect) {
+                soundRef.current = sound;
+                
+                // Cleanup when audio finishes
+                sound.setOnPlaybackStatusUpdate((status) => {
+                  if (status.isLoaded && status.didJustFinish) {
+                    sound.unloadAsync();
+                    if (soundRef.current === sound) {
+                      soundRef.current = null;
+                    }
+                  }
+                });
+              } else {
+                // User switched photos while loading, unload immediately
+                sound.unloadAsync().catch(() => {});
+              }
+            } catch (error) {
+              console.error("Error playing audio:", error);
+              // Fallback to TTS if audio fails
+              if (currentEventIdRef.current === eventIdForThisEffect && selectedMetadata.description) {
+                Speech.speak(selectedMetadata.description, {
+                  pitch: 0.9,
+                  rate: 0.9,
+                  language: 'en-US',
+                });
+              }
+            }
+          } else if (selectedMetadata.description && currentEventIdRef.current === eventIdForThisEffect) {
+            // Use TTS for text descriptions
+            Speech.speak(selectedMetadata.description, {
+              pitch: 0.9,
+              rate: 0.9,
+              language: 'en-US',
+            });
+          }
         }
-      }, 300);
+      }, 100);
 
       return () => {
         clearTimeout(timer);
         Speech.stop();
+        // Cleanup audio - stop first, then unload
+        const soundToCleanup = soundRef.current;
+        if (soundToCleanup) {
+          soundToCleanup.stopAsync().catch(() => {});
+          soundToCleanup.unloadAsync().catch(() => {});
+          soundRef.current = null;
+        }
       };
     } else {
-      // Stop speech if no description
+      // Stop speech/audio if no description
       Speech.stop();
+      const soundToCleanup = soundRef.current;
+      if (soundToCleanup) {
+        soundToCleanup.stopAsync().catch(() => {});
+        soundToCleanup.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
     }
-  }, [selectedEvent?.event_id, selectedMetadata?.description]);
+  }, [selectedEvent?.event_id, selectedEvent?.audio_url, selectedMetadata?.description, selectedMetadata?.content_type]);
 
   const fetchEvents = async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_PHOTOS);
+      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
       
       if (!response.ok) {
         throw new Error(`Failed to fetch events: ${response.status}`);
@@ -109,7 +210,15 @@ export default function ColeInboxScreen() {
         return true;
       });
       
-      setEvents(validEvents);
+      // Sort by event_id (timestamp) in descending order (latest first)
+      // This ensures the newest events appear first in the grid
+      const sortedEvents = validEvents.sort((a, b) => {
+        // event_id is a timestamp string, so we can compare them directly
+        // For descending order (latest first), we want b - a
+        return b.event_id.localeCompare(a.event_id);
+      });
+      
+      setEvents(sortedEvents);
       
       // Fetch metadata for each event
       const metadataPromises = (data.events || []).map(async (event) => {
@@ -143,6 +252,55 @@ export default function ColeInboxScreen() {
     }
   };
 
+  const refreshEventUrls = async (eventId: string): Promise<Event | null> => {
+    try {
+      // Fetch fresh URLs for all events (backend generates new presigned URLs)
+      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+      if (!response.ok) {
+        console.warn(`Failed to refresh URLs for event ${eventId}`);
+        return null;
+      }
+      
+      const data: ListEventsResponse = await response.json();
+      const refreshedEvent = data.events?.find(e => e.event_id === eventId);
+      
+      if (refreshedEvent) {
+        // Update the event in the events array
+        setEvents(prevEvents => 
+          prevEvents.map(e => e.event_id === eventId ? refreshedEvent : e)
+        );
+        return refreshedEvent;
+      }
+      return null;
+    } catch (error) {
+      console.error(`Error refreshing URLs for event ${eventId}:`, error);
+      return null;
+    }
+  };
+
+  const handleEventPress = async (item: Event) => {
+    // Open immediately with existing URLs for instant response
+    setSelectedEvent(item);
+    
+    // Refresh URLs in background (non-blocking) to ensure they're not expired
+    // This happens after the modal opens so Cole doesn't wait
+    const eventIdToRefresh = item.event_id; // Capture event_id for closure
+    refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
+      if (refreshedEvent) {
+        // Update selectedEvent if it's still the same event
+        setSelectedEvent(prev => {
+          if (prev?.event_id === eventIdToRefresh) {
+            return refreshedEvent;
+          }
+          return prev; // Don't update if user switched to a different photo
+        });
+      }
+    }).catch(err => {
+      console.warn("Background URL refresh failed:", err);
+      // Continue with original URLs - they might still work
+    });
+  };
+
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
     const hasDescription = metadata?.description;
@@ -155,7 +313,7 @@ export default function ColeInboxScreen() {
     return (
       <TouchableOpacity 
         style={styles.photoContainer}
-        onPress={() => setSelectedEvent(item)}
+        onPress={() => handleEventPress(item)}
         activeOpacity={0.8}
       >
         <Image
@@ -175,35 +333,167 @@ export default function ColeInboxScreen() {
     );
   };
 
-  const closeFullScreen = useCallback(() => {
-    // Stop any ongoing speech
+  const closeFullScreen = useCallback(async () => {
+    // Stop any ongoing speech/audio
     Speech.stop();
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync();
+      soundRef.current = null;
+    }
     setSelectedEvent(null);
   }, []);
 
-  // PanResponder for swipe left or right to close
+  const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
+    if (!selectedEvent) return;
+    
+    // Find current index
+    const currentIndex = events.findIndex(e => e.event_id === selectedEvent.event_id);
+    if (currentIndex === -1) return;
+    
+    // Stop any ongoing speech/audio IMMEDIATELY
+    Speech.stop();
+    
+    // Stop and unload audio - wait for stop to actually complete
+    const currentSound = soundRef.current;
+    if (currentSound) {
+      try {
+        // Stop playback and wait for it to actually stop
+        await currentSound.stopAsync();
+      } catch (e) {
+        // Ignore errors if already stopped
+      }
+      try {
+        // Unload after stopping
+        await currentSound.unloadAsync();
+      } catch (e) {
+        // Ignore errors
+      }
+      soundRef.current = null;
+    }
+    
+    // Reset the hasSpokenRef to prevent new audio from starting too early
+    hasSpokenRef.current = false;
+    
+    // Determine the target event
+    let targetEvent: Event | null = null;
+    if (direction === 'prev') {
+      if (currentIndex === 0) {
+        // At first photo - go back to gallery
+        closeFullScreen();
+        return;
+      } else {
+        // Go to previous photo (newer)
+        targetEvent = events[currentIndex - 1];
+      }
+    } else {
+      // direction === 'next'
+      if (currentIndex === events.length - 1) {
+        // At last photo - go back to gallery
+        closeFullScreen();
+        return;
+      } else {
+        // Go to next photo (older)
+        targetEvent = events[currentIndex + 1];
+      }
+    }
+    
+    if (targetEvent) {
+      // Don't update the ref here - let the useEffect handle it
+      // This ensures the useEffect sees the transition from old event ID to new event ID
+      
+      // Refresh URLs for the target photo
+      const refreshedEvent = await refreshEventUrls(targetEvent.event_id);
+      
+      // Update selectedEvent - this will trigger useEffect which will:
+      // 1. See the change from old event ID to new event ID
+      // 2. Stop old audio
+      // 3. Update the ref to the new event ID
+      // 4. Start new audio
+      setSelectedEvent(refreshedEvent || targetEvent);
+    }
+  }, [selectedEvent, events, refreshEventUrls, closeFullScreen]);
+
+  // PanResponder for swipe navigation:
+  // - Left/Right: Navigate between photos
+  // - Up/Down: Return to inbox
   const swipeResponder = useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: (_, gestureState) => {
-          // Only respond to horizontal swipes
-          return Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
-        },
+        onMoveShouldSetPanResponder: () => true, // Respond to all swipes
         onPanResponderRelease: (_, gestureState) => {
-          // Swipe left or right with minimum distance of 50 pixels
-          if (Math.abs(gestureState.dx) > 50 && Math.abs(gestureState.dy) < 100) {
+          const absDx = Math.abs(gestureState.dx);
+          const absDy = Math.abs(gestureState.dy);
+          
+          // Minimum swipe distance of 50 pixels
+          if (absDx < 50 && absDy < 50) {
+            return; // Too small, ignore
+          }
+          
+          // Vertical swipe (up or down) - return to inbox
+          if (absDy > absDx && absDy > 50) {
             closeFullScreen();
+          }
+          // Horizontal swipe (left or right) - navigate between photos
+          // Standard interpretation: swipe left = next (forward), swipe right = previous (back)
+          else if (absDx > absDy && absDx > 50 && absDy < 100) {
+            if (gestureState.dx < 0) {
+              // Swipe left - go to next photo (older, forward in array)
+              navigateToPhoto('next');
+            } else {
+              // Swipe right - go to previous photo (newer, backward in array)
+              navigateToPhoto('prev');
+            }
           }
         },
       }),
-    [closeFullScreen]
+    [navigateToPhoto, closeFullScreen]
   );
 
-  const playDescription = () => {
+  const playDescription = async () => {
     const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-    if (metadata && metadata.description) {
-      Speech.stop(); // Stop any ongoing speech first
+    if (!metadata || !selectedEvent) return;
+    
+    // Refresh URLs before playing to ensure they're not expired
+    const refreshedEvent = await refreshEventUrls(selectedEvent.event_id);
+    const eventToUse = refreshedEvent || selectedEvent;
+    
+    // Stop any ongoing speech/audio first
+    Speech.stop();
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync();
+      soundRef.current = null;
+    }
+    
+    // Check if we have audio_url from Event (presigned GET URL) and content_type is 'audio'
+    // Use eventToUse.audio_url (from ListMirrorEvents) not metadata.audio_url (from metadata.json)
+    if (eventToUse.audio_url && metadata.content_type === 'audio') {
+      // Play audio file
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: eventToUse.audio_url },
+          { shouldPlay: true }
+        );
+        soundRef.current = sound;
+        
+        // Update selectedEvent with fresh URLs
+        if (refreshedEvent) {
+          setSelectedEvent(refreshedEvent);
+        }
+        
+        // Cleanup when audio finishes
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            sound.unloadAsync();
+            soundRef.current = null;
+          }
+        });
+      } catch (error) {
+        console.error("Error playing audio:", error);
+        Alert.alert("Error", "Failed to play audio message");
+      }
+    } else if (metadata.description) {
+      // Use TTS for text descriptions
       Speech.speak(metadata.description, {
         pitch: 0.9,
         rate: 0.9,
@@ -246,8 +536,12 @@ export default function ColeInboxScreen() {
                 // Continue even if Firestore delete fails
               }
 
-              // 3. Stop any ongoing speech
+              // 3. Stop any ongoing speech/audio
               Speech.stop();
+              if (soundRef.current) {
+                await soundRef.current.unloadAsync();
+                soundRef.current = null;
+              }
               
               // 4. Remove from local state and refresh
               setEvents(events.filter(e => e.event_id !== event.event_id));
@@ -320,21 +614,21 @@ export default function ColeInboxScreen() {
           <View style={styles.fullScreenContainer} {...swipeResponder.panHandlers}>
             <View style={styles.topButtonContainer}>
               {/* Delete button - for caregiver mode */}
-              <TouchableOpacity 
+        <TouchableOpacity 
                 style={styles.deleteButton}
                 onPress={() => deleteEvent(selectedEvent)}
-              >
+        >
                 <FontAwesome name="trash" size={20} color="#fff" />
-              </TouchableOpacity>
-            </View>
-            
+        </TouchableOpacity>
+      </View>
+
             <Image
               source={{ uri: selectedEvent.image_url }}
               style={styles.fullScreenImage}
               resizeMode="contain"
             />
             
-            {selectedMetadata && selectedMetadata.description && (
+            {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
               <View style={styles.descriptionContainer}>
                 <View style={styles.descriptionHeader}>
                   <Text style={styles.descriptionLabel}>From {selectedMetadata.sender}:</Text>
@@ -344,20 +638,30 @@ export default function ColeInboxScreen() {
                       onPress={playDescription}
                       activeOpacity={0.7}
                     >
-                      <FontAwesome name="play" size={24} color="#fff" />
+                      <FontAwesome 
+                        name={selectedMetadata.content_type === 'audio' ? "volume-up" : "play"} 
+                        size={24} 
+                        color="#fff" 
+                      />
                     </TouchableOpacity>
-                    <TouchableOpacity 
+        <TouchableOpacity 
                       style={styles.closeButtonInline}
                       onPress={closeFullScreen}
                       activeOpacity={0.7}
                     >
                       <Text style={styles.closeButtonTextInline}>X</Text>
-                    </TouchableOpacity>
-                  </View>
+        </TouchableOpacity>
+      </View>
                 </View>
-                <Text style={styles.descriptionText}>
-                  {selectedMetadata.description}
-                </Text>
+                {selectedMetadata.content_type === 'audio' ? (
+                  <Text style={styles.descriptionText}>
+                    🎤 Voice message
+                  </Text>
+                ) : (
+                  <Text style={styles.descriptionText}>
+                    {selectedMetadata.description}
+                  </Text>
+                )}
               </View>
             )}
           </View>
@@ -501,10 +805,10 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
-    flex: 1,
+    flex: 1, 
   },
   buttonRow: {
-    flexDirection: 'row',
+    flexDirection: 'row', 
     alignItems: 'center',
     gap: 12,
   },
@@ -521,7 +825,7 @@ const styles = StyleSheet.create({
     height: 60,
     borderRadius: 30,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center',
+    justifyContent: 'center', 
     alignItems: 'center',
     borderWidth: 2,
     borderColor: '#fff',

@@ -3,7 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env.deploy"
-SOURCE_DIR="${PROJECT_ROOT}/backend/s3-signer"
+SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/functions"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "Error: .env.deploy file not found!"

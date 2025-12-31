@@ -1,4 +1,4 @@
-module mirror.local/s3-signer
+module mirror.local/functions
 
 go 1.25.5
 

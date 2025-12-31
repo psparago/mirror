@@ -7,7 +7,7 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env.deploy"
-SOURCE_DIR="${PROJECT_ROOT}/backend/s3-signer"
+SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/functions"
 
 # Colors for output
 RED='\033[0;31m'
@@ -70,23 +70,23 @@ else
 fi
 echo ""
 
-# Function 2: list-mirror-photos
-echo -e "${YELLOW}Deploying list-mirror-photos...${NC}"
-gcloud functions deploy list-mirror-photos \
+# Function 2: list-mirror-events
+echo -e "${YELLOW}Deploying list-mirror-events...${NC}"
+gcloud functions deploy list-mirror-events \
   --gen2 \
   --runtime=${RUNTIME} \
   --region=${REGION} \
   --source="${SOURCE_DIR}" \
-  --entry-point=ListMirrorPhotos \
+  --entry-point=ListMirrorEvents \
   --trigger-http \
   --allow-unauthenticated \
   --set-env-vars ${ENV_VARS} \
   --quiet
 
 if [ $? -eq 0 ]; then
-  echo -e "${GREEN}✓ list-mirror-photos deployed successfully${NC}"
+  echo -e "${GREEN}✓ list-mirror-events deployed successfully${NC}"
 else
-  echo -e "${RED}✗ list-mirror-photos deployment failed${NC}"
+  echo -e "${RED}✗ list-mirror-events deployment failed${NC}"
   exit 1
 fi
 echo ""
@@ -117,6 +117,6 @@ echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
 echo "Deployed functions:"
 echo "  • get-s3-url"
-echo "  • list-mirror-photos"
+echo "  • list-mirror-events"
 echo "  • delete-mirror-event"
 

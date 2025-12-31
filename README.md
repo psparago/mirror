@@ -77,9 +77,13 @@ From root:
 
 ## Backend
 
-Go functions are in `backend/s3-signer/`:
-- `GetSignedURL` - Generates presigned PUT URLs for uploads
-- `ListMirrorPhotos` - Lists and generates presigned GET URLs for gallery
+Go Cloud Functions are in `backend/gcloud/functions/`:
+- `GetSignedURL` - Generates presigned PUT URLs for S3 uploads (images, metadata, audio)
+- `ListMirrorEvents` - Lists event bundles in Cole's inbox and returns presigned GET URLs for:
+  - `image.jpg` - The photo
+  - `metadata.json` - Event metadata (description, sender, timestamp, audio_url, content_type)
+  - `audio.m4a` - Optional audio recording (if present)
+- `DeleteMirrorEvent` - Deletes an event bundle (image, metadata, and audio if present)
 
 Deploy with scripts in `scripts/gcloud/`.
 

@@ -21,7 +21,7 @@ export default function TabTwoScreen() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_PHOTOS);
+      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
       
       if (!response.ok) {
         throw new Error(`Failed to fetch events: ${response.status}`);
