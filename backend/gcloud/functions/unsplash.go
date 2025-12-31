@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -34,10 +35,12 @@ func SearchUnsplash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Prepare the request to Unsplash
-	// Use your Access Key here. In the future, we can move this to an Env Var.
-	url := fmt.Sprintf("https://api.unsplash.com/search/photos?query=%s&per_page=20&orientation=squarish", query)
+	// URL-encode the query parameter to handle multi-word queries like "ice cream truck"
+	encodedQuery := url.QueryEscape(query)
+	// Use relevant ordering, high content filter, and more results for better quality
+	unsplashURL := fmt.Sprintf("https://api.unsplash.com/search/photos?query=%s&order_by=relevant&content_filter=high&per_page=30&orientation=squarish", encodedQuery)
 
-	req, _ := http.NewRequest("GET", url, nil)
+	req, _ := http.NewRequest("GET", unsplashURL, nil)
 	req.Header.Set("Authorization", "Client-ID "+unsplashKey)
 	req.Header.Set("Accept-Version", "v1")
 

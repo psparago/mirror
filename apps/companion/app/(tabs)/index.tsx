@@ -553,7 +553,7 @@ export default function CompanionHomeScreen() {
               style={styles.chipsContainer}
               contentContainerStyle={styles.chipsContent}
             >
-              {["Sushi", "Ice Cream Truck", "Trains", "Puppies"].map((term) => (
+              {["Sushi", "Ice Cream Truck", "Trains", "mac and cheese"].map((term) => (
                 <TouchableOpacity
                   key={term}
                   style={styles.chip}
