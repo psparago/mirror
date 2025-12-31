@@ -3,7 +3,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS } from '@projectmirror/shared';
 import { collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
   event_id: string;
@@ -19,6 +19,35 @@ interface SentReflection {
 export default function SentHistoryScreen() {
   const [reflections, setReflections] = useState<SentReflection[]>([]);
   const [loading, setLoading] = useState(true);
+  const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
+  const [responseEventIdMap, setResponseEventIdMap] = useState<Map<string, string>>(new Map()); // event_id -> response_event_id
+  const [selectedSelfieEventId, setSelectedSelfieEventId] = useState<string | null>(null);
+  const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
+  const [loadingSelfie, setLoadingSelfie] = useState(false);
+
+  // Listen to reflection_responses collection to detect new selfie responses
+  useEffect(() => {
+    const responsesRef = collection(db, 'reflection_responses');
+    const unsubscribeResponses = onSnapshot(responsesRef, (snapshot) => {
+      const eventIds = new Set<string>();
+      const eventIdMap = new Map<string, string>();
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        if (data.event_id) {
+          eventIds.add(data.event_id);
+          if (data.response_event_id) {
+            eventIdMap.set(data.event_id, data.response_event_id);
+          }
+        }
+      });
+      setResponseEventIds(eventIds);
+      setResponseEventIdMap(eventIdMap);
+    }, (error) => {
+      console.error('Error listening to reflection_responses:', error);
+    });
+
+    return () => unsubscribeResponses();
+  }, []);
 
   useEffect(() => {
     // Listen to signals collection for sent Reflections
@@ -146,22 +175,8 @@ export default function SentHistoryScreen() {
             console.error('Error fetching reflection image:', error);
           }
 
-          // Check for selfie response - use event_id as document ID
-          try {
-            const responseRef = doc(db, 'reflection_responses', reflection.event_id);
-            const responseDoc = await getDoc(responseRef);
-            if (responseDoc.exists()) {
-              reflection.hasResponse = true;
-              const responseData = responseDoc.data();
-              // Store response_event_id for later use (we'll need backend support for GET URLs)
-              if (responseData.response_event_id) {
-                // For now, we'll just mark that a response exists
-                // TODO: Add backend function to get presigned GET URLs for response images
-              }
-            }
-          } catch (error) {
-            console.error('Error checking response:', error);
-          }
+          // Check for selfie response - use responseEventIds state (updated by listener)
+          reflection.hasResponse = responseEventIds.has(reflection.event_id);
 
           return reflection;
         });
@@ -197,7 +212,7 @@ export default function SentHistoryScreen() {
     );
 
     return () => unsubscribe();
-  }, []);
+  }, [responseEventIds]);
 
   const getStatusText = (status?: string) => {
     switch (status) {
@@ -266,6 +281,49 @@ export default function SentHistoryScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Selfie Image Modal */}
+      <Modal
+        visible={selectedSelfieEventId !== null}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => {
+          setSelectedSelfieEventId(null);
+          setSelfieImageUrl(null);
+        }}
+      >
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => {
+            setSelectedSelfieEventId(null);
+            setSelfieImageUrl(null);
+          }}
+        >
+          <View style={styles.modalContent}>
+            <TouchableOpacity
+              style={styles.modalCloseButton}
+              onPress={() => {
+                setSelectedSelfieEventId(null);
+                setSelfieImageUrl(null);
+              }}
+            >
+              <Text style={styles.modalCloseText}>✕</Text>
+            </TouchableOpacity>
+            {loadingSelfie ? (
+              <ActivityIndicator size="large" color="#2ecc71" />
+            ) : selfieImageUrl ? (
+              <Image
+                source={{ uri: selfieImageUrl }}
+                style={styles.selfieImage}
+                resizeMode="contain"
+              />
+            ) : (
+              <Text style={styles.modalErrorText}>Failed to load selfie</Text>
+            )}
+          </View>
+        </TouchableOpacity>
+      </Modal>
+      
       <FlatList
         data={reflections}
         keyExtractor={(item) => item.event_id}
@@ -291,10 +349,36 @@ export default function SentHistoryScreen() {
                     )}
                   </View>
                   {item.hasResponse && (
-                    <View style={styles.responseBadge}>
+                    <TouchableOpacity
+                      style={styles.responseBadge}
+                      onPress={async () => {
+                        const responseEventId = responseEventIdMap.get(item.event_id);
+                        if (!responseEventId) return;
+                        
+                        setSelectedSelfieEventId(item.event_id);
+                        setLoadingSelfie(true);
+                        setSelfieImageUrl(null);
+                        
+                        try {
+                          // Get presigned URL for the selfie image
+                          const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+                          if (imageResponse.ok) {
+                            const { url } = await imageResponse.json();
+                            setSelfieImageUrl(url);
+                          } else {
+                            console.error('Failed to get selfie image URL');
+                          }
+                        } catch (error) {
+                          console.error('Error fetching selfie image URL:', error);
+                        } finally {
+                          setLoadingSelfie(false);
+                        }
+                      }}
+                      activeOpacity={0.7}
+                    >
                       <FontAwesome name="camera" size={16} color="#2ecc71" />
                       <Text style={styles.responseText}>Selfie</Text>
-                    </View>
+                    </TouchableOpacity>
                   )}
                 </View>
                 {item.description && (
@@ -421,6 +505,46 @@ const styles = StyleSheet.create({
   emptySubtext: {
     fontSize: 14,
     color: '#999',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '90%',
+    height: '80%',
+    backgroundColor: '#000',
+    borderRadius: 12,
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCloseButton: {
+    position: 'absolute',
+    top: 20,
+    right: 20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1,
+  },
+  modalCloseText: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+  selfieImage: {
+    width: '100%',
+    height: '100%',
+  },
+  modalErrorText: {
+    color: '#fff',
+    fontSize: 16,
   },
 });
 

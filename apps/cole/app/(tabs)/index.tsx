@@ -3,7 +3,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { File } from 'expo-file-system';
+import * as FileSystem from 'expo-file-system';
 import * as Speech from 'expo-speech';
 import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -77,12 +77,16 @@ export default function ColeInboxScreen() {
     
     if (audioStatus.isLoaded && audioStatus.didJustFinish && !audioStatus.playing) {
       // Show selfie mirror after audio finishes
+      // Only show if we haven't already shown it for this event in this session
       if (!audioFinishedRef.current[selectedEvent.event_id]) {
         audioFinishedRef.current[selectedEvent.event_id] = true;
+        console.log(`Audio finished for ${selectedEvent.event_id}, showing selfie mirror. Camera permission: ${cameraPermission?.granted}, showSelfieMirror will be set to true`);
         setShowSelfieMirror(true);
+      } else {
+        console.log(`Audio finished for ${selectedEvent.event_id}, but mirror already shown for this event`);
       }
     }
-  }, [audioStatus?.isLoaded, audioStatus?.didJustFinish, audioStatus?.playing, selectedEvent?.event_id]);
+  }, [audioStatus?.isLoaded, audioStatus?.didJustFinish, audioStatus?.playing, selectedEvent?.event_id, cameraPermission?.granted]);
 
   // Auto-play when audio loads (for initial selection and manual play)
   useEffect(() => {
@@ -129,6 +133,8 @@ export default function ColeInboxScreen() {
       // Reset hasSpokenRef and clear auto-play flag when switching photos
       hasSpokenRef.current = false;
       shouldAutoPlayRef.current = { eventId: null, url: null };
+      // Hide selfie mirror when switching to a different reflection
+      setShowSelfieMirror(false);
     }
     
     // If this is the same event (just a URL refresh), don't restart audio
@@ -147,6 +153,12 @@ export default function ColeInboxScreen() {
       // Reset the ref when opening a new photo
       if (previousEventId !== newEventId) {
         hasSpokenRef.current = false;
+        // Hide selfie mirror when opening a new reflection (it will show after audio finishes)
+        setShowSelfieMirror(false);
+        // Reset audioFinishedRef for the new event so mirror can show after audio finishes
+        if (selectedEvent.event_id) {
+          audioFinishedRef.current[selectedEvent.event_id] = false;
+        }
       }
       
       // If audio is already playing for this event, don't start it again
@@ -551,7 +563,11 @@ export default function ColeInboxScreen() {
 
   // Capture and upload selfie response
   const captureSelfieResponse = async () => {
-    if (!selectedEvent || !cameraRef.current || isCapturingSelfie) return;
+    console.log(`captureSelfieResponse called for event ${selectedEvent?.event_id}`);
+    if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
+      console.log(`captureSelfieResponse early return: selectedEvent=${!!selectedEvent}, cameraRef=${!!cameraRef.current}, isCapturingSelfie=${isCapturingSelfie}`);
+      return;
+    }
     
     // Check camera permissions
     if (!cameraPermission?.granted) {
@@ -563,9 +579,11 @@ export default function ColeInboxScreen() {
     }
 
     setIsCapturingSelfie(true);
+    console.log("Starting selfie capture...");
     
     try {
       // Capture photo
+      console.log("Taking picture...");
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.8,
         base64: false,
@@ -574,13 +592,17 @@ export default function ColeInboxScreen() {
       if (!photo) {
         throw new Error("Failed to capture photo");
       }
+      console.log("Photo captured:", photo.uri);
 
       // Generate event ID for the response
       const responseEventId = Date.now().toString();
+      console.log("Generated response event ID:", responseEventId);
       
       // Get presigned URL for upload (path=from for Star to Companion)
+      console.log("Getting S3 upload URL...");
       const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
       const { url: imageUrl } = await imageResponse.json();
+      console.log("Got S3 URL, uploading image...");
 
       // Upload image
       const imageBlob = await fetch(photo.uri).then(r => r.blob());
@@ -593,10 +615,14 @@ export default function ColeInboxScreen() {
       if (uploadResponse.status !== 200) {
         throw new Error(`Image upload failed: ${uploadResponse.status}`);
       }
+      console.log("Image uploaded successfully to S3");
 
-      // Cleanup local file first
-      const file = new File(photo.uri);
-      await file.delete();
+      // Cleanup local file
+      try {
+        await FileSystem.deleteAsync(photo.uri, { idempotent: true });
+      } catch (cleanupError) {
+        console.warn("Failed to delete local file:", cleanupError);
+      }
 
       // Hide mirror and show success immediately (don't wait for Firestore)
       setShowSelfieMirror(false);
@@ -604,6 +630,7 @@ export default function ColeInboxScreen() {
 
       // Create reflection_response document in Firestore (non-blocking)
       // Use original event_id as document ID for easy lookup
+      console.log(`Creating Firestore document for event ${selectedEvent.event_id} with response_event_id ${responseEventId}`);
       const responseRef = doc(db, 'reflection_responses', selectedEvent.event_id);
       setDoc(responseRef, {
         event_id: selectedEvent.event_id, // Link to original Reflection
@@ -612,6 +639,7 @@ export default function ColeInboxScreen() {
         type: 'selfie_response',
       })
         .then(() => {
+          console.log("Firestore document created successfully");
         })
         .catch((firestoreError: any) => {
           console.error("Failed to save reflection response to Firestore:", firestoreError);
@@ -630,6 +658,7 @@ export default function ColeInboxScreen() {
       Alert.alert("Error", errorMessage);
     } finally {
       setIsCapturingSelfie(false);
+      console.log("Selfie capture process finished");
     }
   };
 
@@ -825,25 +854,43 @@ export default function ColeInboxScreen() {
             />
             
             {/* Selfie Mirror - appears after audio finishes */}
-            {showSelfieMirror && cameraPermission?.granted && (
+            {showSelfieMirror && (
               <View style={styles.selfieMirrorContainer}>
-                <CameraView
-                  ref={cameraRef}
-                  style={styles.selfieMirror}
-                  facing="front"
-                />
-                <TouchableOpacity
-                  style={styles.selfieMirrorButton}
-                  onPress={captureSelfieResponse}
-                  disabled={isCapturingSelfie}
-                  activeOpacity={0.8}
-                >
-                  {isCapturingSelfie ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <View style={styles.selfieMirrorInner} />
-                  )}
-                </TouchableOpacity>
+                {cameraPermission?.granted ? (
+                  <>
+                    <CameraView
+                      ref={cameraRef}
+                      style={styles.selfieMirror}
+                      facing="front"
+                    />
+                    <TouchableOpacity
+                      style={styles.selfieMirrorButton}
+                      onPress={captureSelfieResponse}
+                      disabled={isCapturingSelfie}
+                      activeOpacity={0.8}
+                    >
+                      {isCapturingSelfie ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <View style={styles.selfieMirrorInner} />
+                      )}
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.selfieMirrorButton, { backgroundColor: 'rgba(0, 0, 0, 0.7)' }]}
+                    onPress={async () => {
+                      const result = await requestCameraPermission();
+                      if (!result.granted) {
+                        Alert.alert("Camera Permission", "Camera permission is required to take a selfie response.");
+                      }
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <FontAwesome name="camera" size={32} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 12, marginTop: 8, textAlign: 'center' }}>Tap to enable</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             )}
             
