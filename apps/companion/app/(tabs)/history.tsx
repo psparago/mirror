@@ -160,33 +160,30 @@ export default function SentHistoryScreen() {
 
         // Convert map to array and fetch additional data
         const reflectionPromises = Array.from(reflectionMap.values()).map(async (reflection) => {
-          // Don't fetch image or metadata if reflection is deleted
-          if (reflection.status !== 'deleted') {
-            // Fetch Reflection image URL from backend
-            try {
-              const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
-              if (eventsResponse.ok) {
-                const eventsData = await eventsResponse.json();
-                const matchingEvent = eventsData.events?.find((e: any) => e.event_id === reflection.event_id);
-                if (matchingEvent?.image_url) {
-                  reflection.reflectionImageUrl = matchingEvent.image_url;
-                  // Also fetch metadata for description
-                  if (matchingEvent.metadata_url) {
-                    try {
-                      const metaResponse = await fetch(matchingEvent.metadata_url);
-                      if (metaResponse.ok) {
-                        const metadata = await metaResponse.json();
-                        reflection.description = metadata.description;
-                      }
-                    } catch (err) {
-                      console.error('Error fetching metadata:', err);
+          // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
+          try {
+            const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+            if (eventsResponse.ok) {
+              const eventsData = await eventsResponse.json();
+              const matchingEvent = eventsData.events?.find((e: any) => e.event_id === reflection.event_id);
+              if (matchingEvent?.image_url) {
+                reflection.reflectionImageUrl = matchingEvent.image_url;
+                // Also fetch metadata for description (only for non-deleted)
+                if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
+                  try {
+                    const metaResponse = await fetch(matchingEvent.metadata_url);
+                    if (metaResponse.ok) {
+                      const metadata = await metaResponse.json();
+                      reflection.description = metadata.description;
                     }
+                  } catch (err) {
+                    console.error('Error fetching metadata:', err);
                   }
                 }
               }
-            } catch (error) {
-              console.error('Error fetching reflection image:', error);
             }
+          } catch (error) {
+            console.error('Error fetching reflection image:', error);
           }
 
           // Check for selfie response - use responseEventIds state (updated by listener)
@@ -357,16 +354,23 @@ export default function SentHistoryScreen() {
         renderItem={({ item }) => (
           <View style={styles.reflectionItem}>
             <View style={styles.reflectionRow}>
-              {item.status === 'deleted' ? (
+              {item.reflectionImageUrl ? (
+                <View style={styles.reflectionImageContainer}>
+                  <Image
+                    source={{ uri: item.reflectionImageUrl }}
+                    style={styles.reflectionImage}
+                    resizeMode="cover"
+                  />
+                  {item.status === 'deleted' && (
+                    <View style={styles.deletedOverlay}>
+                      <FontAwesome name="trash" size={24} color="#fff" />
+                    </View>
+                  )}
+                </View>
+              ) : item.status === 'deleted' ? (
                 <View style={[styles.reflectionImage, styles.deletedImagePlaceholder]}>
                   <FontAwesome name="trash" size={32} color="#e74c3c" />
                 </View>
-              ) : item.reflectionImageUrl ? (
-                <Image
-                  source={{ uri: item.reflectionImageUrl }}
-                  style={styles.reflectionImage}
-                  resizeMode="cover"
-                />
               ) : null}
               <View style={styles.reflectionInfo}>
                 <View style={styles.reflectionContent}>
@@ -480,6 +484,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 12,
   },
+  reflectionImageContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 8,
+    overflow: 'hidden',
+    position: 'relative',
+  },
   reflectionImage: {
     width: 80,
     height: 80,
@@ -491,6 +502,16 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#e74c3c',
     borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deletedOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(231, 76, 60, 0.7)',
     justifyContent: 'center',
     alignItems: 'center',
   },

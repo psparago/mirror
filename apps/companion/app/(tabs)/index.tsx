@@ -797,7 +797,7 @@ export default function CompanionHomeScreen() {
       style={styles.dashboardContainer}
     >
       <View style={styles.dashboardContent}>
-        <Text style={styles.dashboardTitle}>Create Reflection</Text>
+        <Text style={styles.dashboardTitle}>Create a Reflection</Text>
         
         <View style={styles.dashboardButtons}>
           <TouchableOpacity 

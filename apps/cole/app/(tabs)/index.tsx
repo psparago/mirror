@@ -22,7 +22,8 @@ export default function ColeInboxScreen() {
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
   const insets = useSafeAreaInsets();
   const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
   const audioPlayer = useAudioPlayer(undefined);
@@ -33,6 +34,7 @@ export default function ColeInboxScreen() {
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
   const audioFinishedRef = useRef<{ [eventId: string]: boolean }>({});
   const [playButtonPressed, setPlayButtonPressed] = useState(false);
+  const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -113,6 +115,27 @@ export default function ColeInboxScreen() {
     }
   }, [audioStatus?.isLoaded, audioStatus?.playing, audioPlayer]);
 
+  // Fetch metadata when a reflection is selected
+  useEffect(() => {
+    if (selectedEvent && !eventMetadata[selectedEvent.event_id] && selectedEvent.metadata_url) {
+      fetch(selectedEvent.metadata_url)
+        .then(res => {
+          if (res.ok) {
+            return res.json();
+          }
+          throw new Error(`Failed to fetch metadata: ${res.status}`);
+        })
+        .then((metadata: EventMetadata) => {
+          setEventMetadata(prev => ({
+            ...prev,
+            [selectedEvent.event_id]: metadata
+          }));
+        })
+        .catch(err => {
+          console.warn(`Failed to fetch metadata for ${selectedEvent.event_id}:`, err);
+        });
+    }
+  }, [selectedEvent?.event_id, selectedEvent?.metadata_url, eventMetadata]);
 
   // Auto-play speech/audio when photo with description opens
   // Using useRef to prevent state loops - only trigger once per photo
@@ -365,6 +388,36 @@ export default function ColeInboxScreen() {
   const handleEventPress = async (item: Event) => {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
+    setImageDimensions(null); // Reset dimensions for new image
+    
+    // Fetch metadata if not already loaded
+    if (!eventMetadata[item.event_id] && item.metadata_url) {
+      try {
+        const metaResponse = await fetch(item.metadata_url);
+        if (metaResponse.ok) {
+          const metadata: EventMetadata = await metaResponse.json();
+          setEventMetadata(prev => ({
+            ...prev,
+            [item.event_id]: metadata
+          }));
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch metadata for ${item.event_id}:`, err);
+      }
+    }
+    
+    // Get image dimensions to size container correctly
+    if (item.image_url) {
+      Image.getSize(
+        item.image_url,
+        (imgWidth, imgHeight) => {
+          setImageDimensions({ width: imgWidth, height: imgHeight });
+        },
+        (error) => {
+          console.warn("Failed to get image dimensions:", error);
+        }
+      );
+    }
     
     // Refresh URLs in background (non-blocking) to ensure they're not expired
     // This happens after the modal opens so Cole doesn't wait
@@ -378,6 +431,30 @@ export default function ColeInboxScreen() {
           }
           return prev; // Don't update if user switched to a different photo
         });
+        // Fetch metadata for refreshed event if not already loaded
+        if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
+          fetch(refreshedEvent.metadata_url)
+            .then(res => res.json())
+            .then((metadata: EventMetadata) => {
+              setEventMetadata(prev => ({
+                ...prev,
+                [refreshedEvent.event_id]: metadata
+              }));
+            })
+            .catch(err => console.warn("Failed to fetch metadata for refreshed event:", err));
+        }
+        // Update dimensions if URL changed
+        if (refreshedEvent.image_url && refreshedEvent.image_url !== item.image_url) {
+          Image.getSize(
+            refreshedEvent.image_url,
+            (imgWidth, imgHeight) => {
+              setImageDimensions({ width: imgWidth, height: imgHeight });
+            },
+            (error) => {
+              console.warn("Failed to get image dimensions:", error);
+            }
+          );
+        }
       }
     }).catch(err => {
       console.warn("Background URL refresh failed:", err);
@@ -409,11 +486,6 @@ export default function ColeInboxScreen() {
               console.error(`Error loading image for event ${item.event_id}:`, error);
             }}
           />
-          {hasDescription && (
-            <View style={styles.descriptionBadge}>
-              <Text style={styles.descriptionBadgeText}>📝</Text>
-            </View>
-          )}
         </BlurView>
       </TouchableOpacity>
     );
@@ -596,19 +668,37 @@ export default function ColeInboxScreen() {
       const responseEventId = Date.now().toString();
       
       // Get presigned URL for upload (path=from for Star to Companion)
-      const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
-      const { url: imageUrl } = await imageResponse.json();
+      let imageUrl: string;
+      try {
+        console.log("Getting presigned URL for selfie upload...");
+        const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+        if (!imageResponse.ok) {
+          throw new Error(`Failed to get presigned URL: ${imageResponse.status} ${imageResponse.statusText}`);
+        }
+        const imageData = await imageResponse.json();
+        imageUrl = imageData.url;
+        console.log("Got presigned URL, uploading image...");
+      } catch (error: any) {
+        console.error("Error getting presigned URL:", error);
+        throw new Error(`Failed to get upload URL: ${error.message || 'Network request failed'}`);
+      }
 
       // Upload image
-      const imageBlob = await fetch(photo.uri).then(r => r.blob());
-      const uploadResponse = await fetch(imageUrl, {
-        method: 'PUT',
-        body: imageBlob,
-        headers: { 'Content-Type': 'image/jpeg' },
-      });
+      try {
+        const imageBlob = await fetch(photo.uri).then(r => r.blob());
+        const uploadResponse = await fetch(imageUrl, {
+          method: 'PUT',
+          body: imageBlob,
+          headers: { 'Content-Type': 'image/jpeg' },
+        });
 
-      if (uploadResponse.status !== 200) {
-        throw new Error(`Image upload failed: ${uploadResponse.status}`);
+        if (uploadResponse.status !== 200) {
+          throw new Error(`Image upload failed: ${uploadResponse.status} ${uploadResponse.statusText}`);
+        }
+        console.log("Image uploaded successfully");
+      } catch (error: any) {
+        console.error("Error uploading image:", error);
+        throw new Error(`Failed to upload image: ${error.message || 'Network request failed'}`);
       }
 
       // Cleanup local file
@@ -620,6 +710,16 @@ export default function ColeInboxScreen() {
 
       // Hide mirror and show success immediately (don't wait for Firestore)
       setShowSelfieMirror(false);
+      
+      // Speak confirmation message
+      const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+      const companionName = metadata?.sender || 'your companion';
+      Speech.speak(`I sent a selfie to ${companionName}`, {
+        pitch: 0.9,
+        rate: 0.9,
+        language: 'en-US',
+      });
+      
       Alert.alert("Success!", "Your selfie response has been sent!");
 
       // Create reflection_response document in Firestore (non-blocking)
@@ -868,24 +968,50 @@ export default function ColeInboxScreen() {
             {/* Top Layer: Header and controls */}
             <View style={[styles.topButtonContainer, { top: insets.top + 10 }]}>
               {/* Reflection header */}
-              {selectedMetadata && (
-                <Text style={styles.reflectionHeader}>
-                  Reflection from {selectedMetadata.sender}
-                </Text>
-              )}
-              {/* Delete button - for caregiver mode */}
-              <TouchableOpacity 
+              <Text style={styles.reflectionHeader}>
+                {selectedMetadata?.sender ? `Reflection from ${selectedMetadata.sender}` : 'Reflection'}
+              </Text>
+              {/* Close button */}
+              <TouchableOpacity
                 style={styles.deleteButton}
-                onPress={() => deleteEvent(selectedEvent)}
+                onPress={closeFullScreen}
+                activeOpacity={0.7}
               >
-                <FontAwesome name="trash" size={20} color="#2C3E50" />
+                <FontAwesome name="times" size={20} color="#fff" />
               </TouchableOpacity>
             </View>
 
             {/* Base Layer: Image with glass border */}
             <View style={[styles.imageFrameContainer, { 
               top: insets.top + 100,
-              bottom: 200 + Math.max(insets.bottom, 24)
+              bottom: isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24),
+              ...(imageDimensions ? (() => {
+                const availableHeight = height - (insets.top + 100) - (isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24));
+                const aspectRatio = imageDimensions.width / imageDimensions.height;
+                const maxWidth = isLandscape ? width * 0.7 : width * 0.9;
+                const maxHeight = isLandscape ? height * 0.6 : height * 0.5;
+                
+                // Calculate dimensions that fit within maxWidth and maxHeight while maintaining aspect ratio
+                const widthFromHeight = availableHeight * aspectRatio;
+                const heightFromWidth = maxWidth / aspectRatio;
+                
+                let finalWidth = maxWidth;
+                let finalHeight = heightFromWidth;
+                
+                if (heightFromWidth > availableHeight) {
+                  finalWidth = widthFromHeight;
+                  finalHeight = availableHeight;
+                }
+                
+                return {
+                  width: Math.min(finalWidth, maxWidth),
+                  height: Math.min(finalHeight, maxHeight),
+                };
+              })() : {
+                width: isLandscape ? width * 0.7 : width * 0.9,
+                maxHeight: isLandscape ? height * 0.6 : height * 0.5,
+              }),
+              alignSelf: 'center',
             }]}>
               <Image
                 source={{ uri: selectedEvent.image_url }}
@@ -896,26 +1022,76 @@ export default function ColeInboxScreen() {
 
             {/* Top Layer: Selfie Mirror - appears after audio finishes */}
             {showSelfieMirror && (
-              <View style={[styles.selfieMirrorContainer, { top: insets.top + 100, right: 40 }]}>
+              <TouchableOpacity 
+                onPress={() => {
+                  captureSelfieResponse();
+                }}
+                disabled={isCapturingSelfie}
+                activeOpacity={0.9}
+                style={[styles.selfieMirrorContainer, { 
+                ...(imageDimensions ? (() => {
+                  const availableHeight = height - (insets.top + 100) - (isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24));
+                  const aspectRatio = imageDimensions.width / imageDimensions.height;
+                  const maxWidth = isLandscape ? width * 0.7 : width * 0.9;
+                  const maxHeight = isLandscape ? height * 0.6 : height * 0.5;
+                  
+                  const widthFromHeight = availableHeight * aspectRatio;
+                  const heightFromWidth = maxWidth / aspectRatio;
+                  
+                  let finalWidth = maxWidth;
+                  let finalHeight = heightFromWidth;
+                  
+                  if (heightFromWidth > availableHeight) {
+                    finalWidth = widthFromHeight;
+                    finalHeight = availableHeight;
+                  }
+                  
+                  const imageWidth = Math.min(finalWidth, maxWidth);
+                  const imageLeft = (width - imageWidth) / 2; // Center the image
+                  const imageRight = imageLeft + imageWidth;
+                  const imageTop = insets.top + 100;
+                  
+                  if (isLandscape) {
+                    // Align with delete button: delete button is in topButtonContainer which is 90% width, centered
+                    // Delete button is at the right edge of that container, which is at right: 5% of screen width
+                    const deleteButtonRight = width * 0.05; // 5% from right edge (since container is 90% width, centered)
+                    const selfieSize = 120;
+                    
+                    return {
+                      top: imageTop + 20, // Align with top of image with spacing
+                      right: deleteButtonRight, // Align with delete button
+                      zIndex: 10
+                    };
+                  } else {
+                    // Portrait: reduce top spacing, increase right spacing
+                    return {
+                      top: insets.top + 100 + 10, // Reduced spacing from top
+                      right: 60, // Increased spacing from right edge
+                      zIndex: 10
+                    };
+                  }
+                })() : {
+                  top: insets.top + 100 + 10,
+                  right: isLandscape ? width * 0.05 : 60,
+                  zIndex: 10
+                })
+              }]}>
                 {cameraPermission?.granted ? (
                   <>
-                    <CameraView
-                      ref={cameraRef}
-                      style={styles.selfieMirror}
-                      facing="front"
-                    />
-                    <TouchableOpacity
-                      style={styles.cameraShutterButton}
-                      onPress={captureSelfieResponse}
-                      disabled={isCapturingSelfie}
-                      activeOpacity={0.8}
-                    >
+                    <View style={styles.selfieMirrorWrapper} pointerEvents="none">
+                      <CameraView
+                        ref={cameraRef}
+                        style={styles.selfieMirror}
+                        facing="front"
+                      />
+                    </View>
+                    <View style={styles.cameraShutterButton}>
                       {isCapturingSelfie ? (
                         <ActivityIndicator size="small" color="#2C3E50" />
                       ) : (
                         <FontAwesome name="camera" size={20} color="#2C3E50" />
                       )}
-                    </TouchableOpacity>
+                    </View>
                   </>
                 ) : (
                   <TouchableOpacity
@@ -932,23 +1108,27 @@ export default function ColeInboxScreen() {
                     <Text style={{ color: '#fff', fontSize: 12, marginTop: 8, textAlign: 'center' }}>Tap to enable</Text>
                   </TouchableOpacity>
                 )}
-              </View>
+              </TouchableOpacity>
             )}
 
             {/* Middle Layer: Floating Info Panel */}
-            {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
-              <View style={[styles.descriptionContainer, { bottom: insets.bottom + 20, paddingBottom: Math.max(insets.bottom, 24) }]}>
-                <View style={styles.descriptionHeader}>
-                  {selectedMetadata.content_type === 'audio' ? (
-                    <Text style={styles.descriptionText}>
-                      🎤 Voice message
-                    </Text>
-                  ) : (
-                    <Text style={styles.descriptionText}>
-                      {selectedMetadata.description}
-                    </Text>
-                  )}
-                  <View style={styles.buttonRow}>
+            <View style={[styles.descriptionContainer, { bottom: insets.bottom + 20, paddingBottom: Math.max(insets.bottom, 24) }]}>
+              <View style={styles.descriptionHeader}>
+                {selectedMetadata?.content_type === 'audio' || selectedEvent?.audio_url ? (
+                  <Text style={styles.descriptionText}>
+                    🎤 Voice message
+                  </Text>
+                ) : selectedMetadata?.description ? (
+                  <Text style={styles.descriptionText}>
+                    {selectedMetadata.description}
+                  </Text>
+                ) : (
+                  <Text style={styles.descriptionText}>
+                    Reflection
+                  </Text>
+                )}
+                <View style={styles.buttonRow}>
+                  {(selectedEvent?.audio_url || selectedMetadata?.description) && (
                     <TouchableOpacity 
                       style={[
                         styles.playButton, 
@@ -962,26 +1142,34 @@ export default function ColeInboxScreen() {
                     >
                       <FontAwesome 
                         name={audioStatus?.playing ? "stop" : "play"} 
-                        size={20} 
-                        color="#fff" 
+                        size={28} 
+                        color={audioStatus?.playing ? "#fff" : "#d32f2f"} 
                       />
                     </TouchableOpacity>
-                    <TouchableOpacity 
-                      style={styles.closeButtonInline}
-                      onPress={closeFullScreen}
-                      activeOpacity={0.8}
-                    >
-                      <FontAwesome name="times" size={20} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
+                  )}
+                  <TouchableOpacity 
+                    style={styles.closeButtonInline}
+                    onPress={() => selectedEvent && deleteEvent(selectedEvent)}
+                    activeOpacity={0.8}
+                  >
+                    <FontAwesome name="trash" size={20} color="#fff" />
+                  </TouchableOpacity>
                 </View>
               </View>
-            )}
+            </View>
 
             {/* Top Layer: Tell Me More floating action button */}
-            {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
+            {(selectedEvent?.audio_url || selectedMetadata?.description) && (
               <TouchableOpacity
-                style={[styles.tellMeMoreButton, { bottom: insets.bottom + 160 }]}
+                style={[styles.tellMeMoreButton, { 
+                  bottom: insets.bottom + 160,
+                  ...(isLandscape ? {
+                    // Align with delete button in landscape (delete button is at right edge of 90% container = 5% from screen edge)
+                    right: width * 0.05,
+                  } : {
+                    right: 20, // Keep original position in portrait
+                  })
+                }]}
                 onPress={playDescription}
                 activeOpacity={0.8}
               >
@@ -1119,7 +1307,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   deleteButton: {
-    backgroundColor: 'rgba(211, 47, 47, 0.8)',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
     padding: 12,
     borderRadius: 8,
     width: 44,
@@ -1129,14 +1317,14 @@ const styles = StyleSheet.create({
   },
   imageFrameContainer: {
     position: 'absolute',
-    width: '90%',
-    left: '5%',
     borderRadius: 40,
     borderWidth: 2,
     borderColor: 'rgba(255, 255, 255, 0.8)',
     overflow: 'hidden',
     backgroundColor: 'transparent',
-    zIndex: 5,
+    zIndex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
     ...Platform.select({
       android: {
         elevation: 5,
@@ -1250,7 +1438,7 @@ const styles = StyleSheet.create({
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: '#2C3E50',
+    backgroundColor: 'rgba(211, 47, 47, 0.8)',
     justifyContent: 'center',
     alignItems: 'center',
     ...Platform.select({
@@ -1284,9 +1472,10 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 60,
-    overflow: 'hidden',
+    overflow: 'visible',
     borderWidth: 4,
     borderColor: '#fff',
+    zIndex: 10,
     ...Platform.select({
       ios: {
         shadowColor: '#2E78B7',
@@ -1305,6 +1494,12 @@ const styles = StyleSheet.create({
       },
     }),
   },
+  selfieMirrorWrapper: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 60,
+    overflow: 'hidden',
+  },
   selfieMirror: {
     width: '100%',
     height: '100%',
@@ -1319,6 +1514,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 20,
     ...Platform.select({
       ios: {
         shadowColor: '#000',
