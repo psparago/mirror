@@ -1,0 +1,15 @@
+{
+  "Rules": [
+    {
+      "ID": "DeleteStagingImagesAfter24Hours",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "staging/"
+      },
+      "Expiration": {
+        "Days": 1
+      }
+    }
+  ]
+}
+

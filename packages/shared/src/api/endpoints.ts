@@ -6,5 +6,6 @@ export const API_ENDPOINTS = {
   LIST_MIRROR_EVENTS: 'https://us-central1-project-mirror-23168.cloudfunctions.net/list-mirror-events',
   DELETE_MIRROR_EVENT: 'https://us-central1-project-mirror-23168.cloudfunctions.net/delete-mirror-event',
   UNSPLASH_SEARCH: 'https://us-central1-project-mirror-23168.cloudfunctions.net/unsplash-search',
+  AI_DESCRIPTION: 'https://us-central1-project-mirror-23168.cloudfunctions.net/generate-ai-description',
 } as const;
 

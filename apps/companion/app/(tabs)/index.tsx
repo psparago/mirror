@@ -1,7 +1,7 @@
 import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
-import { useAudioRecorder, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
+import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
@@ -25,6 +25,9 @@ export default function CompanionHomeScreen() {
   const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
   const [isLoadingImage, setIsLoadingImage] = useState(false);
+  const [isAiThinking, setIsAiThinking] = useState(false);
+  const [isAiGenerated, setIsAiGenerated] = useState(false);
+  const [stagingEventId, setStagingEventId] = useState<string | null>(null);
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
@@ -75,6 +78,35 @@ export default function CompanionHomeScreen() {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   };
 
+  const getAIDescription = async (imageUrl: string) => {
+    try {
+      setIsAiThinking(true);
+      setIsAiGenerated(false);
+      
+      const response = await fetch(
+        `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}`
+      );
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`AI description failed: ${response.status} - ${errorText}`);
+        throw new Error(`AI description failed: ${response.status} - ${errorText}`);
+      }
+      
+      const aiDescription = await response.text();
+      
+      if (aiDescription && aiDescription.trim()) {
+        setDescription(aiDescription.trim());
+        setIsAiGenerated(true);
+      }
+    } catch (error: any) {
+      console.error("Error getting AI description:", error);
+      // Don't show error to user - just let them type manually
+    } finally {
+      setIsAiThinking(false);
+    }
+  };
+
   const searchUnsplash = async (query: string) => {
     if (!query.trim()) return;
     
@@ -115,11 +147,37 @@ export default function CompanionHomeScreen() {
     searchUnsplash(term);
   };
 
-  const handleImageSelect = (imageUrl: string) => {
+  const handleImageSelect = async (imageUrl: string) => {
     setPhoto({ uri: imageUrl });
     setIsSearchModalVisible(false);
     setShowDescriptionInput(true);
     setSearchQuery('');
+    setDescription(''); // Clear previous description
+    setIsAiGenerated(false);
+    
+    // Generate staging event_id for cleanup tracking
+    const stagingId = Date.now().toString();
+    setStagingEventId(stagingId);
+    
+    // Upload all images (Unsplash, gallery, etc.) to staging first, then call AI
+    // This ensures consistent handling and avoids CORS/redirect issues with Unsplash URLs
+    try {
+      const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
+      const { url: stagingUrl } = await stagingResponse.json();
+      
+      const stagingUploadResponse = await uploadPhotoToS3(imageUrl, stagingUrl);
+      if (stagingUploadResponse.status === 200) {
+        // Get presigned GET URL for AI analysis
+        const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
+        if (getStagingUrlResponse.ok) {
+          const { url: getStagingUrl } = await getStagingUrlResponse.json();
+          await getAIDescription(getStagingUrl);
+        }
+      }
+    } catch (error: any) {
+      console.error("Error uploading to staging:", error);
+      // Continue anyway - user can still send manually
+    }
     setSearchResults([]);
   };
 
@@ -150,8 +208,34 @@ export default function CompanionHomeScreen() {
         // Clear any previous audio recording when selecting a new photo
         setAudioUri(null);
         setDescription('');
+        setIsAiGenerated(false);
+        
+        // Generate staging event_id for cleanup tracking
+        const stagingId = Date.now().toString();
+        setStagingEventId(stagingId);
+        
         // Reset the last processed URI to prevent stale URIs from being set
         lastProcessedUriRef.current = null;
+        
+        // Upload to staging and call AI
+        try {
+          const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
+          const { url: stagingUrl } = await stagingResponse.json();
+          
+          const stagingUploadResponse = await uploadPhotoToS3(result.assets[0].uri, stagingUrl);
+          if (stagingUploadResponse.status === 200) {
+            // Get presigned GET URL for AI analysis
+            const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
+            if (getStagingUrlResponse.ok) {
+              const { url: getStagingUrl } = await getStagingUrlResponse.json();
+              await getAIDescription(getStagingUrl);
+            }
+          }
+        } catch (error: any) {
+          console.error("Error uploading to staging:", error);
+          // Continue anyway - user can still send manually
+        }
+        
         // Small delay to ensure image loads
         setTimeout(() => setIsLoadingImage(false), 300);
       }
@@ -174,8 +258,33 @@ export default function CompanionHomeScreen() {
       // Clear any previous audio recording when taking a new photo
       setAudioUri(null);
       setDescription('');
+      setIsAiGenerated(false);
+      
+      // Generate staging event_id for cleanup tracking
+      const stagingId = Date.now().toString();
+      setStagingEventId(stagingId);
+      
       // Reset the last processed URI to prevent stale URIs from being set
       lastProcessedUriRef.current = null;
+      
+      // Upload to staging and call AI
+      try {
+        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
+        const { url: stagingUrl } = await stagingResponse.json();
+        
+        const stagingUploadResponse = await uploadPhotoToS3(picture.uri, stagingUrl);
+        if (stagingUploadResponse.status === 200) {
+          // Get presigned GET URL for AI analysis
+          const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
+          if (getStagingUrlResponse.ok) {
+            const { url: getStagingUrl } = await getStagingUrlResponse.json();
+            await getAIDescription(getStagingUrl);
+          }
+        }
+      } catch (error: any) {
+        console.error("Error uploading to staging:", error);
+        // Continue anyway - user can still send manually
+      }
     } catch (error: any) {
       console.error("Photo capture error:", error);
       Alert.alert("Error", "Failed to capture photo");
@@ -265,32 +374,88 @@ export default function CompanionHomeScreen() {
       const eventID = Date.now().toString();
       const timestamp = new Date().toISOString();
 
-      // 1. Upload image.jpg
+      // 1. Upload image.jpg to final location
       const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
       const { url: imageUrl } = await imageResponse.json();
 
-      const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
-      if (imageUploadResponse.status !== 200) {
-        throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+      // Use staging image if available (all images should go through staging)
+      if (stagingEventId) {
+        // Copy from staging to final location
+        const stagingGetResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
+        if (stagingGetResponse.ok) {
+          const { url: stagingImageUrl } = await stagingGetResponse.json();
+          // Download staging image and upload to final location
+          const stagingImageBlob = await fetch(stagingImageUrl).then(r => r.blob());
+          const imageUploadResponse = await fetch(imageUrl, {
+            method: 'PUT',
+            body: stagingImageBlob,
+            headers: { 'Content-Type': 'image/jpeg' },
+          });
+          if (imageUploadResponse.status !== 200) {
+            throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+          }
+        } else {
+          // Fallback to original upload if staging fetch fails
+          const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
+          if (imageUploadResponse.status !== 200) {
+            throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+          }
+        }
+      } else {
+        // Fallback: upload directly if no staging (shouldn't happen, but handle gracefully)
+        const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
+        if (imageUploadResponse.status !== 200) {
+          throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+        }
+      }
+
+      // Clean up staging image after successful upload to final location
+      if (stagingEventId) {
+        try {
+          await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+        } catch (error: any) {
+          console.error("Error deleting staging image:", error);
+          // Continue anyway - staging cleanup is not critical
+        }
       }
 
       // 2. Upload audio if available
       let audioUrl: string | undefined;
+      let audioUploaded = false;
       if (audioUri) {
-        const audioResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=audio.m4a`);
-        const { url: audioUploadUrl } = await audioResponse.json();
-        // Upload audio file directly using FileSystem.uploadAsync
-        
-        // FileSystem.uploadAsync defaults to binary upload, so we don't need to specify uploadType
-        const audioUploadResponse = await FileSystem.uploadAsync(audioUploadUrl, audioUri, {
-          httpMethod: 'PUT',
-          headers: {
-            'Content-Type': 'audio/m4a',
-          },
-        });
+        // Check if audio file exists before attempting upload
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(audioUri);
+          if (!fileInfo.exists) {
+            // File doesn't exist - silently clear audioUri and continue without audio
+            setAudioUri(null);
+          } else {
+            // File exists - proceed with upload
+            const audioResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=audio.m4a`);
+            const { url: audioUploadUrl } = await audioResponse.json();
+            // Upload audio file directly using FileSystem.uploadAsync
+            
+            // FileSystem.uploadAsync defaults to binary upload, so we don't need to specify uploadType
+            const audioUploadResponse = await FileSystem.uploadAsync(audioUploadUrl, audioUri, {
+              httpMethod: 'PUT',
+              headers: {
+                'Content-Type': 'audio/m4a',
+              },
+            });
 
-        if (audioUploadResponse.status !== 200) {
-          throw new Error(`Audio upload failed: ${audioUploadResponse.status}`);
+            if (audioUploadResponse.status !== 200) {
+              throw new Error(`Audio upload failed: ${audioUploadResponse.status}`);
+            }
+            audioUploaded = true;
+          }
+        } catch (error: any) {
+          // Only log actual errors (not missing files)
+          if (error.message && !error.message.includes('does not exist')) {
+            console.error("Error uploading audio file:", error);
+          }
+          // Clear audioUri and continue without audio
+          setAudioUri(null);
+          // Don't throw - allow upload to continue without audio
         }
       }
 
@@ -298,12 +463,12 @@ export default function CompanionHomeScreen() {
       // Note: We don't store audio_url in metadata because presigned URLs expire (15 min)
       // The backend ListMirrorEvents generates fresh presigned GET URLs when listing events
       const metadata = {
-        description: description.trim() || (audioUri ? "Voice message" : ""),
+        description: description.trim() || (audioUploaded ? "Voice message" : ""),
         sender: "Granddad",
         timestamp: timestamp,
         event_id: eventID,
         // Only store content_type to indicate if audio exists - backend will provide fresh presigned URL
-        content_type: audioUri ? 'audio' as const : 'text' as const,
+        content_type: audioUploaded ? 'audio' as const : 'text' as const,
       };
 
       // 3. Upload metadata.json
@@ -329,6 +494,8 @@ export default function CompanionHomeScreen() {
       setPhoto(null);
       setDescription('');
       setShowDescriptionInput(false);
+      setIsAiGenerated(false);
+      setStagingEventId(null);
       setAudioUri(null);
       if (audioRecorder.isRecording) {
         await stopRecording();
@@ -370,10 +537,23 @@ export default function CompanionHomeScreen() {
     }
   };
 
-  const cancelPhoto = () => {
+  const cancelPhoto = async () => {
+    // Clean up staging image if it exists
+    if (stagingEventId) {
+      try {
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+      } catch (error: any) {
+        console.error("Error deleting staging image:", error);
+        // Continue with cleanup anyway
+      }
+    }
+    
     setPhoto(null);
     setDescription('');
     setShowDescriptionInput(false);
+    setIsAiGenerated(false);
+    setIsAiThinking(false);
+    setStagingEventId(null);
   };
 
   // Show description input overlay if photo is captured
@@ -409,17 +589,23 @@ export default function CompanionHomeScreen() {
                 <TextInput
                   ref={textInputRef}
                   style={styles.descriptionInput}
-                  placeholder="e.g., Look at this blue truck! (or record audio below)"
+                  placeholder={isAiThinking ? "✨ Gemini is thinking..." : "e.g., Look at this blue truck! (or record audio below)"}
                   placeholderTextColor="#999"
                   value={description}
-                  onChangeText={setDescription}
+                  onChangeText={(text) => {
+                    setDescription(text);
+                    // If user edits, mark as not AI-generated
+                    if (text !== description && isAiGenerated) {
+                      setIsAiGenerated(false);
+                    }
+                  }}
                   multiline
-                  autoFocus={!audioUri}
+                  autoFocus={!audioUri && !isAiThinking}
                   spellCheck={true}
                   returnKeyType="done"
                   blurOnSubmit={true}
                   onSubmitEditing={Keyboard.dismiss}
-                  editable={!audioRecorder.isRecording && !audioUri}
+                  editable={!audioRecorder.isRecording && !audioUri && !isAiThinking}
                 />
                 <TouchableOpacity 
                   style={styles.micButton}
@@ -432,6 +618,18 @@ export default function CompanionHomeScreen() {
                   <FontAwesome name="keyboard-o" size={20} color="#2e78b7" />
                 </TouchableOpacity>
               </View>
+              {(isAiGenerated || isAiThinking) && (
+                <View style={styles.aiIndicator}>
+                  {isAiThinking ? (
+                    <>
+                      <ActivityIndicator size="small" color="#9b59b6" style={{ marginRight: 6 }} />
+                      <Text style={styles.aiIndicatorText}>✨ Gemini is thinking...</Text>
+                    </>
+                  ) : (
+                    <Text style={styles.aiIndicatorText}>✨ Generated by AI</Text>
+                  )}
+                </View>
+              )}
               
               {/* Audio Recording Section */}
               <View style={styles.audioSection}>
@@ -1039,5 +1237,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 8,
     textAlign: 'center',
+  },
+  aiIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingLeft: 4,
+  },
+  aiIndicatorText: {
+    color: '#9b59b6',
+    fontSize: 12,
+    fontStyle: 'italic',
   },
 });

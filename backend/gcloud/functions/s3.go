@@ -46,10 +46,10 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 4. Determine upload path: "to" (companion -> cole) or "from" (cole -> companion)
+	// 4. Determine upload path: "to" (companion -> cole), "from" (cole -> companion), or "staging" (temporary)
 	// Default to "from" for Cole's responses, "to" for companion uploads
 	path := r.URL.Query().Get("path")
-	if path != "to" && path != "from" {
+	if path != "to" && path != "from" && path != "staging" {
 		path = "from" // Default to Cole's responses
 	}
 
@@ -59,11 +59,21 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 
 	var s3Key string
 	if eventID != "" && filename != "" {
-		// Event bundle structure: {userID}/{path}/{event_id}/{filename}
-		s3Key = fmt.Sprintf("%s/%s/%s/%s", UserID, path, eventID, filename)
+		if path == "staging" {
+			// Staging is directly under bucket root: staging/{event_id}/{filename}
+			s3Key = fmt.Sprintf("staging/%s/%s", eventID, filename)
+		} else {
+			// Event bundle structure: {userID}/{path}/{event_id}/{filename}
+			s3Key = fmt.Sprintf("%s/%s/%s/%s", UserID, path, eventID, filename)
+		}
 	} else {
-		// Legacy single photo structure: {userID}/{path}/{timestamp}.jpg
-		s3Key = fmt.Sprintf("%s/%s/%d.jpg", UserID, path, time.Now().Unix())
+		if path == "staging" {
+			// Legacy staging structure: staging/{timestamp}.jpg
+			s3Key = fmt.Sprintf("staging/%d.jpg", time.Now().Unix())
+		} else {
+			// Legacy single photo structure: {userID}/{path}/{timestamp}.jpg
+			s3Key = fmt.Sprintf("%s/%s/%d.jpg", UserID, path, time.Now().Unix())
+		}
 	}
 
 	// 6. Presign the request
@@ -272,9 +282,9 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	// 4. Initialize S3 Client
 	s3Client := s3.NewFromConfig(cfg)
 
-	// 5. Determine path: "to" (companion -> cole) or "from" (cole -> companion, selfie responses)
+	// 5. Determine path: "to" (companion -> cole), "from" (cole -> companion, selfie responses), or "staging" (temporary)
 	path := r.URL.Query().Get("path")
-	if path != "to" && path != "from" {
+	if path != "to" && path != "from" && path != "staging" {
 		path = "to" // Default to "to" for backward compatibility
 	}
 
@@ -285,6 +295,11 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		// For selfie responses, only delete image.jpg
 		objectsToDelete = []string{
 			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
+		}
+	} else if path == "staging" {
+		// For staging, only delete image.jpg (staging is directly under bucket root)
+		objectsToDelete = []string{
+			fmt.Sprintf("staging/%s/image.jpg", eventID),
 		}
 	} else {
 		// For regular reflections, delete image.jpg, metadata.json, and audio.m4a (if present)

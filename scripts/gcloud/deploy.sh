@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description
 
 set -e  # Exit on error
 
@@ -27,6 +27,7 @@ if [ -z "$1" ]; then
   echo "  • list-mirror-events"
   echo "  • delete-mirror-event"
   echo "  • unsplash-search"
+  echo "  • generate-ai-description"
   exit 1
 fi
 
@@ -115,6 +116,24 @@ case "$FUNCTION_NAME" in
       --quiet
     ;;
   
+  generate-ai-description)
+    if [ -z "$GEMINI_API_KEY" ]; then
+      echo -e "${RED}Error: GEMINI_API_KEY not found in .env.deploy${NC}"
+      exit 1
+    fi
+    echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
+    gcloud functions deploy generate-ai-description \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=GenerateAIDescription \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY} \
+      --quiet
+    ;;
+  
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
     echo ""
@@ -123,6 +142,7 @@ case "$FUNCTION_NAME" in
     echo "  • list-mirror-events"
     echo "  • delete-mirror-event"
     echo "  • unsplash-search"
+    echo "  • generate-ai-description"
     exit 1
     ;;
 esac

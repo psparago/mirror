@@ -50,6 +50,15 @@ else
   SKIP_UNSPLASH=false
 fi
 
+# Check for Gemini API key (optional, but needed for generate-ai-description function)
+if [ -z "$GEMINI_API_KEY" ]; then
+  echo -e "${YELLOW}Warning: GEMINI_API_KEY not found in .env.deploy${NC}"
+  echo "The generate-ai-description function will be skipped."
+  SKIP_AI=true
+else
+  SKIP_AI=false
+fi
+
 echo -e "${GREEN}✓ Environment variables loaded${NC}"
 echo ""
 
@@ -149,6 +158,32 @@ else
   echo ""
 fi
 
+# Function 5: generate-ai-description
+if [ "$SKIP_AI" = false ]; then
+  echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
+  gcloud functions deploy generate-ai-description \
+    --gen2 \
+    --runtime=${RUNTIME} \
+    --region=${REGION} \
+    --source="${SOURCE_DIR}" \
+    --entry-point=GenerateAIDescription \
+    --trigger-http \
+    --allow-unauthenticated \
+    --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY} \
+    --quiet
+
+  if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ generate-ai-description deployed successfully${NC}"
+  else
+    echo -e "${RED}✗ generate-ai-description deployment failed${NC}"
+    exit 1
+  fi
+  echo ""
+else
+  echo -e "${YELLOW}⚠ Skipping generate-ai-description (GEMINI_API_KEY not set)${NC}"
+  echo ""
+fi
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -158,5 +193,8 @@ echo "  • list-mirror-events"
 echo "  • delete-mirror-event"
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo "  • unsplash-search"
+fi
+if [ "$SKIP_AI" = false ]; then
+  echo "  • generate-ai-description"
 fi
 
