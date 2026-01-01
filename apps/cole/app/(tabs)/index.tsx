@@ -2,12 +2,15 @@ import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
-import { collection, deleteDoc, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, Platform, StatusBar, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
@@ -20,6 +23,7 @@ export default function ColeInboxScreen() {
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
   const audioPlayer = useAudioPlayer(undefined);
   const audioStatus = useAudioPlayerStatus(audioPlayer);
@@ -396,19 +400,21 @@ export default function ColeInboxScreen() {
         onPress={() => handleEventPress(item)}
         activeOpacity={0.8}
       >
-        <Image
-          source={{ uri: item.image_url }}
-          style={styles.photo}
-          resizeMode="cover"
-          onError={(error) => {
-            console.error(`Error loading image for event ${item.event_id}:`, error);
-          }}
-        />
-        {hasDescription && (
-          <View style={styles.descriptionBadge}>
-            <Text style={styles.descriptionBadgeText}>📝</Text>
-          </View>
-        )}
+        <BlurView intensity={30} style={styles.photoBlurContainer}>
+          <Image
+            source={{ uri: item.image_url }}
+            style={styles.photo}
+            resizeMode="cover"
+            onError={(error) => {
+              console.error(`Error loading image for event ${item.event_id}:`, error);
+            }}
+          />
+          {hasDescription && (
+            <View style={styles.descriptionBadge}>
+              <Text style={styles.descriptionBadgeText}>📝</Text>
+            </View>
+          )}
+        </BlurView>
       </TouchableOpacity>
     );
   };
@@ -792,35 +798,47 @@ export default function ColeInboxScreen() {
 
   if (loading) {
     return (
-      <View style={styles.centerContainer}>
+      <LinearGradient
+        colors={['#A1C4FD', '#C2E9FB']}
+        style={styles.centerContainer}
+      >
         <ActivityIndicator size="large" color="#2e78b7" />
         <Text style={styles.loadingText}>Loading Reflections...</Text>
-      </View>
+      </LinearGradient>
     );
   }
 
   if (error) {
     return (
-      <View style={styles.centerContainer}>
+      <LinearGradient
+        colors={['#A1C4FD', '#C2E9FB']}
+        style={styles.centerContainer}
+      >
         <Text style={styles.errorText}>Error: {error}</Text>
         <Text style={styles.retryText} onPress={fetchEvents}>
           Tap to retry
         </Text>
-      </View>
+      </LinearGradient>
     );
   }
 
   if (events.length === 0) {
     return (
-      <View style={styles.centerContainer}>
+      <LinearGradient
+        colors={['#A1C4FD', '#C2E9FB']}
+        style={styles.centerContainer}
+      >
         <Text style={styles.emptyText}>No Reflections yet</Text>
         <Text style={styles.emptySubtext}>Reflections from companions will appear here</Text>
-      </View>
+      </LinearGradient>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <LinearGradient
+      colors={['#A1C4FD', '#C2E9FB']}
+      style={styles.container}
+    >
       <Text style={styles.title}>{selectedEvent ? 'Reflection' : 'Reflections'}</Text>
       <FlatList
         key={numColumns}
@@ -840,8 +858,15 @@ export default function ColeInboxScreen() {
         onRequestClose={closeFullScreen}
       >
         {selectedEvent && (
-          <View style={styles.fullScreenContainer} {...swipeResponder.panHandlers}>
-            <View style={styles.topButtonContainer}>
+          <LinearGradient
+            colors={['#A1C4FD', '#C2E9FB']}
+            style={styles.fullScreenContainer}
+            {...swipeResponder.panHandlers}
+          >
+            <StatusBar barStyle="dark-content" />
+            
+            {/* Top Layer: Header and controls */}
+            <View style={[styles.topButtonContainer, { top: insets.top + 10 }]}>
               {/* Reflection header */}
               {selectedMetadata && (
                 <Text style={styles.reflectionHeader}>
@@ -849,23 +874,29 @@ export default function ColeInboxScreen() {
                 </Text>
               )}
               {/* Delete button - for caregiver mode */}
-        <TouchableOpacity 
+              <TouchableOpacity 
                 style={styles.deleteButton}
                 onPress={() => deleteEvent(selectedEvent)}
-        >
-                <FontAwesome name="trash" size={20} color="#fff" />
-        </TouchableOpacity>
-      </View>
+              >
+                <FontAwesome name="trash" size={20} color="#2C3E50" />
+              </TouchableOpacity>
+            </View>
 
-            <Image
-              source={{ uri: selectedEvent.image_url }}
-              style={styles.fullScreenImage}
-              resizeMode="contain"
-            />
-            
-            {/* Selfie Mirror - appears after audio finishes */}
+            {/* Base Layer: Image with glass border */}
+            <View style={[styles.imageFrameContainer, { 
+              top: insets.top + 100,
+              bottom: 200 + Math.max(insets.bottom, 24)
+            }]}>
+              <Image
+                source={{ uri: selectedEvent.image_url }}
+                style={styles.fullScreenImage}
+                resizeMode="cover"
+              />
+            </View>
+
+            {/* Top Layer: Selfie Mirror - appears after audio finishes */}
             {showSelfieMirror && (
-              <View style={styles.selfieMirrorContainer}>
+              <View style={[styles.selfieMirrorContainer, { top: insets.top + 100, right: 40 }]}>
                 {cameraPermission?.granted ? (
                   <>
                     <CameraView
@@ -874,21 +905,21 @@ export default function ColeInboxScreen() {
                       facing="front"
                     />
                     <TouchableOpacity
-                      style={styles.selfieMirrorButton}
+                      style={styles.cameraShutterButton}
                       onPress={captureSelfieResponse}
                       disabled={isCapturingSelfie}
                       activeOpacity={0.8}
                     >
                       {isCapturingSelfie ? (
-                        <ActivityIndicator size="small" color="#fff" />
+                        <ActivityIndicator size="small" color="#2C3E50" />
                       ) : (
-                        <View style={styles.selfieMirrorInner} />
+                        <FontAwesome name="camera" size={20} color="#2C3E50" />
                       )}
                     </TouchableOpacity>
                   </>
                 ) : (
                   <TouchableOpacity
-                    style={[styles.selfieMirrorButton, { backgroundColor: 'rgba(0, 0, 0, 0.7)' }]}
+                    style={styles.selfieMirrorPermissionButton}
                     onPress={async () => {
                       const result = await requestCameraPermission();
                       if (!result.granted) {
@@ -903,9 +934,10 @@ export default function ColeInboxScreen() {
                 )}
               </View>
             )}
-            
+
+            {/* Middle Layer: Floating Info Panel */}
             {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
-              <View style={styles.descriptionContainer}>
+              <View style={[styles.descriptionContainer, { bottom: insets.bottom + 20, paddingBottom: Math.max(insets.bottom, 24) }]}>
                 <View style={styles.descriptionHeader}>
                   {selectedMetadata.content_type === 'audio' ? (
                     <Text style={styles.descriptionText}>
@@ -926,50 +958,61 @@ export default function ColeInboxScreen() {
                       onPress={playDescription}
                       onPressIn={() => setPlayButtonPressed(true)}
                       onPressOut={() => setPlayButtonPressed(false)}
-                      activeOpacity={0.7}
+                      activeOpacity={0.8}
                     >
                       <FontAwesome 
                         name={audioStatus?.playing ? "stop" : "play"} 
-                        size={24} 
+                        size={20} 
                         color="#fff" 
                       />
                     </TouchableOpacity>
                     <TouchableOpacity 
                       style={styles.closeButtonInline}
                       onPress={closeFullScreen}
-                      activeOpacity={0.7}
+                      activeOpacity={0.8}
                     >
-                      <Text style={styles.closeButtonTextInline}>X</Text>
+                      <FontAwesome name="times" size={20} color="#fff" />
                     </TouchableOpacity>
                   </View>
                 </View>
               </View>
             )}
-          </View>
+
+            {/* Top Layer: Tell Me More floating action button */}
+            {selectedMetadata && (selectedMetadata.description || selectedEvent?.audio_url) && (
+              <TouchableOpacity
+                style={[styles.tellMeMoreButton, { bottom: insets.bottom + 160 }]}
+                onPress={playDescription}
+                activeOpacity={0.8}
+              >
+                <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                  <Text style={styles.tellMeMoreIcon}>✨</Text>
+                </BlurView>
+              </TouchableOpacity>
+            )}
+          </LinearGradient>
         )}
       </Modal>
-    </View>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
   },
   centerContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
-    backgroundColor: '#1a1a1a',
   },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     padding: 16,
-    backgroundColor: '#2a2a2a',
-    color: '#fff',
+    color: '#2C3E50',
+    backgroundColor: 'transparent',
   },
   listContainer: {
     padding: 8,
@@ -982,10 +1025,18 @@ const styles = StyleSheet.create({
     flex: 1,
     margin: 4,
     aspectRatio: 1,
-    backgroundColor: '#2a2a2a',
-    borderRadius: 8,
+    borderRadius: 24,
     overflow: 'hidden',
     position: 'relative',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
+  },
+  photoBlurContainer: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
   },
   photo: {
     width: '100%',
@@ -1008,7 +1059,7 @@ const styles = StyleSheet.create({
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#ccc',
+    color: '#2C3E50',
   },
   errorText: {
     fontSize: 16,
@@ -1018,38 +1069,41 @@ const styles = StyleSheet.create({
   },
   retryText: {
     fontSize: 14,
-    color: '#4a9eff',
+    color: '#2E78B7',
     textDecorationLine: 'underline',
   },
   emptyText: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#ccc',
+    color: '#2C3E50',
     textAlign: 'center',
     marginBottom: 8,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#999',
+    color: '#2C3E50',
     textAlign: 'center',
+    opacity: 0.7,
   },
   fullScreenContainer: {
     flex: 1,
-    backgroundColor: '#000',
   },
   topButtonContainer: {
     position: 'absolute',
-    top: 50,
-    left: 20,
-    right: 20,
+    width: '90%',
+    alignSelf: 'center',
     zIndex: 1,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 10,
+    backgroundColor: 'transparent',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 16,
   },
   reflectionHeader: {
-    color: '#fff',
+    color: '#2C3E50',
     fontSize: 18,
     fontWeight: 'bold',
     flex: 1,
@@ -1073,19 +1127,75 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  imageFrameContainer: {
+    position: 'absolute',
+    width: '90%',
+    left: '5%',
+    borderRadius: 40,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+    overflow: 'hidden',
+    backgroundColor: 'transparent',
+    zIndex: 5,
+    ...Platform.select({
+      android: {
+        elevation: 5,
+      },
+    }),
+  },
   fullScreenImage: {
-    flex: 1,
     width: '100%',
+    height: '100%',
+  },
+  tellMeMoreButton: {
+    position: 'absolute',
+    right: 20,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    overflow: 'hidden',
+    zIndex: 10,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 8,
+      },
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+      },
+    }),
+  },
+  tellMeMoreBlur: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 32,
+  },
+  tellMeMoreIcon: {
+    fontSize: 32,
   },
   descriptionContainer: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    padding: 24,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    minHeight: 120,
+    width: '90%',
+    left: '5%',
+    backgroundColor: 'transparent',
+    paddingTop: 24,
+    paddingHorizontal: 24,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+    zIndex: 5,
   },
   descriptionHeader: {
     flexDirection: 'row',
@@ -1106,37 +1216,63 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   playButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(46, 120, 183, 0.9)',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#2C3E50',
     justifyContent: 'center',
     alignItems: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 4,
+      },
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
+      },
+    }),
   },
   playButtonPlaying: {
-    backgroundColor: 'rgba(46, 120, 183, 1)',
+    opacity: 0.9,
   },
   playButtonPressed: {
-    backgroundColor: 'rgba(46, 120, 183, 0.6)',
     transform: [{ scale: 0.95 }],
   },
   closeButtonInline: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'center', 
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#2C3E50',
+    justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
-  },
-  closeButtonTextInline: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 'bold',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 4,
+      },
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 4,
+      },
+    }),
   },
   descriptionText: {
-    color: '#fff',
+    color: '#2C3E50',
     flex: 1,
     fontSize: 24,
     fontWeight: '600',
@@ -1144,25 +1280,64 @@ const styles = StyleSheet.create({
   },
   selfieMirrorContainer: {
     position: 'absolute',
-    top: 100,
     right: 20,
     width: 120,
     height: 120,
     borderRadius: 60,
     overflow: 'hidden',
-    borderWidth: 3,
+    borderWidth: 4,
     borderColor: '#fff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-    elevation: 5,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#2E78B7',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.2,
+        shadowRadius: 20,
+      },
+      android: {
+        elevation: 8,
+      },
+      default: {
+        shadowColor: '#2E78B7',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.2,
+        shadowRadius: 20,
+      },
+    }),
   },
   selfieMirror: {
     width: '100%',
     height: '100%',
   },
-  selfieMirrorButton: {
+  cameraShutterButton: {
+    position: 'absolute',
+    bottom: -15,
+    alignSelf: 'center',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#fff',
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.3,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 4,
+      },
+      default: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.3,
+        shadowRadius: 4,
+      },
+    }),
+  },
+  selfieMirrorPermissionButton: {
     position: 'absolute',
     top: 0,
     left: 0,
@@ -1172,15 +1347,7 @@ const styles = StyleSheet.create({
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     borderRadius: 60,
-  },
-  selfieMirrorInner: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 3,
-    borderColor: '#fff',
-    backgroundColor: 'transparent',
   },
 });
