@@ -67,21 +67,42 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Presign the request
-	// Ensure "mirror-uploads-sparago-2026" bucket exists in your target S3/Zenko!
-	presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String("mirror-uploads-sparago-2026"),
-		Key:    aws.String(s3Key),
-	})
+	// Check if method is GET (for downloads) or PUT (for uploads, default)
+	method := r.URL.Query().Get("method")
+	if method == "" {
+		method = "PUT" // Default to PUT for backward compatibility
+	}
 
-	if err != nil {
-		http.Error(w, "Presign Error: "+err.Error(), 500)
-		return
+	var presignedURL string
+
+	if method == "GET" {
+		// Generate GET presigned URL for downloading/viewing
+		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Key:    aws.String(s3Key),
+		})
+		if err != nil {
+			http.Error(w, "Presign Error: "+err.Error(), 500)
+			return
+		}
+		presignedURL = presignedRes.URL
+	} else {
+		// Generate PUT presigned URL for uploading (default)
+		presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Key:    aws.String(s3Key),
+		})
+		if err != nil {
+			http.Error(w, "Presign Error: "+err.Error(), 500)
+			return
+		}
+		presignedURL = presignedRes.URL
 	}
 
 	// 7. Successful JSON response
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"url": presignedRes.URL,
+		"url": presignedURL,
 	})
 }
 
@@ -251,14 +272,27 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	// 4. Initialize S3 Client
 	s3Client := s3.NewFromConfig(cfg)
 
-	// 5. Delete image.jpg, metadata.json, and audio.m4a (if present)
-	bucket := "mirror-uploads-sparago-2026"
-	path := "to" // Events are in cole/to/
+	// 5. Determine path: "to" (companion -> cole) or "from" (cole -> companion, selfie responses)
+	path := r.URL.Query().Get("path")
+	if path != "to" && path != "from" {
+		path = "to" // Default to "to" for backward compatibility
+	}
 
-	objectsToDelete := []string{
-		fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
-		fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
-		fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID), // Delete audio if present
+	bucket := "mirror-uploads-sparago-2026"
+
+	var objectsToDelete []string
+	if path == "from" {
+		// For selfie responses, only delete image.jpg
+		objectsToDelete = []string{
+			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
+		}
+	} else {
+		// For regular reflections, delete image.jpg, metadata.json, and audio.m4a (if present)
+		objectsToDelete = []string{
+			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID), // Delete audio if present
+		}
 	}
 
 	var errors []string

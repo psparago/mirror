@@ -8,8 +8,9 @@ import { ActivityIndicator, FlatList, Image, Modal, StyleSheet, Text, TouchableO
 interface SentReflection {
   event_id: string;
   timestamp: any;
-  status?: 'ready' | 'engaged' | 'replayed';
+  status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
   engagementTimestamp?: any;
+  deletedAt?: any;
   hasResponse?: boolean;
   responseImageUrl?: string;
   reflectionImageUrl?: string;
@@ -33,10 +34,14 @@ export default function SentHistoryScreen() {
       const eventIdMap = new Map<string, string>();
       snapshot.docs.forEach((doc) => {
         const data = doc.data();
-        if (data.event_id) {
-          eventIds.add(data.event_id);
-          if (data.response_event_id) {
-            eventIdMap.set(data.event_id, data.response_event_id);
+        // Document ID is the original event_id, data.response_event_id is the selfie's event_id
+        const originalEventId = doc.id; // This is the original reflection's event_id
+        const responseEventId = data.response_event_id;
+        
+        if (originalEventId) {
+          eventIds.add(originalEventId);
+          if (responseEventId) {
+            eventIdMap.set(originalEventId, responseEventId);
           }
         }
       });
@@ -60,11 +65,12 @@ export default function SentHistoryScreen() {
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
         
-        // Status priority: replayed > engaged > ready
+        // Status priority: replayed > engaged > ready > deleted
         const statusPriority: { [key: string]: number } = {
-          'replayed': 3,
-          'engaged': 2,
-          'ready': 1,
+          'replayed': 4,
+          'engaged': 3,
+          'ready': 2,
+          'deleted': 1,
         };
 
         for (const docSnapshot of snapshot.docs) {
@@ -108,6 +114,7 @@ export default function SentHistoryScreen() {
               timestamp: data.timestamp,
               status: currentStatus,
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
+              deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
             });
           } else {
             // We already have this event_id - always update to higher priority status
@@ -121,6 +128,10 @@ export default function SentHistoryScreen() {
               // Update engagement timestamp for engaged/replayed
               if (currentStatus === 'engaged' || currentStatus === 'replayed') {
                 existing.engagementTimestamp = data.timestamp;
+              }
+              // Update deleted_at for deleted status
+              if (currentStatus === 'deleted') {
+                existing.deletedAt = data.deleted_at;
               }
             } else if (currentPriority === existingPriority && currentStatus === existing.status) {
               // Same priority and status - just update timestamp if newer
@@ -149,34 +160,38 @@ export default function SentHistoryScreen() {
 
         // Convert map to array and fetch additional data
         const reflectionPromises = Array.from(reflectionMap.values()).map(async (reflection) => {
-          // Fetch Reflection image URL from backend
-          try {
-            const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
-            if (eventsResponse.ok) {
-              const eventsData = await eventsResponse.json();
-              const matchingEvent = eventsData.events?.find((e: any) => e.event_id === reflection.event_id);
-              if (matchingEvent?.image_url) {
-                reflection.reflectionImageUrl = matchingEvent.image_url;
-                // Also fetch metadata for description
-                if (matchingEvent.metadata_url) {
-                  try {
-                    const metaResponse = await fetch(matchingEvent.metadata_url);
-                    if (metaResponse.ok) {
-                      const metadata = await metaResponse.json();
-                      reflection.description = metadata.description;
+          // Don't fetch image or metadata if reflection is deleted
+          if (reflection.status !== 'deleted') {
+            // Fetch Reflection image URL from backend
+            try {
+              const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+              if (eventsResponse.ok) {
+                const eventsData = await eventsResponse.json();
+                const matchingEvent = eventsData.events?.find((e: any) => e.event_id === reflection.event_id);
+                if (matchingEvent?.image_url) {
+                  reflection.reflectionImageUrl = matchingEvent.image_url;
+                  // Also fetch metadata for description
+                  if (matchingEvent.metadata_url) {
+                    try {
+                      const metaResponse = await fetch(matchingEvent.metadata_url);
+                      if (metaResponse.ok) {
+                        const metadata = await metaResponse.json();
+                        reflection.description = metadata.description;
+                      }
+                    } catch (err) {
+                      console.error('Error fetching metadata:', err);
                     }
-                  } catch (err) {
-                    console.error('Error fetching metadata:', err);
                   }
                 }
               }
+            } catch (error) {
+              console.error('Error fetching reflection image:', error);
             }
-          } catch (error) {
-            console.error('Error fetching reflection image:', error);
           }
 
           // Check for selfie response - use responseEventIds state (updated by listener)
-          reflection.hasResponse = responseEventIds.has(reflection.event_id);
+          // Don't show selfie if reflection is deleted
+          reflection.hasResponse = reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
 
           return reflection;
         });
@@ -220,6 +235,8 @@ export default function SentHistoryScreen() {
         return 'Engaged';
       case 'replayed':
         return 'Replayed';
+      case 'deleted':
+        return 'Deleted';
       default:
         return 'Viewed';
     }
@@ -231,6 +248,8 @@ export default function SentHistoryScreen() {
         return '#4a9eff';
       case 'replayed':
         return '#2ecc71';
+      case 'deleted':
+        return '#e74c3c';
       default:
         return '#999';
     }
@@ -316,9 +335,17 @@ export default function SentHistoryScreen() {
                 source={{ uri: selfieImageUrl }}
                 style={styles.selfieImage}
                 resizeMode="contain"
+                onError={(error) => {
+                  console.error('Error loading selfie image:', error);
+                }}
               />
             ) : (
-              <Text style={styles.modalErrorText}>Failed to load selfie</Text>
+              <View style={{ alignItems: 'center' }}>
+                <Text style={styles.modalErrorText}>Failed to load selfie</Text>
+                <Text style={[styles.modalErrorText, { fontSize: 12, marginTop: 8, opacity: 0.7 }]}>
+                  {selectedSelfieEventId ? `Event: ${selectedSelfieEventId}` : ''}
+                </Text>
+              </View>
             )}
           </View>
         </TouchableOpacity>
@@ -330,43 +357,61 @@ export default function SentHistoryScreen() {
         renderItem={({ item }) => (
           <View style={styles.reflectionItem}>
             <View style={styles.reflectionRow}>
-              {item.reflectionImageUrl && (
+              {item.status === 'deleted' ? (
+                <View style={[styles.reflectionImage, styles.deletedImagePlaceholder]}>
+                  <FontAwesome name="trash" size={32} color="#e74c3c" />
+                </View>
+              ) : item.reflectionImageUrl ? (
                 <Image
                   source={{ uri: item.reflectionImageUrl }}
                   style={styles.reflectionImage}
                   resizeMode="cover"
                 />
-              )}
+              ) : null}
               <View style={styles.reflectionInfo}>
                 <View style={styles.reflectionContent}>
                   <View style={styles.statusBadge}>
                     <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status) }]} />
                     <Text style={styles.statusText}>{getStatusText(item.status)}</Text>
-                    {item.engagementTimestamp && (
+                    {item.status === 'deleted' && item.deletedAt ? (
+                      <Text style={styles.engagementDate}>
+                        {formatEngagementDate(item.deletedAt)}
+                      </Text>
+                    ) : item.engagementTimestamp ? (
                       <Text style={styles.engagementDate}>
                         {formatEngagementDate(item.engagementTimestamp)}
                       </Text>
-                    )}
+                    ) : null}
                   </View>
                   {item.hasResponse && (
                     <TouchableOpacity
                       style={styles.responseBadge}
                       onPress={async () => {
                         const responseEventId = responseEventIdMap.get(item.event_id);
-                        if (!responseEventId) return;
+                        if (!responseEventId) {
+                          console.warn(`No responseEventId found for event ${item.event_id}`);
+                          return;
+                        }
                         
                         setSelectedSelfieEventId(item.event_id);
                         setLoadingSelfie(true);
                         setSelfieImageUrl(null);
                         
                         try {
-                          // Get presigned URL for the selfie image
-                          const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+                          // Get presigned GET URL for the selfie image (method=GET for viewing)
+                          const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET`;
+                          const imageResponse = await fetch(url);
                           if (imageResponse.ok) {
-                            const { url } = await imageResponse.json();
-                            setSelfieImageUrl(url);
+                            const data = await imageResponse.json();
+                            const imageUrl = data.url;
+                            if (imageUrl) {
+                              setSelfieImageUrl(imageUrl);
+                            } else {
+                              console.error('No URL in response:', data);
+                            }
                           } else {
-                            console.error('Failed to get selfie image URL');
+                            const errorText = await imageResponse.text();
+                            console.error(`Failed to get selfie image URL: ${imageResponse.status}`, errorText);
                           }
                         } catch (error) {
                           console.error('Error fetching selfie image URL:', error);
@@ -400,7 +445,7 @@ export default function SentHistoryScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#f5f5f5',
   },
   centerContainer: {
     flex: 1,
@@ -418,13 +463,18 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   reflectionItem: {
-    backgroundColor: '#f9f9f9',
+    backgroundColor: '#fff',
     padding: 12,
     marginVertical: 4,
     marginHorizontal: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#d0d0d0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   reflectionRow: {
     flexDirection: 'row',
@@ -435,6 +485,14 @@ const styles = StyleSheet.create({
     height: 80,
     borderRadius: 8,
     backgroundColor: '#e0e0e0',
+  },
+  deletedImagePlaceholder: {
+    backgroundColor: '#f5f5f5',
+    borderWidth: 2,
+    borderColor: '#e74c3c',
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   reflectionInfo: {
     flex: 1,

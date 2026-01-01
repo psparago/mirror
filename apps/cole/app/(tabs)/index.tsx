@@ -3,9 +3,9 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Speech from 'expo-speech';
-import { collection, deleteDoc, doc, DocumentData, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, deleteDoc, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
@@ -80,10 +80,7 @@ export default function ColeInboxScreen() {
       // Only show if we haven't already shown it for this event in this session
       if (!audioFinishedRef.current[selectedEvent.event_id]) {
         audioFinishedRef.current[selectedEvent.event_id] = true;
-        console.log(`Audio finished for ${selectedEvent.event_id}, showing selfie mirror. Camera permission: ${cameraPermission?.granted}, showSelfieMirror will be set to true`);
         setShowSelfieMirror(true);
-      } else {
-        console.log(`Audio finished for ${selectedEvent.event_id}, but mirror already shown for this event`);
       }
     }
   }, [audioStatus?.isLoaded, audioStatus?.didJustFinish, audioStatus?.playing, selectedEvent?.event_id, cameraPermission?.granted]);
@@ -563,9 +560,7 @@ export default function ColeInboxScreen() {
 
   // Capture and upload selfie response
   const captureSelfieResponse = async () => {
-    console.log(`captureSelfieResponse called for event ${selectedEvent?.event_id}`);
     if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
-      console.log(`captureSelfieResponse early return: selectedEvent=${!!selectedEvent}, cameraRef=${!!cameraRef.current}, isCapturingSelfie=${isCapturingSelfie}`);
       return;
     }
     
@@ -579,11 +574,9 @@ export default function ColeInboxScreen() {
     }
 
     setIsCapturingSelfie(true);
-    console.log("Starting selfie capture...");
     
     try {
       // Capture photo
-      console.log("Taking picture...");
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.8,
         base64: false,
@@ -592,17 +585,13 @@ export default function ColeInboxScreen() {
       if (!photo) {
         throw new Error("Failed to capture photo");
       }
-      console.log("Photo captured:", photo.uri);
 
       // Generate event ID for the response
       const responseEventId = Date.now().toString();
-      console.log("Generated response event ID:", responseEventId);
       
       // Get presigned URL for upload (path=from for Star to Companion)
-      console.log("Getting S3 upload URL...");
       const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
       const { url: imageUrl } = await imageResponse.json();
-      console.log("Got S3 URL, uploading image...");
 
       // Upload image
       const imageBlob = await fetch(photo.uri).then(r => r.blob());
@@ -615,7 +604,6 @@ export default function ColeInboxScreen() {
       if (uploadResponse.status !== 200) {
         throw new Error(`Image upload failed: ${uploadResponse.status}`);
       }
-      console.log("Image uploaded successfully to S3");
 
       // Cleanup local file
       try {
@@ -630,7 +618,6 @@ export default function ColeInboxScreen() {
 
       // Create reflection_response document in Firestore (non-blocking)
       // Use original event_id as document ID for easy lookup
-      console.log(`Creating Firestore document for event ${selectedEvent.event_id} with response_event_id ${responseEventId}`);
       const responseRef = doc(db, 'reflection_responses', selectedEvent.event_id);
       setDoc(responseRef, {
         event_id: selectedEvent.event_id, // Link to original Reflection
@@ -638,13 +625,8 @@ export default function ColeInboxScreen() {
         timestamp: serverTimestamp(),
         type: 'selfie_response',
       })
-        .then(() => {
-          console.log("Firestore document created successfully");
-        })
         .catch((firestoreError: any) => {
           console.error("Failed to save reflection response to Firestore:", firestoreError);
-          console.error("Firestore error code:", firestoreError?.code);
-          console.error("Firestore error message:", firestoreError?.message);
           // Don't show error to user - S3 upload succeeded, which is the important part
           // Firestore is just for tracking/display in Companion app
         });
@@ -658,7 +640,6 @@ export default function ColeInboxScreen() {
       Alert.alert("Error", errorMessage);
     } finally {
       setIsCapturingSelfie(false);
-      console.log("Selfie capture process finished");
     }
   };
 
@@ -747,13 +728,42 @@ export default function ColeInboxScreen() {
                 throw new Error(errorData.errors?.join(', ') || 'Failed to delete S3 objects');
               }
 
-              // 2. Delete Firestore signal document
+              // 2. Delete selfie response image from S3 if it exists (keep the document)
+              try {
+                const responseRef = doc(db, 'reflection_responses', event.event_id);
+                const responseDoc = await getDoc(responseRef);
+                
+                if (responseDoc.exists()) {
+                  const responseData = responseDoc.data();
+                  const responseEventId = responseData.response_event_id;
+                  
+                  if (responseEventId) {
+                    // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
+                    // Keep the reflection_response document in Firestore for history
+                    const deleteSelfieResponse = await fetch(
+                      `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from`
+                    );
+                    
+                    if (!deleteSelfieResponse.ok) {
+                      console.warn("Failed to delete selfie image from S3, continuing with deletion");
+                    }
+                  }
+                }
+              } catch (selfieError: any) {
+                console.warn("Failed to delete selfie response:", selfieError);
+                // Continue even if selfie deletion fails
+              }
+
+              // 3. Mark Firestore signal document as deleted (instead of deleting it)
               try {
                 const signalRef = doc(db, 'signals', event.event_id);
-                await deleteDoc(signalRef);
+                await setDoc(signalRef, {
+                  status: 'deleted',
+                  deleted_at: serverTimestamp(),
+                }, { merge: true });
               } catch (firestoreError: any) {
-                console.warn("Failed to delete Firestore signal:", firestoreError);
-                // Continue even if Firestore delete fails
+                console.warn("Failed to mark Firestore signal as deleted:", firestoreError);
+                // Continue even if Firestore update fails
               }
 
               // 3. Stop any ongoing speech/audio
@@ -811,7 +821,7 @@ export default function ColeInboxScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>{selectedEvent ? 'Reflection' : 'Inbox'}</Text>
+      <Text style={styles.title}>{selectedEvent ? 'Reflection' : 'Reflections'}</Text>
       <FlatList
         key={numColumns}
         data={events}
