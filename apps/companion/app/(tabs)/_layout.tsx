@@ -26,7 +26,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Reflection',
+          title: 'Create Reflection',
           tabBarIcon: ({ color }) => <TabBarIcon name="camera" color={color} />,
         }}
       />

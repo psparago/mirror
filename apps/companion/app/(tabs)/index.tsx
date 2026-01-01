@@ -13,7 +13,7 @@ export default function CompanionHomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
-  const [facing, setFacing] = useState<CameraType>('back');
+  const [facing, setFacing] = useState<CameraType>('front');
   const [description, setDescription] = useState('');
   const [showDescriptionInput, setShowDescriptionInput] = useState(false);
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -28,6 +28,8 @@ export default function CompanionHomeScreen() {
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isAiGenerated, setIsAiGenerated] = useState(false);
   const [stagingEventId, setStagingEventId] = useState<string | null>(null);
+  const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
+  const [showCameraModal, setShowCameraModal] = useState(false);
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
@@ -154,30 +156,9 @@ export default function CompanionHomeScreen() {
     setSearchQuery('');
     setDescription(''); // Clear previous description
     setIsAiGenerated(false);
-    
-    // Generate staging event_id for cleanup tracking
-    const stagingId = Date.now().toString();
-    setStagingEventId(stagingId);
-    
-    // Upload all images (Unsplash, gallery, etc.) to staging first, then call AI
-    // This ensures consistent handling and avoids CORS/redirect issues with Unsplash URLs
-    try {
-      const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
-      const { url: stagingUrl } = await stagingResponse.json();
-      
-      const stagingUploadResponse = await uploadPhotoToS3(imageUrl, stagingUrl);
-      if (stagingUploadResponse.status === 200) {
-        // Get presigned GET URL for AI analysis
-        const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
-        if (getStagingUrlResponse.ok) {
-          const { url: getStagingUrl } = await getStagingUrlResponse.json();
-          await getAIDescription(getStagingUrl);
-        }
-      }
-    } catch (error: any) {
-      console.error("Error uploading to staging:", error);
-      // Continue anyway - user can still send manually
-    }
+    setIntent('none'); // Reset intent - show action buttons
+    setAudioUri(null); // Clear any previous audio
+    setStagingEventId(null); // Don't upload to staging until user chooses intent
     setSearchResults([]);
   };
 
@@ -210,31 +191,12 @@ export default function CompanionHomeScreen() {
         setDescription('');
         setIsAiGenerated(false);
         
-        // Generate staging event_id for cleanup tracking
-        const stagingId = Date.now().toString();
-        setStagingEventId(stagingId);
+        setIntent('none'); // Reset intent - show action buttons
+        setAudioUri(null); // Clear any previous audio
+        setStagingEventId(null); // Don't upload to staging until user chooses intent
         
         // Reset the last processed URI to prevent stale URIs from being set
         lastProcessedUriRef.current = null;
-        
-        // Upload to staging and call AI
-        try {
-          const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
-          const { url: stagingUrl } = await stagingResponse.json();
-          
-          const stagingUploadResponse = await uploadPhotoToS3(result.assets[0].uri, stagingUrl);
-          if (stagingUploadResponse.status === 200) {
-            // Get presigned GET URL for AI analysis
-            const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
-            if (getStagingUrlResponse.ok) {
-              const { url: getStagingUrl } = await getStagingUrlResponse.json();
-              await getAIDescription(getStagingUrl);
-            }
-          }
-        } catch (error: any) {
-          console.error("Error uploading to staging:", error);
-          // Continue anyway - user can still send manually
-        }
         
         // Small delay to ensure image loads
         setTimeout(() => setIsLoadingImage(false), 300);
@@ -255,36 +217,18 @@ export default function CompanionHomeScreen() {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
       setPhoto(picture);
       setShowDescriptionInput(true);
+      setShowCameraModal(false); // Close camera modal after taking photo
       // Clear any previous audio recording when taking a new photo
       setAudioUri(null);
       setDescription('');
       setIsAiGenerated(false);
       
-      // Generate staging event_id for cleanup tracking
-      const stagingId = Date.now().toString();
-      setStagingEventId(stagingId);
+      setIntent('none'); // Reset intent - show action buttons
+      setAudioUri(null); // Clear any previous audio
+      setStagingEventId(null); // Don't upload to staging until user chooses intent
       
       // Reset the last processed URI to prevent stale URIs from being set
       lastProcessedUriRef.current = null;
-      
-      // Upload to staging and call AI
-      try {
-        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
-        const { url: stagingUrl } = await stagingResponse.json();
-        
-        const stagingUploadResponse = await uploadPhotoToS3(picture.uri, stagingUrl);
-        if (stagingUploadResponse.status === 200) {
-          // Get presigned GET URL for AI analysis
-          const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
-          if (getStagingUrlResponse.ok) {
-            const { url: getStagingUrl } = await getStagingUrlResponse.json();
-            await getAIDescription(getStagingUrl);
-          }
-        }
-      } catch (error: any) {
-        console.error("Error uploading to staging:", error);
-        // Continue anyway - user can still send manually
-      }
     } catch (error: any) {
       console.error("Photo capture error:", error);
       Alert.alert("Error", "Failed to capture photo");
@@ -378,7 +322,8 @@ export default function CompanionHomeScreen() {
       const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
       const { url: imageUrl } = await imageResponse.json();
 
-      // Use staging image if available (all images should go through staging)
+      // Upload image to final location
+      // If staging exists (user triggered AI), copy from staging. Otherwise upload directly.
       if (stagingEventId) {
         // Copy from staging to final location
         const stagingGetResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
@@ -402,7 +347,7 @@ export default function CompanionHomeScreen() {
           }
         }
       } else {
-        // Fallback: upload directly if no staging (shouldn't happen, but handle gracefully)
+        // No staging - upload directly (user chose voice or note without AI)
         const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
         if (imageUploadResponse.status !== 200) {
           throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
@@ -554,6 +499,72 @@ export default function CompanionHomeScreen() {
     setIsAiGenerated(false);
     setIsAiThinking(false);
     setStagingEventId(null);
+    setIntent('none');
+    setAudioUri(null);
+  };
+
+  const retakePhoto = async () => {
+    // Clean up staging image
+    if (stagingEventId) {
+      try {
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+      } catch (error: any) {
+        console.error("Error deleting staging image:", error);
+      }
+    }
+    
+    // Clear all state and return to camera
+    setPhoto(null);
+    setDescription('');
+    setShowDescriptionInput(false);
+    setIsAiGenerated(false);
+    setIsAiThinking(false);
+    setStagingEventId(null);
+    setIntent('none');
+    setAudioUri(null);
+    lastProcessedUriRef.current = null;
+  };
+
+  const triggerAI = async () => {
+    if (!photo) return;
+    
+    setIntent('ai');
+    setIsAiThinking(true);
+    setIsAiGenerated(false);
+    
+    try {
+      // Generate staging event_id and upload image if not already uploaded
+      let stagingId = stagingEventId;
+      if (!stagingId) {
+        stagingId = Date.now().toString();
+        setStagingEventId(stagingId);
+        
+        // Upload to staging first
+        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
+        const { url: stagingUrl } = await stagingResponse.json();
+        await uploadPhotoToS3(photo.uri, stagingUrl);
+      }
+      
+      // Get presigned GET URL for staging image
+      const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
+      if (getStagingUrlResponse.ok) {
+        const { url: getStagingUrl } = await getStagingUrlResponse.json();
+        await getAIDescription(getStagingUrl);
+      }
+    } catch (error: any) {
+      console.error("Error uploading to staging or getting AI description:", error);
+      setIsAiThinking(false);
+    }
+  };
+
+  const changeMethod = () => {
+    // Clear description and audio, return to action buttons
+    setDescription('');
+    setAudioUri(null);
+    setIntent('none');
+    setIsAiGenerated(false);
+    setIsAiThinking(false);
+    lastProcessedUriRef.current = null;
   };
 
   // Show description input overlay if photo is captured
@@ -569,84 +580,82 @@ export default function CompanionHomeScreen() {
             contentContainerStyle={styles.previewContainer}
             keyboardShouldPersistTaps="handled"
           >
+            {/* Image Preview with Retake Button */}
             <View style={styles.previewImageContainer}>
               {isLoadingImage ? (
                 <View style={styles.loadingContainer}>
                   <ActivityIndicator size="large" color="#2e78b7" />
                 </View>
               ) : (
-                <Image
-                  source={{ uri: photo.uri }}
-                  style={styles.previewImage}
-                  resizeMode="contain"
-                />
+                <>
+                  <Image
+                    source={{ uri: photo.uri }}
+                    style={styles.previewImage}
+                    resizeMode="contain"
+                  />
+                  <View style={styles.imageTopButtons}>
+                    {intent !== 'none' && (
+                      <TouchableOpacity 
+                        style={styles.backToActionsButton}
+                        onPress={changeMethod}
+                      >
+                        <FontAwesome name="arrow-left" size={16} color="#fff" />
+                        <Text style={styles.backToActionsButtonText}>Back</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity 
+                      style={styles.retakeButton}
+                      onPress={retakePhoto}
+                    >
+                      <FontAwesome name="times" size={20} color="#fff" />
+                      <Text style={styles.retakeButtonText}>Retake</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
               )}
             </View>
-            
-            <View style={styles.descriptionContainer}>
-              <Text style={styles.descriptionLabel}>Add a description:</Text>
-              <View style={styles.inputRow}>
-                <TextInput
-                  ref={textInputRef}
-                  style={styles.descriptionInput}
-                  placeholder={isAiThinking ? "✨ Gemini is thinking..." : "e.g., Look at this blue truck! (or record audio below)"}
-                  placeholderTextColor="#999"
-                  value={description}
-                  onChangeText={(text) => {
-                    setDescription(text);
-                    // If user edits, mark as not AI-generated
-                    if (text !== description && isAiGenerated) {
-                      setIsAiGenerated(false);
-                    }
-                  }}
-                  multiline
-                  autoFocus={!audioUri && !isAiThinking}
-                  spellCheck={true}
-                  returnKeyType="done"
-                  blurOnSubmit={true}
-                  onSubmitEditing={Keyboard.dismiss}
-                  editable={!audioRecorder.isRecording && !audioUri && !isAiThinking}
-                />
+
+            {/* Action Buttons - Show when intent is 'none' */}
+            {intent === 'none' && (
+              <View style={styles.actionButtonsContainer}>
                 <TouchableOpacity 
-                  style={styles.micButton}
+                  style={styles.intentButton}
                   onPress={() => {
-                    // Focus the TextInput to show keyboard with microphone button
-                    textInputRef.current?.focus();
+                    setIntent('voice');
                   }}
-                  activeOpacity={0.7}
+                  disabled={uploading}
                 >
-                  <FontAwesome name="keyboard-o" size={20} color="#2e78b7" />
+                  <FontAwesome name="microphone" size={32} color="#fff" />
+                  <Text style={styles.intentButtonText}>🎤 Add My Voice</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={styles.intentButton}
+                  onPress={triggerAI}
+                  disabled={uploading || isAiThinking}
+                >
+                  <FontAwesome name="magic" size={32} color="#fff" />
+                  <Text style={styles.intentButtonText}>✨ Ask AI to Describe</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity 
+                  style={styles.intentButton}
+                  onPress={() => {
+                    setIntent('note');
+                    setTimeout(() => textInputRef.current?.focus(), 100);
+                  }}
+                  disabled={uploading}
+                >
+                  <FontAwesome name="keyboard-o" size={32} color="#fff" />
+                  <Text style={styles.intentButtonText}>⌨️ Write a Note</Text>
                 </TouchableOpacity>
               </View>
-              {(isAiGenerated || isAiThinking) && (
-                <View style={styles.aiIndicator}>
-                  {isAiThinking ? (
-                    <>
-                      <ActivityIndicator size="small" color="#9b59b6" style={{ marginRight: 6 }} />
-                      <Text style={styles.aiIndicatorText}>✨ Gemini is thinking...</Text>
-                    </>
-                  ) : (
-                    <Text style={styles.aiIndicatorText}>✨ Generated by AI</Text>
-                  )}
-                </View>
-              )}
-              
-              {/* Audio Recording Section */}
-              <View style={styles.audioSection}>
-                {!audioUri && !audioRecorder.isRecording && (
-                  <TouchableOpacity 
-                    style={styles.recordButton}
-                    onPress={startRecording}
-                    disabled={uploading || isStartingRecording}
-                  >
-                    <FontAwesome name="microphone" size={24} color="#fff" />
-                    <Text style={styles.recordButtonText}>
-                      {isStartingRecording ? "Starting..." : "Record Voice"}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-                
-                {audioRecorder.isRecording && (
+            )}
+
+            {/* Voice Intent - Dominated by Mic */}
+            {intent === 'voice' && (
+              <View style={styles.voiceIntentContainer}>
+                {audioRecorder.isRecording ? (
                   <View style={styles.recordingContainer}>
                     <View style={styles.recordingIndicator} />
                     <Text style={styles.recordingText}>Recording...</Text>
@@ -657,34 +666,84 @@ export default function CompanionHomeScreen() {
                       <Text style={styles.stopButtonText}>Stop</Text>
                     </TouchableOpacity>
                   </View>
-                )}
-                
-                {audioUri && !audioRecorder.isRecording && (
+                ) : audioUri ? (
                   <View style={styles.audioPlaybackContainer}>
-                    <FontAwesome name="volume-up" size={20} color="#2e78b7" />
+                    <FontAwesome name="volume-up" size={40} color="#2e78b7" />
                     <Text style={styles.audioPlaybackText}>Voice message recorded</Text>
                     <TouchableOpacity 
                       style={styles.rerecordButton}
                       onPress={() => {
                         setAudioUri(null);
-                        setDescription('');
-                        // Reset the last processed URI so re-recording works
                         lastProcessedUriRef.current = null;
                       }}
                     >
                       <Text style={styles.rerecordButtonText}>Re-record</Text>
                     </TouchableOpacity>
                   </View>
+                ) : (
+                  <TouchableOpacity 
+                    style={styles.recordButtonLarge}
+                    onPress={startRecording}
+                    disabled={uploading || isStartingRecording}
+                  >
+                    <FontAwesome name="microphone" size={48} color="#fff" />
+                    <Text style={styles.recordButtonTextLarge}>
+                      {isStartingRecording ? "Starting..." : "Tap to Record"}
+                    </Text>
+                  </TouchableOpacity>
                 )}
               </View>
-              
-              <TouchableOpacity 
-                style={styles.dismissKeyboardButton}
-                onPress={Keyboard.dismiss}
-              >
-                <Text style={styles.dismissKeyboardText}>Tap here to dismiss keyboard</Text>
-              </TouchableOpacity>
-            </View>
+            )}
+
+            {/* AI or Note Intent - Dominated by Text Input */}
+            {(intent === 'ai' || intent === 'note') && (
+              <View style={styles.textIntentContainer}>
+                <View style={styles.inputRow}>
+                  <TextInput
+                    ref={textInputRef}
+                    style={styles.descriptionInputLarge}
+                    placeholder={isAiThinking ? "✨ Gemini is thinking..." : "Write your description here..."}
+                    placeholderTextColor="#999"
+                    value={description}
+                    onChangeText={(text) => {
+                      setDescription(text);
+                      // If user edits, mark as not AI-generated
+                      if (text !== description && isAiGenerated) {
+                        setIsAiGenerated(false);
+                      }
+                    }}
+                    multiline
+                    autoFocus={!isAiThinking}
+                    spellCheck={true}
+                    returnKeyType="done"
+                    blurOnSubmit={true}
+                    onSubmitEditing={Keyboard.dismiss}
+                    editable={!isAiThinking}
+                  />
+                </View>
+                
+                {isAiThinking && (
+                  <View style={styles.aiIndicator}>
+                    <ActivityIndicator size="small" color="#9b59b6" style={{ marginRight: 6 }} />
+                    <Text style={styles.aiIndicatorText}>✨ Gemini is thinking...</Text>
+                  </View>
+                )}
+                
+                {isAiGenerated && !isAiThinking && (
+                  <View style={styles.aiIndicator}>
+                    <Text style={styles.aiIndicatorText}>✨ Generated by AI</Text>
+                  </View>
+                )}
+                
+                {/* Dismiss Keyboard */}
+                <TouchableOpacity 
+                  style={styles.dismissKeyboardButton}
+                  onPress={Keyboard.dismiss}
+                >
+                  <Text style={styles.dismissKeyboardText}>Tap here to dismiss keyboard</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             <View style={styles.actionButtons}>
               <TouchableOpacity 
@@ -716,54 +775,89 @@ export default function CompanionHomeScreen() {
     );
   }
 
-  // Camera view
+  // Dashboard view
   return (
-    <View style={styles.container}>
-      <CameraView 
-        style={StyleSheet.absoluteFill} 
-        ref={cameraRef}
-        facing={facing}
-      />
+    <View style={styles.dashboardContainer}>
+      <View style={styles.dashboardContent}>
+        <Text style={styles.dashboardTitle}>Create Reflection</Text>
+        
+        <View style={styles.dashboardButtons}>
+          <TouchableOpacity 
+            style={styles.dashboardButton}
+            onPress={() => setShowCameraModal(true)}
+            disabled={uploading || !permission?.granted}
+          >
+            <FontAwesome name="camera" size={48} color="#fff" />
+            <Text style={styles.dashboardButtonText}>Capture Photo</Text>
+          </TouchableOpacity>
 
-      <View style={styles.topControls}>
-        <TouchableOpacity 
-          style={styles.flipButton} 
-          onPress={toggleCameraFacing}
-          disabled={uploading}
-        >
-          <FontAwesome name="refresh" size={24} color="white" />
-        </TouchableOpacity>
+          <TouchableOpacity 
+            style={styles.dashboardButton}
+            onPress={pickImageFromGallery}
+            disabled={uploading || isLoadingGallery}
+          >
+            {isLoadingGallery ? (
+              <ActivityIndicator size="large" color="#fff" />
+            ) : (
+              <FontAwesome name="photo" size={48} color="#fff" />
+            )}
+            <Text style={styles.dashboardButtonText}>Pick from Gallery</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.dashboardButton}
+            onPress={() => setIsSearchModalVisible(true)}
+            disabled={uploading}
+          >
+            <FontAwesome name="search" size={48} color="#fff" />
+            <Text style={styles.dashboardButtonText}>Search Images</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      <View style={styles.buttonContainer}>
-        <TouchableOpacity 
-          style={[styles.galleryButtonBase, styles.galleryButton]} 
-          onPress={pickImageFromGallery}
-          disabled={uploading || isLoadingGallery}
-        >
-          {isLoadingGallery ? (
-            <ActivityIndicator size="small" color="white" />
-          ) : (
-            <FontAwesome name="photo" size={24} color="white" />
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={styles.captureButton} 
-          onPress={takePhoto}
-          disabled={uploading}
-        >
-          <Text style={styles.text}>
-            {uploading ? "UPLOADING..." : "TAKE PHOTO"}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.galleryButtonBase, styles.searchButton]} 
-          onPress={() => setIsSearchModalVisible(true)}
-          disabled={uploading}
-        >
-          <FontAwesome name="search" size={24} color="white" />
-        </TouchableOpacity>
-      </View>
+      {/* Camera Modal */}
+      <Modal
+        visible={showCameraModal}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setShowCameraModal(false)}
+      >
+        <View style={styles.container}>
+          <CameraView 
+            style={StyleSheet.absoluteFill} 
+            ref={cameraRef}
+            facing={facing}
+          />
+
+          <View style={styles.topControls}>
+            <TouchableOpacity 
+              style={styles.closeCameraButton}
+              onPress={() => setShowCameraModal(false)}
+            >
+              <FontAwesome name="times" size={24} color="white" />
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={styles.flipButton} 
+              onPress={toggleCameraFacing}
+              disabled={uploading}
+            >
+              <FontAwesome name="refresh" size={24} color="white" />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.buttonContainer}>
+            <TouchableOpacity 
+              style={styles.captureButton} 
+              onPress={takePhoto}
+              disabled={uploading}
+            >
+              <Text style={styles.text}>
+                {uploading ? "UPLOADING..." : "TAKE PHOTO"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Search Modal */}
       <Modal
@@ -886,6 +980,43 @@ const styles = StyleSheet.create({
     flex: 1, 
     justifyContent: 'center' 
   },
+  dashboardContainer: {
+    flex: 1,
+    backgroundColor: '#1a1a1a',
+  },
+  dashboardContent: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 40,
+  },
+  dashboardTitle: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 60,
+    textAlign: 'center',
+  },
+  dashboardButtons: {
+    width: '100%',
+    gap: 20,
+    maxWidth: 400,
+  },
+  dashboardButton: {
+    backgroundColor: '#2e78b7',
+    paddingVertical: 30,
+    paddingHorizontal: 40,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    minHeight: 120,
+  },
+  dashboardButtonText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '600',
+  },
   permissionText: {
     textAlign: 'center',
     marginBottom: 20,
@@ -906,8 +1037,20 @@ const styles = StyleSheet.create({
   topControls: {
     position: 'absolute',
     top: 60,
+    left: 20,
     right: 20,
     zIndex: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  closeCameraButton: {
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 12,
+    borderRadius: 30,
+    width: 50,
+    height: 50,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   flipButton: {
     backgroundColor: 'rgba(0,0,0,0.5)',
@@ -1248,5 +1391,119 @@ const styles = StyleSheet.create({
     color: '#9b59b6',
     fontSize: 12,
     fontStyle: 'italic',
+  },
+  // Intent-based UI styles
+  imageTopButtons: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    right: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  backToActionsButton: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  backToActionsButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  retakeButton: {
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  retakeButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  actionButtonsContainer: {
+    padding: 20,
+    gap: 15,
+  },
+  intentButton: {
+    backgroundColor: '#2e78b7',
+    paddingVertical: 20,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    minHeight: 70,
+  },
+  intentButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  voiceIntentContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 40,
+    gap: 30,
+  },
+  recordButtonLarge: {
+    backgroundColor: '#e74c3c',
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+  },
+  recordButtonTextLarge: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  textIntentContainer: {
+    flex: 1,
+    padding: 20,
+    gap: 15,
+  },
+  descriptionInputLarge: {
+    backgroundColor: '#333',
+    color: '#fff',
+    padding: 16,
+    borderRadius: 12,
+    fontSize: 18,
+    minHeight: 200,
+    textAlignVertical: 'top',
+    borderWidth: 2,
+    borderColor: '#2e78b7',
+  },
+  changeMethodLink: {
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  changeMethodText: {
+    color: '#2e78b7',
+    fontSize: 14,
+    textDecorationLine: 'underline',
+  },
+  backToActionsLink: {
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  backToActionsText: {
+    color: '#2e78b7',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
