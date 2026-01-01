@@ -2,9 +2,11 @@ import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
+import { BlurView } from 'expo-blur';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import { LinearGradient } from 'expo-linear-gradient';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
@@ -30,6 +32,7 @@ export default function CompanionHomeScreen() {
   const [stagingEventId, setStagingEventId] = useState<string | null>(null);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
+  const [pressedButton, setPressedButton] = useState<string | null>(null);
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
@@ -580,6 +583,9 @@ export default function CompanionHomeScreen() {
             contentContainerStyle={styles.previewContainer}
             keyboardShouldPersistTaps="handled"
           >
+            {/* Title */}
+            <Text style={styles.creationTitle}>Reflection Station</Text>
+            
             {/* Image Preview with Retake Button */}
             <View style={styles.previewImageContainer}>
               {isLoadingImage ? (
@@ -624,18 +630,24 @@ export default function CompanionHomeScreen() {
                     setIntent('voice');
                   }}
                   disabled={uploading}
+                  activeOpacity={0.8}
                 >
-                  <FontAwesome name="microphone" size={32} color="#fff" />
-                  <Text style={styles.intentButtonText}>🎤 Add My Voice</Text>
+                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
+                    <FontAwesome name="microphone" size={32} color="#2C3E50" />
+                    <Text style={styles.intentButtonText}>🎤 Add My Voice</Text>
+                  </BlurView>
                 </TouchableOpacity>
 
                 <TouchableOpacity 
                   style={styles.intentButton}
                   onPress={triggerAI}
                   disabled={uploading || isAiThinking}
+                  activeOpacity={0.8}
                 >
-                  <FontAwesome name="magic" size={32} color="#fff" />
-                  <Text style={styles.intentButtonText}>✨ Ask AI to Describe</Text>
+                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
+                    <FontAwesome name="magic" size={32} color="#2C3E50" />
+                    <Text style={styles.intentButtonText}>✨ Ask AI to Describe</Text>
+                  </BlurView>
                 </TouchableOpacity>
 
                 <TouchableOpacity 
@@ -645,9 +657,12 @@ export default function CompanionHomeScreen() {
                     setTimeout(() => textInputRef.current?.focus(), 100);
                   }}
                   disabled={uploading}
+                  activeOpacity={0.8}
                 >
-                  <FontAwesome name="keyboard-o" size={32} color="#fff" />
-                  <Text style={styles.intentButtonText}>⌨️ Write a Note</Text>
+                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
+                    <FontAwesome name="keyboard-o" size={32} color="#2C3E50" />
+                    <Text style={styles.intentButtonText}>⌨️ Write a Note</Text>
+                  </BlurView>
                 </TouchableOpacity>
               </View>
             )}
@@ -777,40 +792,103 @@ export default function CompanionHomeScreen() {
 
   // Dashboard view
   return (
-    <View style={styles.dashboardContainer}>
+    <LinearGradient
+      colors={['#A1C4FD', '#C2E9FB']}
+      style={styles.dashboardContainer}
+    >
       <View style={styles.dashboardContent}>
         <Text style={styles.dashboardTitle}>Create Reflection</Text>
         
         <View style={styles.dashboardButtons}>
           <TouchableOpacity 
-            style={styles.dashboardButton}
+            style={[
+              styles.dashboardButton,
+              pressedButton === 'capture' && styles.dashboardButtonPressed
+            ]}
             onPress={() => setShowCameraModal(true)}
+            onPressIn={() => setPressedButton('capture')}
+            onPressOut={() => setPressedButton(null)}
             disabled={uploading || !permission?.granted}
+            activeOpacity={1}
           >
-            <FontAwesome name="camera" size={48} color="#fff" />
-            <Text style={styles.dashboardButtonText}>Capture Photo</Text>
+            <BlurView intensity={50} style={[
+              styles.dashboardButtonBlur, 
+              styles.captureButtonBlur,
+              pressedButton === 'capture' && styles.buttonBlurPressed
+            ]}>
+              <LinearGradient
+                colors={['rgba(255, 255, 255, 0.4)', 'rgba(255, 255, 255, 0)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.innerGlow}
+              />
+              <View style={styles.iconContainer}>
+                <FontAwesome name="camera" size={53} color="#2E78B7" />
+              </View>
+              <Text style={styles.captureButtonText}>Capture Photo</Text>
+            </BlurView>
           </TouchableOpacity>
 
           <TouchableOpacity 
-            style={styles.dashboardButton}
+            style={[
+              styles.dashboardButton,
+              pressedButton === 'gallery' && styles.dashboardButtonPressed
+            ]}
             onPress={pickImageFromGallery}
+            onPressIn={() => setPressedButton('gallery')}
+            onPressOut={() => setPressedButton(null)}
             disabled={uploading || isLoadingGallery}
+            activeOpacity={1}
           >
-            {isLoadingGallery ? (
-              <ActivityIndicator size="large" color="#fff" />
-            ) : (
-              <FontAwesome name="photo" size={48} color="#fff" />
-            )}
-            <Text style={styles.dashboardButtonText}>Pick from Gallery</Text>
+            <BlurView intensity={50} style={[
+              styles.dashboardButtonBlur, 
+              styles.galleryButtonBlur,
+              pressedButton === 'gallery' && styles.buttonBlurPressed
+            ]}>
+              <LinearGradient
+                colors={['rgba(255, 255, 255, 0.4)', 'rgba(255, 255, 255, 0)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.innerGlow}
+              />
+              {isLoadingGallery ? (
+                <ActivityIndicator size="large" color="#8E44AD" />
+              ) : (
+                <View style={styles.iconContainer}>
+                  <FontAwesome name="photo" size={53} color="#8E44AD" />
+                </View>
+              )}
+              <Text style={styles.galleryButtonText}>Pick from Gallery</Text>
+            </BlurView>
           </TouchableOpacity>
 
           <TouchableOpacity 
-            style={styles.dashboardButton}
+            style={[
+              styles.dashboardButton,
+              pressedButton === 'search' && styles.dashboardButtonPressed
+            ]}
             onPress={() => setIsSearchModalVisible(true)}
+            onPressIn={() => setPressedButton('search')}
+            onPressOut={() => setPressedButton(null)}
             disabled={uploading}
+            activeOpacity={1}
           >
-            <FontAwesome name="search" size={48} color="#fff" />
-            <Text style={styles.dashboardButtonText}>Search Images</Text>
+            <BlurView intensity={50} style={[
+              styles.dashboardButtonBlur, 
+              styles.searchButtonBlur,
+              pressedButton === 'search' && styles.buttonBlurPressed
+            ]}>
+              <LinearGradient
+                colors={['rgba(255, 255, 255, 0.4)', 'rgba(255, 255, 255, 0)']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.innerGlow}
+              />
+              <View style={styles.iconContainer}>
+                <FontAwesome name="search" size={53} color="#16A085" />
+              </View>
+              <Text style={styles.searchButtonText}>Search Images</Text>
+            </BlurView>
           </TouchableOpacity>
         </View>
       </View>
@@ -971,7 +1049,7 @@ export default function CompanionHomeScreen() {
           </View>
         </View>
       </Modal>
-    </View>
+    </LinearGradient>
   );
 }
 
@@ -982,7 +1060,6 @@ const styles = StyleSheet.create({
   },
   dashboardContainer: {
     flex: 1,
-    backgroundColor: '#1a1a1a',
   },
   dashboardContent: {
     flex: 1,
@@ -992,30 +1069,166 @@ const styles = StyleSheet.create({
   },
   dashboardTitle: {
     fontSize: 32,
-    fontWeight: 'bold',
-    color: '#fff',
+    fontWeight: '600',
+    color: '#2C3E50',
     marginBottom: 60,
     textAlign: 'center',
+    fontFamily: Platform.select({
+      ios: 'System',
+      android: 'sans-serif',
+      default: 'sans-serif',
+    }),
   },
   dashboardButtons: {
     width: '100%',
-    gap: 20,
+    gap: 28,
     maxWidth: 400,
   },
   dashboardButton: {
-    backgroundColor: '#2e78b7',
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#fff',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.5,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 4,
+      },
+      default: {
+        shadowColor: '#fff',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.5,
+        shadowRadius: 4,
+      },
+    }),
+  },
+  dashboardButtonPressed: {
+    transform: [{ scale: 0.98 }],
+  },
+  dashboardButtonBlur: {
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
     paddingVertical: 30,
     paddingHorizontal: 40,
-    borderRadius: 16,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
     minHeight: 120,
+    width: '100%',
+    position: 'relative',
   },
-  dashboardButtonText: {
-    color: '#fff',
+  captureButtonBlur: {
+    backgroundColor: 'rgba(180, 215, 255, 0.4)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#2E78B7',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+      android: {
+        elevation: 8,
+      },
+      default: {
+        shadowColor: '#2E78B7',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+    }),
+  },
+  galleryButtonBlur: {
+    backgroundColor: 'rgba(220, 190, 255, 0.4)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#8E44AD',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+      android: {
+        elevation: 8,
+      },
+      default: {
+        shadowColor: '#8E44AD',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+    }),
+  },
+  searchButtonBlur: {
+    backgroundColor: 'rgba(180, 255, 220, 0.4)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#16A085',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+      android: {
+        elevation: 8,
+      },
+      default: {
+        shadowColor: '#16A085',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+      },
+    }),
+  },
+  buttonBlurPressed: {
+    opacity: 0.9,
+  },
+  innerGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 24,
+  },
+  iconContainer: {
+    padding: 4,
+    zIndex: 1,
+  },
+  captureButtonText: {
+    color: '#2E78B7',
     fontSize: 20,
     fontWeight: '600',
+    fontFamily: Platform.select({
+      ios: 'System',
+      android: 'sans-serif',
+      default: 'sans-serif',
+    }),
+    zIndex: 1,
+  },
+  galleryButtonText: {
+    color: '#8E44AD',
+    fontSize: 20,
+    fontWeight: '600',
+    fontFamily: Platform.select({
+      ios: 'System',
+      android: 'sans-serif',
+      default: 'sans-serif',
+    }),
+    zIndex: 1,
+  },
+  searchButtonText: {
+    color: '#16A085',
+    fontSize: 20,
+    fontWeight: '600',
+    fontFamily: Platform.select({
+      ios: 'System',
+      android: 'sans-serif',
+      default: 'sans-serif',
+    }),
+    zIndex: 1,
   },
   permissionText: {
     textAlign: 'center',
@@ -1102,6 +1315,18 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
     padding: 20,
+  },
+  creationTitle: {
+    fontSize: 28,
+    fontWeight: '600',
+    color: '#fff',
+    marginBottom: 20,
+    textAlign: 'center',
+    fontFamily: Platform.select({
+      ios: 'System',
+      android: 'Roboto',
+      default: 'sans-serif',
+    }),
   },
   previewImageContainer: {
     flex: 1,
@@ -1240,9 +1465,11 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     flex: 1,
-    padding: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
     borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   cancelButton: {
     backgroundColor: '#666',
@@ -1252,8 +1479,10 @@ const styles = StyleSheet.create({
   },
   actionButtonText: {
     color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'center',
+    width: '100%',
   },
   searchButton: {
     // Same as galleryButton
@@ -1432,13 +1661,19 @@ const styles = StyleSheet.create({
   },
   actionButtonsContainer: {
     padding: 20,
-    gap: 15,
+    gap: 28,
   },
   intentButton: {
-    backgroundColor: '#2e78b7',
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
+  },
+  intentButtonBlur: {
+    backgroundColor: 'rgba(255, 255, 255, 0.6)',
     paddingVertical: 20,
     paddingHorizontal: 24,
-    borderRadius: 12,
+    borderRadius: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1446,7 +1681,7 @@ const styles = StyleSheet.create({
     minHeight: 70,
   },
   intentButtonText: {
-    color: '#fff',
+    color: '#2C3E50',
     fontSize: 18,
     fontWeight: '600',
   },
