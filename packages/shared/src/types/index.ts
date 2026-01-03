@@ -22,6 +22,9 @@ export interface EventMetadata {
   // Note: audio_url is NOT stored in metadata.json (presigned URLs expire)
   // The backend ListMirrorEvents generates fresh presigned GET URLs in the Event object
   content_type?: 'text' | 'audio'; // Whether to use TTS (text) or play audio (audio)
+  // AI-generated dual-story fields (optional)
+  short_caption?: string; // Brief greeting - auto-played on load
+  deep_dive?: string; // Detailed story - played when ✨ is tapped
 }
 
 export interface Event {

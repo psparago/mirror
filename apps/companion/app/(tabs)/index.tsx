@@ -29,6 +29,8 @@ export default function CompanionHomeScreen() {
   const [isLoadingImage, setIsLoadingImage] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isAiGenerated, setIsAiGenerated] = useState(false);
+  const [shortCaption, setShortCaption] = useState<string>('');
+  const [deepDive, setDeepDive] = useState<string>('');
   const [stagingEventId, setStagingEventId] = useState<string | null>(null);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
@@ -98,11 +100,17 @@ export default function CompanionHomeScreen() {
         throw new Error(`AI description failed: ${response.status} - ${errorText}`);
       }
       
-      const aiDescription = await response.text();
+      // Parse JSON response
+      const aiResponse = await response.json();
       
-      if (aiDescription && aiDescription.trim()) {
-        setDescription(aiDescription.trim());
+      if (aiResponse && aiResponse.short_caption && aiResponse.deep_dive) {
+        setShortCaption(aiResponse.short_caption);
+        setDeepDive(aiResponse.deep_dive);
+        // Show short_caption in the text input for user to see/edit
+        setDescription(aiResponse.short_caption);
         setIsAiGenerated(true);
+      } else {
+        throw new Error("Invalid response format from AI");
       }
     } catch (error: any) {
       console.error("Error getting AI description:", error);
@@ -159,6 +167,8 @@ export default function CompanionHomeScreen() {
     setSearchQuery('');
     setDescription(''); // Clear previous description
     setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
     setIntent('none'); // Reset intent - show action buttons
     setAudioUri(null); // Clear any previous audio
     setStagingEventId(null); // Don't upload to staging until user chooses intent
@@ -193,6 +203,8 @@ export default function CompanionHomeScreen() {
         setAudioUri(null);
         setDescription('');
         setIsAiGenerated(false);
+        setShortCaption('');
+        setDeepDive('');
         
         setIntent('none'); // Reset intent - show action buttons
         setAudioUri(null); // Clear any previous audio
@@ -225,6 +237,8 @@ export default function CompanionHomeScreen() {
       setAudioUri(null);
       setDescription('');
       setIsAiGenerated(false);
+      setShortCaption('');
+      setDeepDive('');
       
       setIntent('none'); // Reset intent - show action buttons
       setAudioUri(null); // Clear any previous audio
@@ -410,7 +424,7 @@ export default function CompanionHomeScreen() {
       // 3. Create metadata.json
       // Note: We don't store audio_url in metadata because presigned URLs expire (15 min)
       // The backend ListMirrorEvents generates fresh presigned GET URLs when listing events
-      const metadata = {
+      const metadata: any = {
         description: description.trim() || (audioUploaded ? "Voice message" : ""),
         sender: "Granddad",
         timestamp: timestamp,
@@ -418,6 +432,12 @@ export default function CompanionHomeScreen() {
         // Only store content_type to indicate if audio exists - backend will provide fresh presigned URL
         content_type: audioUploaded ? 'audio' as const : 'text' as const,
       };
+
+      // Add AI-generated fields if they exist
+      if (shortCaption && deepDive) {
+        metadata.short_caption = shortCaption;
+        metadata.deep_dive = deepDive;
+      }
 
       // 3. Upload metadata.json
       const metadataResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=metadata.json`);
@@ -443,6 +463,8 @@ export default function CompanionHomeScreen() {
       setDescription('');
       setShowDescriptionInput(false);
       setIsAiGenerated(false);
+      setShortCaption('');
+      setDeepDive('');
       setStagingEventId(null);
       setAudioUri(null);
       if (audioRecorder.isRecording) {
@@ -500,6 +522,8 @@ export default function CompanionHomeScreen() {
     setDescription('');
     setShowDescriptionInput(false);
     setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
     setIsAiThinking(false);
     setStagingEventId(null);
     setIntent('none');
@@ -521,6 +545,8 @@ export default function CompanionHomeScreen() {
     setDescription('');
     setShowDescriptionInput(false);
     setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
     setIsAiThinking(false);
     setStagingEventId(null);
     setIntent('none');
@@ -566,6 +592,8 @@ export default function CompanionHomeScreen() {
     setAudioUri(null);
     setIntent('none');
     setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
     setIsAiThinking(false);
     lastProcessedUriRef.current = null;
   };

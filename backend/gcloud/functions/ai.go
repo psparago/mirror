@@ -2,11 +2,13 @@ package functions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
@@ -65,8 +67,15 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Create multimodal input using genai.Part interface
-	// The prompt for Cole
-	promptText := "Analyze this image. Write a friendly, 1-sentence description for a 15-year-old named Cole who has Angelman Syndrome. Focus on the main object. Example: 'Look Cole, it's a big red fire truck!'"
+	// The prompt for Cole - requesting structured JSON response
+	promptText := `Analyze this image and provide two distinct descriptions for a 15-year-old with Angelman Syndrome.
+
+"short_caption": A brief, high-impact greeting (max 10 words).
+
+"deep_dive": A more detailed, 2-3 sentence story about the details in the photo to facilitate deeper engagement.
+
+Return your response as valid JSON in exactly this format:
+{"short_caption": "string", "deep_dive": "string"}`
 
 	// Use Part interface for multimodal inputs (2026 SDK update)
 	parts := []genai.Part{
@@ -81,7 +90,7 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Return the text
+	// 5. Extract and parse JSON response
 	if len(resp.Candidates) == 0 {
 		log.Printf("Error: No candidates in response")
 		http.Error(w, "No response from Gemini", 500)
@@ -109,6 +118,42 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprint(w, text)
+	// Parse JSON response - handle markdown code blocks if present
+	jsonText := strings.TrimSpace(text)
+	if strings.HasPrefix(jsonText, "```json") {
+		jsonText = strings.TrimPrefix(jsonText, "```json")
+		jsonText = strings.TrimSuffix(jsonText, "```")
+		jsonText = strings.TrimSpace(jsonText)
+	} else if strings.HasPrefix(jsonText, "```") {
+		jsonText = strings.TrimPrefix(jsonText, "```")
+		jsonText = strings.TrimSuffix(jsonText, "```")
+		jsonText = strings.TrimSpace(jsonText)
+	}
+
+	// Parse JSON
+	var result struct {
+		ShortCaption string `json:"short_caption"`
+		DeepDive     string `json:"deep_dive"`
+	}
+
+	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
+		log.Printf("Error parsing JSON response: %v, raw text: %s", err, text)
+		http.Error(w, fmt.Sprintf("Failed to parse JSON response: %v", err), 500)
+		return
+	}
+
+	// Validate required fields
+	if result.ShortCaption == "" || result.DeepDive == "" {
+		log.Printf("Error: Missing required fields in JSON response")
+		http.Error(w, "Invalid JSON response: missing required fields", 500)
+		return
+	}
+
+	// Return JSON response
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+		http.Error(w, "Failed to encode response", 500)
+		return
+	}
 }

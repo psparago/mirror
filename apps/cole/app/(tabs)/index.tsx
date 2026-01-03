@@ -2,6 +2,7 @@ import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -9,7 +10,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
 import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Modal, PanResponder, Platform, StatusBar, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, FlatList, Image, Modal, PanResponder, Platform, StatusBar, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
@@ -35,9 +36,54 @@ export default function ColeInboxScreen() {
   const audioFinishedRef = useRef<{ [eventId: string]: boolean }>({});
   const [playButtonPressed, setPlayButtonPressed] = useState(false);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
+  const [isPlayingDeepDive, setIsPlayingDeepDive] = useState(false);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
+
+  // Sanitize text for smoother TTS playback
+  const sanitizeTextForTTS = (text: string): string => {
+    return text
+      .replace(/!/g, '.') // Replace exclamation marks with periods
+      .replace(/\?/g, '.') // Replace question marks with periods
+      .replace(/;/g, ',') // Replace semicolons with commas
+      .replace(/:/g, ',') // Replace colons with commas
+      .replace(/\.\.\./g, '.') // Replace ellipsis with single period
+      .replace(/\.{2,}/g, '.') // Replace multiple periods with single period
+      .replace(/,{2,}/g, ',') // Replace multiple commas with single comma
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
+  };
+
+  // Configure audio session to prevent ducking and warm up TTS
+  useEffect(() => {
+    const configureAudio = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+        });
+        
+        // Warm up the TTS engine by speaking a silent, very short phrase
+        // This initializes the audio session properly
+        setTimeout(() => {
+          Speech.speak(' ', {
+            volume: 0.0,
+            rate: 1.0,
+            pitch: 1.0,
+          });
+        }, 500);
+      } catch (error) {
+        console.error('Error configuring audio session:', error);
+      }
+    };
+    
+    configureAudio();
+  }, []);
 
   useEffect(() => {
     fetchEvents();
@@ -228,22 +274,23 @@ export default function ColeInboxScreen() {
               console.error("Error playing audio:", error);
               // Fallback to TTS if audio fails
               if (currentEventIdRef.current === eventIdForThisEffect && selectedMetadata.description) {
-                Speech.speak(selectedMetadata.description, {
-                  pitch: 0.9,
-                  rate: 0.9,
+                Speech.speak(sanitizeTextForTTS(selectedMetadata.description), {
+                  pitch: 1.0,
+                  rate: 1.0,
                   language: 'en-US',
                 });
               }
             }
-          } else if (selectedMetadata.description && currentEventIdRef.current === eventIdForThisEffect) {
-            // Use TTS for text descriptions
-            Speech.speak(selectedMetadata.description, {
-              pitch: 0.9,
-              rate: 0.9,
+          } else if ((selectedMetadata.short_caption || selectedMetadata.description) && currentEventIdRef.current === eventIdForThisEffect) {
+            // Use TTS for text descriptions - prefer short_caption for initial play
+            const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
+            Speech.speak(sanitizeTextForTTS(textToSpeak), {
+              pitch: 1.0,
+              rate: 1.0,
               language: 'en-US',
             });
             // Estimate TTS duration and show mirror (rough estimate: ~150 words per minute)
-            const wordCount = selectedMetadata.description.split(/\s+/).length;
+            const wordCount = textToSpeak.split(/\s+/).length;
             const estimatedDuration = (wordCount / 150) * 60 * 1000; // Convert to milliseconds
             setTimeout(() => {
               if (selectedEvent?.event_id && currentEventIdRef.current === selectedEvent.event_id && !audioFinishedRef.current[selectedEvent.event_id]) {
@@ -271,6 +318,40 @@ export default function ColeInboxScreen() {
       }
     }
   }, [selectedEvent?.event_id, selectedEvent?.audio_url, selectedMetadata?.description, selectedMetadata?.content_type]);
+
+  // Animate the Tell Me More button when deep dive is playing
+  useEffect(() => {
+    if (isPlayingDeepDive) {
+      // Start the pulse animation immediately
+      pulseAnimRef.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, {
+            toValue: 1.15,  // More noticeable scale
+            duration: 600,  // Faster pulse
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulseAnim, {
+            toValue: 1,
+            duration: 600,
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      pulseAnimRef.current.start();
+    } else {
+      // Stop the animation and reset
+      if (pulseAnimRef.current) {
+        pulseAnimRef.current.stop();
+      }
+      pulseAnim.setValue(1);
+    }
+
+    return () => {
+      if (pulseAnimRef.current) {
+        pulseAnimRef.current.stop();
+      }
+    };
+  }, [isPlayingDeepDive]);
 
   // Track engagement: send signal if Star views Reflection for > 5 seconds
   useEffect(() => {
@@ -715,8 +796,8 @@ export default function ColeInboxScreen() {
       const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
       const companionName = metadata?.sender || 'your companion';
       Speech.speak(`I sent a selfie to ${companionName}`, {
-        pitch: 0.9,
-        rate: 0.9,
+        pitch: 1.0,
+        rate: 1.0,
         language: 'en-US',
       });
       
@@ -802,12 +883,43 @@ export default function ColeInboxScreen() {
       }
     } else if (metadata.description) {
       // Use TTS for text descriptions
-      Speech.speak(metadata.description, {
-        pitch: 0.9,
-        rate: 0.9,
+      // Add small delay after Speech.stop() to let audio session settle
+      await new Promise(resolve => setTimeout(resolve, 100));
+      Speech.speak(sanitizeTextForTTS(metadata.description), {
+        pitch: 1.0,
+        rate: 1.0,
         language: 'en-US',
       });
     }
+  };
+
+  const playDeepDive = async () => {
+    const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+    if (!metadata || !selectedEvent || !metadata.deep_dive) return;
+    
+    // Stop any current audio/speech
+    Speech.stop();
+    if (audioPlayer) {
+      audioPlayer.pause();
+    }
+    
+    setIsPlayingDeepDive(true);
+    
+    // Add small delay after Speech.stop() to let audio session settle
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Play deep_dive via TTS
+    Speech.speak(sanitizeTextForTTS(metadata.deep_dive), {
+      pitch: 1.0,
+      rate: 1.0,
+      language: 'en-US',
+      onDone: () => {
+        setIsPlayingDeepDive(false);
+      },
+      onStopped: () => {
+        setIsPlayingDeepDive(false);
+      },
+    });
   };
 
   const deleteEvent = async (event: Event) => {
@@ -1159,24 +1271,28 @@ export default function ColeInboxScreen() {
             </View>
 
             {/* Top Layer: Tell Me More floating action button */}
-            {(selectedEvent?.audio_url || selectedMetadata?.description) && (
-              <TouchableOpacity
-                style={[styles.tellMeMoreButton, { 
-                  bottom: insets.bottom + 160,
-                  ...(isLandscape ? {
-                    // Align with delete button in landscape (delete button is at right edge of 90% container = 5% from screen edge)
-                    right: width * 0.05,
-                  } : {
-                    right: 20, // Keep original position in portrait
-                  })
-                }]}
-                onPress={playDescription}
-                activeOpacity={0.8}
+            {selectedMetadata?.deep_dive && (
+              <Animated.View
+                style={[
+                  styles.tellMeMoreButton, 
+                  { 
+                    bottom: insets.bottom + 20 + 120 + 20, // 20px above the bottom info bar
+                    right: 20,
+                    transform: [{ scale: pulseAnim }],
+                  }
+                ]}
               >
-                <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                  <Text style={styles.tellMeMoreIcon}>✨</Text>
-                </BlurView>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ width: '100%', height: '100%' }}
+                  onPress={playDeepDive}
+                  activeOpacity={0.8}
+                  disabled={isPlayingDeepDive}
+                >
+                  <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                    <Text style={styles.tellMeMoreIcon}>✨</Text>
+                  </BlurView>
+                </TouchableOpacity>
+              </Animated.View>
             )}
           </LinearGradient>
         )}
@@ -1337,29 +1453,11 @@ const styles = StyleSheet.create({
   },
   tellMeMoreButton: {
     position: 'absolute',
-    right: 20,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     overflow: 'hidden',
     zIndex: 10,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.3,
-        shadowRadius: 8,
-      },
-      android: {
-        elevation: 8,
-      },
-      default: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.3,
-        shadowRadius: 8,
-      },
-    }),
   },
   tellMeMoreBlur: {
     width: '100%',
@@ -1367,10 +1465,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.4)',
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 32,
+    borderRadius: 30,
   },
   tellMeMoreIcon: {
-    fontSize: 32,
+    fontSize: 28,
+    color: '#2C3E50',
   },
   descriptionContainer: {
     position: 'absolute',

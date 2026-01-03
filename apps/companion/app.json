@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MirrorCompanion",
+    "name": "Looking Glass Companion",
     "slug": "mirror-companion",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -9,18 +9,24 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/splash-icon.png",
+      "image": "./assets/images/splash-lgc.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.psparago.lookingglass.companion",
+      "icon": "./assets/images/icon-lgc.png",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
+      "package": "com.psparago.lookingglass.companion",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
@@ -30,7 +36,21 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      "expo-dev-client",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Companion to use your camera to take photos.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Companion to access your photos."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
