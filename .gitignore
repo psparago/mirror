@@ -41,3 +41,15 @@ scripts/gcloud/.env.deploy
 # generated native folders
 /ios
 /android
+
+# Expo native directories
+/apps/*/ios
+/apps/*/android
+
+# Xcode local state
+*.xcworkspace
+/apps/*/ios/.xcode.env.local
+
+# CocoaPods
+/apps/*/ios/Pods
+/apps/*/ios/Podfile.lock
