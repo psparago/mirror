@@ -1,0 +1,21 @@
+# Project Architecture & Stability Rules
+
+## Version Locking (DO NOT UPGRADE)
+- This project is strictly pinned to **Expo SDK 52**.
+- React version must remain **18.3.1**.
+- React Native version must remain **0.76.6**.
+- Any request to install new packages MUST include a check for SDK 52 compatibility. Use `npx expo install package-name` to ensure version alignment.
+
+## Native Architecture
+- **New Architecture is DISABLED.** (newArchEnabled: false).
+- Do not suggest features or libraries that require the New Architecture (Fabric/TurboModules).
+- If build errors occur related to 'folly' or 'Coroutine.h', immediately suggest a local native folder wipe: `rm -rf ios android` followed by `npx expo prebuild --clean`.
+
+## Monorepo Strategy (npm Workspaces)
+- This is a monorepo with apps in `/apps/*` and shared code in `/packages/*`.
+- Core native dependencies (React, RN, Expo) must be identical across the root `package.json` and all app-level `package.json` files to prevent hoisting conflicts.
+- Always run `npm install` from the root directory.
+
+## Development Workflow
+- When suggesting terminal commands for building, always prioritize the EAS CLI for development builds: `eas build --profile development --platform ios`.
+- Do not suggest `npx expo run:ios` for local development unless explicitly asked, as it often fails on this environment's specific hardware constraints.
