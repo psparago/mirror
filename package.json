@@ -6,14 +6,19 @@
     "apps/*",
     "packages/*"
   ],
+  "devDependencies": {
+    "react-native-reanimated": "~3.16.0"
+  },
+  "overrides": {
+    "react-native-reanimated": "~3.16.0",
+    "react-native-worklets": "npm:@none/none",
+    "react-native-worklets-core": "npm:@none/none"
+  },
   "scripts": {
     "cole": "cd apps/cole && npm start",
     "companion": "cd apps/companion && npm start",
-    "dev:cole": "cd apps/cole && npm start",
-    "dev:companion": "cd apps/companion && npm start",
-    "ios:cole": "cd apps/cole && npm run ios",
-    "ios:companion": "cd apps/companion && npm run ios",
-    "android:cole": "cd apps/cole && npm run android",
-    "android:companion": "cd apps/companion && npm run android"
+    "build:cole": "cd apps/cole && eas build --profile development --platform ios",
+    "build:companion": "cd apps/companion && eas build --profile development --platform ios",
+    "build:all": "npm run build:cole && npm run build:companion"
   }
 }
