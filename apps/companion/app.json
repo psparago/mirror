@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon.png",
     "scheme": "mirror-companion",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/images/splash-lgc.png",
       "resizeMode": "contain",
