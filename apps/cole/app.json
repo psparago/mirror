@@ -44,7 +44,16 @@
           "cameraPermission": "Allow Cole to use your camera to take selfies.",
           "microphonePermission": false
         }
-      ]
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "buildReactNativeFromSource": true
+          }
+        }
+      ] 
+    
     ],
     "experiments": {
       "typedRoutes": true

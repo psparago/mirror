@@ -20,5 +20,8 @@
     "build:cole": "cd apps/cole && eas build --profile development --platform ios",
     "build:companion": "cd apps/companion && eas build --profile development --platform ios",
     "build:all": "npm run build:cole && npm run build:companion"
+  },
+  "dependencies": {
+    "expo-build-properties": "~1.0.10"
   }
 }

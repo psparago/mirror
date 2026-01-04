@@ -50,8 +50,15 @@
         {
           "photosPermission": "Allow Companion to access your photos."
         }
-      ]
-    ],
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "buildReactNativeFromSource": true
+          }
+        }
+      ]    ],
     "experiments": {
       "typedRoutes": true
     },

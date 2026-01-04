@@ -1,3 +1,7 @@
 {
-  "expo": {}
+  "expo": {
+    "plugins": [
+      "expo-build-properties"
+    ]
+  }
 }
