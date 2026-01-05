@@ -1,22 +1,24 @@
 const { getDefaultConfig } = require('expo/metro-config');
 const path = require('path');
 
-// Find the project and workspace root
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, '../..');
 
 const config = getDefaultConfig(projectRoot);
 
-// 1. Watch all files within the monorepo
-config.watchFolders = [workspaceRoot];
+// 1. Prioritize React Native over Web/Browser
+config.resolver.resolverMainFields = ['react-native', 'browser', 'main'];
 
-// 2. Let Metro know where to resolve modules from
+// 2. Add mjs support (required by Firebase v10+)
+config.resolver.sourceExts = [...config.resolver.sourceExts, 'mjs'];
+
+// 3. Monorepo Watch Folders
+config.watchFolders = [workspaceRoot];
 config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),
   path.resolve(workspaceRoot, 'node_modules'),
 ];
-
-// 3. Force Metro to resolve (happen for certain monorepo setups)
 config.resolver.disableHierarchicalLookup = true;
+config.resolver.unstable_enablePackageExports = false;
 
 module.exports = config;

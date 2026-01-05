@@ -1,6 +1,9 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
+
+// BACK TO STANDARD IMPORT: But we'll handle the type mismatch
+import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
+import * as firebaseAuth from 'firebase/auth';
 
 const firebaseConfig = {
     apiKey: "AIzaSyCIl99WbAQGu1CRSAOVAln-_VJJ74tK60Y",
@@ -10,13 +13,16 @@ const firebaseConfig = {
     messagingSenderId: "870445864294",
     appId: "1:870445864294:web:9eef577d81d9d33ea664a7",
     measurementId: "G-LYSQPE4WTH"
-  };
+};
   
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Initialize Services
-export const auth = getAuth(app);
+// CRITICAL FIX: Cast to 'any' to access the hidden mobile function
+const { initializeAuth, getReactNativePersistence } = firebaseAuth as any;
+
+export const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(ReactNativeAsyncStorage)
+});
+
 export const db = getFirestore(app);
-
 export default app;
