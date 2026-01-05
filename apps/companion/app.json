@@ -17,6 +17,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass.companion",
       "icon": "./assets/images/icon-lgc.png",
+      "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }

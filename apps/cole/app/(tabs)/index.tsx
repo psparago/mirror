@@ -1,6 +1,6 @@
-import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
+import { db } from '@projectmirror/shared/firebase';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
@@ -123,19 +123,31 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
-  // Listen to audio player status to detect when audio finishes
+  // INSERT THIS REPLACEMENT BLOCK
   useEffect(() => {
-    if (!audioStatus || !selectedEvent) return;
-    
-    if (audioStatus.isLoaded && audioStatus.didJustFinish && !audioStatus.playing) {
-      // Show selfie mirror after audio finishes
-      // Only show if we haven't already shown it for this event in this session
-      if (!audioFinishedRef.current[selectedEvent.event_id]) {
+    if (!audioPlayer) return;
+
+    // In SDK 52 expo-audio, the event is 'playbackStatusUpdate'
+    const subscription = audioPlayer.addListener('playbackStatusUpdate', (status) => {
+      // There is no didJustFinish. We check if we are at the end.
+      // We check if duration exists, is greater than 0, and we are within 0.2s of the end
+      // AND we are not playing anymore.
+      const isFinished = 
+        status.duration > 0 && 
+        Math.abs(status.currentTime - status.duration) < 0.2 && // Close to end
+        !status.playing; // Stopped
+
+      if (isFinished && selectedEvent && !audioFinishedRef.current[selectedEvent.event_id]) {
+        // Mark as finished to prevent duplicate triggers
         audioFinishedRef.current[selectedEvent.event_id] = true;
         setShowSelfieMirror(true);
       }
-    }
-  }, [audioStatus?.isLoaded, audioStatus?.didJustFinish, audioStatus?.playing, selectedEvent?.event_id, cameraPermission?.granted]);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [audioPlayer, selectedEvent]);
 
   // Auto-play when audio loads (for initial selection and manual play)
   useEffect(() => {

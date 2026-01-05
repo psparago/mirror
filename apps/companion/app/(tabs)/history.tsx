@@ -1,7 +1,7 @@
-import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS } from '@projectmirror/shared';
-import { collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
+import { db } from '@projectmirror/shared/firebase';
+import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 

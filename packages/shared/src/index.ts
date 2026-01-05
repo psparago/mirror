@@ -13,3 +13,4 @@ export * from './s3/upload';
 // Types
 export * from './types';
 
+export * from './firebase';

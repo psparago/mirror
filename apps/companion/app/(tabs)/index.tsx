@@ -1,6 +1,6 @@
-import { db } from '@/config/firebase';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
+import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';

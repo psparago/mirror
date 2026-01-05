@@ -1,9 +1,7 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
-
-// BACK TO STANDARD IMPORT: But we'll handle the type mismatch
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import * as firebaseAuth from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
     apiKey: "AIzaSyCIl99WbAQGu1CRSAOVAln-_VJJ74tK60Y",
@@ -17,7 +15,7 @@ const firebaseConfig = {
   
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// CRITICAL FIX: Cast to 'any' to access the hidden mobile function
+// The working hack for Expo/Firebase environments
 const { initializeAuth, getReactNativePersistence } = firebaseAuth as any;
 
 export const auth = initializeAuth(app, {
