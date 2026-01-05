@@ -42,14 +42,14 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Companion to use your camera to take photos.",
-          "microphonePermission": false
+          "cameraPermission": "Allow Looking Glass Companion to access your camera to send video responses.",
+          "microphonePermission": "Allow Looking Glass Companion to access your microphone for video and audio features."        
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Companion to access your photos."
+          "photosPermission": "Allow Looking Glass Companion to access your photos."
         }
       ],
       [

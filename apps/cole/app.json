@@ -48,8 +48,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Cole to use your camera to take selfies.",
-          "microphonePermission": false
+          "cameraPermission": "Allow Looking Glass Cole to see you.",
+        "microphonePermission": "Allow Looking Glass to hear you."
         }
       ],
       [
