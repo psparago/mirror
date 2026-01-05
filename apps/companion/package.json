@@ -11,6 +11,7 @@
   "dependencies": {
     "@expo/vector-icons": "^14.0.2",
     "@projectmirror/shared": "*",
+    "@react-native-async-storage/async-storage": "1.23.1",
     "@react-navigation/native": "^6.1.17",
     "expo": "~52.0.25",
     "expo-audio": "~0.2.2",
