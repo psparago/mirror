@@ -53,18 +53,9 @@
             "buildReactNativeFromSource": true
           }
         }
-      ] 
-    
-    ],
-    "experiments": {
-      "typedRoutes": true
-    },
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "c68c385b-fb1c-4beb-b226-5750b49b20d2"
-      }
-    },
-    "owner": "psparago"
+      ],
+      "expo-video",
+      "expo-av"
+    ]
   }
 }

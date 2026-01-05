@@ -10,7 +10,7 @@ const config = getDefaultConfig(projectRoot);
 config.resolver.resolverMainFields = ['react-native', 'browser', 'main'];
 
 // 2. Add mjs support (required by Firebase v10+)
-config.resolver.sourceExts = [...config.resolver.sourceExts, 'mjs'];
+config.resolver.sourceExts = [...config.resolver.sourceExts, 'ts', 'tsx', 'js', 'jsx', 'json', 'mjs'];
 
 // 3. Monorepo Watch Folders
 config.watchFolders = [workspaceRoot];

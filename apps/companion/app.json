@@ -58,7 +58,10 @@
             "buildReactNativeFromSource": true
           }
         }
-      ]    ],
+      ],
+      "expo-video",
+      "expo-av"
+    ],
     "experiments": {
       "typedRoutes": true
     },
