@@ -10,7 +10,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 
 export {
   // Catch any errors thrown by the Layout component.
-  ErrorBoundary,
+  ErrorBoundary
 } from 'expo-router';
 
 export const unstable_settings = {
@@ -52,9 +52,10 @@ function RootLayoutNav() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
+        {/* Update this name to reflect the new nested path if necessary, 
+            though usually (tabs)/modal is what the router expects now */}
+        <Stack.Screen name="(tabs)/modal" options={{ presentation: 'modal', headerTitle: 'Modal' }} />
       </Stack>
     </ThemeProvider>
   );
 }
-

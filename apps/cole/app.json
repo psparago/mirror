@@ -29,7 +29,12 @@
       },
       "package": "com.psparago.lookingglass",
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -56,6 +61,14 @@
       ],
       "expo-video",
       "expo-av"
-    ]
+    ],
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "c68c385b-fb1c-4beb-b226-5750b49b20d2"
+      }
+    }
   }
 }
