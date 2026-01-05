@@ -2,6 +2,17 @@
   "expo": {
     "plugins": [
       "expo-build-properties"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "76b4c297-74fd-4954-9716-d51461bdd7cf"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.psparago.projectmirrormonorepo",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
   }
 }

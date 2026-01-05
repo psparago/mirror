@@ -1,17 +1,14 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
-import { Audio } from 'expo-av';
-import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
-import * as Speech from 'expo-speech';
 import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, FlatList, Image, Modal, PanResponder, Platform, StatusBar, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Image, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import ReflectedWatchView from '@/components/ReflectedWatchView';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
@@ -26,10 +23,6 @@ export default function ColeInboxScreen() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
-  const hasSpokenRef = useRef(false); // Must be declared before any conditional returns
-  const audioPlayer = useAudioPlayer(undefined);
-  const audioStatus = useAudioPlayerStatus(audioPlayer);
-  const shouldAutoPlayRef = useRef<{ eventId: string | null; url: string | null }>({ eventId: null, url: null });
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
@@ -123,55 +116,15 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
-  // INSERT THIS REPLACEMENT BLOCK
+  // Auto-select the first (most recent) event when events load (only once)
+  const hasAutoSelectedRef = useRef(false);
   useEffect(() => {
-    if (!audioPlayer) return;
-
-    // In SDK 52 expo-audio, the event is 'playbackStatusUpdate'
-    const subscription = audioPlayer.addListener('playbackStatusUpdate', (status) => {
-      // There is no didJustFinish. We check if we are at the end.
-      // We check if duration exists, is greater than 0, and we are within 0.2s of the end
-      // AND we are not playing anymore.
-      const isFinished = 
-        status.duration > 0 && 
-        Math.abs(status.currentTime - status.duration) < 0.2 && // Close to end
-        !status.playing; // Stopped
-
-      if (isFinished && selectedEvent && !audioFinishedRef.current[selectedEvent.event_id]) {
-        // Mark as finished to prevent duplicate triggers
-        audioFinishedRef.current[selectedEvent.event_id] = true;
-        setShowSelfieMirror(true);
-      }
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, [audioPlayer, selectedEvent]);
-
-  // Auto-play when audio loads (for initial selection and manual play)
-  useEffect(() => {
-    if (!audioStatus || !audioPlayer || !shouldAutoPlayRef.current.eventId) return;
-    
-    // If audio just loaded and we're waiting to auto-play
-    if (audioStatus.isLoaded && !audioStatus.playing && shouldAutoPlayRef.current.eventId) {
-      const waitingEventId = shouldAutoPlayRef.current.eventId;
-      // Check if we're still on the same event
-      if (currentEventIdRef.current === waitingEventId) {
-        // Small delay to ensure everything is ready
-        const playTimer = setTimeout(() => {
-          if (currentEventIdRef.current === waitingEventId && audioStatus.isLoaded && !audioStatus.playing) {
-            audioPlayer.play();
-            shouldAutoPlayRef.current = { eventId: null, url: null };
-          }
-        }, 100);
-        return () => clearTimeout(playTimer);
-      } else {
-        // Event changed, clear the flag
-        shouldAutoPlayRef.current = { eventId: null, url: null };
-      }
+    if (events.length > 0 && !hasAutoSelectedRef.current) {
+      hasAutoSelectedRef.current = true;
+      handleEventPress(events[0]);
     }
-  }, [audioStatus?.isLoaded, audioStatus?.playing, audioPlayer]);
+  }, [events.length]);
+
 
   // Fetch metadata when a reflection is selected
   useEffect(() => {
@@ -517,13 +470,23 @@ export default function ColeInboxScreen() {
     const eventIdToRefresh = item.event_id; // Capture event_id for closure
     refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
       if (refreshedEvent) {
-        // Update selectedEvent if it's still the same event
-        setSelectedEvent(prev => {
-          if (prev?.event_id === eventIdToRefresh) {
-            return refreshedEvent;
-          }
-          return prev; // Don't update if user switched to a different photo
-        });
+        // DON'T update selectedEvent - this would trigger re-renders and re-playback
+        // Just update the events array in the background
+        console.log(`🔄 URLs refreshed for event ${eventIdToRefresh} (silently updated in events array)`);
+        
+        // Update dimensions if image URL changed
+        if (refreshedEvent.image_url !== item.image_url) {
+          Image.getSize(
+            refreshedEvent.image_url,
+            (imgWidth, imgHeight) => {
+              setImageDimensions({ width: imgWidth, height: imgHeight });
+            },
+            (error) => {
+              console.warn("Failed to get image dimensions:", error);
+            }
+          );
+        }
+        
         // Fetch metadata for refreshed event if not already loaded
         if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
           fetch(refreshedEvent.metadata_url)
@@ -535,18 +498,6 @@ export default function ColeInboxScreen() {
               }));
             })
             .catch(err => console.warn("Failed to fetch metadata for refreshed event:", err));
-        }
-        // Update dimensions if URL changed
-        if (refreshedEvent.image_url && refreshedEvent.image_url !== item.image_url) {
-          Image.getSize(
-            refreshedEvent.image_url,
-            (imgWidth, imgHeight) => {
-              setImageDimensions({ width: imgWidth, height: imgHeight });
-            },
-            (error) => {
-              console.warn("Failed to get image dimensions:", error);
-            }
-          );
         }
       }
     }).catch(err => {
@@ -1059,257 +1010,20 @@ export default function ColeInboxScreen() {
   }
 
   return (
-    <LinearGradient
-      colors={['#A1C4FD', '#C2E9FB']}
-      style={styles.container}
-    >
-      <Text style={styles.title}>{selectedEvent ? 'Reflection' : 'Reflections'}</Text>
-      <FlatList
-        key={numColumns}
-        data={events}
-        renderItem={renderEvent}
-        keyExtractor={(item) => item.event_id}
-        numColumns={numColumns}
-        contentContainerStyle={styles.listContainer}
-        columnWrapperStyle={numColumns > 1 ? styles.row : undefined}
-      />
-
-      {/* Full-screen modal with description */}
-      <Modal
-        visible={selectedEvent !== null}
-        transparent={false}
-        animationType="fade"
-        onRequestClose={closeFullScreen}
-      >
-        {selectedEvent && (
-          <LinearGradient
-            colors={['#A1C4FD', '#C2E9FB']}
-            style={styles.fullScreenContainer}
-            {...swipeResponder.panHandlers}
-          >
-            <StatusBar barStyle="dark-content" />
-            
-            {/* Top Layer: Header and controls */}
-            <View style={[styles.topButtonContainer, { top: insets.top + 10 }]}>
-              {/* Reflection header */}
-              <Text style={styles.reflectionHeader}>
-                {selectedMetadata?.sender ? `Reflection from ${selectedMetadata.sender}` : 'Reflection'}
-              </Text>
-              {/* Close button */}
-              <TouchableOpacity
-                style={styles.deleteButton}
-                onPress={closeFullScreen}
-                activeOpacity={0.7}
-              >
-                <FontAwesome name="times" size={20} color="#fff" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Base Layer: Image with glass border */}
-            <View style={[styles.imageFrameContainer, { 
-              top: insets.top + 100,
-              bottom: isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24),
-              ...(imageDimensions ? (() => {
-                const availableHeight = height - (insets.top + 100) - (isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24));
-                const aspectRatio = imageDimensions.width / imageDimensions.height;
-                const maxWidth = isLandscape ? width * 0.7 : width * 0.9;
-                const maxHeight = isLandscape ? height * 0.6 : height * 0.5;
-                
-                // Calculate dimensions that fit within maxWidth and maxHeight while maintaining aspect ratio
-                const widthFromHeight = availableHeight * aspectRatio;
-                const heightFromWidth = maxWidth / aspectRatio;
-                
-                let finalWidth = maxWidth;
-                let finalHeight = heightFromWidth;
-                
-                if (heightFromWidth > availableHeight) {
-                  finalWidth = widthFromHeight;
-                  finalHeight = availableHeight;
-                }
-                
-                return {
-                  width: Math.min(finalWidth, maxWidth),
-                  height: Math.min(finalHeight, maxHeight),
-                };
-              })() : {
-                width: isLandscape ? width * 0.7 : width * 0.9,
-                maxHeight: isLandscape ? height * 0.6 : height * 0.5,
-              }),
-              alignSelf: 'center',
-            }]}>
-              <Image
-                source={{ uri: selectedEvent.image_url }}
-                style={styles.fullScreenImage}
-                resizeMode="cover"
-              />
-            </View>
-
-            {/* Top Layer: Selfie Mirror - appears after audio finishes */}
-            {showSelfieMirror && (
-              <TouchableOpacity 
-                onPress={() => {
-                  captureSelfieResponse();
-                }}
-                disabled={isCapturingSelfie}
-                activeOpacity={0.9}
-                style={[styles.selfieMirrorContainer, { 
-                ...(imageDimensions ? (() => {
-                  const availableHeight = height - (insets.top + 100) - (isLandscape ? 180 + Math.max(insets.bottom, 24) : 200 + Math.max(insets.bottom, 24));
-                  const aspectRatio = imageDimensions.width / imageDimensions.height;
-                  const maxWidth = isLandscape ? width * 0.7 : width * 0.9;
-                  const maxHeight = isLandscape ? height * 0.6 : height * 0.5;
-                  
-                  const widthFromHeight = availableHeight * aspectRatio;
-                  const heightFromWidth = maxWidth / aspectRatio;
-                  
-                  let finalWidth = maxWidth;
-                  let finalHeight = heightFromWidth;
-                  
-                  if (heightFromWidth > availableHeight) {
-                    finalWidth = widthFromHeight;
-                    finalHeight = availableHeight;
-                  }
-                  
-                  const imageWidth = Math.min(finalWidth, maxWidth);
-                  const imageLeft = (width - imageWidth) / 2; // Center the image
-                  const imageRight = imageLeft + imageWidth;
-                  const imageTop = insets.top + 100;
-                  
-                  if (isLandscape) {
-                    // Align with delete button: delete button is in topButtonContainer which is 90% width, centered
-                    // Delete button is at the right edge of that container, which is at right: 5% of screen width
-                    const deleteButtonRight = width * 0.05; // 5% from right edge (since container is 90% width, centered)
-                    const selfieSize = 120;
-                    
-                    return {
-                      top: imageTop + 20, // Align with top of image with spacing
-                      right: deleteButtonRight, // Align with delete button
-                      zIndex: 10
-                    };
-                  } else {
-                    // Portrait: reduce top spacing, increase right spacing
-                    return {
-                      top: insets.top + 100 + 10, // Reduced spacing from top
-                      right: 60, // Increased spacing from right edge
-                      zIndex: 10
-                    };
-                  }
-                })() : {
-                  top: insets.top + 100 + 10,
-                  right: isLandscape ? width * 0.05 : 60,
-                  zIndex: 10
-                })
-              }]}>
-                {cameraPermission?.granted ? (
-                  <>
-                    <View style={styles.selfieMirrorWrapper} pointerEvents="none">
-                      <CameraView
-                        ref={cameraRef}
-                        style={styles.selfieMirror}
-                        facing="front"
-                      />
-                    </View>
-                    <View style={styles.cameraShutterButton}>
-                      {isCapturingSelfie ? (
-                        <ActivityIndicator size="small" color="#2C3E50" />
-                      ) : (
-                        <FontAwesome name="camera" size={20} color="#2C3E50" />
-                      )}
-                    </View>
-                  </>
-                ) : (
-                  <TouchableOpacity
-                    style={styles.selfieMirrorPermissionButton}
-                    onPress={async () => {
-                      const result = await requestCameraPermission();
-                      if (!result.granted) {
-                        Alert.alert("Camera Permission", "Camera permission is required to take a selfie response.");
-                      }
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <FontAwesome name="camera" size={32} color="#fff" />
-                    <Text style={{ color: '#fff', fontSize: 12, marginTop: 8, textAlign: 'center' }}>Tap to enable</Text>
-                  </TouchableOpacity>
-                )}
-              </TouchableOpacity>
-            )}
-
-            {/* Middle Layer: Floating Info Panel */}
-            <View style={[styles.descriptionContainer, { bottom: insets.bottom + 20, paddingBottom: Math.max(insets.bottom, 24) }]}>
-              <View style={styles.descriptionHeader}>
-                {selectedMetadata?.content_type === 'audio' || selectedEvent?.audio_url ? (
-                  <Text style={styles.descriptionText}>
-                    🎤 Voice message
-                  </Text>
-                ) : selectedMetadata?.description ? (
-                  <Text style={styles.descriptionText}>
-                    {selectedMetadata.description}
-                  </Text>
-                ) : (
-                  <Text style={styles.descriptionText}>
-                    Reflection
-                  </Text>
-                )}
-                <View style={styles.buttonRow}>
-                  {(selectedEvent?.audio_url || selectedMetadata?.description) && (
-                    <TouchableOpacity 
-                      style={[
-                        styles.playButton, 
-                        (audioStatus && audioStatus.playing) ? styles.playButtonPlaying : null,
-                        playButtonPressed && (!audioStatus || !audioStatus.playing) ? styles.playButtonPressed : null
-                      ]}
-                      onPress={playDescription}
-                      onPressIn={() => setPlayButtonPressed(true)}
-                      onPressOut={() => setPlayButtonPressed(false)}
-                      activeOpacity={0.8}
-                    >
-                      <FontAwesome 
-                        name={audioStatus?.playing ? "stop" : "play"} 
-                        size={28} 
-                        color={audioStatus?.playing ? "#fff" : "#d32f2f"} 
-                      />
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity 
-                    style={styles.closeButtonInline}
-                    onPress={() => selectedEvent && deleteEvent(selectedEvent)}
-                    activeOpacity={0.8}
-                  >
-                    <FontAwesome name="trash" size={20} color="#fff" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
-
-            {/* Top Layer: Tell Me More floating action button */}
-            {selectedMetadata?.deep_dive && (
-              <Animated.View
-                style={[
-                  styles.tellMeMoreButton, 
-                  { 
-                    bottom: insets.bottom + 20 + 120 + 20, // 20px above the bottom info bar
-                    right: 20,
-                    transform: [{ scale: pulseAnim }],
-                  }
-                ]}
-              >
-                <TouchableOpacity
-                  style={{ width: '100%', height: '100%' }}
-                  onPress={playDeepDive}
-                  activeOpacity={0.8}
-                  disabled={isPlayingDeepDive}
-                >
-                  <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                    <Text style={styles.tellMeMoreIcon}>✨</Text>
-                  </BlurView>
-                </TouchableOpacity>
-              </Animated.View>
-            )}
-          </LinearGradient>
-        )}
-      </Modal>
-    </LinearGradient>
+    <ReflectedWatchView
+      visible={!!selectedEvent}
+      selectedEvent={selectedEvent}
+      events={events}
+      eventMetadata={eventMetadata}
+      onClose={closeFullScreen}
+      onEventSelect={handleEventPress}
+      onDelete={deleteEvent}
+      onCaptureSelfie={captureSelfieResponse}
+      cameraRef={cameraRef}
+      cameraPermission={cameraPermission}
+      requestCameraPermission={requestCameraPermission}
+      isCapturingSelfie={isCapturingSelfie}
+    />
   );
 }
 
