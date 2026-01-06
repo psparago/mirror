@@ -1,24 +1,27 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { Event, EventMetadata } from '@projectmirror/shared';
-import { Audio } from 'expo-av';
+import { Audio, AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Animated,
-    FlatList,
-    Image,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    useWindowDimensions,
-    View
+  ActivityIndicator,
+  Alert,
+  Animated,
+  FlatList,
+  Image,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+// Config
+const AUTO_SHOW_SELFIE_MIRROR = true;
 
 interface ReflectedWatchViewProps {
   visible: boolean;
@@ -54,23 +57,36 @@ export default function ReflectedWatchView({
   const insets = useSafeAreaInsets();
 
   const [isPlayingDeepDive, setIsPlayingDeepDive] = useState(false);
-  const [playButtonPressed, setPlayButtonPressed] = useState(false);
-  const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
 
+  // Audio playback state
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  
+  // Video playback state
+  const videoRef = useRef<Video>(null);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoFinished, setVideoFinished] = useState(false);
+  const [isSpeakingCaption, setIsSpeakingCaption] = useState(false);
+  
+  // Tracking refs
   const hasSpokenRef = useRef(false);
   const currentPlayingEventIdRef = useRef<string | null>(null);
-  const eventsRef = useRef<Event[]>(events); // Always have latest events array
-  const selectedEventRef = useRef<Event | null>(selectedEvent); // Always have latest selected event
-  const audioAutoAdvanceScheduledRef = useRef(false); // Prevent duplicate audio auto-advance
+  const eventsRef = useRef<Event[]>(events);
+  const selectedEventRef = useRef<Event | null>(selectedEvent);
+  const audioAutoAdvanceScheduledRef = useRef(false);
+  
+  // Animation refs
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const controlsOpacity = useRef(new Animated.Value(1)).current; // Start visible (paused state)
+  const selfieMirrorOpacity = useRef(new Animated.Value(1)).current; // Start visible by default
+  const selfieTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
-  // Controls fade animation
-  const controlsOpacity = useRef(new Animated.Value(1)).current;
-  const controlsFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // UI refs
   const flatListRef = useRef<FlatList>(null);
+  
+  // "One Voice" locking rule: controls locked while video is playing
+  const areControlsLocked = isVideoPlaying;
 
   // Keep refs in sync with props
   useEffect(() => {
@@ -97,24 +113,7 @@ export default function ReflectedWatchView({
       .trim();
   };
 
-  // Get image dimensions when event changes
-  useEffect(() => {
-    if (selectedEvent?.image_url) {
-      Image.getSize(
-        selectedEvent.image_url,
-        (imgWidth, imgHeight) => {
-          setImageDimensions({ width: imgWidth, height: imgHeight });
-        },
-        (error) => {
-          console.warn('Failed to get image dimensions:', error);
-        }
-      );
-    } else {
-      setImageDimensions(null);
-    }
-  }, [selectedEvent?.image_url]);
-
-  // Auto-play description/audio when event changes
+  // "KILL SWITCH" + "Context First" Entry Sequence
   useEffect(() => {
     if (!selectedEvent || !selectedMetadata) {
       return;
@@ -124,72 +123,108 @@ export default function ReflectedWatchView({
 
     // Check if this event is already playing
     if (currentPlayingEventIdRef.current === eventId && hasSpokenRef.current) {
-      return; // Already playing this event, don't restart
+      return;
     }
 
-    // Stop any previous playback
+    // ═══ KILL SWITCH ═══
+    // IMMEDIATELY stop all playback from previous event
     Speech.stop();
     if (sound) {
-      // Remove status update listener before unloading
       sound.setOnPlaybackStatusUpdate(null);
       sound.unloadAsync().catch(err => console.warn('Error unloading sound:', err));
       setSound(null);
     }
+    if (videoRef.current) {
+      videoRef.current.stopAsync().catch(err => console.warn('Error stopping video:', err));
+    }
+    if (selfieTimerRef.current) {
+      clearTimeout(selfieTimerRef.current);
+      selfieTimerRef.current = null;
+    }
 
-    // Mark this event as playing IMMEDIATELY
+    // Reset state
+    setIsAudioPlaying(false);
+    setIsVideoPlaying(false);
+    setVideoFinished(false);
+    setIsSpeakingCaption(false);
+    setIsPlayingDeepDive(false);
+    
+    // Reset selfie mirror: visible by default, or fade in for videos
+    const isVideoContent = selectedMetadata?.content_type === 'video';
+    selfieMirrorOpacity.setValue(isVideoContent ? 0 : 1);
+
+    // Mark this event as current
     currentPlayingEventIdRef.current = eventId;
-    hasSpokenRef.current = true; // Set to true immediately to block duplicates
+    hasSpokenRef.current = true;
+    audioAutoAdvanceScheduledRef.current = false;
 
     const timer = setTimeout(() => {
-      // Triple-check we haven't moved to a different event
       if (currentPlayingEventIdRef.current !== eventId) {
         return;
       }
 
-      // Audio message takes priority
-      if (selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '') {
-        audioAutoAdvanceScheduledRef.current = false; // Reset flag for new audio
-        const playAudio = async () => {
+      const hasVideo = selectedMetadata.content_type === 'video';
+      const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
+      const hasCaption = selectedMetadata.description;
+
+      // ═══ CONTEXT FIRST LOGIC (with 2-second initial delay) ═══
+      if (hasVideo) {
+        // Video content: Speak caption (if exists), then auto-play video
+        if (hasCaption) {
+          setIsSpeakingCaption(true);
+          const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
+          Speech.speak(textToSpeak, {
+            volume: 1.0,
+            pitch: 1.0,
+            rate: 1.0,
+            language: 'en-US',
+            onDone: () => {
+              setIsSpeakingCaption(false);
+              // Auto-start video after caption finishes
+              if (currentPlayingEventIdRef.current === eventId && videoRef.current) {
+                videoRef.current.playAsync().catch(err => console.warn('Error auto-starting video:', err));
+              }
+            },
+          });
+        } else {
+          // No caption: auto-start video after 2-second pause
+          setTimeout(() => {
+            if (currentPlayingEventIdRef.current === eventId && videoRef.current) {
+              videoRef.current.playAsync().catch(err => console.warn('Error auto-starting video:', err));
+            }
+          }, 2000);
+        }
+      } else if (hasAudio) {
+        // Audio recording: Skip caption, just auto-play audio after 2-second pause
+        // (No need to speak "Voice message" when they're about to hear the actual voice)
+        setTimeout(() => {
+          if (currentPlayingEventIdRef.current === eventId) {
+            playAudioNow();
+          }
+        }, 2000);
+        
+        // Audio playback function
+        const playAudioNow = async () => {
+          audioAutoAdvanceScheduledRef.current = false;
           try {
-            // Unload previous sound
             if (sound) {
               await sound.unloadAsync();
             }
             
-            // Create and play new sound
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: selectedEvent.audio_url as string },
-              { shouldPlay: true }
+              { shouldPlay: true } // Auto-play
             );
             
-            // Set up status update handler to detect when audio finishes
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
-                // Prevent duplicate auto-advance triggers (callback fires multiple times)
-                if (audioAutoAdvanceScheduledRef.current) {
-                  return;
-                }
+                if (audioAutoAdvanceScheduledRef.current) return;
                 audioAutoAdvanceScheduledRef.current = true;
                 
-                // Guard: Only auto-advance if this event is STILL the current one
-                if (currentPlayingEventIdRef.current !== eventId) {
-                  return;
-                }
+                if (currentPlayingEventIdRef.current !== eventId) return;
                 
-                // Auto-advance: Use refs to get LATEST state (not stale closure)
-                const latestEvents = eventsRef.current;
-                const currentPlayingEvent = selectedEventRef.current;
-                if (!currentPlayingEvent) return;
-                
-                const currentIndex = latestEvents.findIndex((e) => e.event_id === currentPlayingEvent.event_id);                
-                if (currentIndex !== -1) {
-                  // Loop: if at end, go to beginning; otherwise go to next
-                  const nextIndex = currentIndex < latestEvents.length - 1 ? currentIndex + 1 : 0;
-                  const nextEvent = latestEvents[nextIndex];
-                  if (nextEvent) {
-                    setTimeout(() => handleUpNextItemPress(nextEvent), 1500);
-                  }
-                }
+                // Audio finished - just stop, no auto-advance
+                setIsAudioPlaying(false);
               }
             });
             
@@ -199,36 +234,23 @@ export default function ReflectedWatchView({
             console.error('Error playing audio:', error);
           }
         };
-        playAudio();
-      } else if (selectedMetadata.description) {
-        const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-        Speech.speak(textToSpeak, {
-          volume: 1.0,
-          pitch: 1.0,
-          rate: 1.0,
-          language: 'en-US',
-          onDone: () => {
-            // Guard: Only auto-advance if this event is STILL the current one
-            if (currentPlayingEventIdRef.current !== eventId) {
-              return;
-            }
-            
-            // Auto-advance: Use refs to get LATEST state (not stale closure)
-            const latestEvents = eventsRef.current;
-            const currentPlayingEvent = selectedEventRef.current;
-            if (!currentPlayingEvent) return;
-            
-            const currentIndex = latestEvents.findIndex((e) => e.event_id === currentPlayingEvent.event_id);            
-            if (currentIndex !== -1) {
-              // Loop: if at end, go to beginning; otherwise go to next
-              const nextIndex = currentIndex < latestEvents.length - 1 ? currentIndex + 1 : 0;
-              const nextEvent = latestEvents[nextIndex];
-              if (nextEvent) {
-                setTimeout(() => handleUpNextItemPress(nextEvent), 1500);
-              }
-            }
-          },
-        });
+      } else if (hasCaption) {
+        // Just a photo with caption: speak it (after 2-second pause)
+        setTimeout(() => {
+          if (currentPlayingEventIdRef.current === eventId) {
+            setIsSpeakingCaption(true);
+            const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
+            Speech.speak(textToSpeak, {
+              volume: 1.0,
+              pitch: 1.0,
+              rate: 1.0,
+              language: 'en-US',
+              onDone: () => {
+                setIsSpeakingCaption(false);
+              },
+            });
+          }
+        }, 2000);
       }
     }, 150);
 
@@ -236,27 +258,106 @@ export default function ReflectedWatchView({
       clearTimeout(timer);
     };
   }, [selectedEvent?.event_id]);
-  // Animate Tell Me More button
-  useEffect(() => {
-    if (isPlayingDeepDive) {
-      pulseAnimRef.current = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.15,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
+
+  // Control visibility functions
+  const showControls = useCallback(() => {
+    Animated.timing(controlsOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  }, [controlsOpacity]);
+
+  const hideControls = useCallback(() => {
+    Animated.timing(controlsOpacity, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, [controlsOpacity]);
+
+  // Video playback status handler
+  const handleVideoPlaybackStatus = useCallback((status: AVPlaybackStatus) => {
+    if (!status.isLoaded) return;
+
+    const eventId = selectedEvent?.event_id;
+    if (!eventId || currentPlayingEventIdRef.current !== eventId) return;
+
+    // Track playing state
+    if (status.isPlaying && !isVideoPlaying) {
+      setIsVideoPlaying(true);
+      hideControls(); // Hide play button when video starts
+      
+      // ═══ AUTO-SELFIE TIMER ═══
+      // Fade in selfie mirror 5 seconds after video STARTS playing
+      if (AUTO_SHOW_SELFIE_MIRROR && !selfieTimerRef.current) {
+        selfieTimerRef.current = setTimeout(() => {
+          Animated.timing(selfieMirrorOpacity, {
             toValue: 1,
-            duration: 600,
+            duration: 500,
             useNativeDriver: true,
-          }),
-        ])
-      );
-      pulseAnimRef.current.start();
+          }).start();
+        }, 5000);
+      }
+    } else if (!status.isPlaying && isVideoPlaying) {
+      setIsVideoPlaying(false);
+      showControls(); // Show play button when video pauses
+    }
+
+    // ═══ POST-ROLL ENGAGEMENT ═══
+    // Detect video finish
+    if (status.didJustFinish && !videoFinished) {
+      setVideoFinished(true);
+      setIsVideoPlaying(false);
+      showControls(); // Show replay button
+      
+      // Start pulse animation on sparkle button (visual prompt)
+      if (selectedMetadata?.deep_dive) {
+        pulseAnimRef.current = Animated.loop(
+          Animated.sequence([
+            Animated.timing(pulseAnim, {
+              toValue: 1.15,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseAnim, {
+              toValue: 1,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+          ])
+        );
+        pulseAnimRef.current.start();
+      }
+      
+      // NO auto-advance - Cole must manually select next video (no doom scrolling)
+    }
+  }, [isVideoPlaying, videoFinished, selectedEvent?.event_id, cameraPermission, selectedMetadata, showControls, hideControls]);
+
+  // Animate sparkle button when deep dive is playing OR post-roll
+  useEffect(() => {
+    if (isPlayingDeepDive || videoFinished) {
+      if (!pulseAnimRef.current) {
+        pulseAnimRef.current = Animated.loop(
+          Animated.sequence([
+            Animated.timing(pulseAnim, {
+              toValue: 1.15,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseAnim, {
+              toValue: 1,
+              duration: 600,
+              useNativeDriver: true,
+            }),
+          ])
+        );
+        pulseAnimRef.current.start();
+      }
     } else {
       if (pulseAnimRef.current) {
         pulseAnimRef.current.stop();
+        pulseAnimRef.current = null;
       }
       pulseAnim.setValue(1);
     }
@@ -264,83 +365,105 @@ export default function ReflectedWatchView({
     return () => {
       if (pulseAnimRef.current) {
         pulseAnimRef.current.stop();
+        pulseAnimRef.current = null;
       }
     };
-  }, [isPlayingDeepDive]);
+  }, [isPlayingDeepDive, videoFinished]);
 
   // Reset state when view unmounts (empty deps = runs only on unmount)
   useEffect(() => {
     return () => {
       setIsPlayingDeepDive(false);
-      setPlayButtonPressed(false);
       hasSpokenRef.current = false;
       currentPlayingEventIdRef.current = null;
       Speech.stop();
       if (sound) {
         sound.unloadAsync();
       }
+      if (videoRef.current) {
+        videoRef.current.stopAsync();
+      }
+      if (selfieTimerRef.current) {
+        clearTimeout(selfieTimerRef.current);
+      }
     };
-  }, []); // Empty deps - only run on mount/unmount, not when sound changes
+  }, []); // Empty deps - only run on mount/unmount
 
-  // Show controls and start fade timer
-  const showControls = useCallback(() => {
-    // Clear any existing timer
-    if (controlsFadeTimer.current) {
-      clearTimeout(controlsFadeTimer.current);
+  const toggleVideo = useCallback(async () => {
+    if (!videoRef.current || selectedMetadata?.content_type !== 'video') return;
+    
+    if (isVideoPlaying) {
+      await videoRef.current.pauseAsync();
+      showControls(); // Show button when paused
+    } else {
+      // Reset post-roll state if replaying
+      if (videoFinished) {
+        setVideoFinished(false);
+        await videoRef.current.replayAsync();
+      } else {
+        await videoRef.current.playAsync();
+      }
+      hideControls(); // Hide button when playing
     }
-
-    // Fade controls in
-    Animated.timing(controlsOpacity, {
-      toValue: 1,
-      duration: 200,
-      useNativeDriver: true,
-    }).start();
-
-    // Set timer to fade out after 3 seconds
-    controlsFadeTimer.current = setTimeout(() => {
-      Animated.timing(controlsOpacity, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
-    }, 3000);
-  }, [controlsOpacity]);
+  }, [isVideoPlaying, videoFinished, selectedMetadata, showControls, hideControls]);
 
   const playDescription = useCallback(async () => {
     if (!selectedEvent || !selectedMetadata) return;
+    // ONE VOICE: Cannot trigger caption while video is playing
+    if (areControlsLocked) return;
 
-    // Show controls when user interacts
-    showControls();
+    const hasVideo = selectedMetadata.content_type === 'video';
+    const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
 
-    if (isAudioPlaying) {
-      if (sound) await sound.pauseAsync();
-      setIsAudioPlaying(false);
-      Speech.stop();
-      setIsPlayingDeepDive(false);
-    } else {
-      if (selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '') {
+    if (hasVideo) {
+      // For video: toggle video playback
+      toggleVideo();
+    } else if (hasAudio) {
+      // For audio: toggle audio playback
+      if (isAudioPlaying) {
+        if (sound) await sound.pauseAsync();
+        setIsAudioPlaying(false);
+        Speech.stop();
+        showControls(); // Show button when paused
+      } else {
         try {
           if (sound) {
             await sound.playAsync();
             setIsAudioPlaying(true);
+            hideControls(); // Hide button when playing
           }
         } catch (error) {
           console.error('Error playing audio:', error);
         }
-      } else if (selectedMetadata.description) {
+      }
+    } else if (selectedMetadata.description) {
+      // For photo: toggle TTS caption
+      if (isSpeakingCaption) {
+        Speech.stop();
+        setIsSpeakingCaption(false);
+        showControls(); // Show button when stopped
+      } else {
+        setIsSpeakingCaption(true);
+        hideControls(); // Hide button when speaking
         const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
         Speech.speak(textToSpeak, {
           volume: 1.0,
           pitch: 1.0,
           rate: 1.0,
           language: 'en-US',
+          onDone: () => {
+            setIsSpeakingCaption(false);
+            showControls(); // Show button when done
+          },
         });
       }
     }
-  }, [selectedEvent, selectedMetadata, isAudioPlaying, sound, showControls]);
+  }, [selectedEvent, selectedMetadata, isAudioPlaying, sound, isSpeakingCaption, areControlsLocked, showControls, hideControls, toggleVideo]);
 
   const playDeepDive = useCallback(() => {
     if (!selectedMetadata?.deep_dive) return;
+    // ONE VOICE: Cannot trigger deep dive while video is playing
+    if (areControlsLocked) return;
 
     if (isPlayingDeepDive) {
       Speech.stop();
@@ -355,7 +478,7 @@ export default function ReflectedWatchView({
       });
       setIsPlayingDeepDive(true);
     }
-  }, [selectedMetadata?.deep_dive, isPlayingDeepDive]);
+  }, [selectedMetadata?.deep_dive, isPlayingDeepDive, areControlsLocked]);
 
   const handleUpNextItemPress = async (event: Event) => {
     // Stop current audio
@@ -383,9 +506,38 @@ export default function ReflectedWatchView({
   };
 
 
+  // Format event timestamp with relative or absolute date
+  const formatEventDate = (eventId: string): string => {
+    const timestamp = parseInt(eventId, 10);
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    
+    if (diffDays === 0) {
+      return 'today';
+    } else if (diffDays === 1) {
+      return 'yesterday';
+    } else {
+      // Show formatted date and time for older items
+      const dateStr = date.toLocaleDateString('en-US', { 
+        weekday: 'short', 
+        month: 'short', 
+        day: 'numeric' 
+      });
+      const timeStr = date.toLocaleTimeString('en-US', { 
+        hour: 'numeric', 
+        minute: '2-digit',
+        hour12: true 
+      });
+      return `${dateStr}, ${timeStr}`;
+    }
+  };
+
   const renderUpNextItem = ({ item, index }: { item: Event; index: number }) => {
     const metadata = eventMetadata[item.event_id];
     const isNowPlaying = item.event_id === selectedEvent?.event_id;
+    const dateStr = formatEventDate(item.event_id);
 
     return (
       <View style={styles.upNextItemContainer}>
@@ -403,8 +555,11 @@ export default function ReflectedWatchView({
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
               {isNowPlaying && '▶️ '}{metadata?.description || 'Reflection'}
             </Text>
+            <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
+              {dateStr}
+            </Text>
             <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>
-              {metadata?.content_type === 'audio' ? '🎤 Voice' : '📸 Photo'}
+              {metadata?.content_type === 'video' ? '🎥 Video' : metadata?.content_type === 'audio' ? '🎤 Voice' : '📸 Photo'}
               {isNowPlaying && ' • NOW PLAYING'}
             </Text>
           </View>
@@ -470,16 +625,32 @@ export default function ReflectedWatchView({
               </View>
             )}
 
-            {/* Media Container */}
+            {/* Media Container - Tap to pause/play for video/audio only (photos not interactive) */}
             <TouchableOpacity 
               style={styles.mediaContainer} 
               activeOpacity={1}
-              onPress={showControls}
+              onPress={(selectedMetadata?.content_type === 'video' || selectedEvent.audio_url) ? playDescription : undefined}
+              disabled={!selectedMetadata?.content_type || (selectedMetadata.content_type !== 'video' && !selectedEvent.audio_url)}
             >
-              <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="cover" />
+              {selectedMetadata?.content_type === 'video' ? (
+                <Video
+                  ref={videoRef}
+                  source={{ uri: selectedEvent.image_url }}
+                  style={styles.mediaImage}
+                  resizeMode={ResizeMode.COVER}
+                  shouldPlay={false}
+                  isLooping={false}
+                  onPlaybackStatusUpdate={handleVideoPlaybackStatus}
+                  usePoster
+                  posterSource={{ uri: selectedEvent.image_url }}
+                  posterStyle={styles.mediaImage}
+                />
+              ) : (
+                <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="cover" />
+              )}
 
-              {/* Animated Play/Pause Overlay - Fades out after 3 seconds */}
-              {(selectedEvent.audio_url || selectedMetadata?.description) && (
+              {/* Play/Pause Button - Only for videos and audio (not static photos) */}
+              {(selectedMetadata?.content_type === 'video' || selectedEvent.audio_url) && (
                 <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
                   <TouchableOpacity
                     onPress={playDescription}
@@ -488,7 +659,11 @@ export default function ReflectedWatchView({
                   >
                     <BlurView intensity={30} style={styles.playOverlayBlur}>
                       <FontAwesome
-                        name={isAudioPlaying ? 'pause' : 'play'}
+                        name={
+                          selectedMetadata?.content_type === 'video'
+                            ? (videoFinished ? 'refresh' : (isVideoPlaying ? 'pause' : 'play'))
+                            : (isAudioPlaying ? 'pause' : 'play')
+                        }
                         size={64}
                         color="rgba(255, 255, 255, 0.95)"
                       />
@@ -498,9 +673,9 @@ export default function ReflectedWatchView({
               )}
             </TouchableOpacity>
             
-            {/* Selfie Camera Bubble - Bottom Right */}
+            {/* Selfie Camera Bubble - Auto-shows 5s after video starts */}
             {cameraPermission?.granted ? (
-              <View style={[styles.cameraBubble, { bottom: insets.bottom + 100 }]}>
+              <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
                 <CameraView 
                   ref={cameraRef}
                   style={styles.cameraPreview}
@@ -520,9 +695,9 @@ export default function ReflectedWatchView({
                     )}
                   </BlurView>
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             ) : (
-              <View style={[styles.cameraBubble, { bottom: insets.bottom + 100 }]}>
+              <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
                 <TouchableOpacity 
                   style={styles.enableCameraButton}
                   onPress={requestCameraPermission}
@@ -533,21 +708,72 @@ export default function ReflectedWatchView({
                     <Text style={styles.enableCameraText}>Enable{'\n'}Camera</Text>
                   </BlurView>
                 </TouchableOpacity>
-              </View>
+              </Animated.View>
             )}
 
             {/* Metadata & Controls */}
             <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-              <Text style={styles.descriptionText} numberOfLines={3}>
-                {selectedMetadata?.content_type === 'audio' || selectedEvent.audio_url
-                  ? '🎤 Voice message'
-                  : selectedMetadata?.description || 'Reflection'}
-              </Text>
+              {/* Caption with inline replay button for non-audio items */}
+              {selectedMetadata?.description && !selectedEvent.audio_url ? (
+                <View style={styles.captionRow}>
+                  <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
+                    {selectedMetadata.description}
+                  </Text>
+                  <TouchableOpacity 
+                    onPress={() => {
+                      if (areControlsLocked) return;
+                      if (isSpeakingCaption) {
+                        Speech.stop();
+                        setIsSpeakingCaption(false);
+                      } else {
+                        setIsSpeakingCaption(true);
+                        const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
+                        Speech.speak(textToSpeak, {
+                          volume: 1.0,
+                          pitch: 1.0,
+                          rate: 1.0,
+                          language: 'en-US',
+                          onDone: () => {
+                            setIsSpeakingCaption(false);
+                          },
+                        });
+                      }
+                    }}
+                    activeOpacity={0.8} 
+                    disabled={areControlsLocked}
+                    style={[styles.captionButtonInline, { opacity: areControlsLocked ? 0.5 : 1 }]}
+                  >
+                    <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
+                      <FontAwesome 
+                        name={isSpeakingCaption ? 'stop' : 'volume-up'} 
+                        size={24} 
+                        color="#fff" 
+                      />
+                    </BlurView>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <Text style={styles.descriptionText} numberOfLines={3}>
+                  {selectedMetadata?.content_type === 'audio' || selectedEvent.audio_url
+                    ? '🎤 Voice message'
+                    : 'Reflection'}
+                </Text>
+              )}
 
-              {/* Tell Me More FAB */}
+              {/* Tell Me More FAB - Locked during video playback */}
               {selectedMetadata?.deep_dive && (
-                <Animated.View style={[styles.tellMeMoreFAB, { transform: [{ scale: pulseAnim }] }]}>
-                  <TouchableOpacity onPress={playDeepDive} activeOpacity={0.8} disabled={isPlayingDeepDive}>
+                <Animated.View style={[
+                  styles.tellMeMoreFAB, 
+                  { 
+                    transform: [{ scale: pulseAnim }],
+                    opacity: areControlsLocked ? 0.5 : 1
+                  }
+                ]}>
+                  <TouchableOpacity 
+                    onPress={playDeepDive} 
+                    activeOpacity={0.8} 
+                    disabled={isPlayingDeepDive || areControlsLocked}
+                  >
                     <BlurView intensity={50} style={styles.tellMeMoreBlur}>
                       <Text style={styles.tellMeMoreIcon}>✨</Text>
                     </BlurView>
@@ -715,11 +941,31 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
   },
   descriptionText: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '600',
     color: '#fff',
-    marginBottom: 16,
-    lineHeight: 28,
+    marginBottom: 12,
+    lineHeight: 26,
+  },
+  captionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 10,
+  },
+  captionButtonInline: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    overflow: 'hidden',
+    flexShrink: 0,
+  },
+  captionButtonInlineBlur: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 24,
   },
   tellMeMoreFAB: {
     position: 'absolute',
@@ -802,6 +1048,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#fff',
     marginBottom: 4,
+  },
+  upNextDate: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.5)',
+    marginBottom: 2,
+    fontStyle: 'italic',
+  },
+  upNextDateNowPlaying: {
+    color: 'rgba(79, 195, 247, 0.8)',
   },
   upNextMeta: {
     fontSize: 12,

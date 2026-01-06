@@ -26,7 +26,6 @@ export default function ColeInboxScreen() {
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
-  const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -221,7 +220,6 @@ export default function ColeInboxScreen() {
   const handleEventPress = async (item: Event) => {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
-    setImageDimensions(null); // Reset dimensions for new image
     
     // Fetch metadata if not already loaded
     if (!eventMetadata[item.event_id] && item.metadata_url) {
@@ -239,39 +237,12 @@ export default function ColeInboxScreen() {
       }
     }
     
-    // Get image dimensions to size container correctly
-    if (item.image_url) {
-      Image.getSize(
-        item.image_url,
-        (imgWidth, imgHeight) => {
-          setImageDimensions({ width: imgWidth, height: imgHeight });
-        },
-        (error) => {
-          console.warn("Failed to get image dimensions:", error);
-        }
-      );
-    }
-    
     // Refresh URLs in background (non-blocking) to ensure they're not expired
-    // This happens after the modal opens so Cole doesn't wait
-    const eventIdToRefresh = item.event_id; // Capture event_id for closure
+    const eventIdToRefresh = item.event_id;
     refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
       if (refreshedEvent) {
         // DON'T update selectedEvent - this would trigger re-renders and re-playback
         // Just update the events array in the background
-        
-        // Update dimensions if image URL changed
-        if (refreshedEvent.image_url !== item.image_url) {
-          Image.getSize(
-            refreshedEvent.image_url,
-            (imgWidth, imgHeight) => {
-              setImageDimensions({ width: imgWidth, height: imgHeight });
-            },
-            (error) => {
-              console.warn("Failed to get image dimensions:", error);
-            }
-          );
-        }
         
         // Fetch metadata for refreshed event if not already loaded
         if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
