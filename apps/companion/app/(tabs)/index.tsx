@@ -1117,6 +1117,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1.5,
     borderColor: 'rgba(255, 255, 255, 0.9)',
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
     ...Platform.select({
       ios: {
         shadowColor: '#fff',

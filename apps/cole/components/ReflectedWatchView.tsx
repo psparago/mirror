@@ -936,6 +936,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 80,
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
   },
   cameraBubble: {
     position: 'absolute',
@@ -967,6 +968,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 22,
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
   },
   enableCameraButton: {
     width: '100%',
@@ -980,6 +982,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 60,
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
   },
   enableCameraText: {
     color: '#fff',
@@ -1019,6 +1022,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 24,
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
   },
   tellMeMoreFAB: {
     position: 'absolute',
@@ -1035,6 +1039,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 32,
+    backgroundColor: 'transparent', // Required for efficient shadow rendering
   },
   tellMeMoreIcon: {
     fontSize: 32,

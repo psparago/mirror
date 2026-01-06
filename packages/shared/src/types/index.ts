@@ -19,23 +19,23 @@ export interface EventMetadata {
   sender: string;
   timestamp: string;
   event_id: string;
-  // Note: audio_url is NOT stored in metadata.json (presigned URLs expire)
+  // Note: audio_url/video_url are NOT stored in metadata.json (presigned URLs expire)
   // The backend ListMirrorEvents generates fresh presigned GET URLs in the Event object
-  content_type?: 'text' | 'audio' | 'video'; // Whether to use TTS (text), play audio (audio), or play video (video)
-  // AI-generated dual-story fields (optional)
+  content_type?: 'text' | 'audio' | 'video';
+  // AI-generated dual-story fields
   short_caption?: string; // Brief greeting - auto-played on load
   deep_dive?: string; // Detailed story - played when ✨ is tapped
 }
 
 export interface Event {
   event_id: string;
-  image_url: string;
+  image_url: string; // Always a JPG/PNG (Thumbnail for video events)
   metadata_url: string;
-  audio_url?: string; // Optional presigned GET URL for audio.m4a file
+  audio_url?: string; // Optional presigned GET URL for audio.m4a
+  video_url?: string; // Optional presigned GET URL for video.mp4 (NEW)
   metadata?: EventMetadata;
 }
 
 export interface ListEventsResponse {
   events: Event[];
 }
-

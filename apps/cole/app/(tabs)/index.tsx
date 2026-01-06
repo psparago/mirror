@@ -967,6 +967,7 @@ const styles = StyleSheet.create({
     overflow: 'visible',
     borderWidth: 4,
     borderColor: '#fff',
+    backgroundColor: '#000', // Required for efficient shadow rendering
     zIndex: 10,
     ...Platform.select({
       ios: {
