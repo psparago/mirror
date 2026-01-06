@@ -2,22 +2,21 @@ import { FontAwesome } from '@expo/vector-icons';
 import { Event, EventMetadata } from '@projectmirror/shared';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
-import { CameraView, CameraPermissionResponse } from 'expo-camera';
+import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Animated,
-  FlatList,
-  Image,
-  Platform,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  useWindowDimensions,
-  View,
-  Alert,
+    ActivityIndicator,
+    Alert,
+    Animated,
+    FlatList,
+    Image,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    useWindowDimensions,
+    View
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -31,8 +30,8 @@ interface ReflectedWatchViewProps {
   onDelete: (event: Event) => void;
   onCaptureSelfie: () => Promise<void>;
   cameraRef: React.RefObject<CameraView>;
-  cameraPermission: CameraPermissionResponse | null;
-  requestCameraPermission: () => Promise<CameraPermissionResponse>;
+  cameraPermission: PermissionResponse | null;
+  requestCameraPermission: () => Promise<PermissionResponse>;
   isCapturingSelfie: boolean;
 }
 
@@ -62,8 +61,25 @@ export default function ReflectedWatchView({
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   const hasSpokenRef = useRef(false);
   const currentPlayingEventIdRef = useRef<string | null>(null);
+  const eventsRef = useRef<Event[]>(events); // Always have latest events array
+  const selectedEventRef = useRef<Event | null>(selectedEvent); // Always have latest selected event
+  const audioAutoAdvanceScheduledRef = useRef(false); // Prevent duplicate audio auto-advance
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  
+  // Controls fade animation
+  const controlsOpacity = useRef(new Animated.Value(1)).current;
+  const controlsFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flatListRef = useRef<FlatList>(null);
+
+  // Keep refs in sync with props
+  useEffect(() => {
+    eventsRef.current = events;
+  }, [events]);
+  
+  useEffect(() => {
+    selectedEventRef.current = selectedEvent;
+  }, [selectedEvent]);
 
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
 
@@ -108,15 +124,17 @@ export default function ReflectedWatchView({
 
     // Check if this event is already playing
     if (currentPlayingEventIdRef.current === eventId && hasSpokenRef.current) {
-      console.log(`🚫 Blocked duplicate play for event ${eventId}`);
       return; // Already playing this event, don't restart
     }
 
-    console.log(`🎬 Starting playback for event ${eventId}`);
-
     // Stop any previous playback
     Speech.stop();
-    if (audioPlayer) audioPlayer.pause();
+    if (sound) {
+      // Remove status update listener before unloading
+      sound.setOnPlaybackStatusUpdate(null);
+      sound.unloadAsync().catch(err => console.warn('Error unloading sound:', err));
+      setSound(null);
+    }
 
     // Mark this event as playing IMMEDIATELY
     currentPlayingEventIdRef.current = eventId;
@@ -125,13 +143,12 @@ export default function ReflectedWatchView({
     const timer = setTimeout(() => {
       // Triple-check we haven't moved to a different event
       if (currentPlayingEventIdRef.current !== eventId) {
-        console.log(`⏭️ Skipped - moved to different event`);
         return;
       }
 
       // Audio message takes priority
       if (selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '') {
-        console.log(`🎵 Playing audio for event ${eventId}`);
+        audioAutoAdvanceScheduledRef.current = false; // Reset flag for new audio
         const playAudio = async () => {
           try {
             // Unload previous sound
@@ -141,21 +158,41 @@ export default function ReflectedWatchView({
             
             // Create and play new sound
             const { sound: newSound } = await Audio.Sound.createAsync(
-              { uri: selectedEvent.audio_url },
-              { shouldPlay: true },
-              (status) => {
-                if (status.isLoaded && status.didJustFinish) {
-                  // Audio finished, auto-advance
-                  const currentIndex = events.findIndex((e) => e.event_id === eventId);
-                  if (currentIndex !== -1 && currentIndex < events.length - 1) {
-                    const nextEvent = events[currentIndex + 1];
-                    if (nextEvent) {
-                      setTimeout(() => handleUpNextItemPress(nextEvent), 1500);
-                    }
+              { uri: selectedEvent.audio_url as string },
+              { shouldPlay: true }
+            );
+            
+            // Set up status update handler to detect when audio finishes
+            newSound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                // Prevent duplicate auto-advance triggers (callback fires multiple times)
+                if (audioAutoAdvanceScheduledRef.current) {
+                  return;
+                }
+                audioAutoAdvanceScheduledRef.current = true;
+                
+                // Guard: Only auto-advance if this event is STILL the current one
+                if (currentPlayingEventIdRef.current !== eventId) {
+                  return;
+                }
+                
+                // Auto-advance: Use refs to get LATEST state (not stale closure)
+                const latestEvents = eventsRef.current;
+                const currentPlayingEvent = selectedEventRef.current;
+                if (!currentPlayingEvent) return;
+                
+                const currentIndex = latestEvents.findIndex((e) => e.event_id === currentPlayingEvent.event_id);                
+                if (currentIndex !== -1) {
+                  // Loop: if at end, go to beginning; otherwise go to next
+                  const nextIndex = currentIndex < latestEvents.length - 1 ? currentIndex + 1 : 0;
+                  const nextEvent = latestEvents[nextIndex];
+                  if (nextEvent) {
+                    setTimeout(() => handleUpNextItemPress(nextEvent), 1500);
                   }
                 }
               }
-            );
+            });
+            
             setSound(newSound);
             setIsAudioPlaying(true);
           } catch (error) {
@@ -164,7 +201,6 @@ export default function ReflectedWatchView({
         };
         playAudio();
       } else if (selectedMetadata.description) {
-        console.log(`🗣️ Speaking description for event ${eventId}`);
         const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
         Speech.speak(textToSpeak, {
           volume: 1.0,
@@ -172,11 +208,21 @@ export default function ReflectedWatchView({
           rate: 1.0,
           language: 'en-US',
           onDone: () => {
-            console.log(`✅ Speech finished for event ${eventId}`);
-            // Auto-advance to next video when speech finishes (YouTube behavior)
-            const currentIndex = events.findIndex((e) => e.event_id === eventId);
-            if (currentIndex !== -1 && currentIndex < events.length - 1) {
-              const nextEvent = events[currentIndex + 1];
+            // Guard: Only auto-advance if this event is STILL the current one
+            if (currentPlayingEventIdRef.current !== eventId) {
+              return;
+            }
+            
+            // Auto-advance: Use refs to get LATEST state (not stale closure)
+            const latestEvents = eventsRef.current;
+            const currentPlayingEvent = selectedEventRef.current;
+            if (!currentPlayingEvent) return;
+            
+            const currentIndex = latestEvents.findIndex((e) => e.event_id === currentPlayingEvent.event_id);            
+            if (currentIndex !== -1) {
+              // Loop: if at end, go to beginning; otherwise go to next
+              const nextIndex = currentIndex < latestEvents.length - 1 ? currentIndex + 1 : 0;
+              const nextEvent = latestEvents[nextIndex];
               if (nextEvent) {
                 setTimeout(() => handleUpNextItemPress(nextEvent), 1500);
               }
@@ -190,7 +236,6 @@ export default function ReflectedWatchView({
       clearTimeout(timer);
     };
   }, [selectedEvent?.event_id]);
-
   // Animate Tell Me More button
   useEffect(() => {
     if (isPlayingDeepDive) {
@@ -223,7 +268,7 @@ export default function ReflectedWatchView({
     };
   }, [isPlayingDeepDive]);
 
-  // Reset state when view unmounts
+  // Reset state when view unmounts (empty deps = runs only on unmount)
   useEffect(() => {
     return () => {
       setIsPlayingDeepDive(false);
@@ -235,10 +280,37 @@ export default function ReflectedWatchView({
         sound.unloadAsync();
       }
     };
-  }, [sound]);
+  }, []); // Empty deps - only run on mount/unmount, not when sound changes
+
+  // Show controls and start fade timer
+  const showControls = useCallback(() => {
+    // Clear any existing timer
+    if (controlsFadeTimer.current) {
+      clearTimeout(controlsFadeTimer.current);
+    }
+
+    // Fade controls in
+    Animated.timing(controlsOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+
+    // Set timer to fade out after 3 seconds
+    controlsFadeTimer.current = setTimeout(() => {
+      Animated.timing(controlsOpacity, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: true,
+      }).start();
+    }, 3000);
+  }, [controlsOpacity]);
 
   const playDescription = useCallback(async () => {
     if (!selectedEvent || !selectedMetadata) return;
+
+    // Show controls when user interacts
+    showControls();
 
     if (isAudioPlaying) {
       if (sound) await sound.pauseAsync();
@@ -265,7 +337,7 @@ export default function ReflectedWatchView({
         });
       }
     }
-  }, [selectedEvent, selectedMetadata, isAudioPlaying, sound]);
+  }, [selectedEvent, selectedMetadata, isAudioPlaying, sound, showControls]);
 
   const playDeepDive = useCallback(() => {
     if (!selectedMetadata?.deep_dive) return;
@@ -286,8 +358,6 @@ export default function ReflectedWatchView({
   }, [selectedMetadata?.deep_dive, isPlayingDeepDive]);
 
   const handleUpNextItemPress = async (event: Event) => {
-    console.log(`👆 User selected event ${event.event_id}`);
-    
     // Stop current audio
     Speech.stop();
     if (sound) {
@@ -296,42 +366,48 @@ export default function ReflectedWatchView({
     }
     setIsAudioPlaying(false);
     
-    // Reset tracking completely
+    // Reset tracking (don't null currentPlayingEventIdRef - it will be updated by next event's useEffect)
     hasSpokenRef.current = false;
-    currentPlayingEventIdRef.current = null;
     setIsPlayingDeepDive(false);
 
-    // Update to new event - this will trigger the useEffect
+    // Update to new event - this will trigger the useEffect which will set currentPlayingEventIdRef
     onEventSelect(event);
+    
+    // Scroll to the newly selected item (optional but nice UX)
+    const itemIndex = events.findIndex((e) => e.event_id === event.event_id);
+    if (itemIndex !== -1 && flatListRef.current) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToIndex({ index: itemIndex, animated: true, viewPosition: 0.5 });
+      }, 100);
+    }
   };
 
 
-  const renderUpNextItem = ({ item }: { item: Event }) => {
+  const renderUpNextItem = ({ item, index }: { item: Event; index: number }) => {
     const metadata = eventMetadata[item.event_id];
-    const isCurrentlyPlaying = item.event_id === selectedEvent?.event_id;
+    const isNowPlaying = item.event_id === selectedEvent?.event_id;
 
     return (
       <View style={styles.upNextItemContainer}>
         <TouchableOpacity
-          style={[styles.upNextItem, isCurrentlyPlaying && styles.upNextItemActive]}
+          style={[
+            styles.upNextItem,
+            isNowPlaying && styles.upNextItemNowPlaying
+          ]}
           onPress={() => handleUpNextItemPress(item)}
           activeOpacity={0.7}
-          disabled={isCurrentlyPlaying}
+          disabled={isNowPlaying} // Disable tap on currently playing item
         >
           <Image source={{ uri: item.image_url }} style={styles.upNextThumbnail} resizeMode="cover" />
           <View style={styles.upNextInfo}>
-            <Text style={styles.upNextTitle} numberOfLines={2}>
-              {metadata?.description || 'Reflection'}
+            <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
+              {isNowPlaying && '▶️ '}{metadata?.description || 'Reflection'}
             </Text>
-            <Text style={styles.upNextMeta}>
+            <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>
               {metadata?.content_type === 'audio' ? '🎤 Voice' : '📸 Photo'}
+              {isNowPlaying && ' • NOW PLAYING'}
             </Text>
           </View>
-          {isCurrentlyPlaying && (
-            <View style={styles.nowPlayingIndicator}>
-              <FontAwesome name="play" size={10} color="#fff" />
-            </View>
-          )}
         </TouchableOpacity>
         
         {/* Hamburger Menu for Delete */}
@@ -359,12 +435,11 @@ export default function ReflectedWatchView({
     );
   };
 
-  // Filter out current event from up next list
+  // Keep list static - don't reorder, just highlight the playing item in place
   const upNextEvents = useMemo(() => {
-    const filtered = selectedEvent ? events.filter((e) => e.event_id !== selectedEvent.event_id) : events;
-    console.log(`📋 Up Next List: ${filtered.map(e => e.event_id).join(', ')}`);
-    return filtered;
-  }, [events, selectedEvent?.event_id]);
+    // Return events in their original order (sorted by timestamp)
+    return events;
+  }, [events]);
 
   // If no event is selected yet, show loading state
   if (!selectedEvent) {
@@ -396,28 +471,70 @@ export default function ReflectedWatchView({
             )}
 
             {/* Media Container */}
-            <View style={styles.mediaContainer}>
-              <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+            <TouchableOpacity 
+              style={styles.mediaContainer} 
+              activeOpacity={1}
+              onPress={showControls}
+            >
+              <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="cover" />
 
-              {/* Massive Play/Pause Overlay */}
+              {/* Animated Play/Pause Overlay - Fades out after 3 seconds */}
               {(selectedEvent.audio_url || selectedMetadata?.description) && (
-                <TouchableOpacity
-                  style={styles.playOverlay}
-                  onPress={playDescription}
-                  activeOpacity={0.7}
-                  onPressIn={() => setPlayButtonPressed(true)}
-                  onPressOut={() => setPlayButtonPressed(false)}
+                <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
+                  <TouchableOpacity
+                    onPress={playDescription}
+                    activeOpacity={0.7}
+                    style={styles.playButton}
+                  >
+                    <BlurView intensity={30} style={styles.playOverlayBlur}>
+                      <FontAwesome
+                        name={isAudioPlaying ? 'pause' : 'play'}
+                        size={64}
+                        color="rgba(255, 255, 255, 0.95)"
+                      />
+                    </BlurView>
+                  </TouchableOpacity>
+                </Animated.View>
+              )}
+            </TouchableOpacity>
+            
+            {/* Selfie Camera Bubble - Bottom Right */}
+            {cameraPermission?.granted ? (
+              <View style={[styles.cameraBubble, { bottom: insets.bottom + 100 }]}>
+                <CameraView 
+                  ref={cameraRef}
+                  style={styles.cameraPreview}
+                  facing="front"
+                />
+                <TouchableOpacity 
+                  style={styles.cameraButton}
+                  onPress={onCaptureSelfie}
+                  activeOpacity={0.8}
+                  disabled={isCapturingSelfie}
                 >
-                  <BlurView intensity={30} style={styles.playOverlayBlur}>
-                    <FontAwesome
-                      name={isAudioPlaying ? 'pause' : 'play'}
-                      size={64}
-                      color="rgba(255, 255, 255, 0.95)"
-                    />
+                  <BlurView intensity={50} style={styles.cameraButtonBlur}>
+                    {isCapturingSelfie ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <FontAwesome name="camera" size={20} color="#fff" />
+                    )}
                   </BlurView>
                 </TouchableOpacity>
-              )}
-            </View>
+              </View>
+            ) : (
+              <View style={[styles.cameraBubble, { bottom: insets.bottom + 100 }]}>
+                <TouchableOpacity 
+                  style={styles.enableCameraButton}
+                  onPress={requestCameraPermission}
+                  activeOpacity={0.8}
+                >
+                  <BlurView intensity={50} style={styles.enableCameraBlur}>
+                    <FontAwesome name="camera" size={24} color="#fff" />
+                    <Text style={styles.enableCameraText}>Enable{'\n'}Camera</Text>
+                  </BlurView>
+                </TouchableOpacity>
+              </View>
+            )}
 
             {/* Metadata & Controls */}
             <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
@@ -453,12 +570,21 @@ export default function ReflectedWatchView({
               <Text style={styles.upNextCount}>{upNextEvents.length}</Text>
             </View>
             <FlatList
+              ref={flatListRef}
               data={upNextEvents}
               renderItem={renderUpNextItem}
               keyExtractor={(item) => item.event_id}
+              extraData={selectedEvent?.event_id}
               contentContainerStyle={styles.upNextList}
               showsVerticalScrollIndicator={true}
               indicatorStyle="white"
+              onScrollToIndexFailed={(info) => {
+                // Fallback if scrollToIndex fails
+                const wait = new Promise(resolve => setTimeout(resolve, 100));
+                wait.then(() => {
+                  flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
+                });
+              }}
             />
           </View>
         </View>
@@ -510,9 +636,14 @@ const styles = StyleSheet.create({
   },
   playOverlay: {
     position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -80 }, { translateY: -80 }],
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  playButton: {
     width: 160,
     height: 160,
     borderRadius: 80,
@@ -526,6 +657,57 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 80,
+  },
+  cameraBubble: {
+    position: 'absolute',
+    right: 20,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  cameraPreview: {
+    width: '100%',
+    height: '100%',
+  },
+  cameraButton: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    overflow: 'hidden',
+  },
+  cameraButtonBlur: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 22,
+  },
+  enableCameraButton: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 60,
+    overflow: 'hidden',
+  },
+  enableCameraBlur: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 60,
+  },
+  enableCameraText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
   },
   metadataContainer: {
     paddingHorizontal: 20,
@@ -624,6 +806,18 @@ const styles = StyleSheet.create({
   upNextMeta: {
     fontSize: 12,
     color: 'rgba(255, 255, 255, 0.6)',
+  },
+  upNextItemNowPlaying: {
+    backgroundColor: 'rgba(30, 144, 255, 0.25)', // Blue highlight for now playing
+    borderWidth: 2,
+    borderColor: 'rgba(30, 144, 255, 0.6)',
+  },
+  upNextTitleNowPlaying: {
+    color: '#4FC3F7', // Bright blue for visibility
+    fontWeight: '700',
+  },
+  upNextMetaNowPlaying: {
+    color: 'rgba(79, 195, 247, 0.9)',
   },
   nowPlayingIndicator: {
     position: 'absolute',

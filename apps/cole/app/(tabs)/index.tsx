@@ -1,14 +1,15 @@
-import { FontAwesome } from '@expo/vector-icons';
+import ReflectedWatchView from '@/components/ReflectedWatchView';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
+import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Speech from 'expo-speech';
 import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import ReflectedWatchView from '@/components/ReflectedWatchView';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
@@ -16,7 +17,6 @@ export default function ColeInboxScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
-  const [showSelfieMirror, setShowSelfieMirror] = useState(false);
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -26,58 +26,12 @@ export default function ColeInboxScreen() {
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
-  const audioFinishedRef = useRef<{ [eventId: string]: boolean }>({});
-  const [playButtonPressed, setPlayButtonPressed] = useState(false);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
-  const [isPlayingDeepDive, setIsPlayingDeepDive] = useState(false);
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
-  // Sanitize text for smoother TTS playback
-  const sanitizeTextForTTS = (text: string): string => {
-    return text
-      .replace(/!/g, '.') // Replace exclamation marks with periods
-      .replace(/\?/g, '.') // Replace question marks with periods
-      .replace(/;/g, ',') // Replace semicolons with commas
-      .replace(/:/g, ',') // Replace colons with commas
-      .replace(/\.\.\./g, '.') // Replace ellipsis with single period
-      .replace(/\.{2,}/g, '.') // Replace multiple periods with single period
-      .replace(/,{2,}/g, ',') // Replace multiple commas with single comma
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .trim();
-  };
-
-  // Configure audio session to prevent ducking and warm up TTS
-  useEffect(() => {
-    const configureAudio = async () => {
-      try {
-        await Audio.setAudioModeAsync({
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-          shouldDuckAndroid: false,
-          playThroughEarpieceAndroid: false,
-        });
-        
-        // Warm up the TTS engine by speaking a silent, very short phrase
-        // This initializes the audio session properly
-        setTimeout(() => {
-          Speech.speak(' ', {
-            volume: 0.0,
-            rate: 1.0,
-            pitch: 1.0,
-          });
-        }, 500);
-      } catch (error) {
-        console.error('Error configuring audio session:', error);
-      }
-    };
-    
-    configureAudio();
-  }, []);
-
+  // Fetch events and listen for Firestore updates
   useEffect(() => {
     fetchEvents();
 
@@ -148,175 +102,8 @@ export default function ColeInboxScreen() {
     }
   }, [selectedEvent?.event_id, selectedEvent?.metadata_url, eventMetadata]);
 
-  // Auto-play speech/audio when photo with description opens
-  // Using useRef to prevent state loops - only trigger once per photo
+  // Get metadata for selected event  
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-  const currentEventIdRef = useRef<string | null>(null);
-  
-  useEffect(() => {
-    // IMMEDIATELY stop any existing audio/speech when event changes
-    const previousEventId = currentEventIdRef.current;
-    const newEventId = selectedEvent?.event_id || null;
-    
-    // If we're switching to a different photo, stop everything immediately
-    if (previousEventId && previousEventId !== newEventId) {
-      Speech.stop();
-      if (audioPlayer) {
-        // Pause playback (source stays loaded, will be replaced when new audio loads)
-        audioPlayer.pause();
-      }
-      // Reset hasSpokenRef and clear auto-play flag when switching photos
-      hasSpokenRef.current = false;
-      shouldAutoPlayRef.current = { eventId: null, url: null };
-      // Hide selfie mirror when switching to a different reflection
-      setShowSelfieMirror(false);
-    }
-    
-    // If this is the same event (just a URL refresh), don't restart audio
-    // This prevents duplicate playback when refreshEventUrls updates selectedEvent
-    if (previousEventId === newEventId && newEventId !== null && hasSpokenRef.current) {
-      // Same event and audio already started - this is just a URL refresh
-      // Update the ref but don't restart playback
-      currentEventIdRef.current = newEventId;
-      return;
-    }
-    
-    // Update the current event ID reference
-    currentEventIdRef.current = newEventId;
-    
-    if (selectedEvent && selectedMetadata && (selectedMetadata.description || selectedEvent.audio_url)) {
-      // Reset the ref when opening a new photo
-      if (previousEventId !== newEventId) {
-        hasSpokenRef.current = false;
-        // Hide selfie mirror when opening a new reflection (it will show after audio finishes)
-        setShowSelfieMirror(false);
-        // Reset audioFinishedRef for the new event so mirror can show after audio finishes
-        if (selectedEvent.event_id) {
-          audioFinishedRef.current[selectedEvent.event_id] = false;
-        }
-      }
-      
-      // If audio is already playing for this event, don't start it again
-      if (hasSpokenRef.current && currentEventIdRef.current === newEventId) {
-        return; // Audio already playing for this event, don't restart
-      }
-      
-      // Capture the event_id to check if we're still on the same photo
-      const eventIdForThisEffect = selectedEvent.event_id;
-      
-      // Small delay (100ms) before speaking to ensure modal is ready
-      const timer = setTimeout(async () => {
-        // Double-check we're still on the same photo before playing
-        // Also check if audio is already playing for this event
-        if (!hasSpokenRef.current && currentEventIdRef.current === eventIdForThisEffect) {
-          hasSpokenRef.current = true;
-          
-          // Check if we have audio_url from Event (presigned GET URL) and content_type is 'audio'
-          // Use selectedEvent.audio_url (from ListMirrorEvents) not selectedMetadata.audio_url (from metadata.json)
-          if (selectedEvent.audio_url && selectedMetadata.content_type === 'audio') {
-            // Play audio file
-            try {
-              // Stop any existing audio immediately (defensive check)
-              if (audioPlayer) {
-                audioPlayer.pause();
-              }
-              
-              // Small delay to ensure old audio is stopped before starting new one
-              await new Promise(resolve => setTimeout(resolve, 50));
-              
-              // Check again if we're still on the same photo
-              if (currentEventIdRef.current !== eventIdForThisEffect) {
-                return; // User switched photos, don't start audio
-              }
-              
-              // Load and play the audio using the presigned GET URL from the Event
-              if (audioPlayer && currentEventIdRef.current === eventIdForThisEffect) {
-                audioPlayer.replace(selectedEvent.audio_url);
-                // Set flag to auto-play when audio loads
-                shouldAutoPlayRef.current = { eventId: eventIdForThisEffect, url: selectedEvent.audio_url };
-              }
-            } catch (error) {
-              console.error("Error playing audio:", error);
-              // Fallback to TTS if audio fails
-              if (currentEventIdRef.current === eventIdForThisEffect && selectedMetadata.description) {
-                Speech.speak(sanitizeTextForTTS(selectedMetadata.description), {
-                  pitch: 1.0,
-                  rate: 1.0,
-                  language: 'en-US',
-                });
-              }
-            }
-          } else if ((selectedMetadata.short_caption || selectedMetadata.description) && currentEventIdRef.current === eventIdForThisEffect) {
-            // Use TTS for text descriptions - prefer short_caption for initial play
-            const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
-            Speech.speak(sanitizeTextForTTS(textToSpeak), {
-              pitch: 1.0,
-              rate: 1.0,
-              language: 'en-US',
-            });
-            // Estimate TTS duration and show mirror (rough estimate: ~150 words per minute)
-            const wordCount = textToSpeak.split(/\s+/).length;
-            const estimatedDuration = (wordCount / 150) * 60 * 1000; // Convert to milliseconds
-            setTimeout(() => {
-              if (selectedEvent?.event_id && currentEventIdRef.current === selectedEvent.event_id && !audioFinishedRef.current[selectedEvent.event_id]) {
-                audioFinishedRef.current[selectedEvent.event_id] = true;
-                setShowSelfieMirror(true);
-              }
-            }, Math.max(estimatedDuration, 2000)); // At least 2 seconds
-          }
-        }
-      }, 100);
-
-      return () => {
-        clearTimeout(timer);
-        Speech.stop();
-        // Cleanup audio - pause playback
-        if (audioPlayer) {
-          audioPlayer.pause();
-        }
-      };
-    } else {
-      // Stop speech/audio if no description
-      Speech.stop();
-      if (audioPlayer) {
-        audioPlayer.pause();
-      }
-    }
-  }, [selectedEvent?.event_id, selectedEvent?.audio_url, selectedMetadata?.description, selectedMetadata?.content_type]);
-
-  // Animate the Tell Me More button when deep dive is playing
-  useEffect(() => {
-    if (isPlayingDeepDive) {
-      // Start the pulse animation immediately
-      pulseAnimRef.current = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.15,  // More noticeable scale
-            duration: 600,  // Faster pulse
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 600,
-            useNativeDriver: true,
-          }),
-        ])
-      );
-      pulseAnimRef.current.start();
-    } else {
-      // Stop the animation and reset
-      if (pulseAnimRef.current) {
-        pulseAnimRef.current.stop();
-      }
-      pulseAnim.setValue(1);
-    }
-
-    return () => {
-      if (pulseAnimRef.current) {
-        pulseAnimRef.current.stop();
-      }
-    };
-  }, [isPlayingDeepDive]);
 
   // Track engagement: send signal if Star views Reflection for > 5 seconds
   useEffect(() => {
@@ -472,7 +259,6 @@ export default function ColeInboxScreen() {
       if (refreshedEvent) {
         // DON'T update selectedEvent - this would trigger re-renders and re-playback
         // Just update the events array in the background
-        console.log(`🔄 URLs refreshed for event ${eventIdToRefresh} (silently updated in events array)`);
         
         // Update dimensions if image URL changed
         if (refreshedEvent.image_url !== item.image_url) {
@@ -536,14 +322,8 @@ export default function ColeInboxScreen() {
   };
 
   const closeFullScreen = useCallback(async () => {
-    // Stop any ongoing speech/audio
-    Speech.stop();
-    if (audioPlayer) {
-      audioPlayer.pause();
-    }
-    setShowSelfieMirror(false);
     setSelectedEvent(null);
-  }, [audioPlayer]);
+  }, []);
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
@@ -551,20 +331,6 @@ export default function ColeInboxScreen() {
     // Find current index
     const currentIndex = events.findIndex(e => e.event_id === selectedEvent.event_id);
     if (currentIndex === -1) return;
-    
-    // Stop any ongoing speech/audio IMMEDIATELY
-    Speech.stop();
-    
-    // Pause audio
-    if (audioPlayer) {
-      audioPlayer.pause();
-    }
-    
-    // Reset the hasSpokenRef to prevent new audio from starting too early
-    hasSpokenRef.current = false;
-    
-    // Hide selfie mirror when navigating
-    setShowSelfieMirror(false);
     
     // Determine the target event
     let targetEvent: Event | null = null;
@@ -590,17 +356,9 @@ export default function ColeInboxScreen() {
     }
     
     if (targetEvent) {
-      // Don't update the ref here - let the useEffect handle it
-      // This ensures the useEffect sees the transition from old event ID to new event ID
-      
       // Refresh URLs for the target photo
       const refreshedEvent = await refreshEventUrls(targetEvent.event_id);
-      
-      // Update selectedEvent - this will trigger useEffect which will:
-      // 1. See the change from old event ID to new event ID
-      // 2. Stop old audio
-      // 3. Update the ref to the new event ID
-      // 4. Start new audio
+      // Update selectedEvent - ReflectedWatchView will handle the audio transition
       setSelectedEvent(refreshedEvent || targetEvent);
     }
   }, [selectedEvent, events, refreshEventUrls, closeFullScreen]);
@@ -752,9 +510,6 @@ export default function ColeInboxScreen() {
         console.warn("Failed to delete local file:", cleanupError);
       }
 
-      // Hide mirror and show success immediately (don't wait for Firestore)
-      setShowSelfieMirror(false);
-      
       // Speak confirmation message
       const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
       const companionName = metadata?.sender || 'your companion';
@@ -793,97 +548,6 @@ export default function ColeInboxScreen() {
     }
   };
 
-  const playDescription = async () => {
-    const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-    if (!metadata || !selectedEvent) return;
-    
-    // If audio is currently playing, pause it
-    if (audioStatus?.playing) {
-      if (audioPlayer) {
-        audioPlayer.pause();
-      }
-      Speech.stop();
-      return;
-    }
-    
-    // Track replay if this is a manual play after auto-play
-    const eventId = selectedEvent.event_id;
-    // Send replay signal if:
-    // 1. hasSpokenRef is true (meaning audio was auto-played or manually played before)
-    // 2. AND we haven't already sent a replay signal for this event
-    if (hasSpokenRef.current && eventId && !hasReplayedRef.current[eventId]) {
-      sendReplaySignal(eventId);
-    }
-    
-    // Refresh URLs before playing to ensure they're not expired
-    const refreshedEvent = await refreshEventUrls(selectedEvent.event_id);
-    const eventToUse = refreshedEvent || selectedEvent;
-    
-    // Stop any ongoing speech/audio first
-    Speech.stop();
-    if (audioPlayer) {
-      audioPlayer.pause();
-    }
-    
-    // Check if we have audio_url from Event (presigned GET URL) and content_type is 'audio'
-    // Use eventToUse.audio_url (from ListMirrorEvents) not metadata.audio_url (from metadata.json)
-    if (eventToUse.audio_url && metadata.content_type === 'audio') {
-      // Play audio file
-      try {
-        if (audioPlayer && selectedEvent) {
-          audioPlayer.replace(eventToUse.audio_url);
-          // Set flag to auto-play when audio loads
-          shouldAutoPlayRef.current = { eventId: selectedEvent.event_id, url: eventToUse.audio_url };
-          
-          // Update selectedEvent with fresh URLs
-          if (refreshedEvent) {
-            setSelectedEvent(refreshedEvent);
-          }
-        }
-      } catch (error) {
-        console.error("Error playing audio:", error);
-        Alert.alert("Error", "Failed to play audio Reflection");
-      }
-    } else if (metadata.description) {
-      // Use TTS for text descriptions
-      // Add small delay after Speech.stop() to let audio session settle
-      await new Promise(resolve => setTimeout(resolve, 100));
-      Speech.speak(sanitizeTextForTTS(metadata.description), {
-        pitch: 1.0,
-        rate: 1.0,
-        language: 'en-US',
-      });
-    }
-  };
-
-  const playDeepDive = async () => {
-    const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-    if (!metadata || !selectedEvent || !metadata.deep_dive) return;
-    
-    // Stop any current audio/speech
-    Speech.stop();
-    if (audioPlayer) {
-      audioPlayer.pause();
-    }
-    
-    setIsPlayingDeepDive(true);
-    
-    // Add small delay after Speech.stop() to let audio session settle
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    // Play deep_dive via TTS
-    Speech.speak(sanitizeTextForTTS(metadata.deep_dive), {
-      pitch: 1.0,
-      rate: 1.0,
-      language: 'en-US',
-      onDone: () => {
-        setIsPlayingDeepDive(false);
-      },
-      onStopped: () => {
-        setIsPlayingDeepDive(false);
-      },
-    });
-  };
 
   const deleteEvent = async (event: Event) => {
     Alert.alert(
@@ -947,11 +611,8 @@ export default function ColeInboxScreen() {
                 // Continue even if Firestore update fails
               }
 
-              // 3. Stop any ongoing speech/audio
+              // 3. Stop any ongoing speech (defensive cleanup)
               Speech.stop();
-              if (audioPlayer) {
-                audioPlayer.pause();
-              }
               
               // 4. Remove from local state and refresh
               setEvents(events.filter(e => e.event_id !== event.event_id));
@@ -1252,12 +913,6 @@ const styles = StyleSheet.create({
         shadowRadius: 4,
       },
     }),
-  },
-  playButtonPlaying: {
-    opacity: 0.9,
-  },
-  playButtonPressed: {
-    transform: [{ scale: 0.95 }],
   },
   closeButtonInline: {
     width: 50,
