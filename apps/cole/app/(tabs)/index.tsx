@@ -356,8 +356,9 @@ export default function ColeInboxScreen() {
       return;
     }
     
-    console.log(`🔄 Media failed to load for event ${event.event_id}, refreshing URLs...`);
+    // Add to set IMMEDIATELY to block concurrent calls
     refreshingEventsRef.current.add(event.event_id);
+    console.log(`🔄 Refreshing expired URLs for event ${event.event_id}`);
     
     try {
       const refreshedEvent = await refreshEventUrls(event.event_id);

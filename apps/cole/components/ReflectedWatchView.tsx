@@ -169,7 +169,7 @@ export default function ReflectedWatchView({
       const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
       const hasCaption = selectedMetadata.description;
 
-      // ═══ CONTEXT FIRST LOGIC (with 2-second initial delay) ═══
+      // ═══ CONTEXT FIRST LOGIC (with brief initial delay) ═══
       if (hasVideo) {
         // Video content: Speak caption (if exists), then auto-play video
         if (hasCaption) {
@@ -189,21 +189,21 @@ export default function ReflectedWatchView({
             },
           });
         } else {
-          // No caption: auto-start video after 2-second pause
+          // No caption: auto-start video after brief pause
           setTimeout(() => {
             if (currentPlayingEventIdRef.current === eventId && videoRef.current) {
               videoRef.current.playAsync().catch(err => console.warn('Error auto-starting video:', err));
             }
-          }, 2000);
+          }, 500);
         }
       } else if (hasAudio) {
-        // Audio recording: Skip caption, just auto-play audio after 2-second pause
+        // Audio recording: Skip caption, just auto-play audio after brief pause
         // (No need to speak "Voice message" when they're about to hear the actual voice)
         setTimeout(() => {
           if (currentPlayingEventIdRef.current === eventId) {
             playAudioNow();
           }
-        }, 2000);
+        }, 500);
         
         // Audio playback function
         const playAudioNow = async () => {
@@ -261,7 +261,7 @@ export default function ReflectedWatchView({
           }
         };
       } else if (hasCaption) {
-        // Just a photo with caption: speak it (after 2-second pause)
+        // Just a photo with caption: speak it (after brief pause)
         setTimeout(() => {
           if (currentPlayingEventIdRef.current === eventId) {
             setIsSpeakingCaption(true);
@@ -276,7 +276,7 @@ export default function ReflectedWatchView({
               },
             });
           }
-        }, 2000);
+        }, 500);
       }
     }, 150);
 
