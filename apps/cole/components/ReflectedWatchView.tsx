@@ -32,6 +32,7 @@ interface ReflectedWatchViewProps {
   onEventSelect: (event: Event) => void;
   onDelete: (event: Event) => void;
   onCaptureSelfie: () => Promise<void>;
+  onMediaError?: (event: Event) => void; // Callback when media fails to load (e.g., expired URLs)
   cameraRef: React.RefObject<CameraView>;
   cameraPermission: PermissionResponse | null;
   requestCameraPermission: () => Promise<PermissionResponse>;
@@ -47,6 +48,7 @@ export default function ReflectedWatchView({
   onEventSelect,
   onDelete,
   onCaptureSelfie,
+  onMediaError,
   cameraRef,
   cameraPermission,
   requestCameraPermission,
@@ -217,21 +219,45 @@ export default function ReflectedWatchView({
             );
             
             newSound.setOnPlaybackStatusUpdate((status) => {
-              if (status.isLoaded && status.didJustFinish) {
+              if (!status.isLoaded) {
+                // Check if it's an error status (URL expired, etc.)
+                if ('error' in status) {
+                  console.log('🔄 Audio failed to load (likely expired URL), refreshing...');
+                  if (onMediaError && selectedEvent) {
+                    onMediaError(selectedEvent);
+                  }
+                }
+                return;
+              }
+              
+              // Update state to match actual playback
+              setIsAudioPlaying(status.isPlaying);
+              
+              // Handle audio finish
+              if (status.didJustFinish) {
                 if (audioAutoAdvanceScheduledRef.current) return;
                 audioAutoAdvanceScheduledRef.current = true;
                 
                 if (currentPlayingEventIdRef.current !== eventId) return;
                 
-                // Audio finished - just stop, no auto-advance
+                // Audio finished
                 setIsAudioPlaying(false);
               }
             });
             
             setSound(newSound);
             setIsAudioPlaying(true);
-          } catch (error) {
-            console.error('Error playing audio:', error);
+          } catch (error: any) {
+            // Check if this is a URL expiration error
+            const errorMessage = error?.message || String(error);
+            if (errorMessage.includes('-1102') || errorMessage.includes('NSURLErrorDomain') || errorMessage.includes('failed')) {
+              console.log('🔄 Audio URL expired during auto-play, refreshing...');
+              if (onMediaError && selectedEvent) {
+                onMediaError(selectedEvent);
+              }
+            } else {
+              console.error('Error playing audio:', error);
+            }
           }
         };
       } else if (hasCaption) {
@@ -412,53 +438,11 @@ export default function ReflectedWatchView({
     // ONE VOICE: Cannot trigger caption while video is playing
     if (areControlsLocked) return;
 
-    const hasVideo = selectedMetadata.content_type === 'video';
-    const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
-
-    if (hasVideo) {
-      // For video: toggle video playback
+    // Only handle video playback - audio auto-plays, photos are not interactive
+    if (selectedMetadata.content_type === 'video') {
       toggleVideo();
-    } else if (hasAudio) {
-      // For audio: toggle audio playback
-      if (isAudioPlaying) {
-        if (sound) await sound.pauseAsync();
-        setIsAudioPlaying(false);
-        Speech.stop();
-        showControls(); // Show button when paused
-      } else {
-        try {
-          if (sound) {
-            await sound.playAsync();
-            setIsAudioPlaying(true);
-            hideControls(); // Hide button when playing
-          }
-        } catch (error) {
-          console.error('Error playing audio:', error);
-        }
-      }
-    } else if (selectedMetadata.description) {
-      // For photo: toggle TTS caption
-      if (isSpeakingCaption) {
-        Speech.stop();
-        setIsSpeakingCaption(false);
-        showControls(); // Show button when stopped
-      } else {
-        setIsSpeakingCaption(true);
-        hideControls(); // Hide button when speaking
-        const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-        Speech.speak(textToSpeak, {
-          volume: 1.0,
-          pitch: 1.0,
-          rate: 1.0,
-          language: 'en-US',
-          onDone: () => {
-            setIsSpeakingCaption(false);
-            showControls(); // Show button when done
-          },
-        });
-      }
     }
-  }, [selectedEvent, selectedMetadata, isAudioPlaying, sound, isSpeakingCaption, areControlsLocked, showControls, hideControls, toggleVideo]);
+  }, [selectedEvent, selectedMetadata, areControlsLocked, toggleVideo]);
 
   const playDeepDive = useCallback(() => {
     if (!selectedMetadata?.deep_dive) return;
@@ -625,12 +609,12 @@ export default function ReflectedWatchView({
               </View>
             )}
 
-            {/* Media Container - Tap to pause/play for video/audio only (photos not interactive) */}
+            {/* Media Container - Tap to pause/play for videos only (photos and audio not interactive) */}
             <TouchableOpacity 
               style={styles.mediaContainer} 
               activeOpacity={1}
-              onPress={(selectedMetadata?.content_type === 'video' || selectedEvent.audio_url) ? playDescription : undefined}
-              disabled={!selectedMetadata?.content_type || (selectedMetadata.content_type !== 'video' && !selectedEvent.audio_url)}
+              onPress={selectedMetadata?.content_type === 'video' ? playDescription : undefined}
+              disabled={selectedMetadata?.content_type !== 'video'}
             >
               {selectedMetadata?.content_type === 'video' ? (
                 <Video
@@ -641,16 +625,32 @@ export default function ReflectedWatchView({
                   shouldPlay={false}
                   isLooping={false}
                   onPlaybackStatusUpdate={handleVideoPlaybackStatus}
+                  onError={(error) => {
+                    console.warn('Video load error (possibly expired URL):', error);
+                    if (onMediaError && selectedEvent) {
+                      onMediaError(selectedEvent);
+                    }
+                  }}
                   usePoster
                   posterSource={{ uri: selectedEvent.image_url }}
                   posterStyle={styles.mediaImage}
                 />
               ) : (
-                <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="cover" />
+                <Image 
+                  source={{ uri: selectedEvent.image_url }} 
+                  style={styles.mediaImage} 
+                  resizeMode="cover"
+                  onError={(error) => {
+                    console.warn('Image load error (possibly expired URL):', error);
+                    if (onMediaError && selectedEvent) {
+                      onMediaError(selectedEvent);
+                    }
+                  }}
+                />
               )}
 
-              {/* Play/Pause Button - Only for videos and audio (not static photos) */}
-              {(selectedMetadata?.content_type === 'video' || selectedEvent.audio_url) && (
+              {/* Play/Pause Button - Only for videos (not photos or audio) */}
+              {selectedMetadata?.content_type === 'video' && (
                 <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
                   <TouchableOpacity
                     onPress={playDescription}
@@ -659,11 +659,7 @@ export default function ReflectedWatchView({
                   >
                     <BlurView intensity={30} style={styles.playOverlayBlur}>
                       <FontAwesome
-                        name={
-                          selectedMetadata?.content_type === 'video'
-                            ? (videoFinished ? 'refresh' : (isVideoPlaying ? 'pause' : 'play'))
-                            : (isAudioPlaying ? 'pause' : 'play')
-                        }
+                        name={videoFinished ? 'refresh' : (isVideoPlaying ? 'pause' : 'play')}
                         size={64}
                         color="rgba(255, 255, 255, 0.95)"
                       />
@@ -713,7 +709,7 @@ export default function ReflectedWatchView({
 
             {/* Metadata & Controls */}
             <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-              {/* Caption with inline replay button for non-audio items */}
+              {/* Caption with inline TTS button for items with description (no audio) */}
               {selectedMetadata?.description && !selectedEvent.audio_url ? (
                 <View style={styles.captionRow}>
                   <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
@@ -752,11 +748,68 @@ export default function ReflectedWatchView({
                     </BlurView>
                   </TouchableOpacity>
                 </View>
+              ) : selectedEvent.audio_url ? (
+                /* Voice message with inline audio play/pause button */
+                <View style={styles.captionRow}>
+                  <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
+                    🎤 Voice message
+                  </Text>
+                  <TouchableOpacity 
+                    onPress={async () => {
+                      if (!sound) {
+                        console.warn('Audio not loaded yet');
+                        return;
+                      }
+                      try {
+                        if (isAudioPlaying) {
+                          await sound.pauseAsync();
+                        } else {
+                          // Check if audio has finished and needs to be repositioned
+                          const status = await sound.getStatusAsync();
+                          
+                          if (status.isLoaded) {
+                            // If at the end (finished or very close), rewind to start
+                            const positionMillis = status.positionMillis || 0;
+                            const durationMillis = status.durationMillis || 0;
+                            const isAtEnd = durationMillis > 0 && (positionMillis >= durationMillis - 100);
+                            
+                            if (isAtEnd) {
+                              await sound.setPositionAsync(0);
+                              audioAutoAdvanceScheduledRef.current = false; // Reset auto-advance flag for replay
+                            }
+                          }
+                          
+                          await sound.playAsync();
+                        }
+                      } catch (error: any) {
+                        // Check if this is a URL expiration error (error code -1102 or similar network errors)
+                        const errorMessage = error?.message || String(error);
+                        if (errorMessage.includes('-1102') || errorMessage.includes('NSURLErrorDomain') || errorMessage.includes('failed')) {
+                          console.log('🔄 Audio URL expired, refreshing...');
+                          if (onMediaError && selectedEvent) {
+                            onMediaError(selectedEvent);
+                          }
+                        } else {
+                          console.error('Error controlling audio playback:', error);
+                        }
+                      }
+                    }}
+                    activeOpacity={0.8}
+                    disabled={!sound}
+                    style={[styles.captionButtonInline, { opacity: sound ? 1 : 0.5 }]}
+                  >
+                    <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
+                      <FontAwesome 
+                        name={isAudioPlaying ? 'pause' : 'play'} 
+                        size={24} 
+                        color="#fff" 
+                      />
+                    </BlurView>
+                  </TouchableOpacity>
+                </View>
               ) : (
                 <Text style={styles.descriptionText} numberOfLines={3}>
-                  {selectedMetadata?.content_type === 'audio' || selectedEvent.audio_url
-                    ? '🎤 Voice message'
-                    : 'Reflection'}
+                  Reflection
                 </Text>
               )}
 

@@ -8,7 +8,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
 import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
@@ -26,6 +26,7 @@ export default function ColeInboxScreen() {
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
+  const refreshingEventsRef = useRef<Set<string>>(new Set()); // Track events currently being refreshed
   
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -66,6 +67,20 @@ export default function ColeInboxScreen() {
     // Cleanup listener on unmount to prevent memory leaks
     return () => {
       unsubscribe();
+    };
+  }, []);
+
+  // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        // App came to foreground - refresh events to get fresh URLs
+        fetchEvents();
+      }
+    });
+
+    return () => {
+      subscription.remove();
     };
   }, []);
 
@@ -333,6 +348,30 @@ export default function ColeInboxScreen() {
       setSelectedEvent(refreshedEvent || targetEvent);
     }
   }, [selectedEvent, events, refreshEventUrls, closeFullScreen]);
+
+  // Handle media load errors (e.g., expired S3 URLs) by refreshing URLs
+  const handleMediaError = useCallback(async (event: Event) => {
+    // Prevent duplicate refresh calls for the same event
+    if (refreshingEventsRef.current.has(event.event_id)) {
+      return;
+    }
+    
+    console.log(`🔄 Media failed to load for event ${event.event_id}, refreshing URLs...`);
+    refreshingEventsRef.current.add(event.event_id);
+    
+    try {
+      const refreshedEvent = await refreshEventUrls(event.event_id);
+      if (refreshedEvent && selectedEvent?.event_id === event.event_id) {
+        // Update the selected event with fresh URLs
+        setSelectedEvent(refreshedEvent);
+      }
+    } finally {
+      // Remove from set after a short delay to allow the refresh to complete
+      setTimeout(() => {
+        refreshingEventsRef.current.delete(event.event_id);
+      }, 1000);
+    }
+  }, [selectedEvent, refreshEventUrls]);
 
   // PanResponder for swipe navigation:
   // - Left/Right: Navigate between photos
@@ -651,6 +690,7 @@ export default function ColeInboxScreen() {
       onEventSelect={handleEventPress}
       onDelete={deleteEvent}
       onCaptureSelfie={captureSelfieResponse}
+      onMediaError={handleMediaError}
       cameraRef={cameraRef}
       cameraPermission={cameraPermission}
       requestCameraPermission={requestCameraPermission}

@@ -3,7 +3,7 @@ import { API_ENDPOINTS } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, AppState, AppStateStatus, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
   event_id: string;
@@ -25,6 +25,7 @@ export default function SentHistoryScreen() {
   const [selectedSelfieEventId, setSelectedSelfieEventId] = useState<string | null>(null);
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
@@ -224,7 +225,21 @@ export default function SentHistoryScreen() {
     );
 
     return () => unsubscribe();
-  }, [responseEventIds]);
+  }, [responseEventIds, refreshTrigger]);
+
+  // Auto-refresh when app comes back to foreground (handles expired URLs)
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (nextAppState === 'active') {
+        // App came to foreground - trigger refresh to get fresh URLs
+        setRefreshTrigger(prev => prev + 1);
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   const getStatusText = (status?: string) => {
     switch (status) {
