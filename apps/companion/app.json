@@ -61,8 +61,7 @@
         }
       ],
       "expo-video",
-      "expo-av",
-      "expo-video-thumbnails"
+      "expo-av"
     ],
     "experiments": {
       "typedRoutes": true
