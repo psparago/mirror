@@ -14,7 +14,6 @@ export {
 } from 'expo-router';
 
 export const unstable_settings = {
-  // Ensure that reloading on `/modal` keeps a back button present.
   initialRouteName: '(tabs)',
 };
 
@@ -52,9 +51,6 @@ function RootLayoutNav() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        {/* Update this name to reflect the new nested path if necessary, 
-            though usually (tabs)/modal is what the router expects now */}
-        <Stack.Screen name="(tabs)/modal" options={{ presentation: 'modal', headerTitle: 'Modal' }} />
       </Stack>
     </ThemeProvider>
   );
