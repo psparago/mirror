@@ -12,8 +12,6 @@ interface CameraModalProps {
   onToggleFacing: () => void;
   cameraMode: 'photo' | 'video';
   onSetCameraMode: (mode: 'photo' | 'video') => void;
-  isRecordingVideo: boolean;
-  recordingDuration: number;
   onShutterPress: () => void;
   uploading: boolean;
 }
@@ -26,8 +24,6 @@ export default function CameraModal({
   onToggleFacing,
   cameraMode,
   onSetCameraMode,
-  isRecordingVideo,
-  recordingDuration,
   onShutterPress,
   uploading,
 }: CameraModalProps) {
@@ -55,7 +51,7 @@ export default function CameraModal({
           <TouchableOpacity 
             style={styles.flipButton} 
             onPress={onToggleFacing}
-            disabled={uploading || isRecordingVideo}
+            disabled={uploading}
           >
             <FontAwesome name="refresh" size={24} color="white" />
           </TouchableOpacity>
@@ -66,7 +62,6 @@ export default function CameraModal({
           <TouchableOpacity 
             style={[styles.modeButton, cameraMode === 'photo' && styles.modeButtonActive]}
             onPress={() => onSetCameraMode('photo')}
-            disabled={isRecordingVideo}
           >
             <FontAwesome name="camera" size={20} color={cameraMode === 'photo' ? '#fff' : '#999'} />
             <Text style={[styles.modeText, cameraMode === 'photo' && styles.modeTextActive]}>Photo</Text>
@@ -74,37 +69,21 @@ export default function CameraModal({
           <TouchableOpacity 
             style={[styles.modeButton, cameraMode === 'video' && styles.modeButtonActive]}
             onPress={() => onSetCameraMode('video')}
-            disabled={isRecordingVideo}
           >
             <FontAwesome name="video-camera" size={20} color={cameraMode === 'video' ? '#fff' : '#999'} />
             <Text style={[styles.modeText, cameraMode === 'video' && styles.modeTextActive]}>Video</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Recording Duration Display */}
-        {isRecordingVideo && (
-          <View style={styles.videoRecordingIndicator}>
-            <View style={styles.recordingDot} />
-            <Text style={styles.videoRecordingText}>
-              {recordingDuration.toFixed(1)}s / 10s
-            </Text>
-          </View>
-        )}
-
         <View style={styles.buttonContainer}>
           <TouchableOpacity 
-            style={[
-              styles.captureButton,
-              cameraMode === 'video' && isRecordingVideo && styles.captureButtonRecording
-            ]} 
+            style={styles.captureButton} 
             onPress={onShutterPress}
             disabled={uploading}
           >
             <Text style={styles.text}>
               {uploading ? "UPLOADING..." : 
-                cameraMode === 'video' ? 
-                  (isRecordingVideo ? "STOP RECORDING" : "RECORD VIDEO") :
-                  "TAKE PHOTO"}
+                cameraMode === 'video' ? "RECORD VIDEO" : "TAKE PHOTO"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -180,33 +159,6 @@ const styles = StyleSheet.create({
   modeTextActive: {
     color: '#fff',
   },
-  videoRecordingIndicator: {
-    position: 'absolute',
-    top: 190,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    backgroundColor: 'rgba(255, 0, 0, 0.8)',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 25,
-    alignSelf: 'center',
-    zIndex: 10,
-  },
-  recordingDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#fff',
-  },
-  videoRecordingText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
   buttonContainer: {
     position: 'absolute',
     bottom: 40,
@@ -221,9 +173,6 @@ const styles = StyleSheet.create({
     borderRadius: 30,
     minWidth: 200,
     alignItems: 'center',
-  },
-  captureButtonRecording: {
-    backgroundColor: '#d32f2f',
   },
   text: {
     color: 'white',

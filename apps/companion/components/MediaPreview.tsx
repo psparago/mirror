@@ -1,6 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { ResizeMode, Video } from 'expo-av';
 import { BlurView } from 'expo-blur';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import React from 'react';
 import { ActivityIndicator, Image, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
@@ -49,6 +49,11 @@ export default function MediaPreview({
   onRerecord,
   textInputRef,
 }: MediaPreviewProps) {
+  // Video player for preview
+  const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
+    // Optional: handle status updates
+  });
+  
   return (
     <ScrollView 
       contentContainerStyle={styles.previewContainer}
@@ -67,12 +72,11 @@ export default function MediaPreview({
           <>
             {mediaType === 'video' && videoUri ? (
               <View style={styles.videoPreviewContainer}>
-                <Video
-                  source={{ uri: videoUri }}
+                <VideoView
+                  player={videoPlayer}
                   style={styles.previewImage}
-                  resizeMode={ResizeMode.CONTAIN}
-                  useNativeControls
-                  isLooping
+                  contentFit="contain"
+                  nativeControls
                 />
                 <View style={styles.videoPlayIcon}>
                   <FontAwesome name="play-circle" size={60} color="rgba(255, 255, 255, 0.8)" />

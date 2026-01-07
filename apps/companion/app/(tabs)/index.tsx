@@ -3,7 +3,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
-import { ResizeMode, Video } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
@@ -42,14 +42,16 @@ export default function CompanionHomeScreen() {
   // Video support state
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
-  const [isRecordingVideo, setIsRecordingVideo] = useState(false);
-  const [recordingDuration, setRecordingDuration] = useState(0);
   const [videoUri, setVideoUri] = useState<string | null>(null);
+  
+  // Video player for preview
+  const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
+    // Optional: handle status updates
+  });
   
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Request audio permissions on mount
   useEffect(() => {
@@ -98,32 +100,11 @@ export default function CompanionHomeScreen() {
   };
 
   const openCameraModal = () => {
-    // Reset all recording state when opening camera
-    setIsRecordingVideo(false);
-    setRecordingDuration(0);
     setCameraMode('photo');
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
     setShowCameraModal(true);
   };
 
   const closeCameraModal = () => {
-    // Clean up recording state when closing
-    if (isRecordingVideo && cameraRef.current) {
-      try {
-        cameraRef.current.stopRecording();
-      } catch (error) {
-        console.warn('Error stopping recording on close:', error);
-      }
-    }
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
-    setIsRecordingVideo(false);
-    setRecordingDuration(0);
     setShowCameraModal(false);
   };
 
@@ -319,51 +300,33 @@ export default function CompanionHomeScreen() {
     }
   };
 
-  const startVideoRecording = async () => {
-    if (!cameraRef.current || isRecordingVideo) {
-      console.log('⚠️ Cannot start recording', { hasCameraRef: !!cameraRef.current, isRecordingVideo });
-      return;
-    }
-    
-    console.log('🎥 Starting video recording...');
-    
+  const recordVideoWithNativeCamera = async () => {
     try {
-      setIsRecordingVideo(true);
-      setRecordingDuration(0);
+      console.log('📹 Launching native camera for video recording...');
       
-      // Start the duration timer with auto-stop at 10 seconds
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingDuration(prev => {
-          const newDuration = prev + 0.1;
-          // Auto-stop at 10 seconds
-          if (newDuration >= 10) {
-            console.log('⏱️ Auto-stopping at 10 seconds');
-            stopVideoRecording();
-            return 10;
-          }
-          return newDuration;
-        });
-      }, 100);
-
-      console.log('📹 Calling cameraRef.current.recordAsync()...');
-      // This promise resolves when recording stops (either by stopRecording() or maxDuration)
-      const video = await cameraRef.current.recordAsync({
-        maxDuration: 10, // 10 second fallback limit
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+        allowsEditing: false,
+        quality: 0.8,
+        videoMaxDuration: 10, // 10 second limit
       });
-      
-      console.log('✅ Recording completed!', { hasUri: !!video?.uri, duration: recordingDuration });
-      
-      // Recording has stopped - clean up timer and state
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-      setIsRecordingVideo(false);
-      setRecordingDuration(0);
 
-      // Process the video if we got one
-      if (video && video.uri) {
-        console.log('💾 Processing video:', video.uri);
+      console.log('📹 Camera result:', { cancelled: result.canceled, hasAssets: result.assets?.length });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const video = result.assets[0];
+        console.log('✅ Video recorded:', { uri: video.uri, duration: video.duration });
+        
+        // Check duration (duration is in milliseconds)
+        if (video.duration && video.duration > 10000) {
+          Alert.alert(
+            "Video Too Long",
+            "Please record a video that's 10 seconds or less.",
+            [{ text: "OK" }]
+          );
+          return;
+        }
+
         setVideoUri(video.uri);
         setPhoto({ uri: video.uri });
         setMediaType('video');
@@ -377,90 +340,22 @@ export default function CompanionHomeScreen() {
         setIntent('none');
         setStagingEventId(null);
         lastProcessedUriRef.current = null;
-      } else {
-        console.error('❌ No video URI received');
-        Alert.alert("Error", "Failed to save video recording");
       }
     } catch (error: any) {
       console.error("❌ Video recording error:", error);
-      
-      // Clean up on error
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-      setIsRecordingVideo(false);
-      setRecordingDuration(0);
-      
       Alert.alert("Error", `Failed to record video: ${error.message || 'Unknown error'}`);
     }
   };
 
-  const stopVideoRecording = () => {
-    console.log('🛑 stopVideoRecording called', { 
-      isRecordingVideo, 
-      hasCameraRef: !!cameraRef.current,
-      cameraRefType: cameraRef.current?.constructor?.name 
-    });
-    
-    if (!cameraRef.current) {
-      console.error('❌ No camera ref available');
-      return;
-    }
-    
-    if (!isRecordingVideo) {
-      console.warn('⚠️ Not currently recording, ignoring stop call');
-      return;
-    }
-
-    try {
-      console.log('📞 Calling cameraRef.current.stopRecording()...');
-      
-      // Set a timeout to force cleanup if stopRecording doesn't work
-      const timeoutId = setTimeout(() => {
-        console.warn('⏰ Timeout: stopRecording didn\'t resolve, forcing cleanup');
-        if (recordingTimerRef.current) {
-          clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
-        setIsRecordingVideo(false);
-        setRecordingDuration(0);
-        Alert.alert("Warning", "Recording stopped but video may not have been saved properly");
-      }, 3000); // 3 second timeout
-      
-      // Store timeout ID so we can clear it if recording stops normally
-      (cameraRef.current as any)._stopTimeout = timeoutId;
-      
-      // This should cause recordAsync to resolve
-      cameraRef.current.stopRecording();
-      
-      console.log('✅ stopRecording() called successfully');
-    } catch (error: any) {
-      console.error("❌ Error calling stopRecording:", error);
-      // Force cleanup even if stopRecording fails
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-      setIsRecordingVideo(false);
-      setRecordingDuration(0);
-    }
-  };
-
   const handleCameraShutterPress = () => {
-    console.log('🎬 Shutter button pressed', { cameraMode, isRecordingVideo });
+    console.log('🎬 Shutter button pressed', { cameraMode });
     
     if (cameraMode === 'photo') {
       console.log('📸 Taking photo...');
       takePhoto();
     } else {
-      if (isRecordingVideo) {
-        console.log('⏹️ User wants to STOP recording');
-        stopVideoRecording();
-      } else {
-        console.log('▶️ User wants to START recording');
-        startVideoRecording();
-      }
+      console.log('📹 Launching native camera for video...');
+      recordVideoWithNativeCamera();
     }
   };
 
@@ -885,12 +780,11 @@ export default function CompanionHomeScreen() {
                 <>
                   {mediaType === 'video' && videoUri ? (
                     <View style={styles.videoPreviewContainer}>
-                      <Video
-                        source={{ uri: videoUri }}
+                      <VideoView
+                        player={videoPlayer}
                         style={styles.previewImage}
-                        resizeMode={ResizeMode.CONTAIN}
-                        useNativeControls
-                        isLooping
+                        contentFit="contain"
+                        nativeControls
                       />
                       <View style={styles.videoPlayIcon}>
                         <FontAwesome name="play-circle" size={60} color="rgba(255, 255, 255, 0.8)" />
@@ -1206,8 +1100,6 @@ export default function CompanionHomeScreen() {
         onToggleFacing={toggleCameraFacing}
         cameraMode={cameraMode}
         onSetCameraMode={setCameraMode}
-        isRecordingVideo={isRecordingVideo}
-        recordingDuration={recordingDuration}
         onShutterPress={handleCameraShutterPress}
         uploading={uploading}
       />

@@ -282,6 +282,32 @@ CompanionHomeScreen (index.tsx)
 3. ✅ Better error handling
 4. ✅ Cleaner separation of concerns
 
+### Additional Bug Fix (Video Recording):
+
+**Problem**: Video recording wouldn't stop when user pressed "STOP RECORDING" button. The recording would continue past the 10-second limit.
+
+**Root Cause**: In Expo SDK 52, `cameraRef.current.stopRecording()` doesn't reliably resolve the `recordAsync()` promise immediately. The promise eventually resolves, but with a delay. Meanwhile, the video processing logic was checking `isRecordingVideo` state, which was already set to `false` by `stopVideoRecording()`, so the video never got processed.
+
+**Solution**: Added `shouldProcessVideoRef` (a `useRef`) to track whether we want to process the video when the promise eventually resolves, separate from the UI state (`isRecordingVideo`):
+
+1. **Start Recording**: Set `shouldProcessVideoRef.current = true`
+2. **User Stops**: 
+   - Clear timer
+   - Update UI (`isRecordingVideo = false`)
+   - Keep `shouldProcessVideoRef.current = true`
+   - Call `cameraRef.current.stopRecording()`
+3. **Promise Resolves** (eventually):
+   - Check `shouldProcessVideoRef.current`
+   - If `true`, process the video
+   - If `false` (user cancelled), skip processing
+4. **User Cancels** (closes modal):
+   - Set `shouldProcessVideoRef.current = false`
+   - Promise will skip processing when it resolves
+
+**Key Insight**: Separate UI state (`isRecordingVideo`) from processing intent (`shouldProcessVideoRef`).
+
+---
+
 ### What's Next:
 1. 📋 Complete component extraction (3 more components)
 2. 📋 Integrate MediaPreview
@@ -290,7 +316,131 @@ CompanionHomeScreen (index.tsx)
 
 ---
 
-**Last Updated**: Jan 6, 2026, 10:45 PM PST
-**Status**: Ready for testing when you return!
-**Estimated Time to Complete Full Refactoring**: ~2 hours
+---
+
+## Major Change: Switched from expo-camera to Native Camera for Video Recording
+
+**Date**: Jan 7, 2026, 12:30 AM PST
+
+**Problem**: `expo-camera`'s `stopRecording()` method has a critical bug in SDK 52 where the `recordAsync()` promise never resolves when manually stopped. This made it impossible for users to stop video recording - videos would either:
+1. Continue recording past the 10-second limit, or
+2. Stop recording but the app would hang waiting for the video file
+
+**Attempted Solutions**:
+1. ✅ Added `shouldProcessVideoRef` to separate UI state from processing intent
+2. ✅ Added timeout promise racing (8 second timeout)
+3. ❌ Neither solution worked reliably - the promise simply never resolved
+
+**Final Solution**: Switched to using `expo-image-picker`'s `launchCameraAsync()` for video recording.
+
+### Implementation Changes:
+
+1. **Removed**:
+   - `startVideoRecording()` function (118 lines of buggy code)
+   - `stopVideoRecording()` function (46 lines)
+   - `isRecordingVideo` state
+   - `recordingDuration` state
+   - `recordingTimerRef` ref
+   - `shouldProcessVideoRef` ref
+   - Recording indicator UI
+   - Countdown timer UI
+
+2. **Added**:
+   - `recordVideoWithNativeCamera()` function (~45 lines, simple and reliable)
+   - Uses `ImagePicker.launchCameraAsync()` with `mediaTypes: Videos`
+   - `videoMaxDuration: 10` enforced by the native OS camera
+
+3. **Updated**:
+   - `CameraModal` component: Removed recording-related props and UI
+   - `handleCameraShutterPress()`: Simplified to call native camera for videos
+   - Button text: "RECORD VIDEO" now launches native camera
+
+### Trade-offs:
+
+**Pros** ✅:
+- **Reliable**: Uses battle-tested native iOS/Android camera app
+- **Simpler code**: ~150 lines of complex recording logic removed
+- **Better UX**: Users get native camera features (zoom, flash, grid, etc.)
+- **No bugs**: OS handles all recording edge cases
+
+**Cons** ❌:
+- User briefly leaves the app (modal dismissal/presentation animation)
+- Lost custom UI (countdown timer, recording indicator)
+- Can't enforce exact 10-second limit (user can stop earlier, but OS enforces max)
+
+### Result:
+- Cleaner codebase
+- More reliable video recording
+- Better user experience overall
+
+---
+
+---
+
+## Migration from expo-av to expo-video (Video Playback)
+
+**Date**: Jan 7, 2026, 1:00 AM PST
+
+**Reason**: `expo-av`'s `Video` component is deprecated in favor of the newer, more performant `expo-video` package. Since both apps already had the package installed and we were touching video code anyway, we migrated everything to the new API.
+
+### Changes Made:
+
+**Cole (Looking Glass) - `ReflectedWatchView.tsx`**:
+- ❌ Removed: `import { Video, ResizeMode } from 'expo-av'`
+- ✅ Added: `import { useVideoPlayer, VideoView } from 'expo-video'`
+- Changed video state management:
+  - Old: `const videoRef = useRef<Video>(null)` with imperative methods
+  - New: `const player = useVideoPlayer(videoSource, callback)` with declarative API
+- Updated all video controls:
+  - `videoRef.current.playAsync()` → `player.play()`
+  - `videoRef.current.pauseAsync()` → `player.pause()`
+  - `videoRef.current.stopAsync()` → `player.pause()`
+  - `videoRef.current.replayAsync()` → `player.seekTo(0); player.play()`
+- Replaced `<Video ref={...} onPlaybackStatusUpdate={...} />` with:
+  - `<VideoView player={player} contentFit="cover" />`
+- Moved status tracking from `onPlaybackStatusUpdate` to `useVideoPlayer` callback
+- Moved video finished detection to player status monitoring
+
+**Companion - `index.tsx`**:
+- ❌ Removed: `import { Video, ResizeMode } from 'expo-av'`
+- ✅ Added: `import { useVideoPlayer, VideoView } from 'expo-video'`
+- Added: `const videoPlayer = useVideoPlayer(videoUri || '', callback)`
+- Replaced `<Video source={...} resizeMode={...} />` with:
+  - `<VideoView player={videoPlayer} contentFit="contain" />`
+
+**Companion - `MediaPreview.tsx`**:
+- Same changes as `index.tsx`
+- Added local `useVideoPlayer` hook for preview
+
+### API Differences:
+
+| Old (`expo-av`) | New (`expo-video`) |
+|-----------------|-------------------|
+| `useRef<Video>(null)` + imperative methods | `useVideoPlayer(source, callback)` |
+| `<Video ref={videoRef} source={...} />` | `<VideoView player={player} />` |
+| `resizeMode={ResizeMode.COVER}` | `contentFit="cover"` |
+| `onPlaybackStatusUpdate={(status) => {...}}` | Second param of `useVideoPlayer` |
+| `videoRef.current.playAsync()` | `player.play()` |
+| `videoRef.current.pauseAsync()` | `player.pause()` |
+| `shouldPlay={false}` | Player starts paused by default |
+| `useNativeControls` | `nativeControls` prop |
+
+### Benefits:
+
+✅ **Better Performance**: New architecture, optimized rendering  
+✅ **Modern API**: Hooks-based, more React-idiomatic  
+✅ **Future-proof**: Active development, won't be deprecated  
+✅ **Simpler**: Less boilerplate, cleaner code  
+✅ **No warnings**: Removes deprecation warnings from console  
+
+### Files Updated:
+1. `apps/cole/components/ReflectedWatchView.tsx` (~71 video-related lines updated)
+2. `apps/companion/app/(tabs)/index.tsx` (~15 lines updated)
+3. `apps/companion/components/MediaPreview.tsx` (~15 lines updated)
+
+---
+
+**Last Updated**: Jan 7, 2026, 1:00 AM PST
+**Status**: Migrated to expo-video, switched to native camera - ready for testing!
+**Estimated Time to Complete Full Refactoring**: ~1.5 hours
 

@@ -1,10 +1,11 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { Event, EventMetadata } from '@projectmirror/shared';
-import { Audio, AVPlaybackStatus, ResizeMode, Video } from 'expo-av';
+import { Audio, AVPlaybackStatus } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -64,11 +65,25 @@ export default function ReflectedWatchView({
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
   
-  // Video playback state
-  const videoRef = useRef<Video>(null);
+  // Video playback state  
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoFinished, setVideoFinished] = useState(false);
   const [isSpeakingCaption, setIsSpeakingCaption] = useState(false);
+  
+  // Initialize video player with current event's video URL
+  const videoSource = selectedEvent?.image_url && selectedMetadata?.content_type === 'video' 
+    ? selectedEvent.image_url 
+    : null;
+  
+  const player = useVideoPlayer(videoSource || '', (player) => {
+    // Status update callback
+    setIsVideoPlaying(player.playing);
+    
+    // Check if video finished (idle status after playing)
+    if (player.status === 'idle' && player.currentTime > 0 && !videoFinished) {
+      handleVideoFinished();
+    }
+  });
   
   // Tracking refs
   const hasSpokenRef = useRef(false);
@@ -136,8 +151,12 @@ export default function ReflectedWatchView({
       sound.unloadAsync().catch(err => console.warn('Error unloading sound:', err));
       setSound(null);
     }
-    if (videoRef.current) {
-      videoRef.current.stopAsync().catch(err => console.warn('Error stopping video:', err));
+    if (player && videoSource) {
+      try {
+        player.pause();
+      } catch (err) {
+        console.warn('Error pausing video:', err);
+      }
     }
     if (selfieTimerRef.current) {
       clearTimeout(selfieTimerRef.current);
@@ -183,16 +202,24 @@ export default function ReflectedWatchView({
             onDone: () => {
               setIsSpeakingCaption(false);
               // Auto-start video after caption finishes
-              if (currentPlayingEventIdRef.current === eventId && videoRef.current) {
-                videoRef.current.playAsync().catch(err => console.warn('Error auto-starting video:', err));
+              if (currentPlayingEventIdRef.current === eventId && player && videoSource) {
+                try {
+                  player.play();
+                } catch (err) {
+                  console.warn('Error auto-starting video after caption:', err);
+                }
               }
             },
           });
         } else {
           // No caption: auto-start video after brief pause
           setTimeout(() => {
-            if (currentPlayingEventIdRef.current === eventId && videoRef.current) {
-              videoRef.current.playAsync().catch(err => console.warn('Error auto-starting video:', err));
+            if (currentPlayingEventIdRef.current === eventId && player && videoSource) {
+              try {
+                player.play();
+              } catch (err) {
+                console.warn('Error auto-starting video:', err);
+              }
             }
           }, 500);
         }
@@ -303,36 +330,12 @@ export default function ReflectedWatchView({
   }, [controlsOpacity]);
 
   // Video playback status handler
-  const handleVideoPlaybackStatus = useCallback((status: AVPlaybackStatus) => {
-    if (!status.isLoaded) return;
-
+  // Helper function for video finished state
+  const handleVideoFinished = useCallback(() => {
     const eventId = selectedEvent?.event_id;
     if (!eventId || currentPlayingEventIdRef.current !== eventId) return;
-
-    // Track playing state
-    if (status.isPlaying && !isVideoPlaying) {
-      setIsVideoPlaying(true);
-      hideControls(); // Hide play button when video starts
-      
-      // ═══ AUTO-SELFIE TIMER ═══
-      // Fade in selfie mirror 5 seconds after video STARTS playing
-      if (AUTO_SHOW_SELFIE_MIRROR && !selfieTimerRef.current) {
-        selfieTimerRef.current = setTimeout(() => {
-          Animated.timing(selfieMirrorOpacity, {
-            toValue: 1,
-            duration: 500,
-            useNativeDriver: true,
-          }).start();
-        }, 5000);
-      }
-    } else if (!status.isPlaying && isVideoPlaying) {
-      setIsVideoPlaying(false);
-      showControls(); // Show play button when video pauses
-    }
-
-    // ═══ POST-ROLL ENGAGEMENT ═══
-    // Detect video finish
-    if (status.didJustFinish && !videoFinished) {
+    
+    if (!videoFinished) {
       setVideoFinished(true);
       setIsVideoPlaying(false);
       showControls(); // Show replay button
@@ -358,7 +361,28 @@ export default function ReflectedWatchView({
       
       // NO auto-advance - Cole must manually select next video (no doom scrolling)
     }
-  }, [isVideoPlaying, videoFinished, selectedEvent?.event_id, cameraPermission, selectedMetadata, showControls, hideControls]);
+  }, [videoFinished, selectedEvent?.event_id, selectedMetadata, showControls]);
+  
+  // Track video playing state changes for auto-selfie timer
+  useEffect(() => {
+    if (isVideoPlaying && selectedMetadata?.content_type === 'video') {
+      hideControls(); // Hide play button when video starts
+      
+      // ═══ AUTO-SELFIE TIMER ═══
+      // Fade in selfie mirror 5 seconds after video STARTS playing
+      if (AUTO_SHOW_SELFIE_MIRROR && !selfieTimerRef.current) {
+        selfieTimerRef.current = setTimeout(() => {
+          Animated.timing(selfieMirrorOpacity, {
+            toValue: 1,
+            duration: 500,
+            useNativeDriver: true,
+          }).start();
+        }, 5000);
+      }
+    } else if (!isVideoPlaying && selectedMetadata?.content_type === 'video') {
+      showControls(); // Show play button when video pauses
+    }
+  }, [isVideoPlaying, selectedMetadata, hideControls, showControls]);
 
   // Animate sparkle button when deep dive is playing OR post-roll
   useEffect(() => {
@@ -406,8 +430,12 @@ export default function ReflectedWatchView({
       if (sound) {
         sound.unloadAsync();
       }
-      if (videoRef.current) {
-        videoRef.current.stopAsync();
+      if (player && videoSource) {
+        try {
+          player.pause();
+        } catch (err) {
+          console.warn('Error pausing video on cleanup:', err);
+        }
       }
       if (selfieTimerRef.current) {
         clearTimeout(selfieTimerRef.current);
@@ -415,23 +443,28 @@ export default function ReflectedWatchView({
     };
   }, []); // Empty deps - only run on mount/unmount
 
-  const toggleVideo = useCallback(async () => {
-    if (!videoRef.current || selectedMetadata?.content_type !== 'video') return;
+  const toggleVideo = useCallback(() => {
+    if (!player || !videoSource || selectedMetadata?.content_type !== 'video') return;
     
-    if (isVideoPlaying) {
-      await videoRef.current.pauseAsync();
-      showControls(); // Show button when paused
-    } else {
-      // Reset post-roll state if replaying
-      if (videoFinished) {
-        setVideoFinished(false);
-        await videoRef.current.replayAsync();
+    try {
+      if (isVideoPlaying) {
+        player.pause();
+        showControls(); // Show button when paused
       } else {
-        await videoRef.current.playAsync();
+        // Reset post-roll state if replaying
+        if (videoFinished) {
+          setVideoFinished(false);
+          player.seekTo(0);
+          player.play();
+        } else {
+          player.play();
+        }
+        hideControls(); // Hide button when playing
       }
-      hideControls(); // Hide button when playing
+    } catch (err) {
+      console.warn('Error toggling video:', err);
     }
-  }, [isVideoPlaying, videoFinished, selectedMetadata, showControls, hideControls]);
+  }, [player, videoSource, isVideoPlaying, videoFinished, selectedMetadata, showControls, hideControls]);
 
   const playDescription = useCallback(async () => {
     if (!selectedEvent || !selectedMetadata) return;
@@ -616,25 +649,15 @@ export default function ReflectedWatchView({
               onPress={selectedMetadata?.content_type === 'video' ? playDescription : undefined}
               disabled={selectedMetadata?.content_type !== 'video'}
             >
-              {selectedMetadata?.content_type === 'video' ? (
-                <Video
-                  ref={videoRef}
-                  source={{ uri: selectedEvent.image_url }}
+              {selectedMetadata?.content_type === 'video' && videoSource ? (
+                <VideoView
+                  player={player}
                   style={styles.mediaImage}
-                  resizeMode={ResizeMode.COVER}
-                  shouldPlay={false}
-                  isLooping={false}
-                  onPlaybackStatusUpdate={handleVideoPlaybackStatus}
-                  onError={(error) => {
-                    console.warn('Video load error (possibly expired URL):', error);
-                    if (onMediaError && selectedEvent) {
-                      onMediaError(selectedEvent);
-                    }
-                  }}
-                  usePoster
-                  posterSource={{ uri: selectedEvent.image_url }}
-                  posterStyle={styles.mediaImage}
+                  contentFit="cover"
+                  nativeControls={false}
                 />
+              ) : selectedMetadata?.content_type === 'video' ? (
+                <ActivityIndicator size="large" color="#fff" />
               ) : (
                 <Image 
                   source={{ uri: selectedEvent.image_url }} 
