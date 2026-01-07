@@ -1,12 +1,15 @@
+import CameraModal from '@/components/CameraModal';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
+import { ResizeMode, Video } from 'expo-av';
 import { BlurView } from 'expo-blur';
-import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
@@ -35,9 +38,18 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
+  
+  // Video support state
+  const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
+  const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
+  const [isRecordingVideo, setIsRecordingVideo] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [videoUri, setVideoUri] = useState<string | null>(null);
+  
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Request audio permissions on mount
   useEffect(() => {
@@ -83,6 +95,36 @@ export default function CompanionHomeScreen() {
 
   const toggleCameraFacing = () => {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
+  };
+
+  const openCameraModal = () => {
+    // Reset all recording state when opening camera
+    setIsRecordingVideo(false);
+    setRecordingDuration(0);
+    setCameraMode('photo');
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    setShowCameraModal(true);
+  };
+
+  const closeCameraModal = () => {
+    // Clean up recording state when closing
+    if (isRecordingVideo && cameraRef.current) {
+      try {
+        cameraRef.current.stopRecording();
+      } catch (error) {
+        console.warn('Error stopping recording on close:', error);
+      }
+    }
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    setIsRecordingVideo(false);
+    setRecordingDuration(0);
+    setShowCameraModal(false);
   };
 
   const getAIDescription = async (imageUrl: string) => {
@@ -186,20 +228,43 @@ export default function CompanionHomeScreen() {
         return;
       }
 
-      // Launch image picker
+      // Launch media picker (supports both images and videos)
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: 'images', // Using string format as MediaTypeOptions is deprecated
+        mediaTypes: ['images', 'videos'], // Support both images and videos
         allowsEditing: true,
         aspect: [4, 3],
         quality: 0.5,
+        videoMaxDuration: 15, // Allow up to 15 seconds for selection (we'll warn if too long)
       });
 
       if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        
+        // Check if it's a video
+        if (asset.type === 'video') {
+          // Check duration
+          if (asset.duration && asset.duration > 15000) { // duration is in milliseconds
+            Alert.alert(
+              'Video Too Long',
+              `The selected video is ${Math.round(asset.duration / 1000)} seconds. Please select a video shorter than 15 seconds.`,
+              [{ text: 'OK' }]
+            );
+            setIsLoadingGallery(false);
+            return;
+          }
+          
+          setMediaType('video');
+          setVideoUri(asset.uri);
+          setPhoto({ uri: asset.uri });
+        } else {
+          setMediaType('photo');
+          setVideoUri(null);
+          setPhoto({ uri: asset.uri });
+        }
+
         setIsLoadingImage(true);
-        // Set the selected image as if it was just taken
-        setPhoto({ uri: result.assets[0].uri });
         setShowDescriptionInput(true);
-        // Clear any previous audio recording when selecting a new photo
+        // Clear any previous audio recording when selecting new media
         setAudioUri(null);
         setDescription('');
         setIsAiGenerated(false);
@@ -213,13 +278,13 @@ export default function CompanionHomeScreen() {
         // Reset the last processed URI to prevent stale URIs from being set
         lastProcessedUriRef.current = null;
         
-        // Small delay to ensure image loads
+        // Small delay to ensure media loads
         setTimeout(() => setIsLoadingImage(false), 300);
       }
       setIsLoadingGallery(false);
     } catch (error: any) {
-      console.error("Image picker error:", error);
-      Alert.alert("Error", "Failed to pick image from gallery");
+      console.error("Media picker error:", error);
+      Alert.alert("Error", "Failed to pick media from gallery");
       setIsLoadingGallery(false);
       setIsLoadingImage(false);
     }
@@ -231,10 +296,12 @@ export default function CompanionHomeScreen() {
     try {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
       setPhoto(picture);
+      setMediaType('photo');
       setShowDescriptionInput(true);
       setShowCameraModal(false); // Close camera modal after taking photo
       // Clear any previous audio recording when taking a new photo
       setAudioUri(null);
+      setVideoUri(null);
       setDescription('');
       setIsAiGenerated(false);
       setShortCaption('');
@@ -249,6 +316,151 @@ export default function CompanionHomeScreen() {
     } catch (error: any) {
       console.error("Photo capture error:", error);
       Alert.alert("Error", "Failed to capture photo");
+    }
+  };
+
+  const startVideoRecording = async () => {
+    if (!cameraRef.current || isRecordingVideo) {
+      console.log('⚠️ Cannot start recording', { hasCameraRef: !!cameraRef.current, isRecordingVideo });
+      return;
+    }
+    
+    console.log('🎥 Starting video recording...');
+    
+    try {
+      setIsRecordingVideo(true);
+      setRecordingDuration(0);
+      
+      // Start the duration timer with auto-stop at 10 seconds
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          const newDuration = prev + 0.1;
+          // Auto-stop at 10 seconds
+          if (newDuration >= 10) {
+            console.log('⏱️ Auto-stopping at 10 seconds');
+            stopVideoRecording();
+            return 10;
+          }
+          return newDuration;
+        });
+      }, 100);
+
+      console.log('📹 Calling cameraRef.current.recordAsync()...');
+      // This promise resolves when recording stops (either by stopRecording() or maxDuration)
+      const video = await cameraRef.current.recordAsync({
+        maxDuration: 10, // 10 second fallback limit
+      });
+      
+      console.log('✅ Recording completed!', { hasUri: !!video?.uri, duration: recordingDuration });
+      
+      // Recording has stopped - clean up timer and state
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      setIsRecordingVideo(false);
+      setRecordingDuration(0);
+
+      // Process the video if we got one
+      if (video && video.uri) {
+        console.log('💾 Processing video:', video.uri);
+        setVideoUri(video.uri);
+        setPhoto({ uri: video.uri });
+        setMediaType('video');
+        setShowDescriptionInput(true);
+        closeCameraModal();
+        setAudioUri(null);
+        setDescription('');
+        setIsAiGenerated(false);
+        setShortCaption('');
+        setDeepDive('');
+        setIntent('none');
+        setStagingEventId(null);
+        lastProcessedUriRef.current = null;
+      } else {
+        console.error('❌ No video URI received');
+        Alert.alert("Error", "Failed to save video recording");
+      }
+    } catch (error: any) {
+      console.error("❌ Video recording error:", error);
+      
+      // Clean up on error
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      setIsRecordingVideo(false);
+      setRecordingDuration(0);
+      
+      Alert.alert("Error", `Failed to record video: ${error.message || 'Unknown error'}`);
+    }
+  };
+
+  const stopVideoRecording = () => {
+    console.log('🛑 stopVideoRecording called', { 
+      isRecordingVideo, 
+      hasCameraRef: !!cameraRef.current,
+      cameraRefType: cameraRef.current?.constructor?.name 
+    });
+    
+    if (!cameraRef.current) {
+      console.error('❌ No camera ref available');
+      return;
+    }
+    
+    if (!isRecordingVideo) {
+      console.warn('⚠️ Not currently recording, ignoring stop call');
+      return;
+    }
+
+    try {
+      console.log('📞 Calling cameraRef.current.stopRecording()...');
+      
+      // Set a timeout to force cleanup if stopRecording doesn't work
+      const timeoutId = setTimeout(() => {
+        console.warn('⏰ Timeout: stopRecording didn\'t resolve, forcing cleanup');
+        if (recordingTimerRef.current) {
+          clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+        setIsRecordingVideo(false);
+        setRecordingDuration(0);
+        Alert.alert("Warning", "Recording stopped but video may not have been saved properly");
+      }, 3000); // 3 second timeout
+      
+      // Store timeout ID so we can clear it if recording stops normally
+      (cameraRef.current as any)._stopTimeout = timeoutId;
+      
+      // This should cause recordAsync to resolve
+      cameraRef.current.stopRecording();
+      
+      console.log('✅ stopRecording() called successfully');
+    } catch (error: any) {
+      console.error("❌ Error calling stopRecording:", error);
+      // Force cleanup even if stopRecording fails
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      setIsRecordingVideo(false);
+      setRecordingDuration(0);
+    }
+  };
+
+  const handleCameraShutterPress = () => {
+    console.log('🎬 Shutter button pressed', { cameraMode, isRecordingVideo });
+    
+    if (cameraMode === 'photo') {
+      console.log('📸 Taking photo...');
+      takePhoto();
+    } else {
+      if (isRecordingVideo) {
+        console.log('⏹️ User wants to STOP recording');
+        stopVideoRecording();
+      } else {
+        console.log('▶️ User wants to START recording');
+        startVideoRecording();
+      }
     }
   };
 
@@ -335,49 +547,92 @@ export default function CompanionHomeScreen() {
       const eventID = Date.now().toString();
       const timestamp = new Date().toISOString();
 
-      // 1. Upload image.jpg to final location
-      const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
-      const { url: imageUrl } = await imageResponse.json();
+      // 1. Handle Video: Generate Thumbnail & Upload Both
+      if (mediaType === 'video' && videoUri) {
+        // Generate thumbnail from video
+        const { uri: thumbnailUri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
+          time: 0, // Get frame at the beginning
+          quality: 0.5,
+        });
 
-      // Upload image to final location
-      // If staging exists (user triggered AI), copy from staging. Otherwise upload directly.
-      if (stagingEventId) {
-        // Copy from staging to final location
-        const stagingGetResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
-        if (stagingGetResponse.ok) {
-          const { url: stagingImageUrl } = await stagingGetResponse.json();
-          // Download staging image and upload to final location
-          const stagingImageBlob = await fetch(stagingImageUrl).then(r => r.blob());
-          const imageUploadResponse = await fetch(imageUrl, {
-            method: 'PUT',
-            body: stagingImageBlob,
-            headers: { 'Content-Type': 'image/jpeg' },
-          });
-          if (imageUploadResponse.status !== 200) {
-            throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+        // Get presigned URLs for both thumbnail (image.jpg) and video (video.mp4)
+        const [imageResponse, videoResponse] = await Promise.all([
+          fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`),
+          fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=video.mp4`)
+        ]);
+
+        const { url: imageUrl } = await imageResponse.json();
+        const { url: videoUploadUrl } = await videoResponse.json();
+
+        // Upload thumbnail (image.jpg)
+        const thumbnailUploadResponse = await uploadPhotoToS3(thumbnailUri, imageUrl);
+        if (thumbnailUploadResponse.status !== 200) {
+          throw new Error(`Thumbnail upload failed: ${thumbnailUploadResponse.status}`);
+        }
+
+        // Upload video (video.mp4)
+        const videoUploadResponse = await FileSystem.uploadAsync(videoUploadUrl, videoUri, {
+          httpMethod: 'PUT',
+          headers: {
+            'Content-Type': 'video/mp4',
+          },
+        });
+
+        if (videoUploadResponse.status !== 200) {
+          throw new Error(`Video upload failed: ${videoUploadResponse.status}`);
+        }
+
+        // Clean up temporary thumbnail
+        try {
+          await FileSystem.deleteAsync(thumbnailUri, { idempotent: true });
+        } catch (cleanupError) {
+          console.warn("Failed to delete thumbnail:", cleanupError);
+        }
+      } else {
+        // 1. Upload image.jpg to final location (existing photo logic)
+        const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
+        const { url: imageUrl } = await imageResponse.json();
+
+        // Upload image to final location
+        // If staging exists (user triggered AI), copy from staging. Otherwise upload directly.
+        if (stagingEventId) {
+          // Copy from staging to final location
+          const stagingGetResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
+          if (stagingGetResponse.ok) {
+            const { url: stagingImageUrl } = await stagingGetResponse.json();
+            // Download staging image and upload to final location
+            const stagingImageBlob = await fetch(stagingImageUrl).then(r => r.blob());
+            const imageUploadResponse = await fetch(imageUrl, {
+              method: 'PUT',
+              body: stagingImageBlob,
+              headers: { 'Content-Type': 'image/jpeg' },
+            });
+            if (imageUploadResponse.status !== 200) {
+              throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+            }
+          } else {
+            // Fallback to original upload if staging fetch fails
+            const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
+            if (imageUploadResponse.status !== 200) {
+              throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
+            }
           }
         } else {
-          // Fallback to original upload if staging fetch fails
+          // No staging - upload directly (user chose voice or note without AI)
           const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
           if (imageUploadResponse.status !== 200) {
             throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
           }
         }
-      } else {
-        // No staging - upload directly (user chose voice or note without AI)
-        const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
-        if (imageUploadResponse.status !== 200) {
-          throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
-        }
-      }
 
-      // Clean up staging image after successful upload to final location
-      if (stagingEventId) {
-        try {
-          await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
-        } catch (error: any) {
-          console.error("Error deleting staging image:", error);
-          // Continue anyway - staging cleanup is not critical
+        // Clean up staging image after successful upload to final location
+        if (stagingEventId) {
+          try {
+            await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+          } catch (error: any) {
+            console.error("Error deleting staging image:", error);
+            // Continue anyway - staging cleanup is not critical
+          }
         }
       }
 
@@ -425,12 +680,12 @@ export default function CompanionHomeScreen() {
       // Note: We don't store audio_url in metadata because presigned URLs expire (15 min)
       // The backend ListMirrorEvents generates fresh presigned GET URLs when listing events
       const metadata: any = {
-        description: description.trim() || (audioUploaded ? "Voice message" : ""),
+        description: description.trim() || (audioUploaded ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
         sender: "Granddad",
         timestamp: timestamp,
         event_id: eventID,
-        // Only store content_type to indicate if audio exists - backend will provide fresh presigned URL
-        content_type: audioUploaded ? 'audio' as const : 'text' as const,
+        // Set content_type based on media type
+        content_type: mediaType === 'video' ? 'video' as const : (audioUploaded ? 'audio' as const : 'text' as const),
       };
 
       // Add AI-generated fields if they exist
@@ -460,6 +715,8 @@ export default function CompanionHomeScreen() {
       // 4. Cleanup UI first (don't wait for Firestore)
       Alert.alert("Success!", "Reflection sent!");
       setPhoto(null);
+      setVideoUri(null);
+      setMediaType('photo');
       setDescription('');
       setShowDescriptionInput(false);
       setIsAiGenerated(false);
@@ -519,6 +776,8 @@ export default function CompanionHomeScreen() {
     }
     
     setPhoto(null);
+    setVideoUri(null);
+    setMediaType('photo');
     setDescription('');
     setShowDescriptionInput(false);
     setIsAiGenerated(false);
@@ -542,6 +801,8 @@ export default function CompanionHomeScreen() {
     
     // Clear all state and return to camera
     setPhoto(null);
+    setVideoUri(null);
+    setMediaType('photo');
     setDescription('');
     setShowDescriptionInput(false);
     setIsAiGenerated(false);
@@ -614,7 +875,7 @@ export default function CompanionHomeScreen() {
             {/* Title */}
             <Text style={styles.creationTitle}>Reflection Station</Text>
             
-            {/* Image Preview with Retake Button */}
+            {/* Media Preview (Image or Video) with Retake Button */}
             <View style={styles.previewImageContainer}>
               {isLoadingImage ? (
                 <View style={styles.loadingContainer}>
@@ -622,11 +883,26 @@ export default function CompanionHomeScreen() {
                 </View>
               ) : (
                 <>
-                  <Image
-                    source={{ uri: photo.uri }}
-                    style={styles.previewImage}
-                    resizeMode="contain"
-                  />
+                  {mediaType === 'video' && videoUri ? (
+                    <View style={styles.videoPreviewContainer}>
+                      <Video
+                        source={{ uri: videoUri }}
+                        style={styles.previewImage}
+                        resizeMode={ResizeMode.CONTAIN}
+                        useNativeControls
+                        isLooping
+                      />
+                      <View style={styles.videoPlayIcon}>
+                        <FontAwesome name="play-circle" size={60} color="rgba(255, 255, 255, 0.8)" />
+                      </View>
+                    </View>
+                  ) : (
+                    <Image
+                      source={{ uri: photo.uri }}
+                      style={styles.previewImage}
+                      resizeMode="contain"
+                    />
+                  )}
                   <View style={styles.imageTopButtons}>
                     {intent !== 'none' && (
                       <TouchableOpacity 
@@ -833,7 +1109,7 @@ export default function CompanionHomeScreen() {
               styles.dashboardButton,
               pressedButton === 'capture' && styles.dashboardButtonPressed
             ]}
-            onPress={() => setShowCameraModal(true)}
+            onPress={openCameraModal}
             onPressIn={() => setPressedButton('capture')}
             onPressOut={() => setPressedButton(null)}
             disabled={uploading || !permission?.granted}
@@ -853,7 +1129,7 @@ export default function CompanionHomeScreen() {
               <View style={styles.iconContainer}>
                 <FontAwesome name="camera" size={53} color="#2E78B7" />
               </View>
-              <Text style={styles.captureButtonText}>Capture Photo</Text>
+              <Text style={styles.captureButtonText}>Capture Photo or Video</Text>
             </BlurView>
           </TouchableOpacity>
 
@@ -922,48 +1198,19 @@ export default function CompanionHomeScreen() {
       </View>
 
       {/* Camera Modal */}
-      <Modal
+      <CameraModal
         visible={showCameraModal}
-        animationType="slide"
-        presentationStyle="fullScreen"
-        onRequestClose={() => setShowCameraModal(false)}
-      >
-        <View style={styles.container}>
-          <CameraView 
-            style={StyleSheet.absoluteFill} 
-            ref={cameraRef}
-            facing={facing}
-          />
-
-          <View style={styles.topControls}>
-            <TouchableOpacity 
-              style={styles.closeCameraButton}
-              onPress={() => setShowCameraModal(false)}
-            >
-              <FontAwesome name="times" size={24} color="white" />
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.flipButton} 
-              onPress={toggleCameraFacing}
-              disabled={uploading}
-            >
-              <FontAwesome name="refresh" size={24} color="white" />
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.buttonContainer}>
-            <TouchableOpacity 
-              style={styles.captureButton} 
-              onPress={takePhoto}
-              disabled={uploading}
-            >
-              <Text style={styles.text}>
-                {uploading ? "UPLOADING..." : "TAKE PHOTO"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+        onClose={closeCameraModal}
+        cameraRef={cameraRef}
+        facing={facing}
+        onToggleFacing={toggleCameraFacing}
+        cameraMode={cameraMode}
+        onSetCameraMode={setCameraMode}
+        isRecordingVideo={isRecordingVideo}
+        recordingDuration={recordingDuration}
+        onShutterPress={handleCameraShutterPress}
+        uploading={uploading}
+      />
 
       {/* Search Modal */}
       <Modal
@@ -1769,5 +2016,82 @@ const styles = StyleSheet.create({
     color: '#2e78b7',
     fontSize: 16,
     fontWeight: '600',
+  },
+  // Video-specific styles
+  modeToggleContainer: {
+    position: 'absolute',
+    top: 100,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 20,
+    paddingHorizontal: 20,
+    zIndex: 10,
+  },
+  modeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  modeButtonActive: {
+    backgroundColor: 'rgba(46, 120, 183, 0.8)',
+    borderColor: '#fff',
+  },
+  modeText: {
+    color: '#999',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modeTextActive: {
+    color: '#fff',
+  },
+  videoRecordingIndicator: {
+    position: 'absolute',
+    top: 160,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(255, 0, 0, 0.8)',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 25,
+    alignSelf: 'center',
+    zIndex: 10,
+  },
+  recordingDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#fff',
+  },
+  videoRecordingText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  captureButtonRecording: {
+    backgroundColor: '#d32f2f',
+  },
+  videoPreviewContainer: {
+    width: '100%',
+    height: '100%',
+    position: 'relative',
+  },
+  videoPlayIcon: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -30 }, { translateY: -30 }],
+    zIndex: 1,
   },
 });
