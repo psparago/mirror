@@ -32,7 +32,7 @@ export interface Event {
   image_url: string; // Always a JPG/PNG (Thumbnail for video events)
   metadata_url: string;
   audio_url?: string; // Optional presigned GET URL for audio.m4a
-  video_url?: string; // Optional presigned GET URL for video.mp4 (NEW)
+  video_url?: string; // Optional presigned GET URL for video.mp4
   metadata?: EventMetadata;
 }
 

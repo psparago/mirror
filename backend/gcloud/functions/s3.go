@@ -130,9 +130,10 @@ type EventMetadata struct {
 // Event represents a complete event bundle
 type Event struct {
 	EventID     string         `json:"event_id"`
-	ImageURL    string         `json:"image_url"`
+	ImageURL    string         `json:"image_url"`    // Always a thumbnail for video events
 	MetadataURL string         `json:"metadata_url"`
 	AudioURL    string         `json:"audio_url,omitempty"` // Optional audio file URL
+	VideoURL    string         `json:"video_url,omitempty"` // Optional video file URL
 	Metadata    *EventMetadata `json:"metadata,omitempty"`
 }
 
@@ -222,10 +223,13 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			} else if filename == "metadata.json" {
 				eventMap[eventID].MetadataURL = presignedRes.URL
 				fmt.Printf("Found metadata for event %s\n", eventID)
-			} else if filename == "audio.m4a" {
-				eventMap[eventID].AudioURL = presignedRes.URL
-				fmt.Printf("Found audio for event %s\n", eventID)
-			}
+		} else if filename == "audio.m4a" {
+			eventMap[eventID].AudioURL = presignedRes.URL
+			fmt.Printf("Found audio for event %s\n", eventID)
+		} else if filename == "video.mp4" {
+			eventMap[eventID].VideoURL = presignedRes.URL
+			fmt.Printf("Found video for event %s\n", eventID)
+		}
 		} else {
 			// Log unexpected path structure for debugging
 			fmt.Printf("Unexpected path structure: %s (parts: %v)\n", key, parts)
@@ -302,11 +306,12 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("staging/%s/image.jpg", eventID),
 		}
 	} else {
-		// For regular reflections, delete image.jpg, metadata.json, and audio.m4a (if present)
+		// For regular reflections, delete image.jpg, metadata.json, audio.m4a, and video.mp4 (if present)
 		objectsToDelete = []string{
 			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
 			fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
 			fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID), // Delete audio if present
+			fmt.Sprintf("%s/%s/%s/video.mp4", UserID, path, eventID), // Delete video if present
 		}
 	}
 

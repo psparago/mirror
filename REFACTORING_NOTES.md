@@ -440,7 +440,94 @@ CompanionHomeScreen (index.tsx)
 
 ---
 
-**Last Updated**: Jan 7, 2026, 1:00 AM PST
-**Status**: Migrated to expo-video, switched to native camera - ready for testing!
-**Estimated Time to Complete Full Refactoring**: ~1.5 hours
+---
+
+## ✅ Video Playback Safety Fixes (Cole App)
+
+**Date**: Jan 7, 2026, 1:45 AM PST
+
+**Problem**: After rebuilding the Cole dev client with `expo-video`, the app crashed on first load with:
+```
+FunctionCallException: Calling the 'pause' function has failed
+→ Caused by: NativeSharedObjectNotFoundException: Unable to find the native shared object
+```
+
+**Root Cause**: We were calling `player.pause()` even when there was no valid video loaded (null or empty source). The video player object existed but had no native backing without a valid source.
+
+**Solution**: Added safety checks around all video player method calls:
+
+1. **Check videoSource exists** before calling player methods
+2. **Wrap all player calls in try-catch** blocks
+3. **Only render VideoView when videoSource is valid**
+4. **Show loading spinner** if metadata says "video" but source isn't ready
+
+**Changes in `ReflectedWatchView.tsx`:**
+```typescript
+// Added checks in 5 places:
+if (player && videoSource) {
+  try {
+    player.pause();
+  } catch (err) {
+    console.warn('Error pausing video:', err);
+  }
+}
+```
+
+**Result**: App loads without crashes, videos play correctly when available.
+
+---
+
+## 🚀 Backend Video URL Generation - DEPLOYED
+
+**Date**: Jan 7, 2026, ~2:00 AM PST
+
+**Problem**: Videos were uploading to S3 correctly, but Cole couldn't play them because the backend wasn't generating `video_url` presigned URLs.
+
+**Changes Made** (`backend/gcloud/functions/s3.go`):
+
+1. **Added VideoURL field to Event struct:**
+   ```go
+   type Event struct {
+       // ... existing fields
+       VideoURL string `json:"video_url,omitempty"` // NEW
+   }
+   ```
+
+2. **Added video.mp4 handler in ListMirrorEvents:**
+   ```go
+   } else if filename == "video.mp4" {
+       eventMap[eventID].VideoURL = presignedRes.URL
+       fmt.Printf("Found video for event %s\n", eventID)
+   }
+   ```
+
+3. **Added video.mp4 to delete list:**
+   ```go
+   objectsToDelete = []string{
+       // ... existing files
+       fmt.Sprintf("%s/%s/%s/video.mp4", UserID, path, eventID),
+   }
+   ```
+
+**Frontend Fix** (`apps/cole/components/ReflectedWatchView.tsx`):
+```typescript
+// Changed from using image_url (thumbnail) to video_url (actual video)
+const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
+  ? selectedEvent.video_url
+  : null;
+```
+
+**Deployment**: 
+```bash
+./scripts/gcloud/deploy-list-mirror-photos.sh
+```
+
+**Status**: ✅ DEPLOYED - Videos now work end-to-end!
+
+---
+
+**Last Updated**: Jan 7, 2026, 2:00 AM PST
+**Status**: 🎉 VIDEO FULLY OPERATIONAL - All features working, backend deployed
+**Refactoring Status**: CameraModal & MediaPreview extracted, 3 more components pending
+**Video Feature Status**: Complete end-to-end (record, upload, play, delete)
 

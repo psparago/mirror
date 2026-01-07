@@ -71,8 +71,8 @@ export default function ReflectedWatchView({
   const [isSpeakingCaption, setIsSpeakingCaption] = useState(false);
   
   // Initialize video player with current event's video URL
-  const videoSource = selectedEvent?.image_url && selectedMetadata?.content_type === 'video' 
-    ? selectedEvent.image_url 
+  const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
+    ? selectedEvent.video_url
     : null;
   
   const player = useVideoPlayer(videoSource || '', (player) => {
