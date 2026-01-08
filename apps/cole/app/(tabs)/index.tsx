@@ -27,7 +27,7 @@ export default function ColeInboxScreen() {
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
   const refreshingEventsRef = useRef<Set<string>>(new Set()); // Track events currently being refreshed
-  
+
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
@@ -38,9 +38,9 @@ export default function ColeInboxScreen() {
     // Set up Firestore listener for real-time signals
     const signalsRef = collection(db, 'signals');
     const q = query(signalsRef, orderBy('timestamp', 'desc'));
-    
+
     let isInitialLoad = true;
-    
+
     const unsubscribe = onSnapshot(
       q,
       (snapshot: QuerySnapshot<DocumentData>) => {
@@ -148,22 +148,22 @@ export default function ColeInboxScreen() {
       setLoading(true);
       setError(null);
       const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch events: ${response.status}`);
       }
-      
+
       const data: ListEventsResponse = await response.json();
-      
+
       // Filter out events without image URLs and log issues
       const validEvents = (data.events || []).filter((event) => {
         if (!event.image_url || event.image_url === '') {
-          console.warn(`Event ${event.event_id} has no image_url`);
+          console.log(`Skipping incomplete event ${event.event_id} (no image_url)`);
           return false;
         }
         return true;
       });
-      
+
       // Sort by event_id (timestamp) in descending order (latest first)
       // This ensures the newest events appear first in the grid
       const sortedEvents = validEvents.sort((a, b) => {
@@ -171,9 +171,9 @@ export default function ColeInboxScreen() {
         // For descending order (latest first), we want b - a
         return b.event_id.localeCompare(a.event_id);
       });
-      
+
       setEvents(sortedEvents);
-      
+
       // Fetch metadata for each event
       const metadataPromises = (data.events || []).map(async (event) => {
         if (event.metadata_url) {
@@ -189,7 +189,7 @@ export default function ColeInboxScreen() {
         }
         return null;
       });
-      
+
       const metadataResults = await Promise.all(metadataPromises);
       const metadataMap: { [key: string]: EventMetadata } = {};
       metadataResults.forEach(result => {
@@ -214,13 +214,13 @@ export default function ColeInboxScreen() {
         console.warn(`Failed to refresh URLs for event ${eventId}`);
         return null;
       }
-      
+
       const data: ListEventsResponse = await response.json();
       const refreshedEvent = data.events?.find(e => e.event_id === eventId);
-      
+
       if (refreshedEvent) {
         // Update the event in the events array
-        setEvents(prevEvents => 
+        setEvents(prevEvents =>
           prevEvents.map(e => e.event_id === eventId ? refreshedEvent : e)
         );
         return refreshedEvent;
@@ -235,7 +235,7 @@ export default function ColeInboxScreen() {
   const handleEventPress = async (item: Event) => {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
-    
+
     // Fetch metadata if not already loaded
     if (!eventMetadata[item.event_id] && item.metadata_url) {
       try {
@@ -251,14 +251,14 @@ export default function ColeInboxScreen() {
         console.warn(`Failed to fetch metadata for ${item.event_id}:`, err);
       }
     }
-    
+
     // Refresh URLs in background (non-blocking) to ensure they're not expired
     const eventIdToRefresh = item.event_id;
     refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
       if (refreshedEvent) {
         // DON'T update selectedEvent - this would trigger re-renders and re-playback
         // Just update the events array in the background
-        
+
         // Fetch metadata for refreshed event if not already loaded
         if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
           fetch(refreshedEvent.metadata_url)
@@ -281,14 +281,14 @@ export default function ColeInboxScreen() {
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
     const hasDescription = metadata?.description;
-    
+
     // Don't render if no image URL
     if (!item.image_url || item.image_url === '') {
       return null;
     }
-    
+
     return (
-      <TouchableOpacity 
+      <TouchableOpacity
         style={styles.photoContainer}
         onPress={() => handleEventPress(item)}
         activeOpacity={0.8}
@@ -313,11 +313,11 @@ export default function ColeInboxScreen() {
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
-    
+
     // Find current index
     const currentIndex = events.findIndex(e => e.event_id === selectedEvent.event_id);
     if (currentIndex === -1) return;
-    
+
     // Determine the target event
     let targetEvent: Event | null = null;
     if (direction === 'prev') {
@@ -340,7 +340,7 @@ export default function ColeInboxScreen() {
         targetEvent = events[currentIndex + 1];
       }
     }
-    
+
     if (targetEvent) {
       // Refresh URLs for the target photo
       const refreshedEvent = await refreshEventUrls(targetEvent.event_id);
@@ -355,11 +355,11 @@ export default function ColeInboxScreen() {
     if (refreshingEventsRef.current.has(event.event_id)) {
       return;
     }
-    
+
     // Add to set IMMEDIATELY to block concurrent calls
     refreshingEventsRef.current.add(event.event_id);
     console.log(`🔄 Refreshing expired URLs for event ${event.event_id}`);
-    
+
     try {
       const refreshedEvent = await refreshEventUrls(event.event_id);
       if (refreshedEvent && selectedEvent?.event_id === event.event_id) {
@@ -385,12 +385,12 @@ export default function ColeInboxScreen() {
         onPanResponderRelease: (_, gestureState) => {
           const absDx = Math.abs(gestureState.dx);
           const absDy = Math.abs(gestureState.dy);
-          
+
           // Minimum swipe distance of 50 pixels
           if (absDx < 50 && absDy < 50) {
             return; // Too small, ignore
           }
-          
+
           // Vertical swipe (up or down) - return to inbox
           if (absDy > absDx && absDy > 50) {
             closeFullScreen();
@@ -414,7 +414,7 @@ export default function ColeInboxScreen() {
   // Send engagement signal to Firestore
   const sendEngagementSignal = async (eventId: string) => {
     if (hasEngagedRef.current[eventId]) return; // Already sent
-    
+
     try {
       const signalRef = doc(db, 'signals', eventId);
       await setDoc(signalRef, {
@@ -434,7 +434,7 @@ export default function ColeInboxScreen() {
     if (hasReplayedRef.current[eventId]) {
       return; // Already sent
     }
-    
+
     try {
       const signalRef = doc(db, 'signals', eventId);
       await setDoc(signalRef, {
@@ -454,7 +454,7 @@ export default function ColeInboxScreen() {
     if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
       return;
     }
-    
+
     // Check camera permissions
     if (!cameraPermission?.granted) {
       const result = await requestCameraPermission();
@@ -465,7 +465,7 @@ export default function ColeInboxScreen() {
     }
 
     setIsCapturingSelfie(true);
-    
+
     try {
       // Capture photo
       const photo = await cameraRef.current.takePictureAsync({
@@ -479,7 +479,7 @@ export default function ColeInboxScreen() {
 
       // Generate event ID for the response
       const responseEventId = Date.now().toString();
-      
+
       // Get presigned URL for upload (path=from for Star to Companion)
       let imageUrl: string;
       try {
@@ -529,7 +529,7 @@ export default function ColeInboxScreen() {
         rate: 1.0,
         language: 'en-US',
       });
-      
+
       Alert.alert("Success!", "Your selfie response has been sent!");
 
       // Create reflection_response document in Firestore (non-blocking)
@@ -546,7 +546,7 @@ export default function ColeInboxScreen() {
           // Don't show error to user - S3 upload succeeded, which is the important part
           // Firestore is just for tracking/display in Companion app
         });
-      
+
     } catch (error: any) {
       console.error("Error capturing selfie:", error);
       let errorMessage = "Failed to capture selfie. Please try again.";
@@ -561,86 +561,74 @@ export default function ColeInboxScreen() {
 
 
   const deleteEvent = async (event: Event) => {
-    Alert.alert(
-      "Delete Reflection",
-      "Are you sure you want to delete this Reflection?",
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-        },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              // 1. Delete S3 objects
-              const deleteResponse = await fetch(
-                `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}`
-              );
-              
-              if (!deleteResponse.ok) {
-                const errorData = await deleteResponse.json();
-                throw new Error(errorData.errors?.join(', ') || 'Failed to delete S3 objects');
-              }
+    try {
+      // 1. Delete S3 objects
+      const deleteResponse = await fetch(
+        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}`
+      );
 
-              // 2. Delete selfie response image from S3 if it exists (keep the document)
-              try {
-                const responseRef = doc(db, 'reflection_responses', event.event_id);
-                const responseDoc = await getDoc(responseRef);
-                
-                if (responseDoc.exists()) {
-                  const responseData = responseDoc.data();
-                  const responseEventId = responseData.response_event_id;
-                  
-                  if (responseEventId) {
-                    // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
-                    // Keep the reflection_response document in Firestore for history
-                    const deleteSelfieResponse = await fetch(
-                      `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from`
-                    );
-                    
-                    if (!deleteSelfieResponse.ok) {
-                      console.warn("Failed to delete selfie image from S3, continuing with deletion");
-                    }
-                  }
-                }
-              } catch (selfieError: any) {
-                console.warn("Failed to delete selfie response:", selfieError);
-                // Continue even if selfie deletion fails
-              }
+      if (!deleteResponse.ok) {
+        const errorData = await deleteResponse.json();
+        throw new Error(errorData.errors?.join(', ') || 'Failed to delete S3 objects');
+      }
 
-              // 3. Mark Firestore signal document as deleted (instead of deleting it)
-              try {
-                const signalRef = doc(db, 'signals', event.event_id);
-                await setDoc(signalRef, {
-                  status: 'deleted',
-                  deleted_at: serverTimestamp(),
-                }, { merge: true });
-              } catch (firestoreError: any) {
-                console.warn("Failed to mark Firestore signal as deleted:", firestoreError);
-                // Continue even if Firestore update fails
-              }
+      // 2. Delete selfie response image from S3 if it exists (keep the document)
+      try {
+        const responseRef = doc(db, 'reflection_responses', event.event_id);
+        const responseDoc = await getDoc(responseRef);
 
-              // 3. Stop any ongoing speech (defensive cleanup)
-              Speech.stop();
-              
-              // 4. Remove from local state and refresh
-              setEvents(events.filter(e => e.event_id !== event.event_id));
-              setSelectedEvent(null);
-              
-              // 5. Refresh the list to ensure consistency
-              fetchEvents();
-              
-              Alert.alert("Success", "Reflection deleted successfully");
-            } catch (error: any) {
-              console.error("Delete error:", error);
-              Alert.alert("Delete Failed", error.message || "Failed to delete Reflection");
+        if (responseDoc.exists()) {
+          const responseData = responseDoc.data();
+          const responseEventId = responseData.response_event_id;
+
+          if (responseEventId) {
+            // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
+            // Keep the reflection_response document in Firestore for history
+            const deleteSelfieResponse = await fetch(
+              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from`
+            );
+
+            if (!deleteSelfieResponse.ok) {
+              console.warn("Failed to delete selfie image from S3, continuing with deletion");
             }
-          },
-        },
-      ]
-    );
+          }
+        }
+      } catch (selfieError: any) {
+        console.warn("Failed to delete selfie response:", selfieError);
+        // Continue even if selfie deletion fails
+      }
+
+      // 3. Mark Firestore signal document as deleted (instead of deleting it)
+      try {
+        const signalRef = doc(db, 'signals', event.event_id);
+        await setDoc(signalRef, {
+          status: 'deleted',
+          deleted_at: serverTimestamp(),
+        }, { merge: true });
+      } catch (firestoreError: any) {
+        console.warn("Failed to mark Firestore signal as deleted:", firestoreError);
+        // Continue even if Firestore update fails
+      }
+
+      // 4. Stop any ongoing speech (defensive cleanup)
+      Speech.stop();
+
+      // 5. Remove from local state and select next event
+      const remainingEvents = events.filter(e => e.event_id !== event.event_id);
+      setEvents(remainingEvents);
+
+      // Select the first remaining event, or null if no events left
+      if (remainingEvents.length > 0) {
+        setSelectedEvent(remainingEvents[0]);
+      } else {
+        setSelectedEvent(null);
+      }
+
+      Alert.alert("Success", "Reflection deleted successfully");
+    } catch (error: any) {
+      console.error("Delete error:", error);
+      Alert.alert("Delete Failed", error.message || "Failed to delete Reflection");
+    }
   };
 
   if (loading) {
@@ -894,10 +882,10 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: 'bold',
-    flex: 1, 
+    flex: 1,
   },
   buttonRow: {
-    flexDirection: 'row', 
+    flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
   },

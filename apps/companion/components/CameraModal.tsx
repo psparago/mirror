@@ -1,5 +1,4 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import { CameraType, CameraView } from 'expo-camera';
 import React from 'react';
 import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -35,21 +34,22 @@ export default function CameraModal({
       onRequestClose={onClose}
     >
       <View style={styles.container}>
-        <CameraView 
-          style={StyleSheet.absoluteFill} 
+        <CameraView
+          key={facing}
+          style={StyleSheet.absoluteFill}
           ref={cameraRef}
           facing={facing}
         />
 
         <View style={styles.topControls}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.closeCameraButton}
             onPress={onClose}
           >
             <FontAwesome name="times" size={24} color="white" />
           </TouchableOpacity>
-          <TouchableOpacity 
-            style={styles.flipButton} 
+          <TouchableOpacity
+            style={styles.flipButton}
             onPress={onToggleFacing}
             disabled={uploading}
           >
@@ -59,14 +59,14 @@ export default function CameraModal({
 
         {/* Photo/Video Mode Toggle */}
         <View style={styles.modeToggleContainer}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[styles.modeButton, cameraMode === 'photo' && styles.modeButtonActive]}
             onPress={() => onSetCameraMode('photo')}
           >
             <FontAwesome name="camera" size={20} color={cameraMode === 'photo' ? '#fff' : '#999'} />
             <Text style={[styles.modeText, cameraMode === 'photo' && styles.modeTextActive]}>Photo</Text>
           </TouchableOpacity>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[styles.modeButton, cameraMode === 'video' && styles.modeButtonActive]}
             onPress={() => onSetCameraMode('video')}
           >
@@ -76,13 +76,13 @@ export default function CameraModal({
         </View>
 
         <View style={styles.buttonContainer}>
-          <TouchableOpacity 
-            style={styles.captureButton} 
+          <TouchableOpacity
+            style={styles.captureButton}
             onPress={onShutterPress}
             disabled={uploading}
           >
             <Text style={styles.text}>
-              {uploading ? "UPLOADING..." : 
+              {uploading ? "UPLOADING..." :
                 cameraMode === 'video' ? "RECORD VIDEO" : "TAKE PHOTO"}
             </Text>
           </TouchableOpacity>
@@ -93,9 +93,9 @@ export default function CameraModal({
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    justifyContent: 'center' 
+  container: {
+    flex: 1,
+    justifyContent: 'center'
   },
   topControls: {
     position: 'absolute',

@@ -3,12 +3,12 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
-import { useVideoPlayer, VideoView } from 'expo-video';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
@@ -38,17 +38,17 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
-  
+
   // Video support state
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
-  
+
   // Video player for preview
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
     // Optional: handle status updates
   });
-  
+
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
@@ -68,7 +68,7 @@ export default function CompanionHomeScreen() {
   useEffect(() => {
     const currentUri = audioRecorder.uri;
     const isNewUri = currentUri && currentUri !== lastProcessedUriRef.current;
-    
+
     // Only set audioUri if we have a NEW URI, we're not recording, and audioUri is currently null
     // Don't include audioUri in dependencies to prevent infinite loops
     if (isNewUri && !audioRecorder.isRecording) {
@@ -101,7 +101,11 @@ export default function CompanionHomeScreen() {
 
   const openCameraModal = () => {
     setCameraMode('photo');
-    setShowCameraModal(true);
+    setFacing('front');
+    // Small delay to ensure facing state is updated before modal renders
+    setTimeout(() => {
+      setShowCameraModal(true);
+    }, 50);
   };
 
   const closeCameraModal = () => {
@@ -112,20 +116,20 @@ export default function CompanionHomeScreen() {
     try {
       setIsAiThinking(true);
       setIsAiGenerated(false);
-      
+
       const response = await fetch(
         `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}`
       );
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`AI description failed: ${response.status} - ${errorText}`);
         throw new Error(`AI description failed: ${response.status} - ${errorText}`);
       }
-      
+
       // Parse JSON response
       const aiResponse = await response.json();
-      
+
       if (aiResponse && aiResponse.short_caption && aiResponse.deep_dive) {
         setShortCaption(aiResponse.short_caption);
         setDeepDive(aiResponse.deep_dive);
@@ -145,28 +149,28 @@ export default function CompanionHomeScreen() {
 
   const searchUnsplash = async (query: string) => {
     if (!query.trim()) return;
-    
+
     setIsSearching(true);
     setSearchResults([]); // Clear previous results
-    
+
     try {
       const response = await fetch(`${API_ENDPOINTS.UNSPLASH_SEARCH}?query=${encodeURIComponent(query)}`);
-      
+
       if (!response.ok) {
         // Just set empty results - the empty state UI will handle the message
         setSearchResults([]);
         return;
       }
-      
+
       const data = await response.json();
-      
+
       // Check if we have results
       if (!data.results || data.results.length === 0) {
         // No results found - empty state UI will show the message
         setSearchResults([]);
         return;
       }
-      
+
       // Unsplash API returns { results: [...] }
       setSearchResults(data.results || []);
     } catch (error: any) {
@@ -220,7 +224,7 @@ export default function CompanionHomeScreen() {
 
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
-        
+
         // Check if it's a video
         if (asset.type === 'video') {
           // Check duration
@@ -233,7 +237,7 @@ export default function CompanionHomeScreen() {
             setIsLoadingGallery(false);
             return;
           }
-          
+
           setMediaType('video');
           setVideoUri(asset.uri);
           setPhoto({ uri: asset.uri });
@@ -251,14 +255,14 @@ export default function CompanionHomeScreen() {
         setIsAiGenerated(false);
         setShortCaption('');
         setDeepDive('');
-        
+
         setIntent('none'); // Reset intent - show action buttons
         setAudioUri(null); // Clear any previous audio
         setStagingEventId(null); // Don't upload to staging until user chooses intent
-        
+
         // Reset the last processed URI to prevent stale URIs from being set
         lastProcessedUriRef.current = null;
-        
+
         // Small delay to ensure media loads
         setTimeout(() => setIsLoadingImage(false), 300);
       }
@@ -287,11 +291,11 @@ export default function CompanionHomeScreen() {
       setIsAiGenerated(false);
       setShortCaption('');
       setDeepDive('');
-      
+
       setIntent('none'); // Reset intent - show action buttons
       setAudioUri(null); // Clear any previous audio
       setStagingEventId(null); // Don't upload to staging until user chooses intent
-      
+
       // Reset the last processed URI to prevent stale URIs from being set
       lastProcessedUriRef.current = null;
     } catch (error: any) {
@@ -303,12 +307,13 @@ export default function CompanionHomeScreen() {
   const recordVideoWithNativeCamera = async () => {
     try {
       console.log('📹 Launching native camera for video recording...');
-      
+
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Videos,
         allowsEditing: false,
         quality: 0.8,
         videoMaxDuration: 10, // 10 second limit
+        cameraType: ImagePicker.CameraType.front, // Open in selfie mode
       });
 
       console.log('📹 Camera result:', { cancelled: result.canceled, hasAssets: result.assets?.length });
@@ -316,7 +321,7 @@ export default function CompanionHomeScreen() {
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const video = result.assets[0];
         console.log('✅ Video recorded:', { uri: video.uri, duration: video.duration });
-        
+
         // Check duration (duration is in milliseconds)
         if (video.duration && video.duration > 10000) {
           Alert.alert(
@@ -349,7 +354,7 @@ export default function CompanionHomeScreen() {
 
   const handleCameraShutterPress = () => {
     console.log('🎬 Shutter button pressed', { cameraMode });
-    
+
     if (cameraMode === 'photo') {
       console.log('📸 Taking photo...');
       takePhoto();
@@ -406,12 +411,14 @@ export default function CompanionHomeScreen() {
 
     try {
       await audioRecorder.stop();
-      
+
       // Disable recording mode after stopping
+      // Note: playsInSilentMode must be true when staysActiveInBackground is true (iOS default)
       await setAudioModeAsync({
         allowsRecording: false,
+        playsInSilentMode: true,
       });
-      
+
       // Wait a bit for URI to be available, then set it directly
       // The useEffect will also catch it, but setting it here ensures it happens
       setTimeout(() => {
@@ -428,7 +435,7 @@ export default function CompanionHomeScreen() {
 
   const uploadEventBundle = async () => {
     if (!photo) return;
-    
+
     // Require either text description OR audio recording
     if (!description.trim() && !audioUri) {
       Alert.alert("Description Required", "Please add a text description or record an audio message before sending this Reflection.");
@@ -437,7 +444,7 @@ export default function CompanionHomeScreen() {
 
     try {
       setUploading(true);
-      
+
       // Generate unique event_id (timestamp-based)
       const eventID = Date.now().toString();
       const timestamp = new Date().toISOString();
@@ -546,7 +553,7 @@ export default function CompanionHomeScreen() {
             const audioResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=audio.m4a`);
             const { url: audioUploadUrl } = await audioResponse.json();
             // Upload audio file directly using FileSystem.uploadAsync
-            
+
             // FileSystem.uploadAsync defaults to binary upload, so we don't need to specify uploadType
             const audioUploadResponse = await FileSystem.uploadAsync(audioUploadUrl, audioUri, {
               httpMethod: 'PUT',
@@ -669,7 +676,7 @@ export default function CompanionHomeScreen() {
         // Continue with cleanup anyway
       }
     }
-    
+
     setPhoto(null);
     setVideoUri(null);
     setMediaType('photo');
@@ -693,7 +700,7 @@ export default function CompanionHomeScreen() {
         console.error("Error deleting staging image:", error);
       }
     }
-    
+
     // Clear all state and return to camera
     setPhoto(null);
     setVideoUri(null);
@@ -712,24 +719,51 @@ export default function CompanionHomeScreen() {
 
   const triggerAI = async () => {
     if (!photo) return;
-    
+
     setIntent('ai');
     setIsAiThinking(true);
     setIsAiGenerated(false);
-    
+
     try {
       // Generate staging event_id and upload image if not already uploaded
       let stagingId = stagingEventId;
       if (!stagingId) {
         stagingId = Date.now().toString();
         setStagingEventId(stagingId);
-        
+
+        let uriToUpload = photo.uri;
+        let isTempThumbnail = false;
+
+        // If it's a video, generate a thumbnail to use for AI description
+        if (mediaType === 'video' && videoUri) {
+          try {
+            const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
+              time: 0,
+              quality: 0.5,
+            });
+            uriToUpload = uri;
+            isTempThumbnail = true;
+          } catch (thumbnailError) {
+            console.error("Failed to generate thumbnail for AI:", thumbnailError);
+            // Fallback to uploading video (will likely fail at AI step but better than crashing here)
+          }
+        }
+
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
         const { url: stagingUrl } = await stagingResponse.json();
-        await uploadPhotoToS3(photo.uri, stagingUrl);
+        await uploadPhotoToS3(uriToUpload, stagingUrl);
+
+        // Cleanup temp thumbnail
+        if (isTempThumbnail) {
+          try {
+            await FileSystem.deleteAsync(uriToUpload, { idempotent: true });
+          } catch (cleanupError) {
+            console.warn("Failed to delete temp thumbnail:", cleanupError);
+          }
+        }
       }
-      
+
       // Get presigned GET URL for staging image
       const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
       if (getStagingUrlResponse.ok) {
@@ -757,19 +791,19 @@ export default function CompanionHomeScreen() {
   // Show description input overlay if photo is captured
   if (showDescriptionInput && photo) {
     return (
-      <KeyboardAvoidingView 
-        style={styles.container} 
+      <KeyboardAvoidingView
+        style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <ScrollView 
+          <ScrollView
             contentContainerStyle={styles.previewContainer}
             keyboardShouldPersistTaps="handled"
           >
             {/* Title */}
             <Text style={styles.creationTitle}>Reflection Station</Text>
-            
+
             {/* Media Preview (Image or Video) with Retake Button */}
             <View style={styles.previewImageContainer}>
               {isLoadingImage ? (
@@ -799,7 +833,7 @@ export default function CompanionHomeScreen() {
                   )}
                   <View style={styles.imageTopButtons}>
                     {intent !== 'none' && (
-                      <TouchableOpacity 
+                      <TouchableOpacity
                         style={styles.backToActionsButton}
                         onPress={changeMethod}
                       >
@@ -807,7 +841,7 @@ export default function CompanionHomeScreen() {
                         <Text style={styles.backToActionsButtonText}>Back</Text>
                       </TouchableOpacity>
                     )}
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={styles.retakeButton}
                       onPress={retakePhoto}
                     >
@@ -822,7 +856,7 @@ export default function CompanionHomeScreen() {
             {/* Action Buttons - Show when intent is 'none' */}
             {intent === 'none' && (
               <View style={styles.actionButtonsContainer}>
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.intentButton}
                   onPress={() => {
                     setIntent('voice');
@@ -836,7 +870,7 @@ export default function CompanionHomeScreen() {
                   </BlurView>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.intentButton}
                   onPress={triggerAI}
                   disabled={uploading || isAiThinking}
@@ -848,7 +882,7 @@ export default function CompanionHomeScreen() {
                   </BlurView>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.intentButton}
                   onPress={() => {
                     setIntent('note');
@@ -872,7 +906,7 @@ export default function CompanionHomeScreen() {
                   <View style={styles.recordingContainer}>
                     <View style={styles.recordingIndicator} />
                     <Text style={styles.recordingText}>Recording...</Text>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={styles.stopButton}
                       onPress={stopRecording}
                     >
@@ -883,7 +917,7 @@ export default function CompanionHomeScreen() {
                   <View style={styles.audioPlaybackContainer}>
                     <FontAwesome name="volume-up" size={40} color="#2e78b7" />
                     <Text style={styles.audioPlaybackText}>Voice message recorded</Text>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={styles.rerecordButton}
                       onPress={() => {
                         setAudioUri(null);
@@ -894,7 +928,7 @@ export default function CompanionHomeScreen() {
                     </TouchableOpacity>
                   </View>
                 ) : (
-                  <TouchableOpacity 
+                  <TouchableOpacity
                     style={styles.recordButtonLarge}
                     onPress={startRecording}
                     disabled={uploading || isStartingRecording}
@@ -934,22 +968,22 @@ export default function CompanionHomeScreen() {
                     editable={!isAiThinking}
                   />
                 </View>
-                
+
                 {isAiThinking && (
                   <View style={styles.aiIndicator}>
                     <ActivityIndicator size="small" color="#9b59b6" style={{ marginRight: 6 }} />
                     <Text style={styles.aiIndicatorText}>✨ Gemini is thinking...</Text>
                   </View>
                 )}
-                
+
                 {isAiGenerated && !isAiThinking && (
                   <View style={styles.aiIndicator}>
                     <Text style={styles.aiIndicatorText}>✨ Generated by AI</Text>
                   </View>
                 )}
-                
+
                 {/* Dismiss Keyboard */}
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.dismissKeyboardButton}
                   onPress={Keyboard.dismiss}
                 >
@@ -959,15 +993,15 @@ export default function CompanionHomeScreen() {
             )}
 
             <View style={styles.actionButtons}>
-              <TouchableOpacity 
-                style={[styles.actionButton, styles.cancelButton]} 
+              <TouchableOpacity
+                style={[styles.actionButton, styles.cancelButton]}
                 onPress={cancelPhoto}
                 disabled={uploading}
               >
                 <Text style={styles.actionButtonText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.actionButton, styles.sendButton]} 
+              <TouchableOpacity
+                style={[styles.actionButton, styles.sendButton]}
                 onPress={() => {
                   if (!uploading && (description.trim() || audioUri)) {
                     uploadEventBundle();
@@ -996,9 +1030,9 @@ export default function CompanionHomeScreen() {
     >
       <View style={styles.dashboardContent}>
         <Text style={styles.dashboardTitle}>Create a Reflection</Text>
-        
+
         <View style={styles.dashboardButtons}>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[
               styles.dashboardButton,
               pressedButton === 'capture' && styles.dashboardButtonPressed
@@ -1010,7 +1044,7 @@ export default function CompanionHomeScreen() {
             activeOpacity={1}
           >
             <BlurView intensity={50} style={[
-              styles.dashboardButtonBlur, 
+              styles.dashboardButtonBlur,
               styles.captureButtonBlur,
               pressedButton === 'capture' && styles.buttonBlurPressed
             ]}>
@@ -1027,7 +1061,7 @@ export default function CompanionHomeScreen() {
             </BlurView>
           </TouchableOpacity>
 
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[
               styles.dashboardButton,
               pressedButton === 'gallery' && styles.dashboardButtonPressed
@@ -1039,7 +1073,7 @@ export default function CompanionHomeScreen() {
             activeOpacity={1}
           >
             <BlurView intensity={50} style={[
-              styles.dashboardButtonBlur, 
+              styles.dashboardButtonBlur,
               styles.galleryButtonBlur,
               pressedButton === 'gallery' && styles.buttonBlurPressed
             ]}>
@@ -1060,7 +1094,7 @@ export default function CompanionHomeScreen() {
             </BlurView>
           </TouchableOpacity>
 
-          <TouchableOpacity 
+          <TouchableOpacity
             style={[
               styles.dashboardButton,
               pressedButton === 'search' && styles.dashboardButtonPressed
@@ -1072,7 +1106,7 @@ export default function CompanionHomeScreen() {
             activeOpacity={1}
           >
             <BlurView intensity={50} style={[
-              styles.dashboardButtonBlur, 
+              styles.dashboardButtonBlur,
               styles.searchButtonBlur,
               pressedButton === 'search' && styles.buttonBlurPressed
             ]}>
@@ -1093,6 +1127,7 @@ export default function CompanionHomeScreen() {
 
       {/* Camera Modal */}
       <CameraModal
+        key={showCameraModal ? 'open' : 'closed'}
         visible={showCameraModal}
         onClose={closeCameraModal}
         cameraRef={cameraRef}
@@ -1116,7 +1151,7 @@ export default function CompanionHomeScreen() {
           <View style={styles.searchFixedHeader}>
             {/* Header */}
             <View style={styles.searchHeader}>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.closeButton}
                 onPress={() => {
                   setIsSearchModalVisible(false);
@@ -1142,7 +1177,7 @@ export default function CompanionHomeScreen() {
                 autoCapitalize="none"
                 autoCorrect={false}
               />
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.searchSubmitButton}
                 onPress={() => searchUnsplash(searchQuery)}
                 disabled={isSearching || !searchQuery.trim()}
@@ -1156,8 +1191,8 @@ export default function CompanionHomeScreen() {
             </View>
 
             {/* Quick-Pick Chips */}
-            <ScrollView 
-              horizontal 
+            <ScrollView
+              horizontal
               showsHorizontalScrollIndicator={false}
               style={styles.chipsContainer}
               contentContainerStyle={styles.chipsContent}
@@ -1221,9 +1256,9 @@ export default function CompanionHomeScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    justifyContent: 'center' 
+  container: {
+    flex: 1,
+    justifyContent: 'center'
   },
   dashboardContainer: {
     flex: 1,
@@ -1403,11 +1438,11 @@ const styles = StyleSheet.create({
     marginBottom: 20,
     fontSize: 16,
   },
-  button: { 
-    backgroundColor: '#2e78b7', 
-    padding: 15, 
-    borderRadius: 8, 
-    marginTop: 20 
+  button: {
+    backgroundColor: '#2e78b7',
+    padding: 15,
+    borderRadius: 8,
+    marginTop: 20
   },
   buttonText: {
     color: 'white',
@@ -1442,16 +1477,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  buttonContainer: { 
+  buttonContainer: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    flex: 1, 
-    backgroundColor: 'transparent', 
-    flexDirection: 'row', 
-    marginBottom: 60, 
-    justifyContent: 'center', 
+    flex: 1,
+    backgroundColor: 'transparent',
+    flexDirection: 'row',
+    marginBottom: 60,
+    justifyContent: 'center',
     alignItems: 'flex-end',
     gap: 20,
   },
@@ -1467,17 +1502,17 @@ const styles = StyleSheet.create({
   galleryButton: {
     backgroundColor: 'rgba(46, 120, 183, 0.8)',
   },
-  captureButton: { 
-    backgroundColor: 'rgba(46, 120, 183, 0.8)', 
-    padding: 20, 
-    borderRadius: 50, 
-    borderWidth: 2, 
-    borderColor: 'white' 
+  captureButton: {
+    backgroundColor: 'rgba(46, 120, 183, 0.8)',
+    padding: 20,
+    borderRadius: 50,
+    borderWidth: 2,
+    borderColor: 'white'
   },
-  text: { 
-    fontSize: 18, 
-    fontWeight: 'bold', 
-    color: 'white' 
+  text: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: 'white'
   },
   previewContainer: {
     flex: 1,

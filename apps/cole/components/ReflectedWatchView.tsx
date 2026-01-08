@@ -1,6 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { Event, EventMetadata } from '@projectmirror/shared';
-import { Audio, AVPlaybackStatus } from 'expo-av';
+import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -64,57 +64,75 @@ export default function ReflectedWatchView({
   // Audio playback state
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
-  
+
   // Video playback state  
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [videoFinished, setVideoFinished] = useState(false);
   const [isSpeakingCaption, setIsSpeakingCaption] = useState(false);
-  
+
+  // Get metadata for selected event (needed for video source check)
+  const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+
   // Initialize video player with current event's video URL
   const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
     ? selectedEvent.video_url
     : null;
-  
+
   const player = useVideoPlayer(videoSource || '', (player) => {
     // Status update callback
     setIsVideoPlaying(player.playing);
-    
+
     // Check if video finished (idle status after playing)
     if (player.status === 'idle' && player.currentTime > 0 && !videoFinished) {
       handleVideoFinished();
     }
   });
-  
+
   // Tracking refs
   const hasSpokenRef = useRef(false);
   const currentPlayingEventIdRef = useRef<string | null>(null);
   const eventsRef = useRef<Event[]>(events);
   const selectedEventRef = useRef<Event | null>(selectedEvent);
   const audioAutoAdvanceScheduledRef = useRef(false);
-  
+
   // Animation refs
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const pulseAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   const controlsOpacity = useRef(new Animated.Value(1)).current; // Start visible (paused state)
   const selfieMirrorOpacity = useRef(new Animated.Value(1)).current; // Start visible by default
   const selfieTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  
+
   // UI refs
   const flatListRef = useRef<FlatList>(null);
-  
+
   // "One Voice" locking rule: controls locked while video is playing
   const areControlsLocked = isVideoPlaying;
+
+  // Track player's playing state and sync with component state
+  useEffect(() => {
+    if (!player) return;
+
+    const checkPlaying = () => {
+      setIsVideoPlaying(player.playing);
+    };
+
+    // Check immediately
+    checkPlaying();
+
+    // Set up interval to poll player state (expo-video callback may not always fire)
+    const interval = setInterval(checkPlaying, 100);
+
+    return () => clearInterval(interval);
+  }, [player, videoSource]);
 
   // Keep refs in sync with props
   useEffect(() => {
     eventsRef.current = events;
   }, [events]);
-  
+
   useEffect(() => {
     selectedEventRef.current = selectedEvent;
   }, [selectedEvent]);
-
-  const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
 
   // Sanitize text for TTS
   const sanitizeTextForTTS = (text: string): string => {
@@ -169,7 +187,7 @@ export default function ReflectedWatchView({
     setVideoFinished(false);
     setIsSpeakingCaption(false);
     setIsPlayingDeepDive(false);
-    
+
     // Reset selfie mirror: visible by default, or fade in for videos
     const isVideoContent = selectedMetadata?.content_type === 'video';
     selfieMirrorOpacity.setValue(isVideoContent ? 0 : 1);
@@ -188,10 +206,57 @@ export default function ReflectedWatchView({
       const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
       const hasCaption = selectedMetadata.description;
 
+
+
       // ═══ CONTEXT FIRST LOGIC (with brief initial delay) ═══
       if (hasVideo) {
-        // Video content: Speak caption (if exists), then auto-play video
-        if (hasCaption) {
+        // Video content: Play audio caption OR speak text caption, then auto-play video
+        if (hasAudio) {
+          // Video with VOICE caption: play audio first, then video
+          const playAudioThenVideo = async () => {
+            try {
+              if (sound) {
+                await sound.unloadAsync();
+              }
+
+              const { sound: newSound } = await Audio.Sound.createAsync(
+                { uri: selectedEvent.audio_url as string },
+                { shouldPlay: true }
+              );
+
+              newSound.setOnPlaybackStatusUpdate((status) => {
+                if (!status.isLoaded) return;
+
+                // When audio finishes, start the video
+                if (status.didJustFinish) {
+                  if (currentPlayingEventIdRef.current === eventId && player && videoSource) {
+                    try {
+                      player.play();
+                    } catch (err) {
+                      console.warn('Error auto-starting video after audio caption:', err);
+                    }
+                  }
+                }
+              });
+
+              setSound(newSound);
+              setIsAudioPlaying(true);
+            } catch (error) {
+              console.error('Error playing audio caption:', error);
+              // Fallback: just play video
+              if (player && videoSource) {
+                player.play();
+              }
+            }
+          };
+
+          setTimeout(() => {
+            if (currentPlayingEventIdRef.current === eventId) {
+              playAudioThenVideo();
+            }
+          }, 500);
+        } else if (hasCaption) {
+          // Video with TEXT caption: speak it, then play video
           setIsSpeakingCaption(true);
           const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
           Speech.speak(textToSpeak, {
@@ -231,7 +296,7 @@ export default function ReflectedWatchView({
             playAudioNow();
           }
         }, 500);
-        
+
         // Audio playback function
         const playAudioNow = async () => {
           audioAutoAdvanceScheduledRef.current = false;
@@ -239,12 +304,12 @@ export default function ReflectedWatchView({
             if (sound) {
               await sound.unloadAsync();
             }
-            
+
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: selectedEvent.audio_url as string },
               { shouldPlay: true } // Auto-play
             );
-            
+
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (!status.isLoaded) {
                 // Check if it's an error status (URL expired, etc.)
@@ -256,22 +321,22 @@ export default function ReflectedWatchView({
                 }
                 return;
               }
-              
+
               // Update state to match actual playback
               setIsAudioPlaying(status.isPlaying);
-              
+
               // Handle audio finish
               if (status.didJustFinish) {
                 if (audioAutoAdvanceScheduledRef.current) return;
                 audioAutoAdvanceScheduledRef.current = true;
-                
+
                 if (currentPlayingEventIdRef.current !== eventId) return;
-                
+
                 // Audio finished
                 setIsAudioPlaying(false);
               }
             });
-            
+
             setSound(newSound);
             setIsAudioPlaying(true);
           } catch (error: any) {
@@ -334,12 +399,12 @@ export default function ReflectedWatchView({
   const handleVideoFinished = useCallback(() => {
     const eventId = selectedEvent?.event_id;
     if (!eventId || currentPlayingEventIdRef.current !== eventId) return;
-    
+
     if (!videoFinished) {
       setVideoFinished(true);
       setIsVideoPlaying(false);
       showControls(); // Show replay button
-      
+
       // Start pulse animation on sparkle button (visual prompt)
       if (selectedMetadata?.deep_dive) {
         pulseAnimRef.current = Animated.loop(
@@ -358,16 +423,16 @@ export default function ReflectedWatchView({
         );
         pulseAnimRef.current.start();
       }
-      
+
       // NO auto-advance - Cole must manually select next video (no doom scrolling)
     }
   }, [videoFinished, selectedEvent?.event_id, selectedMetadata, showControls]);
-  
+
   // Track video playing state changes for auto-selfie timer
   useEffect(() => {
     if (isVideoPlaying && selectedMetadata?.content_type === 'video') {
       hideControls(); // Hide play button when video starts
-      
+
       // ═══ AUTO-SELFIE TIMER ═══
       // Fade in selfie mirror 5 seconds after video STARTS playing
       if (AUTO_SHOW_SELFIE_MIRROR && !selfieTimerRef.current) {
@@ -445,7 +510,7 @@ export default function ReflectedWatchView({
 
   const toggleVideo = useCallback(() => {
     if (!player || !videoSource || selectedMetadata?.content_type !== 'video') return;
-    
+
     try {
       if (isVideoPlaying) {
         player.pause();
@@ -454,7 +519,7 @@ export default function ReflectedWatchView({
         // Reset post-roll state if replaying
         if (videoFinished) {
           setVideoFinished(false);
-          player.seekTo(0);
+          player.currentTime = 0; // Seek to beginning
           player.play();
         } else {
           player.play();
@@ -505,14 +570,14 @@ export default function ReflectedWatchView({
       setSound(null);
     }
     setIsAudioPlaying(false);
-    
+
     // Reset tracking (don't null currentPlayingEventIdRef - it will be updated by next event's useEffect)
     hasSpokenRef.current = false;
     setIsPlayingDeepDive(false);
 
     // Update to new event - this will trigger the useEffect which will set currentPlayingEventIdRef
     onEventSelect(event);
-    
+
     // Scroll to the newly selected item (optional but nice UX)
     const itemIndex = events.findIndex((e) => e.event_id === event.event_id);
     if (itemIndex !== -1 && flatListRef.current) {
@@ -530,22 +595,22 @@ export default function ReflectedWatchView({
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    
+
     if (diffDays === 0) {
       return 'today';
     } else if (diffDays === 1) {
       return 'yesterday';
     } else {
       // Show formatted date and time for older items
-      const dateStr = date.toLocaleDateString('en-US', { 
-        weekday: 'short', 
-        month: 'short', 
-        day: 'numeric' 
+      const dateStr = date.toLocaleDateString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric'
       });
-      const timeStr = date.toLocaleTimeString('en-US', { 
-        hour: 'numeric', 
+      const timeStr = date.toLocaleTimeString('en-US', {
+        hour: 'numeric',
         minute: '2-digit',
-        hour12: true 
+        hour12: true
       });
       return `${dateStr}, ${timeStr}`;
     }
@@ -581,7 +646,7 @@ export default function ReflectedWatchView({
             </Text>
           </View>
         </TouchableOpacity>
-        
+
         {/* Hamburger Menu for Delete */}
         <TouchableOpacity
           style={styles.hamburgerMenu}
@@ -627,270 +692,270 @@ export default function ReflectedWatchView({
 
   return (
     <LinearGradient colors={['#0f2027', '#203a43', '#2c5364']} style={styles.modalContainer}>
-        <View
-          style={[
-            styles.splitContainer,
-            isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait,
-          ]}
-        >
-          {/* LEFT PANE: The Stage */}
-          <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.4 }]}>
-            {/* Back to Reflections List Button - only show if there are multiple events */}
-            {events.length > 1 && (
-              <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-                <Text style={styles.reflectionsTitle}>Reflections</Text>
-              </View>
+      <View
+        style={[
+          styles.splitContainer,
+          isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait,
+        ]}
+      >
+        {/* LEFT PANE: The Stage */}
+        <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.4 }]}>
+          {/* Back to Reflections List Button - only show if there are multiple events */}
+          {events.length > 1 && (
+            <View style={[styles.headerBar, { top: insets.top + 10 }]}>
+              <Text style={styles.reflectionsTitle}>Reflections</Text>
+            </View>
+          )}
+
+          {/* Media Container - Tap to pause/play for videos only (photos and audio not interactive) */}
+          <TouchableOpacity
+            style={styles.mediaContainer}
+            activeOpacity={1}
+            onPress={selectedMetadata?.content_type === 'video' ? playDescription : undefined}
+            disabled={selectedMetadata?.content_type !== 'video'}
+          >
+            {selectedMetadata?.content_type === 'video' && videoSource ? (
+              <VideoView
+                player={player}
+                style={styles.mediaImage}
+                contentFit="cover"
+                nativeControls={false}
+              />
+            ) : selectedMetadata?.content_type === 'video' ? (
+              <ActivityIndicator size="large" color="#fff" />
+            ) : (
+              <Image
+                source={{ uri: selectedEvent.image_url }}
+                style={styles.mediaImage}
+                resizeMode="cover"
+                onError={(error) => {
+                  console.warn('Image load error (possibly expired URL):', error);
+                  if (onMediaError && selectedEvent) {
+                    onMediaError(selectedEvent);
+                  }
+                }}
+              />
             )}
 
-            {/* Media Container - Tap to pause/play for videos only (photos and audio not interactive) */}
-            <TouchableOpacity 
-              style={styles.mediaContainer} 
-              activeOpacity={1}
-              onPress={selectedMetadata?.content_type === 'video' ? playDescription : undefined}
-              disabled={selectedMetadata?.content_type !== 'video'}
-            >
-              {selectedMetadata?.content_type === 'video' && videoSource ? (
-                <VideoView
-                  player={player}
-                  style={styles.mediaImage}
-                  contentFit="cover"
-                  nativeControls={false}
-                />
-              ) : selectedMetadata?.content_type === 'video' ? (
-                <ActivityIndicator size="large" color="#fff" />
-              ) : (
-                <Image 
-                  source={{ uri: selectedEvent.image_url }} 
-                  style={styles.mediaImage} 
-                  resizeMode="cover"
-                  onError={(error) => {
-                    console.warn('Image load error (possibly expired URL):', error);
-                    if (onMediaError && selectedEvent) {
-                      onMediaError(selectedEvent);
+            {/* Play/Pause Button - Only for videos (not photos or audio) */}
+            {selectedMetadata?.content_type === 'video' && (
+              <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
+                <TouchableOpacity
+                  onPress={playDescription}
+                  activeOpacity={0.7}
+                  style={styles.playButton}
+                >
+                  <BlurView intensity={30} style={styles.playOverlayBlur}>
+                    <FontAwesome
+                      name={videoFinished ? 'refresh' : (isVideoPlaying ? 'pause' : 'play')}
+                      size={64}
+                      color="rgba(255, 255, 255, 0.95)"
+                    />
+                  </BlurView>
+                </TouchableOpacity>
+              </Animated.View>
+            )}
+          </TouchableOpacity>
+
+          {/* Selfie Camera Bubble - Auto-shows 5s after video starts */}
+          {cameraPermission?.granted ? (
+            <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
+              <CameraView
+                ref={cameraRef}
+                style={styles.cameraPreview}
+                facing="front"
+              />
+              <TouchableOpacity
+                style={styles.cameraButton}
+                onPress={onCaptureSelfie}
+                activeOpacity={0.8}
+                disabled={isCapturingSelfie}
+              >
+                <BlurView intensity={50} style={styles.cameraButtonBlur}>
+                  {isCapturingSelfie ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <FontAwesome name="camera" size={20} color="#fff" />
+                  )}
+                </BlurView>
+              </TouchableOpacity>
+            </Animated.View>
+          ) : (
+            <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
+              <TouchableOpacity
+                style={styles.enableCameraButton}
+                onPress={requestCameraPermission}
+                activeOpacity={0.8}
+              >
+                <BlurView intensity={50} style={styles.enableCameraBlur}>
+                  <FontAwesome name="camera" size={24} color="#fff" />
+                  <Text style={styles.enableCameraText}>Enable{'\n'}Camera</Text>
+                </BlurView>
+              </TouchableOpacity>
+            </Animated.View>
+          )}
+
+          {/* Metadata & Controls */}
+          <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
+            {/* Caption with inline TTS button for items with description (no audio) */}
+            {selectedMetadata?.description && !selectedEvent.audio_url ? (
+              <View style={styles.captionRow}>
+                <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
+                  {selectedMetadata.description}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    if (areControlsLocked) return;
+                    if (isSpeakingCaption) {
+                      Speech.stop();
+                      setIsSpeakingCaption(false);
+                    } else {
+                      setIsSpeakingCaption(true);
+                      const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
+                      Speech.speak(textToSpeak, {
+                        volume: 1.0,
+                        pitch: 1.0,
+                        rate: 1.0,
+                        language: 'en-US',
+                        onDone: () => {
+                          setIsSpeakingCaption(false);
+                        },
+                      });
                     }
                   }}
-                />
-              )}
-
-              {/* Play/Pause Button - Only for videos (not photos or audio) */}
-              {selectedMetadata?.content_type === 'video' && (
-                <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
-                  <TouchableOpacity
-                    onPress={playDescription}
-                    activeOpacity={0.7}
-                    style={styles.playButton}
-                  >
-                    <BlurView intensity={30} style={styles.playOverlayBlur}>
-                      <FontAwesome
-                        name={videoFinished ? 'refresh' : (isVideoPlaying ? 'pause' : 'play')}
-                        size={64}
-                        color="rgba(255, 255, 255, 0.95)"
-                      />
-                    </BlurView>
-                  </TouchableOpacity>
-                </Animated.View>
-              )}
-            </TouchableOpacity>
-            
-            {/* Selfie Camera Bubble - Auto-shows 5s after video starts */}
-            {cameraPermission?.granted ? (
-              <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
-                <CameraView 
-                  ref={cameraRef}
-                  style={styles.cameraPreview}
-                  facing="front"
-                />
-                <TouchableOpacity 
-                  style={styles.cameraButton}
-                  onPress={onCaptureSelfie}
                   activeOpacity={0.8}
-                  disabled={isCapturingSelfie}
+                  disabled={areControlsLocked}
+                  style={[styles.captionButtonInline, { opacity: areControlsLocked ? 0.5 : 1 }]}
                 >
-                  <BlurView intensity={50} style={styles.cameraButtonBlur}>
-                    {isCapturingSelfie ? (
-                      <ActivityIndicator size="small" color="#fff" />
-                    ) : (
-                      <FontAwesome name="camera" size={20} color="#fff" />
-                    )}
+                  <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
+                    <FontAwesome
+                      name={isSpeakingCaption ? 'stop' : 'volume-up'}
+                      size={24}
+                      color="#fff"
+                    />
                   </BlurView>
                 </TouchableOpacity>
-              </Animated.View>
-            ) : (
-              <Animated.View style={[styles.cameraBubble, { bottom: insets.bottom + 100, opacity: selfieMirrorOpacity }]}>
-                <TouchableOpacity 
-                  style={styles.enableCameraButton}
-                  onPress={requestCameraPermission}
+              </View>
+            ) : selectedEvent.audio_url ? (
+              /* Voice message with inline audio play/pause button */
+              <View style={styles.captionRow}>
+                <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
+                  🎤 Voice message
+                </Text>
+                <TouchableOpacity
+                  onPress={async () => {
+                    if (!sound) {
+                      console.warn('Audio not loaded yet');
+                      return;
+                    }
+                    try {
+                      if (isAudioPlaying) {
+                        await sound.pauseAsync();
+                      } else {
+                        // Check if audio has finished and needs to be repositioned
+                        const status = await sound.getStatusAsync();
+
+                        if (status.isLoaded) {
+                          // If at the end (finished or very close), rewind to start
+                          const positionMillis = status.positionMillis || 0;
+                          const durationMillis = status.durationMillis || 0;
+                          const isAtEnd = durationMillis > 0 && (positionMillis >= durationMillis - 100);
+
+                          if (isAtEnd) {
+                            await sound.setPositionAsync(0);
+                            audioAutoAdvanceScheduledRef.current = false; // Reset auto-advance flag for replay
+                          }
+                        }
+
+                        await sound.playAsync();
+                      }
+                    } catch (error: any) {
+                      // Check if this is a URL expiration error (error code -1102 or similar network errors)
+                      const errorMessage = error?.message || String(error);
+                      if (errorMessage.includes('-1102') || errorMessage.includes('NSURLErrorDomain') || errorMessage.includes('failed')) {
+                        console.log('🔄 Audio URL expired, refreshing...');
+                        if (onMediaError && selectedEvent) {
+                          onMediaError(selectedEvent);
+                        }
+                      } else {
+                        console.error('Error controlling audio playback:', error);
+                      }
+                    }
+                  }}
                   activeOpacity={0.8}
+                  disabled={!sound}
+                  style={[styles.captionButtonInline, { opacity: sound ? 1 : 0.5 }]}
                 >
-                  <BlurView intensity={50} style={styles.enableCameraBlur}>
-                    <FontAwesome name="camera" size={24} color="#fff" />
-                    <Text style={styles.enableCameraText}>Enable{'\n'}Camera</Text>
+                  <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
+                    <FontAwesome
+                      name={isAudioPlaying ? 'pause' : 'play'}
+                      size={24}
+                      color="#fff"
+                    />
+                  </BlurView>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <Text style={styles.descriptionText} numberOfLines={3}>
+                Reflection
+              </Text>
+            )}
+
+            {/* Tell Me More FAB - Locked during video playback */}
+            {selectedMetadata?.deep_dive && (
+              <Animated.View style={[
+                styles.tellMeMoreFAB,
+                {
+                  transform: [{ scale: pulseAnim }],
+                  opacity: areControlsLocked ? 0.5 : 1
+                }
+              ]}>
+                <TouchableOpacity
+                  onPress={playDeepDive}
+                  activeOpacity={0.8}
+                  disabled={isPlayingDeepDive || areControlsLocked}
+                >
+                  <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                    <Text style={styles.tellMeMoreIcon}>✨</Text>
                   </BlurView>
                 </TouchableOpacity>
               </Animated.View>
             )}
-
-            {/* Metadata & Controls */}
-            <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-              {/* Caption with inline TTS button for items with description (no audio) */}
-              {selectedMetadata?.description && !selectedEvent.audio_url ? (
-                <View style={styles.captionRow}>
-                  <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
-                    {selectedMetadata.description}
-                  </Text>
-                  <TouchableOpacity 
-                    onPress={() => {
-                      if (areControlsLocked) return;
-                      if (isSpeakingCaption) {
-                        Speech.stop();
-                        setIsSpeakingCaption(false);
-                      } else {
-                        setIsSpeakingCaption(true);
-                        const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-                        Speech.speak(textToSpeak, {
-                          volume: 1.0,
-                          pitch: 1.0,
-                          rate: 1.0,
-                          language: 'en-US',
-                          onDone: () => {
-                            setIsSpeakingCaption(false);
-                          },
-                        });
-                      }
-                    }}
-                    activeOpacity={0.8} 
-                    disabled={areControlsLocked}
-                    style={[styles.captionButtonInline, { opacity: areControlsLocked ? 0.5 : 1 }]}
-                  >
-                    <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
-                      <FontAwesome 
-                        name={isSpeakingCaption ? 'stop' : 'volume-up'} 
-                        size={24} 
-                        color="#fff" 
-                      />
-                    </BlurView>
-                  </TouchableOpacity>
-                </View>
-              ) : selectedEvent.audio_url ? (
-                /* Voice message with inline audio play/pause button */
-                <View style={styles.captionRow}>
-                  <Text style={[styles.descriptionText, { flex: 1, marginBottom: 0 }]} numberOfLines={3}>
-                    🎤 Voice message
-                  </Text>
-                  <TouchableOpacity 
-                    onPress={async () => {
-                      if (!sound) {
-                        console.warn('Audio not loaded yet');
-                        return;
-                      }
-                      try {
-                        if (isAudioPlaying) {
-                          await sound.pauseAsync();
-                        } else {
-                          // Check if audio has finished and needs to be repositioned
-                          const status = await sound.getStatusAsync();
-                          
-                          if (status.isLoaded) {
-                            // If at the end (finished or very close), rewind to start
-                            const positionMillis = status.positionMillis || 0;
-                            const durationMillis = status.durationMillis || 0;
-                            const isAtEnd = durationMillis > 0 && (positionMillis >= durationMillis - 100);
-                            
-                            if (isAtEnd) {
-                              await sound.setPositionAsync(0);
-                              audioAutoAdvanceScheduledRef.current = false; // Reset auto-advance flag for replay
-                            }
-                          }
-                          
-                          await sound.playAsync();
-                        }
-                      } catch (error: any) {
-                        // Check if this is a URL expiration error (error code -1102 or similar network errors)
-                        const errorMessage = error?.message || String(error);
-                        if (errorMessage.includes('-1102') || errorMessage.includes('NSURLErrorDomain') || errorMessage.includes('failed')) {
-                          console.log('🔄 Audio URL expired, refreshing...');
-                          if (onMediaError && selectedEvent) {
-                            onMediaError(selectedEvent);
-                          }
-                        } else {
-                          console.error('Error controlling audio playback:', error);
-                        }
-                      }
-                    }}
-                    activeOpacity={0.8}
-                    disabled={!sound}
-                    style={[styles.captionButtonInline, { opacity: sound ? 1 : 0.5 }]}
-                  >
-                    <BlurView intensity={50} style={styles.captionButtonInlineBlur}>
-                      <FontAwesome 
-                        name={isAudioPlaying ? 'pause' : 'play'} 
-                        size={24} 
-                        color="#fff" 
-                      />
-                    </BlurView>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <Text style={styles.descriptionText} numberOfLines={3}>
-                  Reflection
-                </Text>
-              )}
-
-              {/* Tell Me More FAB - Locked during video playback */}
-              {selectedMetadata?.deep_dive && (
-                <Animated.View style={[
-                  styles.tellMeMoreFAB, 
-                  { 
-                    transform: [{ scale: pulseAnim }],
-                    opacity: areControlsLocked ? 0.5 : 1
-                  }
-                ]}>
-                  <TouchableOpacity 
-                    onPress={playDeepDive} 
-                    activeOpacity={0.8} 
-                    disabled={isPlayingDeepDive || areControlsLocked}
-                  >
-                    <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                      <Text style={styles.tellMeMoreIcon}>✨</Text>
-                    </BlurView>
-                  </TouchableOpacity>
-                </Animated.View>
-              )}
-            </View>
-          </View>
-
-          {/* RIGHT PANE: The Rabbit Hole (Up Next) */}
-          <View
-            style={[
-              styles.upNextPane,
-              isLandscape ? { flex: 0.3 } : { flex: 0.6 },
-              { paddingTop: insets.top + 10 },
-            ]}
-          >
-            <View style={styles.upNextHeader}>
-              <Text style={styles.upNextHeaderText}>Up Next</Text>
-              <Text style={styles.upNextCount}>{upNextEvents.length}</Text>
-            </View>
-            <FlatList
-              ref={flatListRef}
-              data={upNextEvents}
-              renderItem={renderUpNextItem}
-              keyExtractor={(item) => item.event_id}
-              extraData={selectedEvent?.event_id}
-              contentContainerStyle={styles.upNextList}
-              showsVerticalScrollIndicator={true}
-              indicatorStyle="white"
-              onScrollToIndexFailed={(info) => {
-                // Fallback if scrollToIndex fails
-                const wait = new Promise(resolve => setTimeout(resolve, 100));
-                wait.then(() => {
-                  flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
-                });
-              }}
-            />
           </View>
         </View>
-      </LinearGradient>
+
+        {/* RIGHT PANE: The Rabbit Hole (Up Next) */}
+        <View
+          style={[
+            styles.upNextPane,
+            isLandscape ? { flex: 0.3 } : { flex: 0.6 },
+            { paddingTop: insets.top + 10 },
+          ]}
+        >
+          <View style={styles.upNextHeader}>
+            <Text style={styles.upNextHeaderText}>Up Next</Text>
+            <Text style={styles.upNextCount}>{upNextEvents.length}</Text>
+          </View>
+          <FlatList
+            ref={flatListRef}
+            data={upNextEvents}
+            renderItem={renderUpNextItem}
+            keyExtractor={(item) => item.event_id}
+            extraData={selectedEvent?.event_id}
+            contentContainerStyle={styles.upNextList}
+            showsVerticalScrollIndicator={true}
+            indicatorStyle="white"
+            onScrollToIndexFailed={(info) => {
+              // Fallback if scrollToIndex fails
+              const wait = new Promise(resolve => setTimeout(resolve, 100));
+              wait.then(() => {
+                flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
+              });
+            }}
+          />
+        </View>
+      </View>
+    </LinearGradient>
   );
 }
 
