@@ -305,14 +305,16 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		objectsToDelete = []string{
 			fmt.Sprintf("staging/%s/image.jpg", eventID),
 		}
-	} else {
-		// For regular reflections, delete image.jpg, metadata.json, audio.m4a, and video.mp4 (if present)
+		} else {
+		// For regular reflections, delete all associated media files
 		objectsToDelete = []string{
 			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
 			fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID), // Delete audio if present
-			fmt.Sprintf("%s/%s/%s/video.mp4", UserID, path, eventID), // Delete video if present
+			fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/video.mp4", UserID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/video.mov", UserID, path, eventID), // Defensive: just in case a .mov slipped in
 		}
+		fmt.Printf("Attempting to delete objects for event %s: %v\n", eventID, objectsToDelete)
 	}
 
 	var errors []string
