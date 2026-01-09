@@ -115,12 +115,16 @@ export default function ReflectedWatchView({
   const selfieTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashOpacity = useRef(new Animated.Value(0)).current;
   const hasVideoPlayedRef = useRef(false); // Track if video has been played at least once
+  const audioIndicatorAnim = useRef(new Animated.Value(0.4)).current; // VU meter animation
 
   // UI refs
   const flatListRef = useRef<FlatList>(null);
 
   // "One Voice" locking rule: controls locked while video is playing
   const areControlsLocked = isVideoPlaying;
+  
+  // Track if any audio/voice is playing for VU meter
+  const isAnyAudioPlaying = isSpeakingCaption || isAudioPlaying || isPlayingDeepDive;
 
   // Track player's playing state and sync with component state
   useEffect(() => {
@@ -148,19 +152,7 @@ export default function ReflectedWatchView({
     selectedEventRef.current = selectedEvent;
   }, [selectedEvent]);
 
-  // Sanitize text for TTS
-  const sanitizeTextForTTS = (text: string): string => {
-    return text
-      .replace(/!/g, '.')
-      .replace(/\?/g, '.')
-      .replace(/;/g, ',')
-      .replace(/:/g, ',')
-      .replace(/\.\.\./g, '.')
-      .replace(/\.{2,}/g, '.')
-      .replace(/,{2,}/g, ',')
-      .replace(/\s+/g, ' ')
-      .trim();
-  };
+  // Removed sanitization - using raw text for TTS now
 
   // "KILL SWITCH" + "Context First" Entry Sequence
   useEffect(() => {
@@ -288,8 +280,7 @@ export default function ReflectedWatchView({
             if (currentPlayingEventIdRef.current === eventId) {
               setIsSpeakingCaption(true);
               hideControls(); // Hide controls during caption speech
-              const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-              Speech.speak(textToSpeak, {
+              Speech.speak(selectedMetadata.description, {
                 volume: 1.0,
                 pitch: 1.0,
                 rate: 1.0,
@@ -408,8 +399,7 @@ export default function ReflectedWatchView({
           if (currentPlayingEventIdRef.current === eventId) {
             setIsSpeakingCaption(true);
             hideControls(); // Hide controls during caption speech
-            const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-            Speech.speak(textToSpeak, {
+            Speech.speak(selectedMetadata.description, {
               volume: 1.0,
               pitch: 1.0,
               rate: 1.0,
@@ -613,6 +603,30 @@ export default function ReflectedWatchView({
     };
   }, [isPlayingDeepDive, videoFinished]);
 
+  // Animate audio indicator (VU meter) when any audio is playing
+  useEffect(() => {
+    if (isAnyAudioPlaying) {
+      const animation = Animated.loop(
+        Animated.sequence([
+          Animated.timing(audioIndicatorAnim, {
+            toValue: 1,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(audioIndicatorAnim, {
+            toValue: 0.4,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      animation.start();
+      return () => animation.stop();
+    } else {
+      audioIndicatorAnim.setValue(0.4);
+    }
+  }, [isAnyAudioPlaying, audioIndicatorAnim]);
+
   // Reset state when view unmounts (empty deps = runs only on unmount)
   useEffect(() => {
     return () => {
@@ -678,8 +692,7 @@ export default function ReflectedWatchView({
           useNativeDriver: true,
         }).start();
         
-        const textToSpeak = sanitizeTextForTTS(selectedMetadata.description);
-        Speech.speak(textToSpeak, {
+        Speech.speak(selectedMetadata.description, {
           volume: 1.0,
           pitch: 1.0,
           rate: 1.0,
@@ -719,10 +732,9 @@ export default function ReflectedWatchView({
       // Show controls when deep dive stops
       showControls();
     } else {
-      const textToSpeak = sanitizeTextForTTS(selectedMetadata.deep_dive);
       // Hide controls when deep dive starts
       hideControls();
-      Speech.speak(textToSpeak, {
+      Speech.speak(selectedMetadata.deep_dive, {
         volume: 1.0,
         pitch: 1.0,
         rate: 1.0,
@@ -887,12 +899,13 @@ export default function ReflectedWatchView({
             style={styles.mediaContainer}
             activeOpacity={1}
             onPress={() => {
-              // Replay on tap for all content types
+              // Video: only replay when finished
               if (selectedMetadata?.content_type === 'video') {
                 if (videoFinished) {
                   playDescription();
                 }
               } else {
+                // Photos: always replay
                 playDescription();
               }
             }}
@@ -1000,20 +1013,31 @@ export default function ReflectedWatchView({
 
           {/* Metadata & Controls */}
           <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-            {/* Simplified caption - no inline buttons */}
-            {selectedMetadata?.description && !selectedEvent.audio_url ? (
-              <Text style={[styles.descriptionText, { marginBottom: 0 }]} numberOfLines={3}>
-                {selectedMetadata.description}
-              </Text>
-            ) : selectedEvent.audio_url ? (
-              <Text style={[styles.descriptionText, { marginBottom: 0 }]} numberOfLines={3}>
-                🎤 Voice message
-              </Text>
-            ) : (
-              <Text style={styles.descriptionText} numberOfLines={3}>
-                Reflection
-              </Text>
-            )}
+            <View style={styles.captionRow}>
+              {/* Audio indicator (VU meter) */}
+              {isAnyAudioPlaying && (
+                <Animated.View style={{ opacity: audioIndicatorAnim }}>
+                  <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
+                </Animated.View>
+              )}
+              
+              {/* Simplified caption - no inline buttons */}
+              <View style={{ flex: 1 }}>
+                {selectedMetadata?.description && !selectedEvent.audio_url ? (
+                  <Text style={[styles.descriptionText, { marginBottom: 0 }]} numberOfLines={3}>
+                    {selectedMetadata.description}
+                  </Text>
+                ) : selectedEvent.audio_url ? (
+                  <Text style={[styles.descriptionText, { marginBottom: 0 }]} numberOfLines={3}>
+                    🎤 Voice message
+                  </Text>
+                ) : (
+                  <Text style={styles.descriptionText} numberOfLines={3}>
+                    Reflection
+                  </Text>
+                )}
+              </View>
+            </View>
             
             {/* Reflection ID (temporary for debugging) */}
             <Text style={styles.reflectionIdText}>
@@ -1216,9 +1240,8 @@ const styles = StyleSheet.create({
   },
   captionRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    gap: 10,
+    alignItems: 'flex-start',
+    gap: 12,
   },
   captionButtonInline: {
     width: 48,
