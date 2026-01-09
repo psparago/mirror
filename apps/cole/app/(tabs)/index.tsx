@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
+  const [pendingUpdates, setPendingUpdates] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
@@ -32,43 +33,7 @@ export default function ColeInboxScreen() {
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
   // Fetch events and listen for Firestore updates
-  useEffect(() => {
-    fetchEvents();
-
-    // Set up Firestore listener for real-time signals
-    const signalsRef = collection(db, 'signals');
-    const q = query(signalsRef, orderBy('timestamp', 'desc'));
-
-    let isInitialLoad = true;
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot: QuerySnapshot<DocumentData>) => {
-        // Skip the initial load - we already fetched events on mount
-        if (isInitialLoad) {
-          isInitialLoad = false;
-          return;
-        }
-
-        // Check if this is a new document (not just initial load)
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added') {
-            const signalData = change.doc.data();
-            // Trigger refresh of the gallery
-            fetchEvents();
-          }
-        });
-      },
-      (error) => {
-        console.error("Firestore listener error:", error);
-      }
-    );
-
-    // Cleanup listener on unmount to prevent memory leaks
-    return () => {
-      unsubscribe();
-    };
-  }, []);
+  // Fetch events and listen for Firestore updates - Moved below to fix closure staleness
 
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
@@ -172,7 +137,22 @@ export default function ColeInboxScreen() {
         return b.event_id.localeCompare(a.event_id);
       });
 
-      setEvents(sortedEvents);
+      // Hot Update Logic:
+      // If user is viewing a reflection (selectedEvent exists), queue updates instead of showing immediately.
+      if (selectedEvent) {
+        // Only update if there are changes. Simple check: if mismatch in first event ID or length
+        const currentTopId = events.length > 0 ? events[0].event_id : null;
+        const newTopId = sortedEvents.length > 0 ? sortedEvents[0].event_id : null;
+
+        if (currentTopId !== newTopId || events.length !== sortedEvents.length) {
+          console.log('🔥 Hot Update: Queueing pending events');
+          setPendingUpdates(sortedEvents);
+        }
+      } else {
+        // Idle state: Update immediately
+        setEvents(sortedEvents);
+        setPendingUpdates([]); // Clear pending
+      }
 
       // Fetch metadata for each event
       const metadataPromises = (data.events || []).map(async (event) => {
@@ -203,6 +183,62 @@ export default function ColeInboxScreen() {
       setError(err.message || 'Failed to load events');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Keep ref to latest fetchEvents to avoid dependency cycles
+  const fetchEventsRef = useRef(fetchEvents);
+  useEffect(() => {
+    fetchEventsRef.current = fetchEvents;
+  });
+
+  // Fetch events and listen for Firestore updates
+  useEffect(() => {
+    fetchEventsRef.current(); // Initial fetch
+
+    // Set up Firestore listener for real-time signals
+    const signalsRef = collection(db, 'signals');
+    const q = query(signalsRef, orderBy('timestamp', 'desc'));
+
+    let isInitialLoad = true;
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot: QuerySnapshot<DocumentData>) => {
+        // Skip the initial load - we already fetched events on mount
+        if (isInitialLoad) {
+          isInitialLoad = false;
+          return;
+        }
+
+        // Check if this is a new document (not just initial load)
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added') {
+            const signalData = change.doc.data();
+            // Trigger refresh of the gallery
+            // Use ref to call the LATEST fetchEvents (with fresh closures over selectedEvent)
+            if (fetchEventsRef.current) {
+              fetchEventsRef.current();
+            }
+          }
+        });
+      },
+      (error) => {
+        console.error("Firestore listener error:", error);
+      }
+    );
+
+    // Cleanup listener on unmount to prevent memory leaks
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  // Flush pending updates to the main list
+  const onFlushUpdates = () => {
+    if (pendingUpdates.length > 0) {
+      setEvents(pendingUpdates);
+      setPendingUpdates([]);
     }
   };
 
@@ -308,8 +344,21 @@ export default function ColeInboxScreen() {
   };
 
   const closeFullScreen = useCallback(async () => {
+    // Stop speech if playing
+    Speech.stop();
+
+    // Auto-flush pending updates when closing
+    if (pendingUpdates.length > 0) {
+      onFlushUpdates();
+    }
+
+    // Only fetch fresh list if we didn't just flush (optional, but robust)
+    if (pendingUpdates.length === 0) {
+      fetchEvents();
+    }
+
     setSelectedEvent(null);
-  }, []);
+  }, [pendingUpdates, events]);
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
@@ -450,7 +499,7 @@ export default function ColeInboxScreen() {
   };
 
   // Capture and upload selfie response
-  const captureSelfieResponse = async () => {
+  const captureSelfieResponse = useCallback(async (silent: boolean = false) => {
     if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
       return;
     }
@@ -490,14 +539,8 @@ export default function ColeInboxScreen() {
         }
         const imageData = await imageResponse.json();
         imageUrl = imageData.url;
-        console.log("Got presigned URL, uploading image...");
-      } catch (error: any) {
-        console.error("Error getting presigned URL:", error);
-        throw new Error(`Failed to get upload URL: ${error.message || 'Network request failed'}`);
-      }
 
-      // Upload image
-      try {
+        console.log("Got presigned URL, uploading image...");
         const imageBlob = await fetch(photo.uri).then(r => r.blob());
         const uploadResponse = await fetch(imageUrl, {
           method: 'PUT',
@@ -510,8 +553,8 @@ export default function ColeInboxScreen() {
         }
         console.log("Image uploaded successfully");
       } catch (error: any) {
-        console.error("Error uploading image:", error);
-        throw new Error(`Failed to upload image: ${error.message || 'Network request failed'}`);
+        console.error("Error getting presigned URL or uploading image:", error);
+        throw new Error(`Failed to get upload URL or upload image: ${error.message || 'Network request failed'}`);
       }
 
       // Cleanup local file
@@ -521,16 +564,17 @@ export default function ColeInboxScreen() {
         console.warn("Failed to delete local file:", cleanupError);
       }
 
-      // Speak confirmation message
-      const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-      const companionName = metadata?.sender || 'your companion';
-      Speech.speak(`I sent a selfie to ${companionName}`, {
-        pitch: 1.0,
-        rate: 1.0,
-        language: 'en-US',
-      });
-
-      Alert.alert("Success!", "Your selfie response has been sent!");
+      // Speak confirmation message (only if not silent)
+      // DISABLED for now - can be distracting during video playback
+      // if (!silent) {
+      //   const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
+      //   const companionName = metadata?.sender || 'your companion';
+      //   Speech.speak(`I sent a selfie to ${companionName}`, {
+      //     pitch: 1.0,
+      //     rate: 1.0,
+      //     language: 'en-US',
+      //   });
+      // }
 
       // Create reflection_response document in Firestore (non-blocking)
       // Use original event_id as document ID for easy lookup
@@ -553,11 +597,13 @@ export default function ColeInboxScreen() {
       if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
         errorMessage = "Permission error. Please check Firestore security rules for 'reflection_responses' collection.";
       }
-      Alert.alert("Error", errorMessage);
+      if (!silent) {
+        Alert.alert("Error", errorMessage);
+      }
     } finally {
       setIsCapturingSelfie(false);
     }
-  };
+  }, [selectedEvent, cameraPermission, isCapturingSelfie, requestCameraPermission, eventMetadata]);
 
 
   const deleteEvent = async (event: Event) => {
@@ -684,6 +730,8 @@ export default function ColeInboxScreen() {
       cameraPermission={cameraPermission}
       requestCameraPermission={requestCameraPermission}
       isCapturingSelfie={isCapturingSelfie}
+      pendingCount={pendingUpdates.length > 0 ? Math.max(0, pendingUpdates.length - events.length) + (pendingUpdates[0]?.event_id !== events[0]?.event_id ? 1 : 0) : 0}
+      onFlushUpdates={onFlushUpdates}
     />
   );
 }
