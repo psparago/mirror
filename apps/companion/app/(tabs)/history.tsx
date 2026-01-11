@@ -38,7 +38,7 @@ export default function SentHistoryScreen() {
         // Document ID is the original event_id, data.response_event_id is the selfie's event_id
         const originalEventId = doc.id; // This is the original reflection's event_id
         const responseEventId = data.response_event_id;
-        
+
         if (originalEventId) {
           eventIds.add(originalEventId);
           if (responseEventId) {
@@ -65,7 +65,7 @@ export default function SentHistoryScreen() {
       async (snapshot: QuerySnapshot) => {
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
-        
+
         // Status priority: replayed > engaged > ready > deleted
         const statusPriority: { [key: string]: number } = {
           'replayed': 4,
@@ -78,23 +78,23 @@ export default function SentHistoryScreen() {
           const data = docSnapshot.data();
           const docId = docSnapshot.id; // Document ID should be the event_id
           const eventIdFromData = data.event_id;
-          
+
           // Use document ID as the primary key (it should be the event_id)
           // Fall back to event_id field if document ID is somehow different
           const actualEventId = docId || eventIdFromData;
-          
+
           // Warn if document ID doesn't match event_id field
           if (eventIdFromData && docId !== eventIdFromData) {
             console.warn(`Document ID (${docId}) doesn't match event_id field (${eventIdFromData})`);
           }
-          
+
           const currentStatus = data.status || 'ready';
           const currentPriority = statusPriority[currentStatus] || 0;
-          
+
           // Check if we already have this event_id
           const existing = reflectionMap.get(actualEventId);
           const existingPriority = existing ? (statusPriority[existing.status || 'ready'] || 0) : 0;
-          
+
           // Helper to convert Firestore timestamp to number
           const getTimestampValue = (ts: any): number => {
             if (!ts) return 0;
@@ -103,9 +103,9 @@ export default function SentHistoryScreen() {
             if (typeof ts === 'number') return ts;
             return 0;
           };
-          
+
           const currentTime = getTimestampValue(data.timestamp);
-          
+
           // Deduplicate by event_id - use document ID as fallback
           // Always use the latest status we see for this event_id
           if (!existing) {
@@ -121,7 +121,7 @@ export default function SentHistoryScreen() {
             // We already have this event_id - always update to higher priority status
             const existingTime = getTimestampValue(existing.timestamp);
             const existingEngTime = getTimestampValue(existing.engagementTimestamp);
-            
+
             // Always update status if this signal has higher priority
             if (currentPriority > existingPriority) {
               existing.status = currentStatus;
@@ -195,7 +195,7 @@ export default function SentHistoryScreen() {
         });
 
         const reflectionsList = await Promise.all(reflectionPromises);
-        
+
         // Sort by timestamp descending (most recent first)
         // Use engagementTimestamp if available (for engaged/replayed), otherwise use timestamp
         // Use engagementTimestamp if available (for engaged/replayed), otherwise use timestamp
@@ -209,12 +209,12 @@ export default function SentHistoryScreen() {
             if (typeof ts === 'number') return ts;
             return 0;
           };
-          
+
           const aTime = getTime(a);
           const bTime = getTime(b);
           return bTime - aTime; // Most recent first
         });
-        
+
         setReflections(reflectionsList);
         setLoading(false);
       },
@@ -269,7 +269,7 @@ export default function SentHistoryScreen() {
 
   const formatEngagementDate = (timestamp: any) => {
     if (!timestamp) return '';
-    
+
     try {
       // Handle Firestore Timestamp
       const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
@@ -278,12 +278,12 @@ export default function SentHistoryScreen() {
       const diffMins = Math.floor(diffMs / 60000);
       const diffHours = Math.floor(diffMs / 3600000);
       const diffDays = Math.floor(diffMs / 86400000);
-      
+
       if (diffMins < 1) return 'just now';
       if (diffMins < 60) return `${diffMins}m ago`;
       if (diffHours < 24) return `${diffHours}h ago`;
       if (diffDays < 7) return `${diffDays}d ago`;
-      
+
       // For older dates, show month/day
       return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     } catch (error) {
@@ -362,7 +362,7 @@ export default function SentHistoryScreen() {
           </View>
         </TouchableOpacity>
       </Modal>
-      
+
       <FlatList
         data={reflections}
         keyExtractor={(item) => item.event_id}
@@ -411,11 +411,11 @@ export default function SentHistoryScreen() {
                           console.warn(`No responseEventId found for event ${item.event_id}`);
                           return;
                         }
-                        
+
                         setSelectedSelfieEventId(item.event_id);
                         setLoadingSelfie(true);
                         setSelfieImageUrl(null);
-                        
+
                         try {
                           // Get presigned GET URL for the selfie image (method=GET for viewing)
                           const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET`;
@@ -464,7 +464,7 @@ export default function SentHistoryScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#1a1a1a', // Dark background
   },
   centerContainer: {
     flex: 1,
@@ -476,24 +476,25 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: 'bold',
     padding: 16,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#1a1a1a',
+    color: '#ffffff',
   },
   listContainer: {
     padding: 8,
   },
   reflectionItem: {
-    backgroundColor: '#fff',
+    backgroundColor: '#2a2a2a', // Dark card background
     padding: 12,
     marginVertical: 4,
     marginHorizontal: 8,
-    borderRadius: 8,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#d0d0d0',
+    borderColor: 'rgba(255, 255, 255, 0.1)', // Subtle light border
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
   },
   reflectionRow: {
     flexDirection: 'row',
@@ -510,7 +511,7 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 8,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: '#3a3a3a', // Darker placeholder
   },
   deletedImagePlaceholder: {
     backgroundColor: '#f5f5f5',
@@ -541,7 +542,7 @@ const styles = StyleSheet.create({
   },
   description: {
     fontSize: 14,
-    color: '#333',
+    color: '#e0e0e0', // Light text on dark background
     marginBottom: 4,
   },
   statusBadge: {
@@ -556,12 +557,12 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 14,
-    color: '#666',
+    color: '#b0b0b0', // Lighter gray for dark theme
     fontWeight: '600',
   },
   engagementDate: {
     fontSize: 12,
-    color: '#999',
+    color: '#888', // Lighter for visibility
     marginLeft: 8,
     fontStyle: 'italic',
   },
@@ -569,36 +570,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#e8f5e9',
+    backgroundColor: 'rgba(46, 204, 113, 0.2)', // Darker green background
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
   },
   responseText: {
     fontSize: 12,
-    color: '#2ecc71',
+    color: '#4ade80', // Brighter green for dark theme
     fontWeight: '600',
   },
   eventId: {
     fontSize: 12,
-    color: '#999',
+    color: '#888', // Lighter for visibility
     fontFamily: 'monospace',
   },
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#666',
+    color: '#b0b0b0', // Lighter for dark theme
   },
   emptyText: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#666',
+    color: '#d0d0d0', // Lighter for dark theme
     marginTop: 16,
     marginBottom: 8,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#999',
+    color: '#888', // Lighter for visibility
   },
   modalOverlay: {
     flex: 1,

@@ -1,12 +1,13 @@
 import ReflectedWatchView from '@/components/ReflectedWatchView';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
-import { collection, doc, DocumentData, getDoc, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, doc, DocumentData, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,6 +29,7 @@ export default function ColeInboxScreen() {
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
   const refreshingEventsRef = useRef<Set<string>>(new Set()); // Track events currently being refreshed
+  const [readEventIds, setReadEventIds] = useState<string[]>([]);
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -47,6 +49,22 @@ export default function ColeInboxScreen() {
     return () => {
       subscription.remove();
     };
+  }, []);
+
+  // Load read state from disk on startup
+  useEffect(() => {
+    const loadReadState = async () => {
+      try {
+        const storedIds = await AsyncStorage.getItem('read_events');
+        if (storedIds) {
+          setReadEventIds(JSON.parse(storedIds));
+        }
+      } catch (error) {
+        console.error('Failed to load read state:', error);
+      }
+    };
+
+    loadReadState();
   }, []);
 
   // Auto-select the first (most recent) event when events load (only once)
@@ -107,6 +125,13 @@ export default function ColeInboxScreen() {
       }
     };
   }, [selectedEvent?.event_id]);
+
+  // Auto-mark as read when an event is opened
+  useEffect(() => {
+    if (selectedEvent) {
+      markEventAsRead(selectedEvent.event_id);
+    }
+  }, [selectedEvent]);
 
   const fetchEvents = async () => {
     try {
@@ -188,51 +213,89 @@ export default function ColeInboxScreen() {
 
   // Keep ref to latest fetchEvents to avoid dependency cycles
   const fetchEventsRef = useRef(fetchEvents);
+  // Refs for stable access inside the listener
+  const eventsRef = useRef(events);
+  const selectedEventRef = useRef(selectedEvent);
+
   useEffect(() => {
     fetchEventsRef.current = fetchEvents;
-  });
+    eventsRef.current = events;
+    selectedEventRef.current = selectedEvent;
+  }, [events, selectedEvent, fetchEvents]);
 
   // Fetch events and listen for Firestore updates
   useEffect(() => {
     fetchEventsRef.current(); // Initial fetch
 
-    // Set up Firestore listener for real-time signals
+    // 1. Set up Firestore listener (The "Doorbell")
     const signalsRef = collection(db, 'signals');
-    const q = query(signalsRef, orderBy('timestamp', 'desc'));
+    const q = query(signalsRef, orderBy('timestamp', 'desc'), limit(10));
 
     let isInitialLoad = true;
 
     const unsubscribe = onSnapshot(
       q,
-      (snapshot: QuerySnapshot<DocumentData>) => {
-        // Skip the initial load - we already fetched events on mount
+      async (snapshot: QuerySnapshot<DocumentData>) => {
+        // Skip initial load to prevent double-fetching on mount
         if (isInitialLoad) {
           isInitialLoad = false;
           return;
         }
 
-        // Check if this is a new document (not just initial load)
+        // 2. Check for NEW signals
+        const newSignalIds: string[] = [];
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
-            const signalData = change.doc.data();
-            // Trigger refresh of the gallery
-            // Use ref to call the LATEST fetchEvents (with fresh closures over selectedEvent)
-            if (fetchEventsRef.current) {
-              fetchEventsRef.current();
-            }
+            newSignalIds.push(change.doc.id);
           }
         });
+
+        if (newSignalIds.length === 0) return;
+
+        console.log(`🔔 Signals received for: ${newSignalIds.join(', ')}`);
+
+        // 3. FETCH & SIGN (The "Mailbox Walk")
+        try {
+          const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+          if (!response.ok) throw new Error('Failed to fetch fresh events');
+
+          const data: ListEventsResponse = await response.json();
+          const freshEvents = data.events || [];
+
+          // 4. THE POLITE LOGIC
+          // Use Refs to get current state without re-subscribing
+          if (selectedEventRef.current) {
+            // --- SCENARIO: BUSY (User is watching) ---
+            const currentIds = new Set(eventsRef.current.map(e => e.event_id));
+            const newItems = freshEvents.filter(e => !currentIds.has(e.event_id));
+
+            if (newItems.length > 0) {
+              console.log(`Queueing ${newItems.length} signed items`);
+              setPendingUpdates(prev => {
+                const existingQueueIds = new Set(prev.map(e => e.event_id));
+                const uniqueNew = newItems.filter(e => !existingQueueIds.has(e.event_id));
+                return [...prev, ...uniqueNew];
+              });
+            }
+          } else {
+            // --- SCENARIO: IDLE (User is on Grid) ---
+            console.log('Idle update: Setting fresh events');
+            const sorted = freshEvents.sort((a, b) => b.event_id.localeCompare(a.event_id));
+            setEvents(sorted);
+            setPendingUpdates([]);
+          }
+
+        } catch (error) {
+          console.error('Error fetching fresh data on signal:', error);
+        }
       },
       (error) => {
         console.error("Firestore listener error:", error);
       }
     );
 
-    // Cleanup listener on unmount to prevent memory leaks
-    return () => {
-      unsubscribe();
-    };
-  }, []);
+    return () => unsubscribe();
+  }, []); // Empty dependency array - strict run-once
 
   // Flush pending updates to the main list
   const onFlushUpdates = () => {
@@ -265,6 +328,19 @@ export default function ColeInboxScreen() {
     } catch (error) {
       console.error(`Error refreshing URLs for event ${eventId}:`, error);
       return null;
+    }
+  };
+
+  const markEventAsRead = async (eventId: string) => {
+    if (readEventIds.includes(eventId)) return;
+
+    const newReadIds = [...readEventIds, eventId];
+    setReadEventIds(newReadIds);
+
+    try {
+      await AsyncStorage.setItem('read_events', JSON.stringify(newReadIds));
+    } catch (error) {
+      console.error('Failed to save read state:', error);
     }
   };
 
@@ -480,9 +556,7 @@ export default function ColeInboxScreen() {
 
   // Send replay signal to Firestore
   const sendReplaySignal = async (eventId: string) => {
-    if (hasReplayedRef.current[eventId]) {
-      return; // Already sent
-    }
+    // REPLAY SIGNAL: Always send to update timestamp (bubbling up list)
 
     try {
       const signalRef = doc(db, 'signals', eventId);
@@ -540,16 +614,14 @@ export default function ColeInboxScreen() {
         const imageData = await imageResponse.json();
         imageUrl = imageData.url;
 
-        console.log("Got presigned URL, uploading image...");
-        const imageBlob = await fetch(photo.uri).then(r => r.blob());
-        const uploadResponse = await fetch(imageUrl, {
-          method: 'PUT',
-          body: imageBlob,
+        console.log("Got presigned URL, uploading image via FileSystem...");
+        const uploadResult = await FileSystem.uploadAsync(imageUrl, photo.uri, {
+          httpMethod: 'PUT',
           headers: { 'Content-Type': 'image/jpeg' },
         });
 
-        if (uploadResponse.status !== 200) {
-          throw new Error(`Image upload failed: ${uploadResponse.status} ${uploadResponse.statusText}`);
+        if (uploadResult.status !== 200) {
+          throw new Error(`Image upload failed: ${uploadResult.status}`);
         }
         console.log("Image uploaded successfully");
       } catch (error: any) {
@@ -732,6 +804,8 @@ export default function ColeInboxScreen() {
       isCapturingSelfie={isCapturingSelfie}
       pendingCount={pendingUpdates.length > 0 ? Math.max(0, pendingUpdates.length - events.length) + (pendingUpdates[0]?.event_id !== events[0]?.event_id ? 1 : 0) : 0}
       onFlushUpdates={onFlushUpdates}
+      readEventIds={readEventIds}
+      onReplay={(event) => sendReplaySignal(event.event_id)}
     />
   );
 }

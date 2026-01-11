@@ -38,7 +38,12 @@ interface ReflectedWatchViewProps {
   cameraPermission: PermissionResponse | null;
   requestCameraPermission: () => Promise<PermissionResponse>;
   isCapturingSelfie: boolean;
+  pendingCount: number;
+  onFlushUpdates: () => void;
+  readEventIds: string[];
+  onReplay?: (event: Event) => void;
 }
+
 
 export default function ReflectedWatchView({
   visible,
@@ -54,6 +59,10 @@ export default function ReflectedWatchView({
   cameraPermission,
   requestCameraPermission,
   isCapturingSelfie,
+  pendingCount,
+  onFlushUpdates,
+  readEventIds,
+  onReplay,
 }: ReflectedWatchViewProps) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -92,7 +101,7 @@ export default function ReflectedWatchView({
     if (player.status === 'idle' && player.currentTime > 0) {
       handleVideoFinished();
     }
-    
+
     // Also check if video duration reached
     if (player.status === 'readyToPlay' && player.duration > 0 && player.currentTime >= player.duration - 0.1) {
       handleVideoFinished();
@@ -115,16 +124,17 @@ export default function ReflectedWatchView({
   const selfieTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashOpacity = useRef(new Animated.Value(0)).current;
   const hasVideoPlayedRef = useRef(false); // Track if video has been played at least once
-  const audioIndicatorAnim = useRef(new Animated.Value(0.4)).current; // VU meter animation
+  const audioIndicatorAnim = useRef(new Animated.Value(0.7)).current; // VU meter animation
 
   // UI refs
   const flatListRef = useRef<FlatList>(null);
 
   // "One Voice" locking rule: controls locked while video is playing
   const areControlsLocked = isVideoPlaying;
-  
+
   // Track if any audio/voice is playing for VU meter
-  const isAnyAudioPlaying = isSpeakingCaption || isAudioPlaying || isPlayingDeepDive;
+  // Show VU meter for ALL audio: video audio, voice messages, TTS, and deep dives
+  const isAnyAudioPlaying = isSpeakingCaption || isPlayingDeepDive || isAudioPlaying;
 
   // Track player's playing state and sync with component state
   useEffect(() => {
@@ -211,7 +221,13 @@ export default function ReflectedWatchView({
 
       const hasVideo = selectedMetadata.content_type === 'video';
       const hasAudio = selectedEvent.audio_url && typeof selectedEvent.audio_url === 'string' && selectedEvent.audio_url.trim() !== '';
-      const hasCaption = selectedMetadata.description;
+      const descriptionLowerCase = selectedMetadata.description ? selectedMetadata.description.trim().toLowerCase() : '';
+      const isGenericDescription = descriptionLowerCase === 'voice message' || descriptionLowerCase === 'video message';
+      const hasCaption = selectedMetadata.description && !isGenericDescription;
+
+
+
+
 
 
 
@@ -259,7 +275,6 @@ export default function ReflectedWatchView({
 
           let autoPlayDelay = 500;
           if (isFirstLoad.current) {
-            console.log('🚀 First Load - Queuing Autoplay (2s Delay)');
             autoPlayDelay = 2000;
             isFirstLoad.current = false;
           }
@@ -272,7 +287,6 @@ export default function ReflectedWatchView({
           // Video with TEXT caption: speak it, then play video
           let autoPlayDelay = 100;
           if (isFirstLoad.current) {
-            console.log('🚀 First Load - Queuing Autoplay (2s Delay)');
             autoPlayDelay = 2000;
             isFirstLoad.current = false;
           }
@@ -303,7 +317,6 @@ export default function ReflectedWatchView({
           // No caption: auto-start video after brief pause
           let autoPlayDelay = 2000;
           if (isFirstLoad.current) {
-            console.log('🚀 First Load - Queuing Autoplay (2s Delay)');
             autoPlayDelay = 2000;
             isFirstLoad.current = false;
           }
@@ -322,7 +335,6 @@ export default function ReflectedWatchView({
         // (No need to speak "Voice message" when they're about to hear the actual voice)
         let autoPlayDelay = 500;
         if (isFirstLoad.current) {
-          console.log('🚀 First Load - Queuing Autoplay (2s Delay)');
           autoPlayDelay = 2000;
           isFirstLoad.current = false;
         }
@@ -335,6 +347,23 @@ export default function ReflectedWatchView({
         // Audio playback function
         const playAudioNow = async () => {
           audioAutoAdvanceScheduledRef.current = false;
+
+          // Trigger selfie capture during audio playback (1.5s delay to catch reaction)
+          setTimeout(() => {
+            if (currentPlayingEventIdRef.current === eventId) {
+              triggerFlash();
+              onCaptureSelfie().catch(err => console.warn('Selfie capture error:', err));
+              // Fade out selfie bubble after capture
+              setTimeout(() => {
+                Animated.timing(selfieMirrorOpacity, {
+                  toValue: 0,
+                  duration: 500,
+                  useNativeDriver: true,
+                }).start();
+              }, 500);
+            }
+          }, 1500);
+
           try {
             if (sound) {
               await sound.unloadAsync();
@@ -357,9 +386,6 @@ export default function ReflectedWatchView({
                 return;
               }
 
-              // Update state to match actual playback
-              setIsAudioPlaying(status.isPlaying);
-
               // Handle audio finish
               if (status.didJustFinish) {
                 if (audioAutoAdvanceScheduledRef.current) return;
@@ -369,6 +395,11 @@ export default function ReflectedWatchView({
 
                 // Audio finished
                 setIsAudioPlaying(false);
+                showControls();
+              } else if (status.isPlaying) {
+                // Only set to true when actually playing, don't set to false on pause/stop
+                // (let didJustFinish handle the false case)
+                setIsAudioPlaying(true);
               }
             });
 
@@ -391,7 +422,6 @@ export default function ReflectedWatchView({
         // Just a photo with caption: speak it (after brief pause)
         let autoPlayDelay = 500;
         if (isFirstLoad.current) {
-          console.log('🚀 First Load - Queuing Autoplay (2s Delay)');
           autoPlayDelay = 2000;
           isFirstLoad.current = false;
         }
@@ -406,10 +436,10 @@ export default function ReflectedWatchView({
               language: 'en-US',
               onDone: () => {
                 setIsSpeakingCaption(false);
-                
+
                 // Show replay button IMMEDIATELY after caption finishes
                 showControls();
-                
+
                 // ═══ AUTO-SELFIE CAPTURE FOR PHOTOS ═══
                 // Capture selfie 250ms after caption finishes, then fade out bubble
                 setTimeout(() => {
@@ -476,7 +506,7 @@ export default function ReflectedWatchView({
   // Helper function for video finished state
   const handleVideoFinished = useCallback(() => {
     const eventId = selectedEvent?.event_id;
-    
+
     if (!eventId || currentPlayingEventIdRef.current !== eventId) {
       return;
     }
@@ -544,7 +574,8 @@ export default function ReflectedWatchView({
         }, 1000);
       }
     } else if (!isVideoPlaying && selectedMetadata?.content_type === 'video') {
-      // Video stopped (paused or finished)
+      // Video stopped (paused or finished) - CRITICAL: Reset audio state
+      setIsAudioPlaying(false);
       if (selfieTimerRef.current) {
         clearTimeout(selfieTimerRef.current);
         selfieTimerRef.current = null;
@@ -554,12 +585,12 @@ export default function ReflectedWatchView({
         duration: 500,
         useNativeDriver: true,
       }).start();
-      
+
       // When video stops and hasn't been marked as finished yet, mark it now
       if (hasVideoPlayedRef.current && !videoFinished) {
         setVideoFinished(true);
       }
-      
+
       // Show controls when video stops (unless speaking caption)
       if (!isSpeakingCaptionRef.current) {
         showControls();
@@ -614,7 +645,7 @@ export default function ReflectedWatchView({
             useNativeDriver: true,
           }),
           Animated.timing(audioIndicatorAnim, {
-            toValue: 0.4,
+            toValue: 0.7,
             duration: 300,
             useNativeDriver: true,
           }),
@@ -623,7 +654,7 @@ export default function ReflectedWatchView({
       animation.start();
       return () => animation.stop();
     } else {
-      audioIndicatorAnim.setValue(0.4);
+      audioIndicatorAnim.setValue(0.7);
     }
   }, [isAnyAudioPlaying, audioIndicatorAnim]);
 
@@ -637,13 +668,7 @@ export default function ReflectedWatchView({
       if (sound) {
         sound.unloadAsync();
       }
-      if (player && videoSource) {
-        try {
-          player.pause();
-        } catch (err) {
-          console.warn('Error pausing video on cleanup:', err);
-        }
-      }
+      // Player cleanup is handled automatically by expo-video hook
       if (selfieTimerRef.current) {
         clearTimeout(selfieTimerRef.current);
       }
@@ -661,10 +686,11 @@ export default function ReflectedWatchView({
         setVideoFinished(false);
         hasVideoPlayedRef.current = false; // Reset for replay
         hideControls(); // Hide button immediately
-        
+
         // Force player to beginning and play
         player.currentTime = 0;
         player.play();
+        if (onReplay && selectedEvent) onReplay(selectedEvent);
         return;
       }
     } catch (err) {
@@ -680,18 +706,55 @@ export default function ReflectedWatchView({
     // Handle video replay or photo caption replay
     if (selectedMetadata.content_type === 'video') {
       toggleVideo();
+    } else if (selectedMetadata.content_type === 'audio') {
+      // Replay audio message
+      if (sound) {
+        try {
+          await sound.replayAsync({ positionMillis: 0, shouldPlay: true });
+          if (onReplay && selectedEvent) onReplay(selectedEvent);
+
+          // Fade in selfie bubble for replay
+          Animated.timing(selfieMirrorOpacity, {
+            toValue: 1,
+            duration: 500,
+            useNativeDriver: true,
+          }).start();
+
+          // Trigger selfie capture for replay
+          setTimeout(() => {
+            triggerFlash();
+            onCaptureSelfie().catch(err => console.warn('Selfie capture error:', err));
+            // Fade out selfie bubble after capture
+            setTimeout(() => {
+              Animated.timing(selfieMirrorOpacity, {
+                toValue: 0,
+                duration: 500,
+                useNativeDriver: true,
+              }).start();
+            }, 500);
+          }, 1500);
+
+        } catch (err) {
+          console.warn('Error replaying audio:', err);
+        }
+      }
     } else {
-      // Replay caption for photos
-      if (selectedMetadata.description) {
+      // Replay caption for photos, but skip generic descriptions
+      const descriptionLowerCase = selectedMetadata.description ? selectedMetadata.description.trim().toLowerCase() : '';
+      const isGenericDescription = descriptionLowerCase === 'voice message' || descriptionLowerCase === 'video message';
+
+      if (selectedMetadata.description && !isGenericDescription) {
+
         setIsSpeakingCaption(true);
         hideControls();
+        if (onReplay && selectedEvent) onReplay(selectedEvent);
         // Fade in selfie bubble for replay
         Animated.timing(selfieMirrorOpacity, {
           toValue: 1,
           duration: 500,
           useNativeDriver: true,
         }).start();
-        
+
         Speech.speak(selectedMetadata.description, {
           volume: 1.0,
           pitch: 1.0,
@@ -701,7 +764,7 @@ export default function ReflectedWatchView({
             setIsSpeakingCaption(false);
             // Show replay button immediately
             showControls();
-            
+
             // ═══ AUTO-SELFIE CAPTURE ON REPLAY ═══
             setTimeout(() => {
               triggerFlash();
@@ -719,7 +782,7 @@ export default function ReflectedWatchView({
         });
       }
     }
-  }, [selectedEvent, selectedMetadata, areControlsLocked, toggleVideo, hideControls, showControls]);
+  }, [selectedEvent, selectedMetadata, areControlsLocked, toggleVideo, hideControls, showControls, sound, onCaptureSelfie, triggerFlash]);
 
   const playDeepDive = useCallback(() => {
     if (!selectedMetadata?.deep_dive) return;
@@ -807,6 +870,7 @@ export default function ReflectedWatchView({
     const metadata = eventMetadata[item.event_id];
     const isNowPlaying = item.event_id === selectedEvent?.event_id;
     const dateStr = formatEventDate(item.event_id);
+    const isRead = readEventIds.includes(item.event_id);
 
     return (
       <View style={styles.upNextItemContainer}>
@@ -819,17 +883,35 @@ export default function ReflectedWatchView({
           activeOpacity={0.7}
           disabled={isNowPlaying} // Disable tap on currently playing item
         >
+          {/* THE BLUE DOT */}
+          {!isRead && (
+            <View style={{
+              width: 10,
+              height: 10,
+              borderRadius: 5,
+              backgroundColor: '#007AFF', // iOS Blue
+              position: 'absolute',
+              left: -6, // Hangs slightly off the edge of the item
+              top: '50%',
+              marginTop: -5,
+              zIndex: 10
+            }} />
+          )}
           <Image source={{ uri: item.image_url }} style={styles.upNextThumbnail} resizeMode="cover" />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
               {isNowPlaying && '▶️ '}{metadata?.description || 'Reflection'}
             </Text>
+
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
               {dateStr}
             </Text>
             <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>
               {metadata?.content_type === 'video' ? '🎥 Video' : metadata?.content_type === 'audio' ? '🎤 Voice' : '📸 Photo'}
               {isNowPlaying && ' • NOW PLAYING'}
+            </Text>
+            <Text style={{ fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'Courier' }}>
+              Reflection ID: {item.event_id}
             </Text>
           </View>
         </TouchableOpacity>
@@ -887,12 +969,24 @@ export default function ReflectedWatchView({
       >
         {/* LEFT PANE: The Stage */}
         <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.4 }]}>
+
           {/* Back to Reflections List Button - only show if there are multiple events */}
-          {events.length > 1 && (
-            <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-              <Text style={styles.reflectionsTitle}>Reflections</Text>
-            </View>
-          )}
+          <View style={[styles.headerBar, { top: insets.top + 10 }]}>
+            {pendingCount > 0 ? (
+              <TouchableOpacity
+                onPress={onFlushUpdates}
+                style={styles.newUpdatesButton}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.newUpdatesText}>
+                  Load {pendingCount} New {pendingCount === 1 ? 'Reflection' : 'Reflections'}
+                </Text>
+                <FontAwesome name="refresh" size={14} color="#fff" style={{ marginLeft: 8 }} />
+              </TouchableOpacity>
+            ) : (
+              events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
+            )}
+          </View>
 
           {/* Media Container - Tap to replay */}
           <TouchableOpacity
@@ -934,10 +1028,9 @@ export default function ReflectedWatchView({
               />
             )}
 
-            {/* Play/Pause Button - Show only after video has played or for non-video content, hide during sparkle */}
-            {!isPlayingDeepDive && ((selectedMetadata?.content_type === 'video' && (videoFinished || hasVideoPlayedRef.current)) || 
-              selectedMetadata?.content_type !== 'video') && (
-              <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]} pointerEvents="box-none">
+            {/* Play/Pause Button - Show only after video has played or for non-video content, hide during sparkle OR audio playback */}
+            {!isPlayingDeepDive && !isAudioPlaying ? (
+              <Animated.View style={[styles.playOverlay, { opacity: (selectedMetadata?.content_type === 'video' && !isVideoPlaying) ? 1 : controlsOpacity }]} pointerEvents="box-none">
                 <TouchableOpacity
                   onPress={playDescription}
                   activeOpacity={0.7}
@@ -945,14 +1038,14 @@ export default function ReflectedWatchView({
                 >
                   <BlurView intensity={30} style={styles.playOverlayBlur}>
                     <FontAwesome
-                      name="play"
+                      name="repeat"
                       size={64}
                       color="rgba(255, 255, 255, 0.95)"
                     />
                   </BlurView>
                 </TouchableOpacity>
               </Animated.View>
-            )}
+            ) : null}
           </TouchableOpacity>
 
           {/* Selfie Camera Bubble - Auto-captures during playback (NO MANUAL BUTTON) */}
@@ -1020,7 +1113,7 @@ export default function ReflectedWatchView({
                   <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
                 </Animated.View>
               )}
-              
+
               {/* Simplified caption - no inline buttons */}
               <View style={{ flex: 1 }}>
                 {selectedMetadata?.description && !selectedEvent.audio_url ? (
@@ -1038,7 +1131,7 @@ export default function ReflectedWatchView({
                 )}
               </View>
             </View>
-            
+
             {/* Reflection ID (temporary for debugging) */}
             <Text style={styles.reflectionIdText}>
               ({selectedEvent.event_id})
@@ -1134,6 +1227,19 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
   },
+  newUpdatesButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2E78B7',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  newUpdatesText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   mediaContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1152,6 +1258,8 @@ const styles = StyleSheet.create({
     bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 100, // Ensure on top of video
+    elevation: 10,
   },
   playButton: {
     width: 160,
@@ -1230,6 +1338,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    zIndex: 100, // Ensure on top of video
+    elevation: 10,
   },
   descriptionText: {
     fontSize: 20,
@@ -1279,9 +1389,10 @@ const styles = StyleSheet.create({
     fontSize: 32,
   },
   reflectionIdText: {
-    fontSize: 8,
-    color: 'rgba(255, 255, 255, 0.4)',
-    marginTop: 4,
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.8)',
+    marginTop: 8,
+    fontFamily: 'Courier', // Monospace for technical look
   },
 
   // UP NEXT PANE (Right/Bottom)

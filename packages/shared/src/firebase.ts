@@ -1,22 +1,21 @@
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import * as firebaseAuth from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
-    apiKey: "AIzaSyCIl99WbAQGu1CRSAOVAln-_VJJ74tK60Y",
-    authDomain: "project-mirror-23168.firebaseapp.com",
-    projectId: "project-mirror-23168",
-    storageBucket: "project-mirror-23168.firebasestorage.app",
-    messagingSenderId: "870445864294",
-    appId: "1:870445864294:web:9eef577d81d9d33ea664a7",
-    measurementId: "G-LYSQPE4WTH"
+  apiKey: "AIzaSyCIl99WbAQGu1CRSAOVAln-_VJJ74tK60Y",
+  authDomain: "project-mirror-23168.firebaseapp.com",
+  projectId: "project-mirror-23168",
+  storageBucket: "project-mirror-23168.firebasestorage.app",
+  messagingSenderId: "870445864294",
+  appId: "1:870445864294:web:9eef577d81d9d33ea664a7",
+  measurementId: "G-LYSQPE4WTH"
 };
-  
+
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// The working hack for Expo/Firebase environments
-const { initializeAuth, getReactNativePersistence } = firebaseAuth as any;
+// Safe import for React Native environment
+import { getReactNativePersistence, initializeAuth } from 'firebase/auth';
 
 export const auth = initializeAuth(app, {
   persistence: getReactNativePersistence(ReactNativeAsyncStorage)

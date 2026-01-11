@@ -68,14 +68,14 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Create multimodal input using genai.Part interface
 	// The prompt for Cole - requesting structured JSON response
-	promptText := `Analyze this image and provide two distinct descriptions for a 15-year-old with Angelman Syndrome.
+	promptText := `Analyze this image for a 15-year-old with Angelman Syndrome. Return range SINGLE JSON object containing exactly these two keys:
 
 "short_caption": A brief, high-impact greeting (max 10 words).
 
 "deep_dive": A more detailed, 2-3 sentence story about the details in the photo to facilitate deeper engagement.
 
-Return your response as valid JSON in exactly this format:
-{"short_caption": "string", "deep_dive": "string"}`
+Return ONLY valid JSON. No markdown formatting.
+Format: {"short_caption": "string", "deep_dive": "string"}`
 
 	// Use Part interface for multimodal inputs (2026 SDK update)
 	parts := []genai.Part{
@@ -123,12 +123,12 @@ Return your response as valid JSON in exactly this format:
 	if strings.HasPrefix(jsonText, "```json") {
 		jsonText = strings.TrimPrefix(jsonText, "```json")
 		jsonText = strings.TrimSuffix(jsonText, "```")
-		jsonText = strings.TrimSpace(jsonText)
-	} else if strings.HasPrefix(jsonText, "```") {
+	}
+	if strings.HasPrefix(jsonText, "```") {
 		jsonText = strings.TrimPrefix(jsonText, "```")
 		jsonText = strings.TrimSuffix(jsonText, "```")
-		jsonText = strings.TrimSpace(jsonText)
 	}
+	jsonText = strings.TrimSpace(jsonText)
 
 	// Parse JSON
 	var result struct {
@@ -136,10 +136,23 @@ Return your response as valid JSON in exactly this format:
 		DeepDive     string `json:"deep_dive"`
 	}
 
+	// Try unmarshalling as a single object first
 	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
-		log.Printf("Error parsing JSON response: %v, raw text: %s", err, text)
-		http.Error(w, fmt.Sprintf("Failed to parse JSON response: %v", err), 500)
-		return
+		// If that fails, try unmarshalling as an array of objects
+		var arrayResult []struct {
+			ShortCaption string `json:"short_caption"`
+			DeepDive     string `json:"deep_dive"`
+		}
+		if errArray := json.Unmarshal([]byte(jsonText), &arrayResult); errArray == nil && len(arrayResult) > 0 {
+			// Successfully parsed as array, use the first item
+			result = arrayResult[0]
+			log.Printf("Parsed JSON as array (fallback success)")
+		} else {
+			// Both failed
+			log.Printf("Error parsing JSON response: %v, raw text: %s", err, text)
+			http.Error(w, fmt.Sprintf("Failed to parse JSON response: %v", err), 500)
+			return
+		}
 	}
 
 	// Validate required fields

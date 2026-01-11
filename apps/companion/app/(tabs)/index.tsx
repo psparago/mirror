@@ -1,6 +1,6 @@
 import CameraModal from '@/components/CameraModal';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, uploadPhotoToS3 } from '@projectmirror/shared';
+import { API_ENDPOINTS } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
@@ -13,6 +13,41 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+
+// Helper to upload securely using FileSystem
+const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
+  let uriToUpload = localUri;
+  let tempUri: string | null = null;
+
+  // If remote URL (e.g. Unsplash), download to cache first
+  if (localUri.startsWith('http')) {
+    // Basic filename sanitization
+    const filename = `temp_upload_${Date.now()}.jpg`;
+    const downloadRes = await FileSystem.downloadAsync(
+      localUri,
+      `${FileSystem.cacheDirectory}${filename}`
+    );
+    uriToUpload = downloadRes.uri;
+    tempUri = downloadRes.uri;
+  }
+
+  try {
+    const uploadResult = await FileSystem.uploadAsync(presignedUrl, uriToUpload, {
+      httpMethod: 'PUT',
+      headers: { 'Content-Type': 'image/jpeg' },
+    });
+
+    if (uploadResult.status !== 200) {
+      throw new Error(`Upload failed with status ${uploadResult.status}`);
+    }
+    return uploadResult;
+  } finally {
+    // Cleanup temp file if we created one
+    if (tempUri) {
+      FileSystem.deleteAsync(tempUri, { idempotent: true }).catch(() => { });
+    }
+  }
+};
 
 export default function CompanionHomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -442,6 +477,8 @@ export default function CompanionHomeScreen() {
       return;
     }
 
+    let tempThumbnail: string | null = null;
+
     try {
       setUploading(true);
 
@@ -449,173 +486,138 @@ export default function CompanionHomeScreen() {
       const eventID = Date.now().toString();
       const timestamp = new Date().toISOString();
 
-      // 1. Handle Video: Generate Thumbnail & Upload Both
+      // 1. Prepare list of files to upload
+      const filesToSign = ['image.jpg', 'metadata.json'];
       if (mediaType === 'video' && videoUri) {
-        // Generate thumbnail from video
-        const { uri: thumbnailUri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
-          time: 0, // Get frame at the beginning
+        filesToSign.push('video.mp4');
+      }
+
+      // Verify audio exists before adding to list
+      let hasAudio = false;
+      if (audioUri) {
+        const fileInfo = await FileSystem.getInfoAsync(audioUri);
+        if (fileInfo.exists) {
+          filesToSign.push('audio.m4a');
+          hasAudio = true;
+        }
+      }
+
+      // 2. Get permissions (Batch Request)
+      console.log('getting batch urls...');
+      const batchRes = await fetch(API_ENDPOINTS.GET_BATCH_S3_UPLOAD_URLS, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          event_id: eventID,
+          path: 'to',
+          files: filesToSign
+        })
+      });
+
+      if (!batchRes.ok) {
+        throw new Error(`Failed to get upload URLs: ${batchRes.status}`);
+      }
+
+      const { urls } = await batchRes.json();
+      const uploadPromises: Promise<any>[] = [];
+
+      // 3. Prepare Image Source
+      let imageSource = photo.uri;
+
+      if (mediaType === 'video' && videoUri) {
+        // Generate thumbnail
+        const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
+          time: 0,
           quality: 0.5,
         });
-
-        // Get presigned URLs for both thumbnail (image.jpg) and video (video.mp4)
-        const [imageResponse, videoResponse] = await Promise.all([
-          fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`),
-          fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=video.mp4`)
-        ]);
-
-        const { url: imageUrl } = await imageResponse.json();
-        const { url: videoUploadUrl } = await videoResponse.json();
-
-        // Upload thumbnail (image.jpg)
-        const thumbnailUploadResponse = await uploadPhotoToS3(thumbnailUri, imageUrl);
-        if (thumbnailUploadResponse.status !== 200) {
-          throw new Error(`Thumbnail upload failed: ${thumbnailUploadResponse.status}`);
-        }
-
-        // Upload video (video.mp4)
-        const videoUploadResponse = await FileSystem.uploadAsync(videoUploadUrl, videoUri, {
-          httpMethod: 'PUT',
-          headers: {
-            'Content-Type': 'video/mp4',
-          },
-        });
-
-        if (videoUploadResponse.status !== 200) {
-          throw new Error(`Video upload failed: ${videoUploadResponse.status}`);
-        }
-
-        // Clean up temporary thumbnail
-        try {
-          await FileSystem.deleteAsync(thumbnailUri, { idempotent: true });
-        } catch (cleanupError) {
-          console.warn("Failed to delete thumbnail:", cleanupError);
-        }
-      } else {
-        // 1. Upload image.jpg to final location (existing photo logic)
-        const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=image.jpg`);
-        const { url: imageUrl } = await imageResponse.json();
-
-        // Upload image to final location
-        // If staging exists (user triggered AI), copy from staging. Otherwise upload directly.
-        if (stagingEventId) {
-          // Copy from staging to final location
-          const stagingGetResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
-          if (stagingGetResponse.ok) {
-            const { url: stagingImageUrl } = await stagingGetResponse.json();
-            // Download staging image and upload to final location
-            const stagingImageBlob = await fetch(stagingImageUrl).then(r => r.blob());
-            const imageUploadResponse = await fetch(imageUrl, {
-              method: 'PUT',
-              body: stagingImageBlob,
-              headers: { 'Content-Type': 'image/jpeg' },
-            });
-            if (imageUploadResponse.status !== 200) {
-              throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
-            }
-          } else {
-            // Fallback to original upload if staging fetch fails
-            const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
-            if (imageUploadResponse.status !== 200) {
-              throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
-            }
-          }
-        } else {
-          // No staging - upload directly (user chose voice or note without AI)
-          const imageUploadResponse = await uploadPhotoToS3(photo.uri, imageUrl);
-          if (imageUploadResponse.status !== 200) {
-            throw new Error(`Image upload failed: ${imageUploadResponse.status}`);
-          }
-        }
-
-        // Clean up staging image after successful upload to final location
-        if (stagingEventId) {
-          try {
-            await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
-          } catch (error: any) {
-            console.error("Error deleting staging image:", error);
-            // Continue anyway - staging cleanup is not critical
-          }
+        imageSource = uri;
+        tempThumbnail = uri; // Mark for cleanup
+      } else if (stagingEventId) {
+        // If Staging exists, fetch the READ URL for the staging image
+        // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
+        const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
+        if (stagingRes.ok) {
+          const { url } = await stagingRes.json();
+          imageSource = url;
         }
       }
 
-      // 2. Upload audio if available
-      let audioUrl: string | undefined;
-      let audioUploaded = false;
-      if (audioUri) {
-        // Check if audio file exists before attempting upload
-        try {
-          const fileInfo = await FileSystem.getInfoAsync(audioUri);
-          if (!fileInfo.exists) {
-            // File doesn't exist - silently clear audioUri and continue without audio
-            setAudioUri(null);
-          } else {
-            // File exists - proceed with upload
-            const audioResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=audio.m4a`);
-            const { url: audioUploadUrl } = await audioResponse.json();
-            // Upload audio file directly using FileSystem.uploadAsync
+      // 4. Queue Image Upload
+      uploadPromises.push(safeUploadToS3(imageSource, urls['image.jpg']));
 
-            // FileSystem.uploadAsync defaults to binary upload, so we don't need to specify uploadType
-            const audioUploadResponse = await FileSystem.uploadAsync(audioUploadUrl, audioUri, {
-              httpMethod: 'PUT',
-              headers: {
-                'Content-Type': 'audio/m4a',
-              },
-            });
-
-            if (audioUploadResponse.status !== 200) {
-              throw new Error(`Audio upload failed: ${audioUploadResponse.status}`);
-            }
-            audioUploaded = true;
-          }
-        } catch (error: any) {
-          // Only log actual errors (not missing files)
-          if (error.message && !error.message.includes('does not exist')) {
-            console.error("Error uploading audio file:", error);
-          }
-          // Clear audioUri and continue without audio
-          setAudioUri(null);
-          // Don't throw - allow upload to continue without audio
-        }
+      // 5. Queue Video Upload
+      if (mediaType === 'video' && videoUri && urls['video.mp4']) {
+        uploadPromises.push(
+          FileSystem.uploadAsync(urls['video.mp4'], videoUri, {
+            httpMethod: 'PUT',
+            headers: { 'Content-Type': 'video/mp4' },
+          }).then(res => {
+            if (res.status !== 200) throw new Error(`Video upload failed: ${res.status}`);
+            return res;
+          })
+        );
       }
 
-      // 3. Create metadata.json
-      // Note: We don't store audio_url in metadata because presigned URLs expire (15 min)
-      // The backend ListMirrorEvents generates fresh presigned GET URLs when listing events
+      // 6. Queue Audio Upload
+      if (hasAudio && audioUri && urls['audio.m4a']) {
+        uploadPromises.push(
+          FileSystem.uploadAsync(urls['audio.m4a'], audioUri, {
+            httpMethod: 'PUT',
+            headers: { 'Content-Type': 'audio/m4a' },
+          }).then(res => {
+            if (res.status !== 200) throw new Error(`Audio upload failed: ${res.status}`);
+            return res;
+          })
+        );
+      }
+
+      // 7. Queue Metadata Upload
       const metadata: any = {
-        description: description.trim() || (audioUploaded ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
+        description: description.trim() || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
         sender: "Granddad",
         timestamp: timestamp,
         event_id: eventID,
-        // Set content_type based on media type
-        content_type: mediaType === 'video' ? 'video' as const : (audioUploaded ? 'audio' as const : 'text' as const),
+        content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
       };
 
-      // Add AI-generated fields if they exist
       if (shortCaption && deepDive) {
         metadata.short_caption = shortCaption;
         metadata.deep_dive = deepDive;
       }
 
-      // 3. Upload metadata.json
-      const metadataResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${eventID}&filename=metadata.json`);
-      const { url: metadataUrl } = await metadataResponse.json();
-
-      // Convert metadata to blob
       const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
-      const metadataUploadResponse = await fetch(metadataUrl, {
-        method: 'PUT',
-        body: metadataBlob,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      uploadPromises.push(
+        fetch(urls['metadata.json'], {
+          method: 'PUT',
+          body: metadataBlob,
+          headers: { 'Content-Type': 'application/json' },
+        }).then(async res => {
+          if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
+          return res;
+        })
+      );
 
-      if (metadataUploadResponse.status !== 200) {
-        throw new Error(`Metadata upload failed: ${metadataUploadResponse.status}`);
+      // 8. Execute All Uploads Parallelly
+      await Promise.all(uploadPromises);
+
+      // 9. Cleanup Staging & Local
+      Alert.alert("Success!", "Reflection sent!");
+
+      if (tempThumbnail) {
+        FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
       }
 
-      // 4. Cleanup UI first (don't wait for Firestore)
-      Alert.alert("Success!", "Reflection sent!");
+      if (stagingEventId) {
+        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`).catch(() => { });
+      }
+
+      if (photo.uri && !photo.uri.startsWith('http')) {
+        FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => { });
+      }
+
+      // 10. Reset State
       setPhoto(null);
       setVideoUri(null);
       setMediaType('photo');
@@ -630,36 +632,17 @@ export default function CompanionHomeScreen() {
         await stopRecording();
       }
 
-      // 5. Write signal to Firestore in background (non-blocking)
-      // This won't block the UI even if Firestore fails
+      // 11. Write Signal to Firestore
       setDoc(doc(collection(db, 'signals'), eventID), {
         event_id: eventID,
         sender: "Granddad",
         status: "ready",
         timestamp: serverTimestamp(),
         type: "mirror_event",
-      })
-        .then(() => {
-        })
-        .catch((firestoreError: any) => {
-          // Log error but don't block the user
-          console.error("Failed to write Firestore signal:", firestoreError);
-          console.error("Firestore error code:", firestoreError?.code);
-          console.error("Firestore error message:", firestoreError?.message);
-          console.error("Full error:", JSON.stringify(firestoreError, null, 2));
-        });
+      }).catch(err => console.error("Firestore signal error:", err));
 
-      // Delete local file (only if it's a local file, not a remote URL)
-      if (photo.uri && !photo.uri.startsWith('http://') && !photo.uri.startsWith('https://')) {
-        try {
-          // Use FileSystem.deleteAsync to delete the local file
-          await FileSystem.deleteAsync(photo.uri, { idempotent: true });
-        } catch (cleanupError) {
-          console.warn("Failed to delete local file:", cleanupError);
-        }
-      }
     } catch (error: any) {
-      console.error("Full Error:", error);
+      console.error("Full Upload Error:", error);
       Alert.alert("Upload Error", error.message);
     } finally {
       setUploading(false);
@@ -752,7 +735,7 @@ export default function CompanionHomeScreen() {
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
         const { url: stagingUrl } = await stagingResponse.json();
-        await uploadPhotoToS3(uriToUpload, stagingUrl);
+        await safeUploadToS3(uriToUpload, stagingUrl);
 
         // Cleanup temp thumbnail
         if (isTempThumbnail) {

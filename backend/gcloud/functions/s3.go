@@ -130,7 +130,7 @@ type EventMetadata struct {
 // Event represents a complete event bundle
 type Event struct {
 	EventID     string         `json:"event_id"`
-	ImageURL    string         `json:"image_url"`    // Always a thumbnail for video events
+	ImageURL    string         `json:"image_url"` // Always a thumbnail for video events
 	MetadataURL string         `json:"metadata_url"`
 	AudioURL    string         `json:"audio_url,omitempty"` // Optional audio file URL
 	VideoURL    string         `json:"video_url,omitempty"` // Optional video file URL
@@ -223,13 +223,13 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			} else if filename == "metadata.json" {
 				eventMap[eventID].MetadataURL = presignedRes.URL
 				fmt.Printf("Found metadata for event %s\n", eventID)
-		} else if filename == "audio.m4a" {
-			eventMap[eventID].AudioURL = presignedRes.URL
-			fmt.Printf("Found audio for event %s\n", eventID)
-		} else if filename == "video.mp4" {
-			eventMap[eventID].VideoURL = presignedRes.URL
-			fmt.Printf("Found video for event %s\n", eventID)
-		}
+			} else if filename == "audio.m4a" {
+				eventMap[eventID].AudioURL = presignedRes.URL
+				fmt.Printf("Found audio for event %s\n", eventID)
+			} else if filename == "video.mp4" {
+				eventMap[eventID].VideoURL = presignedRes.URL
+				fmt.Printf("Found video for event %s\n", eventID)
+			}
 		} else {
 			// Log unexpected path structure for debugging
 			fmt.Printf("Unexpected path structure: %s (parts: %v)\n", key, parts)
@@ -305,7 +305,7 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		objectsToDelete = []string{
 			fmt.Sprintf("staging/%s/image.jpg", eventID),
 		}
-		} else {
+	} else {
 		// For regular reflections, delete all associated media files
 		objectsToDelete = []string{
 			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
@@ -345,4 +345,84 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 			"message": "Event deleted successfully",
 		})
 	}
+}
+
+type BatchUploadRequest struct {
+	EventID string   `json:"event_id"`
+	Path    string   `json:"path"`
+	Files   []string `json:"files"`
+}
+
+// GetBatchS3UploadURLs generates presigned PUT URLs for multiple files in a single request
+func GetBatchS3UploadURLs(w http.ResponseWriter, r *http.Request) {
+	// 1. CORS Headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", 405)
+		return
+	}
+
+	// 2. Parse Request Body
+	var req BatchUploadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), 400)
+		return
+	}
+
+	if req.EventID == "" {
+		http.Error(w, "event_id required", 400)
+		return
+	}
+
+	// 3. Load Config
+	ctx := context.TODO()
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+	if err != nil {
+		http.Error(w, "AWS Config Error: "+err.Error(), 500)
+		return
+	}
+
+	s3Client := s3.NewFromConfig(cfg)
+	presignClient := s3.NewPresignClient(s3Client)
+
+	// 4. Default path logic
+	path := req.Path
+	if path != "to" && path != "from" && path != "staging" {
+		path = "from"
+	}
+
+	// 5. Generate URLs
+	urls := make(map[string]string)
+
+	for _, filename := range req.Files {
+		var s3Key string
+		if path == "staging" {
+			s3Key = fmt.Sprintf("staging/%s/%s", req.EventID, filename)
+		} else {
+			s3Key = fmt.Sprintf("%s/%s/%s/%s", UserID, path, req.EventID, filename)
+		}
+
+		presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Key:    aws.String(s3Key),
+		})
+		if err != nil {
+			http.Error(w, "Presign Error for "+filename+": "+err.Error(), 500)
+			return
+		}
+		urls[filename] = presignedRes.URL
+	}
+
+	// 6. Return Response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"urls": urls,
+	})
 }
