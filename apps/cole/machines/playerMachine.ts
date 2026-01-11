@@ -134,11 +134,24 @@ export const playerMachine = setup({
 
         // 🎤 AUDIO LOGIC (Voice Messages)
         playingAudio: {
-            entry: 'playAudio', // Starts audio AND selfie timer logic (parallel handled in React action for simplicity or we can split it here)
-            // Note: For simplicity in the machine, we'll wait for AUDIO_FINISHED signal. 
-            // The React action will handle the parallel "play audio" and "snap selfie" coordination.
-            on: {
-                AUDIO_FINISHED: '#lookingGlassPlayer.finished'
+            entry: 'playAudio',
+            type: 'parallel',
+            states: {
+                audio: {
+                    on: {
+                        AUDIO_FINISHED: '#lookingGlassPlayer.finished'
+                    }
+                },
+                selfie: {
+                    initial: 'waiting',
+                    states: {
+                        waiting: { after: { 1500: 'snap' } }, // Wait 1.5s for reaction
+                        snap: {
+                            entry: 'triggerSelfie',
+                            type: 'final'
+                        }
+                    }
+                }
             }
         },
 
