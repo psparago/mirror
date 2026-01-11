@@ -376,17 +376,28 @@ export default function MainStageView({
               {isNowPlaying && '▶️ '}{metadata?.description || 'Reflection'}
             </Text>
 
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              {item.video_url ? (
+                <>
+                  <FontAwesome name="video-camera" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
+                  <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Video</Text>
+                </>
+              ) : item.audio_url ? (
+                <>
+                  <FontAwesome name="microphone" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
+                  <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Voice</Text>
+                </>
+              ) : (
+                <>
+                  <FontAwesome name="camera" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
+                  <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Photo</Text>
+                </>
+              )}
+              {isNowPlaying && <Text style={styles.upNextMetaNowPlaying}> • NOW PLAYING</Text>}
+            </View>
+
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
               {formatEventDate(item.event_id)}
-            </Text>
-
-            <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>
-              {item.video_url
-                ? '� Video'
-                : item.audio_url
-                  ? '� Voice'
-                  : '📸 Photo'}
-              {isNowPlaying && ' • NOW PLAYING'}
             </Text>
 
             <Text style={styles.reflectionId}>
@@ -448,11 +459,17 @@ export default function MainStageView({
           {/* Capraion & Metadata */}
           <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              {/* VU Meter */}
+              {/* VU Meter for audio playback */}
               {isAnyAudioPlaying && (
                 <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 10 }}>
                   <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
                 </Animated.View>
+              )}
+              {/* Microphone icon for voice recordings */}
+              {selectedEvent?.audio_url && (
+                <View style={{ marginRight: 10 }}>
+                  <FontAwesome name="microphone" size={18} color="rgba(255, 255, 255, 0.9)" />
+                </View>
               )}
               <Text style={styles.descriptionText}>
                 {selectedEvent?.audio_url ? 'Voice recording' : selectedMetadata?.description}

@@ -446,9 +446,14 @@ export default function SentHistoryScreen() {
                   )}
                 </View>
                 {item.description && (
-                  <Text style={styles.description} numberOfLines={2}>
-                    {item.description}
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {item.description === 'Voice message' && (
+                      <FontAwesome name="microphone" size={14} color="#e0e0e0" />
+                    )}
+                    <Text style={styles.description} numberOfLines={2}>
+                      {item.description}
+                    </Text>
+                  </View>
                 )}
                 <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
               </View>
