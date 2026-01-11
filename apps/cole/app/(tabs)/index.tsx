@@ -1,4 +1,4 @@
-import ReflectedWatchView from '@/components/ReflectedWatchView';
+import MainStageView from '@/components/MainStageView';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -469,7 +469,7 @@ export default function ColeInboxScreen() {
     if (targetEvent) {
       // Refresh URLs for the target photo
       const refreshedEvent = await refreshEventUrls(targetEvent.event_id);
-      // Update selectedEvent - ReflectedWatchView will handle the audio transition
+      // Update selectedEvent - MainStageView will handle the audio transition
       setSelectedEvent(refreshedEvent || targetEvent);
     }
   }, [selectedEvent, events, refreshEventUrls, closeFullScreen]);
@@ -788,7 +788,7 @@ export default function ColeInboxScreen() {
   }
 
   return (
-    <ReflectedWatchView
+    <MainStageView
       visible={!!selectedEvent}
       selectedEvent={selectedEvent}
       events={events}
