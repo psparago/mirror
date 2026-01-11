@@ -130,7 +130,28 @@ else
 fi
 echo ""
 
-# Function 4: unsplash-search
+# Function 4: get-batch-s3-upload-urls
+echo -e "${YELLOW}Deploying get-batch-s3-upload-urls...${NC}"
+gcloud functions deploy get-batch-s3-upload-urls \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=GetBatchS3UploadURLs \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars ${ENV_VARS} \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ get-batch-s3-upload-urls deployed successfully${NC}"
+else
+  echo -e "${RED}✗ get-batch-s3-upload-urls deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
+# Function 5: unsplash-search
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo -e "${YELLOW}Deploying unsplash-search...${NC}"
   
@@ -158,7 +179,7 @@ else
   echo ""
 fi
 
-# Function 5: generate-ai-description
+# Function 6: generate-ai-description
 if [ "$SKIP_AI" = false ]; then
   echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
   gcloud functions deploy generate-ai-description \
@@ -191,6 +212,7 @@ echo "Deployed functions:"
 echo "  • get-s3-url"
 echo "  • list-mirror-events"
 echo "  • delete-mirror-event"
+echo "  • get-batch-s3-upload-urls"
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo "  • unsplash-search"
 fi
