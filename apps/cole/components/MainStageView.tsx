@@ -76,7 +76,8 @@ export default function MainStageView({
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 
   // --- AUDIO/VIDEO REFS ---
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
+  const [sound, setSound] = useState<Audio.Sound | null>(null); // Voice messages
+  const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null); // Companion audio captions
 
   // Get metadata (memoized to prevent unnecessary re-renders)
   const selectedMetadata = useMemo(
@@ -86,6 +87,9 @@ export default function MainStageView({
 
   // Track previous event to prevent restart loops
   const prevEventIdRef = useRef<string | null>(null);
+
+  // Track active caption session to prevent ghost TTS callbacks
+  const captionSessionRef = useRef(0);
 
   // Initialize Video Player
   const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
@@ -134,20 +138,45 @@ export default function MainStageView({
     // ... actions ... (we keep the actions block same, just modify lines around it)
     actions: {
       stopAllMedia: async () => {
-        // Stop all media without logging (too verbose)
+        console.log('🛑 Stopping all media');
+        // Increment session to invalidate any pending callbacks
+        captionSessionRef.current += 1;
+        // Stop TTS immediately and forcefully
         Speech.stop();
+        // Stop voice message audio
         if (sound) {
-          await sound.stopAsync();
-          await sound.unloadAsync();
+          try {
+            await sound.stopAsync();
+            await sound.unloadAsync();
+          } catch (e) {
+            console.error('Error stopping sound:', e);
+          }
           setSound(null);
+        }
+        // Stop companion caption audio
+        if (captionSound) {
+          try {
+            await captionSound.stopAsync();
+            await captionSound.unloadAsync();
+          } catch (e) {
+            console.error('Error stopping caption:', e);
+          }
+          setCaptionSound(null);
         }
         if (player) player.pause();
         Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+
+        // Small delay to ensure everything stops
+        await new Promise(resolve => setTimeout(resolve, 100));
       },
 
       speakCaption: async () => {
         const text = selectedMetadata?.description;
         const audioUrl = selectedEvent?.audio_url; // Companion-recorded caption
+
+        // Start new caption session
+        captionSessionRef.current += 1;
+        const thisSession = captionSessionRef.current;
 
         // Hide controls while speaking
         Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
@@ -156,38 +185,80 @@ export default function MainStageView({
         if (audioUrl) {
           try {
             console.log(`🎧 Playing companion audio from: ${audioUrl.substring(0, 50)}...`);
-            const { sound: captionSound } = await Audio.Sound.createAsync(
+            const { sound: newCaptionSound } = await Audio.Sound.createAsync(
               { uri: audioUrl },
               { shouldPlay: true },
               (status) => {
                 if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
-                  console.log('✅ Companion audio finished');
-                  captionSound.unloadAsync();
-                  send({ type: 'NARRATION_FINISHED' });
+                  // Only send if this is still the active session
+                  if (captionSessionRef.current === thisSession) {
+                    console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
+                    newCaptionSound.unloadAsync();
+                    setCaptionSound(null);
+                    send({ type: 'NARRATION_FINISHED' });
+                  } else {
+                    console.log('🚫 Companion audio finished but session changed - ignoring');
+                    newCaptionSound.unloadAsync();
+                  }
                 }
               }
             );
+            setCaptionSound(newCaptionSound);
+            console.log('🎧 Companion audio started, waiting for completion...');
+            // DO NOT send NARRATION_FINISHED here - wait for callback!
           } catch (error) {
-            console.error('❌ Audio caption error:', error);
-            send({ type: 'NARRATION_FINISHED' });
+            if (captionSessionRef.current === thisSession) {
+              console.error('❌ Audio caption error - sending NARRATION_FINISHED:', error);
+              send({ type: 'NARRATION_FINISHED' });
+            }
           }
         } else if (text) {
           Speech.speak(text, {
-            onDone: () => send({ type: 'NARRATION_FINISHED' }),
-            onError: () => send({ type: 'NARRATION_FINISHED' })
+            onDone: () => {
+              // Only send if this is still the active session
+              if (captionSessionRef.current === thisSession) {
+                console.log('✅ TTS finished - sending NARRATION_FINISHED');
+                send({ type: 'NARRATION_FINISHED' });
+              } else {
+                console.log('🚫 TTS finished but session changed - ignoring');
+              }
+            },
+            onError: () => {
+              if (captionSessionRef.current === thisSession) {
+                console.error('❌ TTS error - sending NARRATION_FINISHED');
+                send({ type: 'NARRATION_FINISHED' });
+              }
+            }
           });
         } else {
-          send({ type: 'NARRATION_FINISHED' });
+          if (captionSessionRef.current === thisSession) {
+            console.log('⚠️ No caption - sending NARRATION_FINISHED immediately');
+            send({ type: 'NARRATION_FINISHED' });
+          }
         }
       },
 
-      playVideo: () => {
-        if (player) {
-          player.currentTime = 0;
-          player.play();
-        } else {
-          send({ type: 'VIDEO_FINISHED' });
+      playVideo: async () => {
+        // Wait for video to be ready (max 2 seconds)
+        const maxWaitMs = 2000;
+        const checkIntervalMs = 100;
+        let waitedMs = 0;
+
+        while (waitedMs < maxWaitMs) {
+          if (player && player.duration > 0) {
+            console.log(`▶️ Playing video: duration=${player.duration}s (waited ${waitedMs}ms)`);
+            player.currentTime = 0;
+            player.play();
+            Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
+          waitedMs += checkIntervalMs;
         }
+
+        // Video never loaded
+        console.error(`⚠️ Video not ready after ${waitedMs}ms - duration=${player?.duration || 0}s`);
+        send({ type: 'VIDEO_FINISHED' });
       },
 
       playAudio: async () => {
@@ -314,7 +385,7 @@ export default function MainStageView({
 
   // Pulse animation for Tell Me More button
   useEffect(() => {
-    if (state && state.matches('finished')) {
+    if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
       Animated.loop(
         Animated.sequence([
           Animated.timing(tellMeMorePulse, { toValue: 1.15, duration: 600, useNativeDriver: true }),
@@ -322,7 +393,7 @@ export default function MainStageView({
         ])
       ).start();
     } else {
-      tellMeMorePulse.setValue(1);
+      tellMeMorePulse.setValue(1);  // stop animation
     }
   }, [state, tellMeMorePulse]);
 
