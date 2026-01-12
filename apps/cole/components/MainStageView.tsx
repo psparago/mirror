@@ -12,6 +12,7 @@ import {
   Animated,
   FlatList,
   Image,
+  PanResponder,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -20,7 +21,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { playerMachine } from '../machines/playerMachine';
-
 interface MainStageProps {
   visible: boolean;
   selectedEvent: Event | null;
@@ -78,6 +78,13 @@ export default function MainStageView({
   // --- AUDIO/VIDEO REFS ---
   const [sound, setSound] = useState<Audio.Sound | null>(null); // Voice messages
   const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null); // Companion audio captions
+
+  // --- Live refs used by pan responder ---
+  const eventsRef = useRef(events);
+  const selectedEventRef = useRef(selectedEvent);
+
+  // Track caption sound in ref to handle race condition with stopAllMedia
+  const captionSoundRef = useRef<Audio.Sound | null>(null);
 
   // Get metadata (memoized to prevent unnecessary re-renders)
   const selectedMetadata = useMemo(
@@ -153,15 +160,17 @@ export default function MainStageView({
           }
           setSound(null);
         }
-        // Stop companion caption audio
-        if (captionSound) {
+        // Stop companion caption audio (check both state AND ref for race condition)
+        const soundToStop = captionSound || captionSoundRef.current;
+        if (soundToStop) {
           try {
-            await captionSound.stopAsync();
-            await captionSound.unloadAsync();
+            await soundToStop.stopAsync();
+            await soundToStop.unloadAsync();
           } catch (e) {
             console.error('Error stopping caption:', e);
           }
           setCaptionSound(null);
+          captionSoundRef.current = null;
         }
         if (player) player.pause();
         Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
@@ -195,14 +204,18 @@ export default function MainStageView({
                     console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
                     newCaptionSound.unloadAsync();
                     setCaptionSound(null);
+                    captionSoundRef.current = null;
                     send({ type: 'NARRATION_FINISHED' });
                   } else {
                     console.log('🚫 Companion audio finished but session changed - ignoring');
                     newCaptionSound.unloadAsync();
+                    captionSoundRef.current = null;
                   }
                 }
               }
             );
+            // Set ref immediately for stopAllMedia race condition protection
+            captionSoundRef.current = newCaptionSound;
             setCaptionSound(newCaptionSound);
             console.log('🎧 Companion audio started, waiting for completion...');
             // DO NOT send NARRATION_FINISHED here - wait for callback!
@@ -321,11 +334,19 @@ export default function MainStageView({
     }
   }, [state]);
 
+  // Sync Live refs on every render
+  useEffect(() => {
+    eventsRef.current = events;
+    selectedEventRef.current = selectedEvent;
+  }, [events, selectedEvent]);
+
   // --- SYNC REACT EVENTS TO MACHINE ---
 
   // 1. New Event Selected (ONLY when event_id actually changes)
   useEffect(() => {
     const currentEventId = selectedEvent?.event_id || null;
+
+    if (!selectedMetadata) return;
 
     // Only send SELECT_EVENT if the event ID actually changed
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
@@ -483,8 +504,41 @@ export default function MainStageView({
 
   if (!selectedEvent) return <View style={styles.modalContainer} />;
 
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dx) > 20;
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const currentEvents = eventsRef.current;
+        const currentSelected = selectedEventRef.current;
+
+        const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
+        if (currentIndex === -1) return;
+
+        if (gestureState.dx < -50) {
+          console.log('👈 Swiped Left (Next)');
+          if (currentIndex < currentEvents.length - 1) {
+            onEventSelect(currentEvents[currentIndex + 1]);
+          }
+        }
+
+        else if (gestureState.dx > 50) {
+          console.log('👉 Swiped Right (Previous)');
+          if (currentIndex > 0) {
+            onEventSelect(currentEvents[currentIndex - 1]);
+          }
+        }
+      },
+    })
+  ).current;
+
   return (
-    <LinearGradient colors={['#0f2027', '#203a43', '#2c5364']} style={styles.modalContainer}>
+    <LinearGradient
+      colors={['#0f2027', '#203a43', '#2c5364']}
+      style={styles.modalContainer}
+      {...panResponder.panHandlers}
+    >
       <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
         {/* LEFT PANE */}
