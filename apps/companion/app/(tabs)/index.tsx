@@ -12,17 +12,17 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
   let uriToUpload = localUri;
   let tempUri: string | null = null;
 
-  // If remote URL (e.g. Unsplash), download to cache first
+  // If remote URL (e.g. Unsplash or AI TTS), download to cache first
   if (localUri.startsWith('http')) {
-    // Basic filename sanitization
-    const filename = `temp_upload_${Date.now()}.jpg`;
+    const extension = localUri.split('?')[0].split('.').pop()?.toLowerCase() || 'jpg';
+    const filename = `temp_upload_${Date.now()}.${extension}`;
     const downloadRes = await FileSystem.downloadAsync(
       localUri,
       `${FileSystem.cacheDirectory}${filename}`
@@ -32,9 +32,13 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
   }
 
   try {
+    // Determine content type based on extension
+    const extension = uriToUpload.split('.').pop()?.toLowerCase();
+    const contentType = extension === 'm4a' || extension === 'mp3' ? 'audio/mpeg' : 'image/jpeg';
+
     const uploadResult = await FileSystem.uploadAsync(presignedUrl, uriToUpload, {
       httpMethod: 'PUT',
-      headers: { 'Content-Type': 'image/jpeg' },
+      headers: { 'Content-Type': contentType },
     });
 
     if (uploadResult.status !== 200) {
@@ -70,6 +74,8 @@ export default function CompanionHomeScreen() {
   const [shortCaption, setShortCaption] = useState<string>('');
   const [deepDive, setDeepDive] = useState<string>('');
   const [stagingEventId, setStagingEventId] = useState<string | null>(null);
+  const [aiAudioUrl, setAiAudioUrl] = useState<string | null>(null);
+  const [aiDeepDiveAudioUrl, setAiDeepDiveAudioUrl] = useState<string | null>(null);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
@@ -102,6 +108,14 @@ export default function CompanionHomeScreen() {
     ]).start(() => setToastMessage(''));
   };
 
+
+  // Global AppState listener for Companion
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      console.log(`📱 [Companion App] AppState changed to: ${nextAppState}`);
+    });
+    return () => subscription.remove();
+  }, []);
 
   // Request audio permissions on mount
   useEffect(() => {
@@ -206,6 +220,8 @@ export default function CompanionHomeScreen() {
       if (aiResponse && aiResponse.short_caption && aiResponse.deep_dive) {
         setShortCaption(aiResponse.short_caption);
         setDeepDive(aiResponse.deep_dive);
+        setAiAudioUrl(aiResponse.audio_url || null);
+        setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
         // Show short_caption in the text input for user to see/edit
         setDescription(aiResponse.short_caption);
         setIsAiGenerated(true);
@@ -538,6 +554,16 @@ export default function CompanionHomeScreen() {
           filesToSign.push('audio.m4a');
           hasAudio = true;
         }
+      } else if (aiAudioUrl) {
+        filesToSign.push('audio.m4a'); // Store AI TTS as audio.m4a for consistency
+        hasAudio = true;
+      }
+
+      // Check for AI Deep Dive audio
+      let hasDeepDiveAudio = false;
+      if (aiDeepDiveAudioUrl) {
+        filesToSign.push('deep_dive.m4a');
+        hasDeepDiveAudio = true;
       }
 
       // 2. Get permissions (Batch Request)
@@ -599,16 +625,16 @@ export default function CompanionHomeScreen() {
       }
 
       // 6. Queue Audio Upload
-      if (hasAudio && audioUri && urls['audio.m4a']) {
-        uploadPromises.push(
-          FileSystem.uploadAsync(urls['audio.m4a'], audioUri, {
-            httpMethod: 'PUT',
-            headers: { 'Content-Type': 'audio/m4a' },
-          }).then(res => {
-            if (res.status !== 200) throw new Error(`Audio upload failed: ${res.status}`);
-            return res;
-          })
-        );
+      if (hasAudio && urls['audio.m4a']) {
+        const audioSource = audioUri || aiAudioUrl;
+        if (audioSource) {
+          uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']));
+        }
+      }
+
+      // 6.5 Queue Deep Dive Audio Upload
+      if (hasDeepDiveAudio && aiDeepDiveAudioUrl && urls['deep_dive.m4a']) {
+        uploadPromises.push(safeUploadToS3(aiDeepDiveAudioUrl, urls['deep_dive.m4a']));
       }
 
       // 7. Queue Metadata Upload

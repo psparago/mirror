@@ -62,10 +62,19 @@ export default function ColeInboxScreen() {
         if (selectedEventRef.current) {
           const eventId = selectedEventRef.current.event_id;
           console.log(`🔄 Auto-refreshing URLs for currently selected event: ${eventId}`);
+
+          // Wait 1 second for app to stabilize before re-triggering playback
+          await new Promise(resolve => setTimeout(resolve, 1000));
+
           refreshEventUrlsRef.current(eventId).then(refreshed => {
             if (refreshed) {
               console.log(`✅ Successfully refreshed URLs for ${eventId}`);
-              setSelectedEvent(refreshed);
+              // Use a slight hack to force a re-trigger if it's the same object/content
+              // by setting to null then back, but better to just set it and ensure MainStage handles it.
+              setSelectedEvent(null);
+              setTimeout(() => {
+                setSelectedEvent(refreshed);
+              }, 50);
             }
           }).catch(err => {
             console.warn(`❌ Failed to auto-refresh current event ${eventId}:`, err);

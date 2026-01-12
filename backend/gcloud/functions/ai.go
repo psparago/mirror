@@ -9,7 +9,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
 )
@@ -131,18 +135,18 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 	jsonText = strings.TrimSpace(jsonText)
 
 	// Parse JSON
-	var result struct {
-		ShortCaption string `json:"short_caption"`
-		DeepDive     string `json:"deep_dive"`
+	type AIResult struct {
+		ShortCaption     string `json:"short_caption"`
+		DeepDive         string `json:"deep_dive"`
+		AudioURL         string `json:"audio_url,omitempty"`
+		DeepDiveAudioURL string `json:"deep_dive_audio_url,omitempty"`
 	}
+	var result AIResult
 
 	// Try unmarshalling as a single object first
 	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
 		// If that fails, try unmarshalling as an array of objects
-		var arrayResult []struct {
-			ShortCaption string `json:"short_caption"`
-			DeepDive     string `json:"deep_dive"`
-		}
+		var arrayResult []AIResult
 		if errArray := json.Unmarshal([]byte(jsonText), &arrayResult); errArray == nil && len(arrayResult) > 0 {
 			// Successfully parsed as array, use the first item
 			result = arrayResult[0]
@@ -155,11 +159,59 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 		}
 	}
 
-	// Validate required fields
-	if result.ShortCaption == "" || result.DeepDive == "" {
-		log.Printf("Error: Missing required fields in JSON response")
-		http.Error(w, "Invalid JSON response: missing required fields", 500)
-		return
+	// 6. Generate Speech using OpenAI (TTS)
+	// We do this for the short caption as it's the primary narration
+	speechData, err := GenerateSpeech(result.ShortCaption)
+	if err != nil || len(speechData) == 0 {
+		log.Printf("Warning: Failed to generate speech (err=%v, len=%d)", err, len(speechData))
+		// Don't fail the whole request if TTS fails, just continue without audio
+	} else {
+		// 7. Upload Audio to S3
+		audioKey := fmt.Sprintf("staging/tts/%d.mp3", time.Now().UnixNano())
+		err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
+		if err != nil {
+			log.Printf("Warning: Failed to upload audio to S3: %v", err)
+		} else {
+			// For the preview in Companion app, we can generate a fresh presigned URL here.
+			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+			s3Client := s3.NewFromConfig(cfg)
+			presignClient := s3.NewPresignClient(s3Client)
+
+			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String("mirror-uploads-sparago-2026"),
+				Key:    aws.String(audioKey),
+			})
+			if err == nil {
+				result.AudioURL = presignedRes.URL
+				log.Printf("Generated TTS and stored at: %s", audioKey)
+			}
+		}
+	}
+
+	// 8. Generate Speech for Deep Dive
+	deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
+	if err != nil || len(deepDiveSpeechData) == 0 {
+		log.Printf("Warning: Failed to generate deep dive speech (err=%v, len=%d)", err, len(deepDiveSpeechData))
+	} else {
+		// 9. Upload Deep Dive Audio to S3
+		deepDiveAudioKey := fmt.Sprintf("staging/tts/deepdive_%d.mp3", time.Now().UnixNano())
+		err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
+		if err != nil {
+			log.Printf("Warning: Failed to upload deep dive audio to S3: %v", err)
+		} else {
+			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+			s3Client := s3.NewFromConfig(cfg)
+			presignClient := s3.NewPresignClient(s3Client)
+
+			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String("mirror-uploads-sparago-2026"),
+				Key:    aws.String(deepDiveAudioKey),
+			})
+			if err == nil {
+				result.DeepDiveAudioURL = presignedRes.URL
+				log.Printf("Generated Deep Dive TTS and stored at: %s", deepDiveAudioKey)
+			}
+		}
 	}
 
 	// Return JSON response

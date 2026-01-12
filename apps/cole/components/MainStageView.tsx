@@ -9,6 +9,7 @@ import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   FlatList,
   Image,
@@ -272,27 +273,36 @@ export default function MainStageView({
       },
 
       playVideo: async () => {
-        // Wait for video to be ready (max 5 seconds)
-        const maxWaitMs = 5000;
-        const checkIntervalMs = 100;
+        // Wait for video to be ready (max 10 seconds)
+        const maxWaitMs = 10000;
+        const checkIntervalMs = 200;
         let waitedMs = 0;
 
         console.log(`🎬 playVideo called: source=${videoSource?.substring(0, 50)}...`);
 
         while (waitedMs < maxWaitMs) {
-          if (player && player.duration > 0) {
+          if (player && player.duration > 0 && player.status === 'readyToPlay') {
             console.log(`▶️ Playing video: duration=${player.duration}s (waited ${waitedMs}ms)`);
+
+            // On iPad, sometimes a tiny delay helps the native layer attach before play()
+            await new Promise(resolve => setTimeout(resolve, 300));
+
             player.currentTime = 0;
             player.play();
             Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
             return;
           }
+
+          if (waitedMs % 1000 === 0) {
+            console.log(`⏳ Still waiting for video... status=${player?.status}, waited=${waitedMs}ms`);
+          }
+
           await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
           waitedMs += checkIntervalMs;
         }
 
         // Video never loaded
-        console.error(`⚠️ Video not ready after ${waitedMs}ms - duration=${player?.duration || 0}s`);
+        console.error(`⚠️ Video not ready after ${waitedMs}ms - status=${player?.status}, duration=${player?.duration || 0}s`);
         send({ type: 'VIDEO_FINISHED' });
       },
 
@@ -323,12 +333,31 @@ export default function MainStageView({
         }
       },
 
-      playDeepDive: () => {
-        if (selectedMetadata?.deep_dive) {
-          Speech.speak(selectedMetadata.deep_dive, {
-            onDone: () => send({ type: 'NARRATION_FINISHED' })
-          });
-        } else {
+      playDeepDive: async () => {
+        try {
+          if (sound) await sound.unloadAsync();
+
+          if (selectedEvent?.deep_dive_audio_url) {
+            const { sound: newSound } = await Audio.Sound.createAsync(
+              { uri: selectedEvent.deep_dive_audio_url },
+              { shouldPlay: true }
+            );
+            newSound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                send({ type: 'NARRATION_FINISHED' });
+              }
+            });
+            setSound(newSound);
+          } else if (selectedMetadata?.deep_dive) {
+            Speech.speak(selectedMetadata.deep_dive, {
+              onDone: () => send({ type: 'NARRATION_FINISHED' }),
+              onError: () => send({ type: 'NARRATION_FINISHED' })
+            });
+          } else {
+            send({ type: 'NARRATION_FINISHED' });
+          }
+        } catch (err) {
+          console.error("Deep dive audio error", err);
           send({ type: 'NARRATION_FINISHED' });
         }
       },
@@ -612,6 +641,14 @@ export default function MainStageView({
                 </BlurView>
               </TouchableOpacity>
             </Animated.View>
+
+            {/* Loading Indicator for slow iPad loads */}
+            {state && state.matches({ playingVideo: 'playing' }) && (!player || player.status !== 'readyToPlay') && (
+              <View style={styles.videoLoadingOverlay}>
+                <ActivityIndicator size="large" color="#fff" />
+                <Text style={styles.videoLoadingText}>Preparing video...</Text>
+              </View>
+            )}
           </TouchableOpacity>
 
           {/* Capraion & Metadata */}
@@ -749,5 +786,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  videoLoadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 50,
+  },
+  videoLoadingText: {
+    color: '#fff',
+    marginTop: 10,
+    fontSize: 18,
+    fontWeight: '600',
   },
 });

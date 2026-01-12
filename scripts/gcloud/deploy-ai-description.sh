@@ -26,10 +26,15 @@ fi
 
 source "$ENV_FILE"
 
-# Check for GEMINI_API_KEY
+# Check for required API keys
 if [ -z "$GEMINI_API_KEY" ]; then
   echo -e "${RED}Error: GEMINI_API_KEY not found in .env.deploy${NC}"
   exit 1
+fi
+
+if [ -z "$OPENAI_API_KEY" ]; then
+  echo -e "${YELLOW}Warning: OPENAI_API_KEY not found in .env.deploy${NC}"
+  echo "TTS functionality will be disabled."
 fi
 
 echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
@@ -42,7 +47,7 @@ gcloud functions deploy generate-ai-description \
   --entry-point=GenerateAIDescription \
   --trigger-http \
   --allow-unauthenticated \
-  --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY} \
+  --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY} \
   --quiet
 
 if [ $? -eq 0 ]; then

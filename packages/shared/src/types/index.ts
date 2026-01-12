@@ -25,6 +25,7 @@ export interface EventMetadata {
   // AI-generated dual-story fields
   short_caption?: string; // Brief greeting - auto-played on load
   deep_dive?: string; // Detailed story - played when ✨ is tapped
+  deep_dive_audio_url?: string; // Optional TTS for deep dive
 }
 
 export interface Event {
@@ -33,6 +34,7 @@ export interface Event {
   metadata_url: string;
   audio_url?: string; // Optional presigned GET URL for audio.m4a
   video_url?: string; // Optional presigned GET URL for video.mp4
+  deep_dive_audio_url?: string; // Optional presigned GET URL for deep_dive.m4a
   metadata?: EventMetadata;
 }
 

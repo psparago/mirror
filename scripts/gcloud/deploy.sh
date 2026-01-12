@@ -52,7 +52,7 @@ source "$ENV_FILE"
 # Common deployment parameters
 REGION="us-central1"
 RUNTIME="go125"
-ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
+ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION},OPENAI_API_KEY=${OPENAI_API_KEY}"
 
 # Deploy based on function name
 case "$FUNCTION_NAME" in
@@ -130,7 +130,7 @@ case "$FUNCTION_NAME" in
       --entry-point=GenerateAIDescription \
       --trigger-http \
       --allow-unauthenticated \
-      --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY} \
+      --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY} \
       --quiet
     ;;
   
