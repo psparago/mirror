@@ -12,7 +12,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
@@ -74,6 +74,10 @@ export default function CompanionHomeScreen() {
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
 
+  // Toast state
+  const [toastMessage, setToastMessage] = useState<string>('');
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+
   // Video support state
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
@@ -87,6 +91,17 @@ export default function CompanionHomeScreen() {
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
+
+  // Show toast notification
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2000),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
+    ]).start(() => setToastMessage(''));
+  };
+
 
   // Request audio permissions on mount
   useEffect(() => {
@@ -603,7 +618,7 @@ export default function CompanionHomeScreen() {
       await Promise.all(uploadPromises);
 
       // 9. Cleanup Staging & Local
-      Alert.alert("Success!", "Reflection sent!");
+      showToast('✅ Reflection sent!');
 
       if (tempThumbnail) {
         FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
@@ -1234,6 +1249,13 @@ export default function CompanionHomeScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Toast Notification */}
+      {toastMessage ? (
+        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+          <Text style={styles.toastText}>{toastMessage}</Text>
+        </Animated.View>
+      ) : null}
     </LinearGradient>
   );
 }
@@ -2003,5 +2025,25 @@ const styles = StyleSheet.create({
     left: '50%',
     transform: [{ translateX: -30 }, { translateY: -30 }],
     zIndex: 1,
+  },
+  toast: {
+    position: 'absolute',
+    bottom: 100,
+    left: '50%',
+    transform: [{ translateX: -150 }],
+    width: 300,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });

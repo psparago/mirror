@@ -301,7 +301,33 @@ export default function ColeInboxScreen() {
   // Flush pending updates to the main list
   const onFlushUpdates = () => {
     if (pendingUpdates.length > 0) {
-      setEvents(prev => [...pendingUpdates, ...prev]);
+      setEvents((prevEvents) => {
+        // 1. Combine Old + New
+        // (We put pendingUpdates LAST so they overwrite old versions in the Map)
+        const combined = [...prevEvents, ...pendingUpdates];
+
+        // 2. Deduplicate by ID
+        const uniqueEvents = Array.from(
+          new Map(combined.map((item) => [item.event_id, item])).values()
+        );
+
+        // 3. Sort Descending (Newest on top)
+        const sorted = uniqueEvents.sort((a, b) => b.event_id.localeCompare(a.event_id));
+
+        // 4. Autoplay the newest event (first in sorted list)
+        if (sorted.length > 0) {
+          const newestEvent = sorted[0];
+          console.log(`🎬 Autoplaying newest reflection after flush: ${newestEvent.event_id}`);
+          // Use setTimeout to ensure state update completes first
+          setTimeout(() => {
+            setSelectedEvent(newestEvent);
+          }, 100);
+        }
+
+        return sorted;
+      });
+
+      // Clear the queue
       setPendingUpdates([]);
     }
   };

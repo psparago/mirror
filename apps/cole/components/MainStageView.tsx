@@ -86,6 +86,10 @@ export default function MainStageView({
   // Track caption sound in ref to handle race condition with stopAllMedia
   const captionSoundRef = useRef<Audio.Sound | null>(null);
 
+  // Toast state
+  const [toastMessage, setToastMessage] = useState<string>('');
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+
   // Get metadata (memoized to prevent unnecessary re-renders)
   const selectedMetadata = useMemo(
     () => selectedEvent ? eventMetadata[selectedEvent.event_id] : null,
@@ -97,6 +101,16 @@ export default function MainStageView({
 
   // Track active caption session to prevent ghost TTS callbacks
   const captionSessionRef = useRef(0);
+
+  // Show toast notification
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2000),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
+    ]).start(() => setToastMessage(''));
+  };
 
   // Initialize Video Player
   const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
@@ -496,6 +510,17 @@ export default function MainStageView({
               Reflection ID: {item.event_id}
             </Text>
           </View>
+
+          {/* Delete Button */}
+          <TouchableOpacity
+            style={styles.deleteButton}
+            onPress={() => {
+              onDelete(item);
+              showToast('🗑️ Reflection deleted');
+            }}
+          >
+            <FontAwesome name="ellipsis-v" size={20} color="rgba(255, 255, 255, 0.6)" />
+          </TouchableOpacity>
         </TouchableOpacity>
       </View>
     );
@@ -648,6 +673,13 @@ export default function MainStageView({
         ) : null}
         <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white', opacity: flashOpacity }]} />
       </Animated.View>
+
+      {/* Toast Notification */}
+      {toastMessage ? (
+        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+          <Text style={styles.toastText}>{toastMessage}</Text>
+        </Animated.View>
+      ) : null}
     </LinearGradient>
   );
 }
@@ -689,4 +721,25 @@ const styles = StyleSheet.create({
   upNextMetaNowPlaying: { color: '#4FC3F7', fontWeight: 'bold' },
   reflectionId: { fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'Courier' },
   upNextInfo: { flex: 1, justifyContent: 'center' },
+  deleteButton: { padding: 10, justifyContent: 'center', alignItems: 'center' },
+  toast: {
+    position: 'absolute',
+    bottom: 100,
+    left: '50%',
+    transform: [{ translateX: -150 }],
+    width: 300,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
 });
