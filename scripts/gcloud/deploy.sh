@@ -130,7 +130,7 @@ case "$FUNCTION_NAME" in
       --entry-point=GenerateAIDescription \
       --trigger-http \
       --allow-unauthenticated \
-      --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY} \
+      --set-env-vars ${ENV_VARS},GEMINI_API_KEY=${GEMINI_API_KEY} \
       --quiet
     ;;
   

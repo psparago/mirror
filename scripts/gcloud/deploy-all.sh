@@ -196,7 +196,7 @@ if [ "$SKIP_AI" = false ]; then
     --entry-point=GenerateAIDescription \
     --trigger-http \
     --allow-unauthenticated \
-    --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY} \
+    --set-env-vars ${ENV_VARS},GEMINI_API_KEY=${GEMINI_API_KEY} \
     --quiet
 
   if [ $? -eq 0 ]; then

@@ -160,17 +160,20 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 	}
 
 	// 6. Generate Speech using OpenAI (TTS)
-	// We do this for the short caption as it's the primary narration
+	log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
 	speechData, err := GenerateSpeech(result.ShortCaption)
-	if err != nil || len(speechData) == 0 {
-		log.Printf("Warning: Failed to generate speech (err=%v, len=%d)", err, len(speechData))
-		// Don't fail the whole request if TTS fails, just continue without audio
+	if err != nil {
+		log.Printf("TTS ERROR: Failed to generate speech: %v", err)
+	} else if len(speechData) == 0 {
+		log.Printf("TTS ERROR: Received empty audio data from OpenAI")
 	} else {
+		log.Printf("TTS SUCCESS: Generated %d bytes of audio", len(speechData))
 		// 7. Upload Audio to S3
 		audioKey := fmt.Sprintf("staging/tts/%d.mp3", time.Now().UnixNano())
+		log.Printf("S3: Uploading audio to key: %s", audioKey)
 		err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
 		if err != nil {
-			log.Printf("Warning: Failed to upload audio to S3: %v", err)
+			log.Printf("S3 ERROR: Failed to upload audio to S3: %v", err)
 		} else {
 			// For the preview in Companion app, we can generate a fresh presigned URL here.
 			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
@@ -189,15 +192,20 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 	}
 
 	// 8. Generate Speech for Deep Dive
+	log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
 	deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
-	if err != nil || len(deepDiveSpeechData) == 0 {
-		log.Printf("Warning: Failed to generate deep dive speech (err=%v, len=%d)", err, len(deepDiveSpeechData))
+	if err != nil {
+		log.Printf("TTS ERROR: Failed to generate deep dive speech: %v", err)
+	} else if len(deepDiveSpeechData) == 0 {
+		log.Printf("TTS ERROR: Received empty deep dive audio data")
 	} else {
+		log.Printf("TTS SUCCESS: Generated %d bytes for deep dive", len(deepDiveSpeechData))
 		// 9. Upload Deep Dive Audio to S3
 		deepDiveAudioKey := fmt.Sprintf("staging/tts/deepdive_%d.mp3", time.Now().UnixNano())
+		log.Printf("S3: Uploading deep dive audio to: %s", deepDiveAudioKey)
 		err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
 		if err != nil {
-			log.Printf("Warning: Failed to upload deep dive audio to S3: %v", err)
+			log.Printf("S3 ERROR: Failed to upload deep dive audio: %v", err)
 		} else {
 			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
 			s3Client := s3.NewFromConfig(cfg)
