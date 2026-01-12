@@ -125,6 +125,12 @@ export default function MainStageView({
 
   // Helper for reused selfie logic
   const performSelfieCapture = useCallback(async (delay = 0) => {
+    // Check permission first before starting ANY UI transitions (mirror, flash, etc)
+    if (!cameraPermission?.granted) {
+      console.log('📸 Helper: Skipping selfie - camera permission not granted');
+      return;
+    }
+
     console.log(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
     // Fade in mirror
     Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();

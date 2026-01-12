@@ -7,7 +7,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
-import { collection, doc, DocumentData, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -39,11 +39,23 @@ export default function ColeInboxScreen() {
 
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+    const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
-        console.log('🔄 App came to foreground - refreshing events for fresh URLs');
+        console.log('🔄 App came to foreground - refreshing events and resuming network');
+        try {
+          await enableNetwork(db);
+        } catch (e) {
+          console.warn('Error resuming Firestore network:', e);
+        }
         // Use ref to get current version of fetchEvents
         fetchEventsRef.current();
+      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
+        try {
+          await disableNetwork(db);
+          console.log('⏸️ Firestore network paused');
+        } catch (e) {
+          console.warn('Error pausing Firestore network:', e);
+        }
       }
     });
 

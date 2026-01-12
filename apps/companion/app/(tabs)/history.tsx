@@ -3,7 +3,7 @@ import { API_ENDPOINTS } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
-import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
+import { collection, disableNetwork, enableNetwork, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -25,6 +25,7 @@ export default function SentHistoryScreen() {
   const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
   const [responseEventIdMap, setResponseEventIdMap] = useState<Map<string, string>>(new Map()); // event_id -> response_event_id
   const [selectedSelfieEventId, setSelectedSelfieEventId] = useState<string | null>(null);
+  const [responseTimestampMap, setResponseTimestampMap] = useState<Map<string, any>>(new Map()); // event_id -> timestamp
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
@@ -49,6 +50,7 @@ export default function SentHistoryScreen() {
     const unsubscribeResponses = onSnapshot(responsesRef, (snapshot) => {
       const eventIds = new Set<string>();
       const eventIdMap = new Map<string, string>();
+      const timestampMap = new Map<string, any>();
       snapshot.docs.forEach((doc) => {
         const data = doc.data();
         // Document ID is the original event_id, data.response_event_id is the selfie's event_id
@@ -60,10 +62,14 @@ export default function SentHistoryScreen() {
           if (responseEventId) {
             eventIdMap.set(originalEventId, responseEventId);
           }
+          if (data.timestamp) {
+            timestampMap.set(originalEventId, data.timestamp);
+          }
         }
       });
       setResponseEventIds(eventIds);
       setResponseEventIdMap(eventIdMap);
+      setResponseTimestampMap(timestampMap);
     }, (error) => {
       console.error('Error listening to reflection_responses:', error);
     });
@@ -248,7 +254,21 @@ export default function SentHistoryScreen() {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
         // App came to foreground - trigger refresh to get fresh URLs
+        try {
+          await enableNetwork(db);
+          console.log('✅ Firestore network resumed');
+        } catch (e) {
+          console.warn('Error resuming Firestore network:', e);
+        }
         setRefreshTrigger(prev => prev + 1);
+      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
+        // Pausing network prevents "Transport Errored" warnings during suspension
+        try {
+          await disableNetwork(db);
+          console.log('⏸️ Firestore network paused');
+        } catch (e) {
+          console.warn('Error pausing Firestore network:', e);
+        }
       }
     });
 
@@ -407,13 +427,20 @@ export default function SentHistoryScreen() {
 
             {/* Save Button */}
             {selfieImageUrl && !loadingSelfie && (
-              <TouchableOpacity
-                style={styles.saveSelfieButton}
-                onPress={saveSelfieToPhotos}
-              >
-                <FontAwesome name="download" size={18} color="#fff" style={{ marginRight: 8 }} />
-                <Text style={styles.saveSelfieButtonText}>Save to Photos</Text>
-              </TouchableOpacity>
+              <View style={{ width: '100%', alignItems: 'center' }}>
+                {selectedSelfieEventId && responseTimestampMap.has(selectedSelfieEventId) && (
+                  <Text style={styles.selfieTimestamp}>
+                    Captured {formatEngagementDate(responseTimestampMap.get(selectedSelfieEventId))}
+                  </Text>
+                )}
+                <TouchableOpacity
+                  style={styles.saveSelfieButton}
+                  onPress={saveSelfieToPhotos}
+                >
+                  <FontAwesome name="download" size={18} color="#fff" style={{ marginRight: 8 }} />
+                  <Text style={styles.saveSelfieButtonText}>Save to Photos</Text>
+                </TouchableOpacity>
+              </View>
             )}
 
             {/* Toast Notification (Inside Modal) */}
@@ -739,6 +766,12 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  selfieTimestamp: {
+    color: '#888',
+    fontSize: 14,
+    marginBottom: 10,
+    fontStyle: 'italic',
   },
 });
 
