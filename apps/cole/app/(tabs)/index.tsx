@@ -40,19 +40,41 @@ export default function ColeInboxScreen() {
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
+      console.log(`📱 AppState changed to: ${nextAppState}`);
+
       if (nextAppState === 'active') {
-        console.log('🔄 App came to foreground - refreshing events and resuming network');
+        console.log('🔄 App came to foreground - resuming network and refreshing data');
         try {
+          // 1. Resume Firestore
           await enableNetwork(db);
+          console.log('✅ Firestore network resumed');
         } catch (e) {
           console.warn('Error resuming Firestore network:', e);
         }
-        // Use ref to get current version of fetchEvents
-        fetchEventsRef.current();
+
+        // 2. Refresh the overall list
+        if (fetchEventsRef.current) {
+          fetchEventsRef.current();
+        }
+
+        // 3. CRITICAL: Refresh the currently selected event's URLs
+        // (URLs likely expired if app was backgrounded for ~1 hour)
+        if (selectedEventRef.current) {
+          const eventId = selectedEventRef.current.event_id;
+          console.log(`🔄 Auto-refreshing URLs for currently selected event: ${eventId}`);
+          refreshEventUrlsRef.current(eventId).then(refreshed => {
+            if (refreshed) {
+              console.log(`✅ Successfully refreshed URLs for ${eventId}`);
+              setSelectedEvent(refreshed);
+            }
+          }).catch(err => {
+            console.warn(`❌ Failed to auto-refresh current event ${eventId}:`, err);
+          });
+        }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
         try {
           await disableNetwork(db);
-          console.log('⏸️ Firestore network paused');
+          console.log(`⏸️ Firestore network paused (${nextAppState})`);
         } catch (e) {
           console.warn('Error pausing Firestore network:', e);
         }
@@ -384,6 +406,12 @@ export default function ColeInboxScreen() {
       return null;
     }
   };
+
+  // Keep ref to latest refreshEventUrls
+  const refreshEventUrlsRef = useRef(refreshEventUrls);
+  useEffect(() => {
+    refreshEventUrlsRef.current = refreshEventUrls;
+  }, [refreshEventUrls]);
 
   const markEventAsRead = async (eventId: string) => {
     if (readEventIds.includes(eventId)) return;

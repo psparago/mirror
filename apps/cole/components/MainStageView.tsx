@@ -272,10 +272,12 @@ export default function MainStageView({
       },
 
       playVideo: async () => {
-        // Wait for video to be ready (max 2 seconds)
-        const maxWaitMs = 2000;
+        // Wait for video to be ready (max 5 seconds)
+        const maxWaitMs = 5000;
         const checkIntervalMs = 100;
         let waitedMs = 0;
+
+        console.log(`🎬 playVideo called: source=${videoSource?.substring(0, 50)}...`);
 
         while (waitedMs < maxWaitMs) {
           if (player && player.duration > 0) {

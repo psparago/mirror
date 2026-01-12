@@ -3,9 +3,9 @@ import { API_ENDPOINTS } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
-import { collection, disableNetwork, enableNetwork, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
   event_id: string;
@@ -249,33 +249,23 @@ export default function SentHistoryScreen() {
     return () => unsubscribe();
   }, [responseEventIds]); // Removed refreshTrigger from dependency list to prevent unnecessary resubscriptions
 
-  // Auto-refresh when app comes back to foreground (handles expired URLs)
+  // Refresh local data when app comes to foreground
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
-        // App came to foreground - trigger refresh to get fresh URLs
-        try {
-          await enableNetwork(db);
-          console.log('✅ Firestore network resumed');
-        } catch (e) {
-          console.warn('Error resuming Firestore network:', e);
-        }
         setRefreshTrigger(prev => prev + 1);
-      } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        // Pausing network prevents "Transport Errored" warnings during suspension
-        try {
-          await disableNetwork(db);
-          console.log('⏸️ Firestore network paused');
-        } catch (e) {
-          console.warn('Error pausing Firestore network:', e);
-        }
       }
     });
 
-    return () => {
-      subscription.remove();
-    };
+    return () => subscription.remove();
   }, []);
+
+  // Refresh local data when refreshTrigger changes
+  useEffect(() => {
+    if (refreshTrigger > 0) {
+      console.log('🔄 [History] Refreshing data on foreground');
+    }
+  }, [refreshTrigger]);
 
   const getStatusText = (status?: string) => {
     switch (status) {
