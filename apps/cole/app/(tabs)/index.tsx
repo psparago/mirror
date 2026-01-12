@@ -41,8 +41,9 @@ export default function ColeInboxScreen() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
-        // App came to foreground - refresh events to get fresh URLs
-        fetchEvents();
+        console.log('🔄 App came to foreground - refreshing events for fresh URLs');
+        // Use ref to get current version of fetchEvents
+        fetchEventsRef.current();
       }
     });
 
@@ -300,7 +301,7 @@ export default function ColeInboxScreen() {
   // Flush pending updates to the main list
   const onFlushUpdates = () => {
     if (pendingUpdates.length > 0) {
-      setEvents(pendingUpdates);
+      setEvents(prev => [...pendingUpdates, ...prev]);
       setPendingUpdates([]);
     }
   };
