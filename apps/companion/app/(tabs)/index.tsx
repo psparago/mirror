@@ -106,9 +106,32 @@ export default function CompanionHomeScreen() {
   // Request audio permissions on mount
   useEffect(() => {
     (async () => {
+      // Request microphone for audio recording
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        console.warn('Audio recording permission not granted');
+        console.warn('🎤 Microphone permission denied');
+      } else {
+        console.log('✅ Microphone permission granted');
+      }
+
+      // Request camera permission
+      if (!permission) {
+        console.log('📸 Requesting camera permission...');
+        const cameraResult = await requestPermission();
+        if (cameraResult.granted) {
+          console.log('✅ Camera permission granted');
+        } else {
+          console.warn('❌ Camera permission denied');
+        }
+      }
+
+      // Request photo library permission
+      console.log('📷 Requesting photo library permission...');
+      const libraryResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (libraryResult.granted) {
+        console.log('✅ Photo library permission granted');
+      } else {
+        console.warn('❌ Photo library permission denied');
       }
     })();
   }, []);

@@ -1,9 +1,11 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
+import * as FileSystem from 'expo-file-system';
+import * as MediaLibrary from 'expo-media-library';
 import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, AppState, AppStateStatus, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
   event_id: string;
@@ -26,6 +28,20 @@ export default function SentHistoryScreen() {
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
+
+  // Toast state
+  const [toastMessage, setToastMessage] = useState('');
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+
+  // Show toast notification
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2000),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
+    ]).start(() => setToastMessage(''));
+  };
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
@@ -225,11 +241,11 @@ export default function SentHistoryScreen() {
     );
 
     return () => unsubscribe();
-  }, [responseEventIds, refreshTrigger]);
+  }, [responseEventIds]); // Removed refreshTrigger from dependency list to prevent unnecessary resubscriptions
 
   // Auto-refresh when app comes back to foreground (handles expired URLs)
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+    const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
       if (nextAppState === 'active') {
         // App came to foreground - trigger refresh to get fresh URLs
         setRefreshTrigger(prev => prev + 1);
@@ -310,6 +326,35 @@ export default function SentHistoryScreen() {
     );
   }
 
+  // Save selfie to camera roll
+  const saveSelfieToPhotos = async () => {
+    if (!selfieImageUrl) return;
+
+    try {
+      // Download the image to a temporary location
+      const fileUri = FileSystem.documentDirectory + `selfie_${Date.now()}.jpg`;
+      const downloadResult = await FileSystem.downloadAsync(selfieImageUrl, fileUri);
+
+      if (downloadResult.status !== 200) {
+        throw new Error('Failed to download image');
+      }
+
+      // Save to camera roll
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'We need permission to save photos to your camera roll.');
+        return;
+      }
+
+      await MediaLibrary.saveToLibraryAsync(downloadResult.uri);
+      showToast('📸 Selfie saved to Photos');
+
+    } catch (error) {
+      console.error('Error saving selfie:', error);
+      Alert.alert('Error', 'Failed to save selfie to Photos');
+    }
+  };
+
   return (
     <View style={styles.container}>
       {/* Selfie Image Modal */}
@@ -359,6 +404,24 @@ export default function SentHistoryScreen() {
                 </Text>
               </View>
             )}
+
+            {/* Save Button */}
+            {selfieImageUrl && !loadingSelfie && (
+              <TouchableOpacity
+                style={styles.saveSelfieButton}
+                onPress={saveSelfieToPhotos}
+              >
+                <FontAwesome name="download" size={18} color="#fff" style={{ marginRight: 8 }} />
+                <Text style={styles.saveSelfieButtonText}>Save to Photos</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Toast Notification (Inside Modal) */}
+            {toastMessage ? (
+              <Animated.View style={[styles.toast, { opacity: toastOpacity, bottom: 20 }]}>
+                <Text style={styles.toastText}>{toastMessage}</Text>
+              </Animated.View>
+            ) : null}
           </View>
         </TouchableOpacity>
       </Modal>
@@ -645,6 +708,37 @@ const styles = StyleSheet.create({
   modalErrorText: {
     color: '#fff',
     fontSize: 16,
+  },
+  saveSelfieButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2ecc71',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    marginTop: 20,
+  },
+  saveSelfieButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  toast: {
+    position: 'absolute',
+    bottom: 50,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(50, 50, 50, 0.9)',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 25,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
 

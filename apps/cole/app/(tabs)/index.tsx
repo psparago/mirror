@@ -52,6 +52,21 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
+  // Request camera permission on startup
+  // Request camera permission on startup
+  useEffect(() => {
+    console.log('📸 Triggering camera permission check on startup...');
+    // Always request explicitly on mount to ensure prompt appears
+    requestCameraPermission().then(result => {
+      if (result.granted) {
+        console.log('✅ Camera permission granted');
+      } else {
+        console.log('❌ Camera permission denied');
+      }
+    }).catch(err => console.warn('Camera permission request failed:', err));
+  }, []);
+
+
   // Load read state from disk on startup
   useEffect(() => {
     const loadReadState = async () => {
