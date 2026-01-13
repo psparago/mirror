@@ -16,19 +16,27 @@ import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList,
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
+  console.log(`📡 safeUploadToS3: Starting upload. Source: ${localUri.substring(0, 50)}... Target: ${presignedUrl.substring(0, 50)}...`);
   let uriToUpload = localUri;
   let tempUri: string | null = null;
 
   // If remote URL (e.g. Unsplash or AI TTS), download to cache first
   if (localUri.startsWith('http')) {
-    const extension = localUri.split('?')[0].split('.').pop()?.toLowerCase() || 'jpg';
-    const filename = `temp_upload_${Date.now()}.${extension}`;
-    const downloadRes = await FileSystem.downloadAsync(
-      localUri,
-      `${FileSystem.cacheDirectory}${filename}`
-    );
-    uriToUpload = downloadRes.uri;
-    tempUri = downloadRes.uri;
+    try {
+      const extension = localUri.split('?')[0].split('.').pop()?.toLowerCase() || 'jpg';
+      const filename = `temp_upload_${Date.now()}.${extension}`;
+      console.log(`📥 safeUploadToS3: Downloading remote file to ${filename}...`);
+      const downloadRes = await FileSystem.downloadAsync(
+        localUri,
+        `${FileSystem.cacheDirectory}${filename}`
+      );
+      uriToUpload = downloadRes.uri;
+      tempUri = downloadRes.uri;
+      console.log(`✅ safeUploadToS3: Download complete: ${uriToUpload}`);
+    } catch (err) {
+      console.error(`❌ safeUploadToS3: Download failed:`, err);
+      throw err;
+    }
   }
 
   try {
@@ -36,15 +44,21 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
     const extension = uriToUpload.split('.').pop()?.toLowerCase();
     const contentType = extension === 'm4a' || extension === 'mp3' ? 'audio/mpeg' : 'image/jpeg';
 
+    console.log(`📤 safeUploadToS3: Uploading ${uriToUpload} (ContentType: ${contentType})...`);
     const uploadResult = await FileSystem.uploadAsync(presignedUrl, uriToUpload, {
       httpMethod: 'PUT',
       headers: { 'Content-Type': contentType },
     });
 
     if (uploadResult.status !== 200) {
+      console.error(`❌ safeUploadToS3: Upload failed with status ${uploadResult.status}`);
       throw new Error(`Upload failed with status ${uploadResult.status}`);
     }
+    console.log(`✅ safeUploadToS3: Upload SUCCESS for ${uriToUpload}`);
     return uploadResult;
+  } catch (err) {
+    console.error(`❌ safeUploadToS3: Upload error:`, err);
+    throw err;
   } finally {
     // Cleanup temp file if we created one
     if (tempUri) {
@@ -540,30 +554,44 @@ export default function CompanionHomeScreen() {
     }
 
     let tempThumbnail: string | null = null;
+    let finalCaption = description.trim();
+    let finalDeepDive = deepDive;
+    let finalCaptionAudio = audioUri || aiAudioUrl;
+    let finalDeepDiveAudio = aiDeepDiveAudioUrl;
 
     try {
       setUploading(true);
 
-      // FORCE DEEP DIVE: Ensure we have AI content even if user manual-typed or recorded audio
-      // We do this in the background if we don't have it yet
-      let activeDeepDive = deepDive;
-      let activeDeepDiveAudio = aiDeepDiveAudioUrl;
-      let activeShortCaption = shortCaption;
-      let activeAiAudio = aiAudioUrl;
+      // ALWAYS ensure we have a Deep Dive and correct TTS before proceeding
+      // If we are missing deep dive, or if the caption text has changed from the original AI caption (meaning it was edited or manually typed)
+      // and we don't have human audio, we should refresh the TTS.
 
-      if (!activeDeepDive) {
-        console.log("🛠️ Reflection missing Deep Dive, generating in background...");
-        const aiResult = await generateDeepDiveBackground();
-        if (aiResult) {
-          activeDeepDive = aiResult.deep_dive;
-          activeDeepDiveAudio = aiResult.deep_dive_audio_url;
-          activeShortCaption = aiResult.short_caption;
-          activeAiAudio = aiResult.audio_url;
+      const needsDeepDive = !finalDeepDive;
+      const needsCaptionAudio = !audioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
+
+      if (needsDeepDive || needsCaptionAudio) {
+        console.log("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
+
+        // Use our new backend capabilities to either generate missing fields or just refresh TTS
+        let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(photo.uri)}`;
+        if (finalCaption) fetchUrl += `&target_caption=${encodeURIComponent(finalCaption)}`;
+        if (finalDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(finalDeepDive)}`;
+
+        const aiResponse = await fetch(fetchUrl);
+        if (aiResponse.ok) {
+          const aiResult = await aiResponse.json();
+          finalCaption = aiResult.short_caption;
+          finalDeepDive = aiResult.deep_dive;
+          finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio if exists
+          finalDeepDiveAudio = aiResult.deep_dive_audio_url;
+        } else {
+          console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
       }
 
       // Generate unique event_id (timestamp-based)
       const eventID = Date.now().toString();
+      console.log(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
       // 1. Prepare list of files to upload
@@ -580,17 +608,19 @@ export default function CompanionHomeScreen() {
           filesToSign.push('audio.m4a');
           hasAudio = true;
         }
-      } else if (aiAudioUrl) {
+      } else if (finalCaptionAudio) {
         filesToSign.push('audio.m4a'); // Store AI TTS as audio.m4a for consistency
         hasAudio = true;
       }
 
       // Check for AI Deep Dive audio
       let hasDeepDiveAudio = false;
-      if (activeDeepDiveAudio) {
+      if (finalDeepDiveAudio) {
         filesToSign.push('deep_dive.m4a');
         hasDeepDiveAudio = true;
       }
+
+      console.log(`📡 uploadEventBundle: Files to sign:`, filesToSign);
 
       // 2. Get permissions (Batch Request)
       console.log('getting batch urls...');
@@ -611,6 +641,7 @@ export default function CompanionHomeScreen() {
       }
 
       const { urls } = await batchRes.json();
+      console.log('📡 uploadEventBundle: Received presigned URLs for:', Object.keys(urls));
       const uploadPromises: Promise<any>[] = [];
 
       // 3. Prepare Image Source
@@ -652,30 +683,27 @@ export default function CompanionHomeScreen() {
 
       // 6. Queue Audio Upload
       if (hasAudio && urls['audio.m4a']) {
-        const audioSource = audioUri || activeAiAudio;
+        const audioSource = audioUri || finalCaptionAudio;
         if (audioSource) {
           uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']));
         }
       }
 
       // 6.5 Queue Deep Dive Audio Upload
-      if (hasDeepDiveAudio && activeDeepDiveAudio && urls['deep_dive.m4a']) {
-        uploadPromises.push(safeUploadToS3(activeDeepDiveAudio, urls['deep_dive.m4a']));
+      if (hasDeepDiveAudio && finalDeepDiveAudio && urls['deep_dive.m4a']) {
+        uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, urls['deep_dive.m4a']));
       }
 
       // 7. Queue Metadata Upload
       const metadata: any = {
-        description: description.trim() || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
+        description: finalCaption || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
         sender: "Granddad",
         timestamp: timestamp,
         event_id: eventID,
         content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
+        short_caption: finalCaption,
+        deep_dive: finalDeepDive,
       };
-
-      if (activeShortCaption && activeDeepDive) {
-        metadata.short_caption = activeShortCaption;
-        metadata.deep_dive = activeDeepDive;
-      }
 
       const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
       uploadPromises.push(

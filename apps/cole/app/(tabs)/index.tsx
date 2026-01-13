@@ -320,8 +320,7 @@ export default function ColeInboxScreen() {
             const now = Date.now();
             const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
 
-            // 5. PRE-FETCH METADATA for New Items
-            // This prevents "metadata-less" state confusion in MainStageView
+            // 5. PRE-FETCH METADATA for New Items (Blocking for auto-play safety)
             const metaPromises = newItems.map(async (item) => {
               if (item.metadata_url) {
                 try {
@@ -337,24 +336,37 @@ export default function ColeInboxScreen() {
               return null;
             });
 
+            // Sequential: Wait for meta, then inject, then auto-play
             Promise.all(metaPromises).then(results => {
               const updates: { [key: string]: EventMetadata } = {};
               results.forEach(r => { if (r) updates[r.id] = r.meta; });
+
               if (Object.keys(updates).length > 0) {
+                console.log(`✅ Pre-fetched metadata for ${Object.keys(updates).length} new items`);
                 setEventMetadata(prev => ({ ...prev, ...updates }));
               }
-            });
 
-            // Update events
-            setEvents(prev => {
-              const merged = [...signedNewItems, ...prev];
-              return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
-            });
+              // Update events list
+              setEvents(prev => {
+                const merged = [...signedNewItems, ...prev];
+                return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
+              });
 
-            // Mark as "Recent" for visual distinction if we are currently looking at something
-            if (selectedEventRef.current) {
-              setRecentlyArrivedIds(prev => [...prev, ...newItems.map(item => item.event_id)]);
-            }
+              // Brief delay to let state settle before auto-play (prevents hardware/network spam)
+              setTimeout(() => {
+                if (newItems.length > 0) {
+                  const newestId = newItems[0].event_id;
+                  console.log(`🚀 Auto-playing new arrival: ${newestId}`);
+                  setRecentlyArrivedIds(prev => [...prev, newestId]);
+
+                  // Find the fully prepared event object from the fresh list
+                  const autoPlayMatch = signedNewItems.find(e => e.event_id === newestId);
+                  if (autoPlayMatch) {
+                    setSelectedEvent(autoPlayMatch);
+                  }
+                }
+              }, 1000);
+            });
           }
 
         } catch (error) {
@@ -703,10 +715,22 @@ export default function ColeInboxScreen() {
       let imageUrl: string;
       try {
         console.log("Getting presigned URL for selfie upload...");
-        const imageResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
-        if (!imageResponse.ok) {
-          throw new Error(`Failed to get presigned URL: ${imageResponse.status} ${imageResponse.statusText}`);
-        }
+        const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
+          try {
+            const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+            if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+            return res;
+          } catch (e: any) {
+            if (retryCount < 1) {
+              console.log(`🔄 Selfie URL fetch failed, retrying in 1.5s... (${e.message})`);
+              await new Promise(r => setTimeout(r, 1500));
+              return fetchWithRetry(retryCount + 1);
+            }
+            throw e;
+          }
+        };
+
+        const imageResponse = await fetchWithRetry();
         const imageData = await imageResponse.json();
         imageUrl = imageData.url;
 
@@ -760,13 +784,24 @@ export default function ColeInboxScreen() {
         });
 
     } catch (error: any) {
-      console.error("Error capturing selfie:", error);
+      console.error("❌ Error capturing selfie:", error);
+      // Detailed logging for tricky network/platform errors
+      if (error && typeof error === 'object') {
+        console.error("❌ Detailed Error Info:", {
+          message: error.message,
+          code: error.code,
+          domain: error.domain,
+          userInfo: error.userInfo
+        });
+      }
+
       let errorMessage = "Failed to capture selfie. Please try again.";
       if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
         errorMessage = "Permission error. Please check Firestore security rules for 'reflection_responses' collection.";
       }
+
       if (!silent) {
-        Alert.alert("Error", errorMessage);
+        Alert.alert("Error", `${errorMessage}\n\nTechnical info: ${error.message || 'Unknown error'}`);
       }
     } finally {
       setIsCapturingSelfie(false);

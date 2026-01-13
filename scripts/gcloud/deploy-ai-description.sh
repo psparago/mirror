@@ -47,7 +47,7 @@ gcloud functions deploy generate-ai-description \
   --entry-point=GenerateAIDescription \
   --trigger-http \
   --allow-unauthenticated \
-  --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY} \
+  --set-env-vars GEMINI_API_KEY=${GEMINI_API_KEY},OPENAI_API_KEY=${OPENAI_API_KEY},AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION:-us-east-1} \
   --quiet
 
 if [ $? -eq 0 ]; then
@@ -56,4 +56,3 @@ else
   echo -e "${RED}✗ generate-ai-description deployment failed${NC}"
   exit 1
 fi
-

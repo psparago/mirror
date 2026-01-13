@@ -45,179 +45,143 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 
 	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
-	// 2. Get Image from S3 URL (passed in query)
+	// 2. Get params
 	imageURL := r.URL.Query().Get("image_url")
-	if imageURL == "" {
-		http.Error(w, "image_url parameter required", 400)
-		return
-	}
+	targetCaption := r.URL.Query().Get("target_caption")
+	targetDeepDive := r.URL.Query().Get("target_deep_dive")
 
-	res, err := http.Get(imageURL)
-	if err != nil {
-		http.Error(w, "Failed to fetch image: "+err.Error(), 500)
-		return
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf("Failed to fetch image: HTTP %d", res.StatusCode), 500)
-		return
-	}
-
-	imgData, err := io.ReadAll(res.Body)
-	if err != nil {
-		http.Error(w, "Failed to read image data: "+err.Error(), 500)
-		return
-	}
-
-	// 3. Create multimodal input using genai.Part interface
-	// The prompt for Cole - requesting structured JSON response
-	promptText := `Analyze this image for a 15-year-old with Angelman Syndrome. Return range SINGLE JSON object containing exactly these two keys:
-
-"short_caption": A brief, high-impact greeting (max 10 words).
-
-"deep_dive": A more detailed, 2-3 sentence story about the details in the photo to facilitate deeper engagement.
-
-Return ONLY valid JSON. No markdown formatting.
-Format: {"short_caption": "string", "deep_dive": "string"}`
-
-	// Use Part interface for multimodal inputs (2026 SDK update)
-	parts := []genai.Part{
-		genai.Text(promptText),
-		genai.ImageData("jpeg", imgData),
-	}
-
-	// 4. Ask Gemini
-	resp, err := model.GenerateContent(ctx, parts...)
-	if err != nil {
-		http.Error(w, "Generate AI Description Error: "+err.Error(), 500)
-		return
-	}
-
-	// 5. Extract and parse JSON response
-	if len(resp.Candidates) == 0 {
-		log.Printf("Error: No candidates in response")
-		http.Error(w, "No response from Gemini", 500)
-		return
-	}
-
-	if len(resp.Candidates[0].Content.Parts) == 0 {
-		log.Printf("Error: No parts in response")
-		http.Error(w, "No response from Gemini", 500)
-		return
-	}
-
-	// Extract text from the response part
-	part := resp.Candidates[0].Content.Parts[0]
-	log.Printf("Response part type: %T", part)
-
-	var text string
-	switch v := part.(type) {
-	case genai.Text:
-		text = string(v)
-		log.Printf("Extracted text: %s", text)
-	default:
-		log.Printf("Error: Unexpected response type from Gemini: %T, value: %v", part, part)
-		http.Error(w, fmt.Sprintf("Unexpected response type from Gemini: %T", part), 500)
-		return
-	}
-
-	// Parse JSON response - handle markdown code blocks if present
-	jsonText := strings.TrimSpace(text)
-	if strings.HasPrefix(jsonText, "```json") {
-		jsonText = strings.TrimPrefix(jsonText, "```json")
-		jsonText = strings.TrimSuffix(jsonText, "```")
-	}
-	if strings.HasPrefix(jsonText, "```") {
-		jsonText = strings.TrimPrefix(jsonText, "```")
-		jsonText = strings.TrimSuffix(jsonText, "```")
-	}
-	jsonText = strings.TrimSpace(jsonText)
-
-	// Parse JSON
-	type AIResult struct {
+	var result struct {
 		ShortCaption     string `json:"short_caption"`
 		DeepDive         string `json:"deep_dive"`
 		AudioURL         string `json:"audio_url,omitempty"`
 		DeepDiveAudioURL string `json:"deep_dive_audio_url,omitempty"`
 	}
-	var result AIResult
 
-	// Try unmarshalling as a single object first
-	if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
-		// If that fails, try unmarshalling as an array of objects
-		var arrayResult []AIResult
-		if errArray := json.Unmarshal([]byte(jsonText), &arrayResult); errArray == nil && len(arrayResult) > 0 {
-			// Successfully parsed as array, use the first item
-			result = arrayResult[0]
-			log.Printf("Parsed JSON as array (fallback success)")
-		} else {
-			// Both failed
-			log.Printf("Error parsing JSON response: %v, raw text: %s", err, text)
-			http.Error(w, fmt.Sprintf("Failed to parse JSON response: %v", err), 500)
+	// 3. Logic: If we have both target texts, just do TTS. If missing either, call Gemini for image analysis.
+	if targetCaption != "" && targetDeepDive != "" {
+		log.Printf("TTS-only mode: using provided texts")
+		result.ShortCaption = targetCaption
+		result.DeepDive = targetDeepDive
+	} else {
+		if imageURL == "" {
+			http.Error(w, "image_url parameter required if target texts are missing", 400)
 			return
+		}
+
+		res, err := http.Get(imageURL)
+		if err != nil {
+			http.Error(w, "Failed to fetch image: "+err.Error(), 500)
+			return
+		}
+		defer res.Body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			http.Error(w, fmt.Sprintf("Failed to fetch image: HTTP %d", res.StatusCode), 500)
+			return
+		}
+
+		imgData, err := io.ReadAll(res.Body)
+		if err != nil {
+			http.Error(w, "Failed to read image data: "+err.Error(), 500)
+			return
+		}
+
+		// Create multimodal input
+		promptText := `Analyze this image for a 15-year-old with Angelman Syndrome (Cole). 
+IMPORTANT: DO NOT attempt to diagnose or guess if anyone in the photo has a medical disorder or syndrome (like Down Syndrome or Angelman Syndrome) based on their appearance, facial expressions, or gestures. Focus only on the observable activities, objects, and emotions.
+
+Return a SINGLE JSON object containing:
+"short_caption": A high-impact greeting (max 10 words).
+"deep_dive": A 2-3 sentence story about details in the photo.
+Format: {"short_caption": "string", "deep_dive": "string"}`
+
+		parts := []genai.Part{
+			genai.Text(promptText),
+			genai.ImageData("jpeg", imgData),
+		}
+
+		resp, err := model.GenerateContent(ctx, parts...)
+		if err != nil {
+			http.Error(w, "Gemini Error: "+err.Error(), 500)
+			return
+		}
+
+		if len(resp.Candidates) == 0 {
+			http.Error(w, "No response from Gemini", 500)
+			return
+		}
+
+		part := resp.Candidates[0].Content.Parts[0]
+		var text string
+		if v, ok := part.(genai.Text); ok {
+			text = string(v)
+		} else {
+			http.Error(w, "Unexpected response type", 500)
+			return
+		}
+
+		jsonText := strings.TrimSpace(text)
+		jsonText = strings.TrimPrefix(jsonText, "```json")
+		jsonText = strings.TrimPrefix(jsonText, "```")
+		jsonText = strings.TrimSuffix(jsonText, "```")
+		jsonText = strings.TrimSpace(jsonText)
+
+		if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
+			http.Error(w, "JSON Parse Error", 500)
+			return
+		}
+
+		// Preference: If user provided one but not both, use their text
+		if targetCaption != "" {
+			result.ShortCaption = targetCaption
+		}
+		if targetDeepDive != "" {
+			result.DeepDive = targetDeepDive
 		}
 	}
 
-	// 6. Generate Speech using OpenAI (TTS)
-	log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
-	speechData, err := GenerateSpeech(result.ShortCaption)
+	// Setup AWS Config for TTS storage (shared)
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
 	if err != nil {
-		log.Printf("TTS ERROR: Failed to generate speech: %v", err)
-	} else if len(speechData) == 0 {
-		log.Printf("TTS ERROR: Received empty audio data from OpenAI")
-	} else {
-		log.Printf("TTS SUCCESS: Generated %d bytes of audio", len(speechData))
-		// 7. Upload Audio to S3
-		audioKey := fmt.Sprintf("staging/tts/%d.mp3", time.Now().UnixNano())
-		log.Printf("S3: Uploading audio to key: %s", audioKey)
-		err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
-		if err != nil {
-			log.Printf("S3 ERROR: Failed to upload audio to S3: %v", err)
-		} else {
-			// For the preview in Companion app, we can generate a fresh presigned URL here.
-			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
-			s3Client := s3.NewFromConfig(cfg)
-			presignClient := s3.NewPresignClient(s3Client)
+		log.Printf("AWS Config Error: %v", err)
+		http.Error(w, "S3 Config Error", 500)
+		return
+	}
+	s3Client := s3.NewFromConfig(cfg)
+	presignClient := s3.NewPresignClient(s3Client)
 
-			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String("mirror-uploads-sparago-2026"),
-				Key:    aws.String(audioKey),
-			})
+	// 6. Generate Speech using OpenAI (TTS)
+	if result.ShortCaption != "" {
+		log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
+		speechData, err := GenerateSpeech(result.ShortCaption)
+		if err == nil && len(speechData) > 0 {
+			audioKey := fmt.Sprintf("staging/tts/%d.mp3", time.Now().UnixNano())
+			err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
 			if err == nil {
+				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String("mirror-uploads-sparago-2026"),
+					Key:    aws.String(audioKey),
+				})
 				result.AudioURL = presignedRes.URL
-				log.Printf("Generated TTS and stored at: %s", audioKey)
+				log.Printf("Generated TTS for caption at: %s", audioKey)
 			}
 		}
 	}
 
 	// 8. Generate Speech for Deep Dive
-	log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
-	deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
-	if err != nil {
-		log.Printf("TTS ERROR: Failed to generate deep dive speech: %v", err)
-	} else if len(deepDiveSpeechData) == 0 {
-		log.Printf("TTS ERROR: Received empty deep dive audio data")
-	} else {
-		log.Printf("TTS SUCCESS: Generated %d bytes for deep dive", len(deepDiveSpeechData))
-		// 9. Upload Deep Dive Audio to S3
-		deepDiveAudioKey := fmt.Sprintf("staging/tts/deepdive_%d.mp3", time.Now().UnixNano())
-		log.Printf("S3: Uploading deep dive audio to: %s", deepDiveAudioKey)
-		err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
-		if err != nil {
-			log.Printf("S3 ERROR: Failed to upload deep dive audio: %v", err)
-		} else {
-			cfg, _ := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
-			s3Client := s3.NewFromConfig(cfg)
-			presignClient := s3.NewPresignClient(s3Client)
-
-			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String("mirror-uploads-sparago-2026"),
-				Key:    aws.String(deepDiveAudioKey),
-			})
+	if result.DeepDive != "" {
+		log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
+		deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
+		if err == nil && len(deepDiveSpeechData) > 0 {
+			deepDiveAudioKey := fmt.Sprintf("staging/tts/deepdive_%d.mp3", time.Now().UnixNano())
+			err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
 			if err == nil {
+				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String("mirror-uploads-sparago-2026"),
+					Key:    aws.String(deepDiveAudioKey),
+				})
 				result.DeepDiveAudioURL = presignedRes.URL
-				log.Printf("Generated Deep Dive TTS and stored at: %s", deepDiveAudioKey)
+				log.Printf("Generated Deep Dive TTS at: %s", deepDiveAudioKey)
 			}
 		}
 	}

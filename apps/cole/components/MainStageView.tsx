@@ -13,9 +13,13 @@ import {
   Animated,
   FlatList,
   Image,
+  KeyboardAvoidingView,
+  Modal,
   PanResponder,
+  Platform,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View
@@ -100,6 +104,12 @@ export default function MainStageView({
 
   // Track active caption session to prevent ghost TTS callbacks
   const captionSessionRef = useRef(0);
+
+  const [isAdminMode, setIsAdminMode] = useState(false);
+  const [showAdminChallenge, setShowAdminChallenge] = useState(false);
+  const [adminAnswer, setAdminAnswer] = useState('');
+  const [mathChallenge, setMathChallenge] = useState({ a: 3, b: 3, sum: 6 });
+  const lastTapRef = useRef<number>(0);
 
   // Show toast notification
   const showToast = (message: string) => {
@@ -211,39 +221,56 @@ export default function MainStageView({
 
         // If there's a companion audio recording, play that instead of TTS
         if (audioUrl) {
-          try {
-            console.log(`🎧 Narrating caption from: ${audioUrl.substring(0, 80)}...`);
-            const { sound: newCaptionSound } = await Audio.Sound.createAsync(
-              { uri: audioUrl },
-              { shouldPlay: true },
-              (status) => {
-                if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
-                  // Only send if this is still the active session
-                  if (captionSessionRef.current === thisSession) {
-                    console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
-                    newCaptionSound.unloadAsync();
-                    setCaptionSound(null);
-                    captionSoundRef.current = null;
-                    send({ type: 'NARRATION_FINISHED' });
-                  } else {
-                    console.log('🚫 Companion audio finished but session changed - ignoring');
-                    newCaptionSound.unloadAsync();
-                    captionSoundRef.current = null;
+          const playAudioWithRetry = async (retryCount = 0) => {
+            try {
+              console.log(`🎧 Narrating caption from: ${audioUrl.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+              const { sound: newCaptionSound } = await Audio.Sound.createAsync(
+                { uri: audioUrl },
+                { shouldPlay: true },
+                (status) => {
+                  if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
+                    // Only send if this is still the active session
+                    if (captionSessionRef.current === thisSession) {
+                      console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
+                      newCaptionSound.unloadAsync();
+                      setCaptionSound(null);
+                      captionSoundRef.current = null;
+                      send({ type: 'NARRATION_FINISHED' });
+                    } else {
+                      console.log('🚫 Companion audio finished but session changed - ignoring');
+                      newCaptionSound.unloadAsync();
+                      captionSoundRef.current = null;
+                    }
                   }
                 }
+              );
+              // Set ref immediately for stopAllMedia race condition protection
+              captionSoundRef.current = newCaptionSound;
+              setCaptionSound(newCaptionSound);
+              console.log('🎧 Companion audio started, waiting for completion...');
+            } catch (error: any) {
+              console.error(`❌ Audio caption error (Attempt ${retryCount + 1}):`, error);
+
+              if (retryCount < 1 && captionSessionRef.current === thisSession) {
+                console.log('🔄 Retrying audio load in 1.5s...');
+                await new Promise(r => setTimeout(r, 1500));
+                return playAudioWithRetry(retryCount + 1);
               }
-            );
-            // Set ref immediately for stopAllMedia race condition protection
-            captionSoundRef.current = newCaptionSound;
-            setCaptionSound(newCaptionSound);
-            console.log('🎧 Companion audio started, waiting for completion...');
-            // DO NOT send NARRATION_FINISHED here - wait for callback!
-          } catch (error) {
-            if (captionSessionRef.current === thisSession) {
-              console.error('❌ Audio caption error - sending NARRATION_FINISHED:', error);
-              send({ type: 'NARRATION_FINISHED' });
+
+              if (captionSessionRef.current === thisSession) {
+                if (error && typeof error === 'object') {
+                  console.error("❌ Detailed Caption Error:", {
+                    message: error.message,
+                    code: error.code,
+                    domain: error.domain
+                  });
+                }
+                send({ type: 'NARRATION_FINISHED' });
+              }
             }
-          }
+          };
+
+          playAudioWithRetry();
         } else if (text) {
           Speech.speak(text, {
             onDone: () => {
@@ -305,60 +332,97 @@ export default function MainStageView({
       },
 
       playAudio: async () => {
-        try {
-          if (sound) await sound.unloadAsync();
+        const playWithRetry = async (retryCount = 0) => {
+          try {
+            if (sound) await sound.unloadAsync();
 
-          if (!selectedEvent?.audio_url) {
-            send({ type: 'AUDIO_FINISHED' });
-            return;
-          }
-
-          const { sound: newSound } = await Audio.Sound.createAsync(
-            { uri: selectedEvent.audio_url as string },
-            { shouldPlay: true }
-          );
-
-          newSound.setOnPlaybackStatusUpdate((status) => {
-            if (status.isLoaded && status.didJustFinish) {
+            if (!selectedEvent?.audio_url) {
               send({ type: 'AUDIO_FINISHED' });
+              return;
             }
-          });
-          setSound(newSound);
 
-        } catch (err) {
-          console.error("Audio error", err);
-          send({ type: 'AUDIO_FINISHED' });
-        }
-      },
-
-      playDeepDive: async () => {
-        try {
-          if (sound) await sound.unloadAsync();
-
-          if (selectedEvent?.deep_dive_audio_url) {
-            console.log(`🧠 Playing deep dive audio from: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}...`);
+            console.log(`🎧 Playing audio: ${selectedEvent.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
             const { sound: newSound } = await Audio.Sound.createAsync(
-              { uri: selectedEvent.deep_dive_audio_url },
+              { uri: selectedEvent.audio_url as string },
               { shouldPlay: true }
             );
+
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
-                send({ type: 'NARRATION_FINISHED' });
+                send({ type: 'AUDIO_FINISHED' });
               }
             });
             setSound(newSound);
-          } else if (selectedMetadata?.deep_dive) {
-            Speech.speak(selectedMetadata.deep_dive, {
-              onDone: () => send({ type: 'NARRATION_FINISHED' }),
-              onError: () => send({ type: 'NARRATION_FINISHED' })
-            });
-          } else {
+
+          } catch (err: any) {
+            console.error(`❌ Audio error (Attempt ${retryCount + 1}):`, err);
+
+            if (retryCount < 1) {
+              console.log('🔄 Retrying audio load in 1.5s...');
+              await new Promise(r => setTimeout(r, 1500));
+              return playWithRetry(retryCount + 1);
+            }
+
+            if (err && typeof err === 'object') {
+              console.error("❌ Detailed Audio Error:", {
+                message: err.message,
+                code: err.code,
+                domain: err.domain
+              });
+            }
+            send({ type: 'AUDIO_FINISHED' });
+          }
+        };
+
+        playWithRetry();
+      },
+
+      playDeepDive: async () => {
+        const playDeepDiveWithRetry = async (retryCount = 0) => {
+          try {
+            if (sound) await sound.unloadAsync();
+
+            if (selectedEvent?.deep_dive_audio_url) {
+              console.log(`🧠 Playing deep dive audio: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+              const { sound: newSound } = await Audio.Sound.createAsync(
+                { uri: selectedEvent.deep_dive_audio_url },
+                { shouldPlay: true }
+              );
+              newSound.setOnPlaybackStatusUpdate((status) => {
+                if (status.isLoaded && status.didJustFinish) {
+                  send({ type: 'NARRATION_FINISHED' });
+                }
+              });
+              setSound(newSound);
+            } else if (selectedMetadata?.deep_dive) {
+              Speech.speak(selectedMetadata.deep_dive, {
+                onDone: () => send({ type: 'NARRATION_FINISHED' }),
+                onError: () => send({ type: 'NARRATION_FINISHED' })
+              });
+            } else {
+              send({ type: 'NARRATION_FINISHED' });
+            }
+          } catch (err: any) {
+            console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
+
+            if (retryCount < 1 && selectedEvent?.deep_dive_audio_url) {
+              console.log('🔄 Retrying deep dive audio load in 1.5s...');
+              await new Promise(r => setTimeout(r, 1500));
+              return playDeepDiveWithRetry(retryCount + 1);
+            }
+
+            if (err && typeof err === 'object') {
+              console.error("❌ Detailed Deep Dive Error:", {
+                message: err.message,
+                code: err.code,
+                domain: err.domain
+              });
+            }
             send({ type: 'NARRATION_FINISHED' });
           }
-        } catch (err) {
-          console.error("Deep dive audio error", err);
-          send({ type: 'NARRATION_FINISHED' });
-        }
+        };
+
+        playDeepDiveWithRetry();
       },
 
       showSelfieBubble: () => {
@@ -504,6 +568,45 @@ export default function MainStageView({
     if (onReplay && selectedEvent) onReplay(selectedEvent);
   };
 
+  const handleAdminToggle = () => {
+    // Only verify answer when ENTERING admin mode
+    if (adminAnswer.trim() === String(mathChallenge.sum)) {
+      setIsAdminMode(true);
+      showToast('🔓 Admin Mode ENABLED');
+      setShowAdminChallenge(false);
+      setAdminAnswer('');
+    } else {
+      showToast('❌ Incorrect answer');
+      setAdminAnswer('');
+    }
+  };
+
+  const generateNewChallenge = () => {
+    const a = Math.floor(Math.random() * 5) + 1;
+    const b = Math.floor(Math.random() * 5) + 1;
+    setMathChallenge({ a, b, sum: a + b });
+  };
+
+  const handleAdminTrigger = () => {
+    const now = Date.now();
+    const DOUBLE_TAP_DELAY = 500;
+
+    if (now - lastTapRef.current < DOUBLE_TAP_DELAY) {
+      if (isAdminMode) {
+        // Exit directly
+        setIsAdminMode(false);
+        showToast('🔒 Admin Mode DISABLED');
+      } else {
+        // Enter: Generate challenge and show modal
+        generateNewChallenge();
+        setShowAdminChallenge(true);
+      }
+      lastTapRef.current = 0; // Reset
+    } else {
+      lastTapRef.current = now;
+    }
+  };
+
   const handleUpNextItemPress = (event: Event) => {
     onEventSelect(event);
   };
@@ -605,16 +708,23 @@ export default function MainStageView({
             </Text>
           </View>
 
-          {/* Delete Button */}
-          <TouchableOpacity
-            style={styles.deleteButton}
-            onPress={() => {
-              onDelete(item);
-              showToast('🗑️ Reflection deleted');
-            }}
-          >
-            <FontAwesome name="ellipsis-v" size={20} color="rgba(255, 255, 255, 0.6)" />
-          </TouchableOpacity>
+          {/* Delete Button - Only visible in Admin Mode and requires LONG press */}
+          {isAdminMode ? (
+            <TouchableOpacity
+              style={styles.deleteButton}
+              onLongPress={() => {
+                onDelete(item);
+                showToast('🗑️ Reflection deleted');
+              }}
+              delayLongPress={1500}
+            >
+              <FontAwesome name="trash" size={20} color="rgba(255, 100, 100, 0.9)" />
+            </TouchableOpacity>
+          ) : (
+            <View style={[styles.deleteButton, { opacity: 0.3 }]}>
+              <FontAwesome name="lock" size={16} color="rgba(255, 255, 255, 0.4)" />
+            </View>
+          )}
         </TouchableOpacity>
       </View>
     );
@@ -676,7 +786,20 @@ export default function MainStageView({
                 </BlurView>
               </TouchableOpacity>
             ) : (
-              events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>}
+                {!isAdminMode && (
+                  <View style={styles.lockBadge}>
+                    <FontAwesome name="lock" size={10} color="rgba(255,255,255,0.6)" style={{ marginRight: 4 }} />
+                    <Text style={styles.lockText}>CAREGIVER LOCK</Text>
+                  </View>
+                )}
+                {isAdminMode && (
+                  <View style={styles.adminBadge}>
+                    <Text style={styles.adminBadgeText}>ADMIN MODE</Text>
+                  </View>
+                )}
+              </View>
             )}
           </View>
 
@@ -756,7 +879,20 @@ export default function MainStageView({
         {/* RIGHT PANE */}
         <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.6 }, { paddingTop: insets.top + 10 }]}>
           <View style={styles.upNextHeader}>
-            <Text style={styles.upNextHeaderText}>Up Next</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={styles.upNextHeaderText}>Up Next</Text>
+              <TouchableOpacity
+                onPress={handleAdminTrigger}
+                activeOpacity={0.6}
+                style={{ marginLeft: 8, padding: 4 }}
+              >
+                <FontAwesome
+                  name={isAdminMode ? "unlock" : "cog"}
+                  size={14}
+                  color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.4)"}
+                />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.upNextCount}>{events.length}</Text>
           </View>
           <FlatList
@@ -794,6 +930,58 @@ export default function MainStageView({
           <Text style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>
       ) : null}
+
+      {/* Admin Challenge Modal */}
+      <Modal
+        visible={showAdminChallenge}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAdminChallenge(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.adminChallengeOverlay}
+        >
+          <View style={styles.adminChallengeBox}>
+            <View style={styles.adminLockIcon}>
+              <FontAwesome name="lock" size={32} color="#007AFF" />
+            </View>
+            <Text style={styles.adminChallengeTitle}>Caregiver Mode</Text>
+            <Text style={styles.adminChallengeSub}>To toggle delete access, please solve:</Text>
+            <Text style={styles.mathProblem}>{mathChallenge.a} + {mathChallenge.b} = ?</Text>
+
+            <TextInput
+              style={styles.adminInput}
+              keyboardType="number-pad"
+              autoFocus
+              maxLength={2}
+              value={adminAnswer}
+              onChangeText={setAdminAnswer}
+              onSubmitEditing={handleAdminToggle}
+              placeholder="?"
+            />
+
+            <View style={styles.adminButtonRow}>
+              <TouchableOpacity
+                style={[styles.adminButton, styles.adminCancelButton]}
+                onPress={() => {
+                  setShowAdminChallenge(false);
+                  setAdminAnswer('');
+                }}
+              >
+                <Text style={styles.adminCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.adminButton, styles.adminSubmitButton]}
+                onPress={handleAdminToggle}
+              >
+                <Text style={styles.adminButtonText}>Verify</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </LinearGradient>
   );
 }
@@ -895,5 +1083,119 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 18,
     fontWeight: '600',
+  },
+  // --- Admin Styles ---
+  lockBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 10,
+  },
+  lockText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  adminBadge: {
+    backgroundColor: '#FF3B30',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 10,
+  },
+  adminBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  adminChallengeOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  adminChallengeBox: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: '#fff',
+    borderRadius: 24,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  adminLockIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(0,122,255,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  adminChallengeTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#1C1C1E',
+    marginBottom: 8,
+  },
+  adminChallengeSub: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  mathProblem: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: '#007AFF',
+    marginBottom: 20,
+  },
+  adminInput: {
+    width: '60%',
+    height: 60,
+    backgroundColor: '#F2F2F7',
+    borderRadius: 16,
+    fontSize: 28,
+    textAlign: 'center',
+    color: '#000',
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#E5E5EA',
+  },
+  adminButtonRow: {
+    flexDirection: 'row',
+    width: '100%',
+    gap: 12,
+  },
+  adminButton: {
+    flex: 1,
+    height: 50,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  adminCancelButton: {
+    backgroundColor: '#E5E5EA',
+  },
+  adminCancelButtonText: {
+    color: '#3A3A3C',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  adminSubmitButton: {
+    backgroundColor: '#007AFF',
+  },
+  adminButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
   },
 });
