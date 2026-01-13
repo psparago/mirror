@@ -87,11 +87,11 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	var presignedURL string
 
 	if method == "GET" {
-		// Generate GET presigned URL for downloading/viewing
+		// Generate GET presigned URL for downloading/viewing (Expiry: 4 hours)
 		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String("mirror-uploads-sparago-2026"),
 			Key:    aws.String(s3Key),
-		})
+		}, s3.WithPresignExpires(4*time.Hour))
 		if err != nil {
 			http.Error(w, "Presign Error: "+err.Error(), 500)
 			return
@@ -186,7 +186,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 4. List objects in the "{userID}/to/" prefix (Cole's inbox)
+	// 4. List objects in the \"{userID}/to/\" prefix (Cole\'s inbox)
 	// Don't use delimiter - we need to see all nested objects
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String("mirror-uploads-sparago-2026"),
@@ -212,7 +212,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Extract event_id and filename from path like "cole/to/{event_id}/image.jpg"
+		// Extract event_id and filename from path like \"cole/to/{event_id}/image.jpg\"
 		relativePath := key[len(folderPrefix):]
 		parts := strings.Split(relativePath, "/")
 
@@ -228,11 +228,11 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// Generate presigned GET URL
+			// Generate presigned GET URL (Expiry: 4 hours)
 			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 				Bucket: aws.String("mirror-uploads-sparago-2026"),
 				Key:    aws.String(key),
-			})
+			}, s3.WithPresignExpires(4*time.Hour))
 			if err != nil {
 				fmt.Printf("Error presigning %s: %v\n", key, err)
 				continue
@@ -245,10 +245,10 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			} else if filename == "metadata.json" {
 				eventMap[eventID].MetadataURL = presignedRes.URL
 				fmt.Printf("Found metadata for event %s\n", eventID)
-			} else if filename == "audio.m4a" || filename == "audio.mp3" {
+			} else if filename == "audio.m4a" || filename == "audio.mp3" || filename == "audio_caption.mp3" || filename == "caption.mp3" {
 				eventMap[eventID].AudioURL = presignedRes.URL
 				fmt.Printf("Found audio for event %s\n", eventID)
-			} else if filename == "deep_dive.m4a" || filename == "deep_dive.mp3" {
+			} else if filename == "deep_dive.m4a" || filename == "deep_dive.mp3" || filename == "deep_dive_audio.mp3" {
 				eventMap[eventID].DeepDiveAudioURL = presignedRes.URL
 				fmt.Printf("Found deep dive audio for event %s\n", eventID)
 			} else if filename == "video.mp4" {
@@ -278,6 +278,84 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"events": events,
 	})
+}
+
+// GetEventBundle returns fresh presigned URLs for a specific event bundle
+func GetEventBundle(w http.ResponseWriter, r *http.Request) {
+	// 1. CORS Headers
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		return
+	}
+
+	eventID := r.URL.Query().Get("event_id")
+	if eventID == "" {
+		http.Error(w, "event_id is required", 400)
+		return
+	}
+
+	ctx := context.TODO()
+
+	// 2. Load Config
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+	if err != nil {
+		http.Error(w, "AWS Config Error: "+err.Error(), 500)
+		return
+	}
+
+	s3Client := s3.NewFromConfig(cfg)
+	presignClient := s3.NewPresignClient(s3Client)
+
+	// 3. List objects for this specific event folder: {userID}/to/{eventID}/
+	prefix := fmt.Sprintf("%s/to/%s/", UserID, eventID)
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String("mirror-uploads-sparago-2026"),
+		Prefix: aws.String(prefix),
+	}
+
+	result, err := s3Client.ListObjectsV2(ctx, input)
+	if err != nil {
+		http.Error(w, "S3 List Error: "+err.Error(), 500)
+		return
+	}
+
+	event := &Event{EventID: eventID}
+
+	// 4. Presign each file found in the bundle (Expiry: 4 hours)
+	for _, obj := range result.Contents {
+		key := *obj.Key
+		filename := key[len(prefix):]
+
+		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Key:    aws.String(key),
+		}, s3.WithPresignExpires(4*time.Hour))
+
+		if err != nil {
+			fmt.Printf("Error presigning %s: %v\n", key, err)
+			continue
+		}
+
+		switch filename {
+		case "image.jpg":
+			event.ImageURL = presignedRes.URL
+		case "metadata.json":
+			event.MetadataURL = presignedRes.URL
+		case "audio.m4a", "audio.mp3", "audio_caption.mp3", "caption.mp3":
+			event.AudioURL = presignedRes.URL
+		case "deep_dive.m4a", "deep_dive.mp3", "deep_dive_audio.mp3":
+			event.DeepDiveAudioURL = presignedRes.URL
+		case "video.mp4":
+			event.VideoURL = presignedRes.URL
+		}
+	}
+
+	// Return JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(event)
 }
 
 // DeleteMirrorEvent handles deletion of an event bundle (S3 objects)
@@ -311,10 +389,10 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	// 4. Initialize S3 Client
 	s3Client := s3.NewFromConfig(cfg)
 
-	// 5. Determine path: "to" (companion -> cole), "from" (cole -> companion, selfie responses), or "staging" (temporary)
+	// 5. Determine path: \"to\" (companion -> cole), \"from\" (cole -> companion, selfie responses), or \"staging\" (temporary)
 	path := r.URL.Query().Get("path")
 	if path != "to" && path != "from" && path != "staging" {
-		path = "to" // Default to "to" for backward compatibility
+		path = "to" // Default to \"to\" for backward compatibility
 	}
 
 	bucket := "mirror-uploads-sparago-2026"

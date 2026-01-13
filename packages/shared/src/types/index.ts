@@ -36,6 +36,7 @@ export interface Event {
   video_url?: string; // Optional presigned GET URL for video.mp4
   deep_dive_audio_url?: string; // Optional presigned GET URL for deep_dive.m4a
   metadata?: EventMetadata;
+  refreshedAt?: number; // Local timestamp when URLs were last refreshed
 }
 
 export interface ListEventsResponse {

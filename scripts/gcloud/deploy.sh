@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle
 
 set -e  # Exit on error
 
@@ -28,6 +28,7 @@ if [ -z "$1" ]; then
   echo "  • delete-mirror-event"
   echo "  • unsplash-search"
   echo "  • generate-ai-description"
+  echo "  • get-event-bundle"
   exit 1
 fi
 
@@ -134,6 +135,20 @@ case "$FUNCTION_NAME" in
       --quiet
     ;;
   
+  get-event-bundle)
+    echo -e "${YELLOW}Deploying get-event-bundle...${NC}"
+    gcloud functions deploy get-event-bundle \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=GetEventBundle \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
+  
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
     echo ""
@@ -143,6 +158,7 @@ case "$FUNCTION_NAME" in
     echo "  • delete-mirror-event"
     echo "  • unsplash-search"
     echo "  • generate-ai-description"
+    echo "  • get-event-bundle"
     exit 1
     ;;
 esac

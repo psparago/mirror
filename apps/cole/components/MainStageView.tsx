@@ -36,9 +36,8 @@ interface MainStageProps {
   cameraPermission: PermissionResponse | null;
   requestCameraPermission: () => Promise<PermissionResponse>;
   isCapturingSelfie: boolean;
-  pendingCount: number;
-  onFlushUpdates: () => void;
   readEventIds: string[];
+  recentlyArrivedIds: string[]; // State for items that arrived during this session
   onReplay?: (event: Event) => void;
 }
 
@@ -56,9 +55,8 @@ export default function MainStageView({
   cameraPermission,
   requestCameraPermission,
   isCapturingSelfie,
-  pendingCount,
-  onFlushUpdates,
   readEventIds,
+  recentlyArrivedIds,
   onReplay,
 }: MainStageProps) {
   const { width, height } = useWindowDimensions();
@@ -214,7 +212,7 @@ export default function MainStageView({
         // If there's a companion audio recording, play that instead of TTS
         if (audioUrl) {
           try {
-            console.log(`🎧 Playing companion audio from: ${audioUrl.substring(0, 50)}...`);
+            console.log(`🎧 Narrating caption from: ${audioUrl.substring(0, 80)}...`);
             const { sound: newCaptionSound } = await Audio.Sound.createAsync(
               { uri: audioUrl },
               { shouldPlay: true },
@@ -338,6 +336,7 @@ export default function MainStageView({
           if (sound) await sound.unloadAsync();
 
           if (selectedEvent?.deep_dive_audio_url) {
+            console.log(`🧠 Playing deep dive audio from: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}...`);
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: selectedEvent.deep_dive_audio_url },
               { shouldPlay: true }
@@ -404,21 +403,48 @@ export default function MainStageView({
       prevEventIdRef.current = currentEventId;
       console.log(`📩 User selected reflection: ${currentEventId}`);
       send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
+
+      // Auto-scroll the list to show the selected item
+      if (flatListRef.current) {
+        const index = events.findIndex(e => e.event_id === currentEventId);
+        if (index !== -1) {
+          try {
+            flatListRef.current.scrollToIndex({
+              index,
+              animated: true,
+              viewPosition: 0.5 // Center the item in the list
+            });
+          } catch (err) {
+            // scrollToOffset as fallback if scrollToIndex fails (common in early renders)
+            console.warn('Scroll to index failed, using fallback');
+          }
+        }
+      }
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events]);
 
   // 2. Video Player Finished
   useEffect(() => {
     if (!player) return;
     const interval = setInterval(() => {
-      if (player.duration > 0 && player.currentTime >= player.duration - 0.1) {
+      // Use 0.2s threshold to ensure we catch it before it actually stops
+      if (player.duration > 0 && player.currentTime >= player.duration - 0.2) {
         send({ type: 'VIDEO_FINISHED' });
       }
     }, 200);
     return () => clearInterval(interval);
   }, [player, send]);
 
-  // 3. Show/Hide Controls AND Bubble Based on State
+  // 3. Rewind video on completion for deep dive context
+  useEffect(() => {
+    if (state?.matches('finished') && player && (selectedMetadata?.content_type === 'video' || !!selectedEvent?.video_url)) {
+      console.log('🏁 Rewinding video to start for deep dive context');
+      player.pause();
+      player.currentTime = 0;
+    }
+  }, [state?.matches('finished'), player, selectedMetadata, selectedEvent]);
+
+  // 4. Show/Hide Controls AND Bubble Based on State
   useEffect(() => {
     if (!state) return;
 
@@ -495,15 +521,45 @@ export default function MainStageView({
 
   const upNextEvents = useMemo(() => events, [events]);
 
+  const scrollToNewestArrival = () => {
+    if (recentlyArrivedIds.length === 0 || !flatListRef.current) return;
+
+    // Find the first (newest) event in the list that is currently marked as a recent arrival
+    const newestIndex = events.findIndex(e => recentlyArrivedIds.includes(e.event_id));
+
+    if (newestIndex !== -1) {
+      console.log(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
+
+      // 1. Select the event (Auto-play)
+      onEventSelect(events[newestIndex]);
+
+      // 2. Scroll to it
+      try {
+        flatListRef.current.scrollToIndex({
+          index: newestIndex,
+          animated: true,
+          viewPosition: 0.5 // Center it
+        });
+      } catch (err) {
+        console.warn('Scroll to newest arrival failed');
+      }
+    }
+  };
+
   const renderUpNextItem = ({ item }: { item: Event }) => {
-    const metadata = eventMetadata[item.event_id];
+    const itemMetadata = eventMetadata[item.event_id];
     const isNowPlaying = item.event_id === selectedEvent?.event_id;
     const isRead = readEventIds.includes(item.event_id);
+    const isNewArrival = recentlyArrivedIds.includes(item.event_id);
 
     return (
       <View style={styles.upNextItemContainer}>
         <TouchableOpacity
-          style={[styles.upNextItem, isNowPlaying && styles.upNextItemNowPlaying]}
+          style={[
+            styles.upNextItem,
+            isNowPlaying && styles.upNextItemNowPlaying,
+            isNewArrival && !isNowPlaying && styles.upNextItemNewArrival
+          ]}
           onPress={() => handleUpNextItemPress(item)}
           disabled={isNowPlaying}
         >
@@ -516,7 +572,7 @@ export default function MainStageView({
           <Image source={{ uri: item.image_url }} style={styles.upNextThumbnail} />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
-              {isNowPlaying && '▶️ '}{metadata?.description || 'Reflection'}
+              {isNowPlaying && '▶️ '}{itemMetadata?.description || 'Reflection'}
             </Text>
 
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -537,6 +593,7 @@ export default function MainStageView({
                 </>
               )}
               {isNowPlaying && <Text style={styles.upNextMetaNowPlaying}> • NOW PLAYING</Text>}
+              {isNewArrival && !isNowPlaying && <Text style={styles.upNextMetaNew}> • NEW</Text>}
             </View>
 
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
@@ -608,9 +665,15 @@ export default function MainStageView({
 
           {/* Header */}
           <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-            {pendingCount > 0 ? (
-              <TouchableOpacity onPress={onFlushUpdates} style={styles.newUpdatesButton}>
-                <Text style={styles.newUpdatesText}>Load {pendingCount} New</Text>
+            {recentlyArrivedIds.length > 0 ? (
+              <TouchableOpacity
+                onPress={scrollToNewestArrival}
+                style={styles.newArrivalNotification}
+                activeOpacity={0.7}
+              >
+                <BlurView intensity={80} style={styles.notificationBlur}>
+                  <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                </BlurView>
               </TouchableOpacity>
             ) : (
               events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
@@ -627,7 +690,7 @@ export default function MainStageView({
               }
             }}
           >
-            {selectedMetadata?.content_type === 'video' && videoSource ? (
+            {(selectedMetadata?.content_type === 'video' || !!selectedEvent.video_url) && videoSource ? (
               <VideoView player={player} style={styles.mediaImage} nativeControls={false} />
             ) : (
               <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} />
@@ -701,6 +764,12 @@ export default function MainStageView({
             data={upNextEvents}
             renderItem={renderUpNextItem}
             keyExtractor={(item) => item.event_id}
+            onScrollToIndexFailed={(info) => {
+              const wait = new Promise(resolve => setTimeout(resolve, 500));
+              wait.then(() => {
+                flatListRef.current?.scrollToIndex({ index: info.index, animated: true });
+              });
+            }}
           />
         </View>
 
@@ -766,6 +835,29 @@ const styles = StyleSheet.create({
   upNextMetaNowPlaying: { color: '#4FC3F7', fontWeight: 'bold' },
   reflectionId: { fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'Courier' },
   upNextInfo: { flex: 1, justifyContent: 'center' },
+  upNextItemNewArrival: {
+    backgroundColor: 'rgba(255, 215, 0, 0.15)', // Soft gold tint
+    borderColor: 'rgba(255, 215, 0, 0.5)',
+    borderWidth: 1,
+  },
+  upNextMetaNew: { color: '#FFD700', fontWeight: 'bold', fontSize: 10, marginLeft: 4 },
+  newArrivalNotification: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 215, 0, 0.2)',
+  },
+  notificationBlur: {
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  newArrivalText: {
+    color: '#FFD700',
+    fontWeight: 'bold',
+    fontSize: 14,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2
+  },
   deleteButton: { padding: 10, justifyContent: 'center', alignItems: 'center' },
   toast: {
     position: 'absolute',

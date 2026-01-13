@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
   const [events, setEvents] = useState<Event[]>([]);
-  const [pendingUpdates, setPendingUpdates] = useState<Event[]>([]);
+  const [recentlyArrivedIds, setRecentlyArrivedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
@@ -221,22 +221,11 @@ export default function ColeInboxScreen() {
         return b.event_id.localeCompare(a.event_id);
       });
 
-      // Hot Update Logic:
-      // If user is viewing a reflection (selectedEvent exists), queue updates instead of showing immediately.
-      if (selectedEvent) {
-        // Only update if there are changes. Simple check: if mismatch in first event ID or length
-        const currentTopId = events.length > 0 ? events[0].event_id : null;
-        const newTopId = sortedEvents.length > 0 ? sortedEvents[0].event_id : null;
+      const now = Date.now();
+      const eventsWithTimestamp = sortedEvents.map(e => ({ ...e, refreshedAt: now }));
 
-        if (currentTopId !== newTopId || events.length !== sortedEvents.length) {
-          console.log('🔥 Hot Update: Queueing pending events');
-          setPendingUpdates(sortedEvents);
-        }
-      } else {
-        // Idle state: Update immediately
-        setEvents(sortedEvents);
-        setPendingUpdates([]); // Clear pending
-      }
+      // Just update immediately, the centering logic in MainStageView will handle the focus stability
+      setEvents(eventsWithTimestamp);
 
       // Fetch metadata for each event
       const metadataPromises = (data.events || []).map(async (event) => {
@@ -321,27 +310,51 @@ export default function ColeInboxScreen() {
           const data: ListEventsResponse = await response.json();
           const freshEvents = data.events || [];
 
-          // 4. THE POLITE LOGIC
-          // Use Refs to get current state without re-subscribing
-          if (selectedEventRef.current) {
-            // --- SCENARIO: BUSY (User is watching) ---
-            const currentIds = new Set(eventsRef.current.map(e => e.event_id));
-            const newItems = freshEvents.filter(e => !currentIds.has(e.event_id));
+          // 4. IMMEDIATE INJECTION LOGIC
+          const currentIds = new Set(eventsRef.current.map(e => e.event_id));
+          const newItems = freshEvents.filter(e => !currentIds.has(e.event_id));
 
-            if (newItems.length > 0) {
-              console.log(`Queueing ${newItems.length} signed items`);
-              setPendingUpdates(prev => {
-                const existingQueueIds = new Set(prev.map(e => e.event_id));
-                const uniqueNew = newItems.filter(e => !existingQueueIds.has(e.event_id));
-                return [...prev, ...uniqueNew];
-              });
+          if (newItems.length > 0) {
+            console.log(`✨ Injecting ${newItems.length} new items immediately`);
+
+            const now = Date.now();
+            const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
+
+            // 5. PRE-FETCH METADATA for New Items
+            // This prevents "metadata-less" state confusion in MainStageView
+            const metaPromises = newItems.map(async (item) => {
+              if (item.metadata_url) {
+                try {
+                  const mRes = await fetch(item.metadata_url);
+                  if (mRes.ok) {
+                    const meta: EventMetadata = await mRes.json();
+                    return { id: item.event_id, meta };
+                  }
+                } catch (e) {
+                  console.warn(`Failed pre-fetching meta for ${item.event_id}`, e);
+                }
+              }
+              return null;
+            });
+
+            Promise.all(metaPromises).then(results => {
+              const updates: { [key: string]: EventMetadata } = {};
+              results.forEach(r => { if (r) updates[r.id] = r.meta; });
+              if (Object.keys(updates).length > 0) {
+                setEventMetadata(prev => ({ ...prev, ...updates }));
+              }
+            });
+
+            // Update events
+            setEvents(prev => {
+              const merged = [...signedNewItems, ...prev];
+              return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
+            });
+
+            // Mark as "Recent" for visual distinction if we are currently looking at something
+            if (selectedEventRef.current) {
+              setRecentlyArrivedIds(prev => [...prev, ...newItems.map(item => item.event_id)]);
             }
-          } else {
-            // --- SCENARIO: IDLE (User is on Grid) ---
-            console.log('Idle update: Setting fresh events');
-            const sorted = freshEvents.sort((a, b) => b.event_id.localeCompare(a.event_id));
-            setEvents(sorted);
-            setPendingUpdates([]);
           }
 
         } catch (error) {
@@ -356,63 +369,51 @@ export default function ColeInboxScreen() {
     return () => unsubscribe();
   }, []); // Empty dependency array - strict run-once
 
-  // Flush pending updates to the main list
-  const onFlushUpdates = () => {
-    if (pendingUpdates.length > 0) {
-      setEvents((prevEvents) => {
-        // 1. Combine Old + New
-        // (We put pendingUpdates LAST so they overwrite old versions in the Map)
-        const combined = [...prevEvents, ...pendingUpdates];
-
-        // 2. Deduplicate by ID
-        const uniqueEvents = Array.from(
-          new Map(combined.map((item) => [item.event_id, item])).values()
-        );
-
-        // 3. Sort Descending (Newest on top)
-        const sorted = uniqueEvents.sort((a, b) => b.event_id.localeCompare(a.event_id));
-
-        // 4. Autoplay the newest event (first in sorted list)
-        if (sorted.length > 0) {
-          const newestEvent = sorted[0];
-          console.log(`🎬 Autoplaying newest reflection after flush: ${newestEvent.event_id}`);
-          // Use setTimeout to ensure state update completes first
-          setTimeout(() => {
-            setSelectedEvent(newestEvent);
-          }, 100);
-        }
-
-        return sorted;
-      });
-
-      // Clear the queue
-      setPendingUpdates([]);
-    }
-  };
 
   const refreshEventUrls = async (eventId: string): Promise<Event | null> => {
     try {
-      // Fetch fresh URLs for all events (backend generates new presigned URLs)
-      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+      // Fetch fresh URLs for a single event bundle (Expiry: 4 hours)
+      const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}`);
       if (!response.ok) {
         console.warn(`Failed to refresh URLs for event ${eventId}`);
         return null;
       }
 
-      const data: ListEventsResponse = await response.json();
-      const refreshedEvent = data.events?.find(e => e.event_id === eventId);
+      const refreshedEvent: Event = await response.json();
+      const refreshedEventWithTimestamp = { ...refreshedEvent, refreshedAt: Date.now() };
 
-      if (refreshedEvent) {
-        // Update the event in the events array
-        setEvents(prevEvents =>
-          prevEvents.map(e => e.event_id === eventId ? refreshedEvent : e)
-        );
-        return refreshedEvent;
-      }
-      return null;
+      // Update the event in the events array
+      setEvents(prevEvents =>
+        prevEvents.map(e => e.event_id === eventId ? { ...e, ...refreshedEventWithTimestamp } : e)
+      );
+      return refreshedEventWithTimestamp;
     } catch (error) {
       console.error(`Error refreshing URLs for event ${eventId}:`, error);
       return null;
+    }
+  };
+
+  // Predictive Neighbor Refresh: Silently refresh the next 2 events in circular order
+  const refreshNeighborUrls = async (currentEventId: string) => {
+    if (events.length <= 1) return;
+
+    const currentIndex = events.findIndex(e => e.event_id === currentEventId);
+    if (currentIndex === -1) return;
+
+    // We refresh the next 2 events to stay ahead of the user
+    const neighborIndices = [
+      (currentIndex + 1) % events.length,
+      (currentIndex + 2) % events.length
+    ].filter(idx => idx !== currentIndex);
+
+    for (const idx of neighborIndices) {
+      const neighbor = events[idx];
+      // Only refresh if about to expire (e.g. older than 3 hours)
+      const STALE_THRESHOLD = 3 * 60 * 60 * 1000;
+      if (!neighbor.refreshedAt || Date.now() - neighbor.refreshedAt > STALE_THRESHOLD) {
+        console.log(`📡 Predictive refresh for neighbor: ${neighbor.event_id} (Stale)`);
+        refreshEventUrls(neighbor.event_id).catch(() => { });
+      }
     }
   };
 
@@ -439,6 +440,9 @@ export default function ColeInboxScreen() {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
 
+    // Remove from "Recent" arrivals once selected
+    setRecentlyArrivedIds(prev => prev.filter(id => id !== item.event_id));
+
     // Fetch metadata if not already loaded
     if (!eventMetadata[item.event_id] && item.metadata_url) {
       try {
@@ -455,30 +459,38 @@ export default function ColeInboxScreen() {
       }
     }
 
-    // Refresh URLs in background (non-blocking) to ensure they're not expired
-    const eventIdToRefresh = item.event_id;
-    refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
-      if (refreshedEvent) {
-        // DON'T update selectedEvent - this would trigger re-renders and re-playback
-        // Just update the events array in the background
+    // Refresh URLs in background (non-blocking) if they are stale
+    const STALE_THRESHOLD = 3 * 60 * 60 * 1000; // 3 hours
+    const isStale = !item.refreshedAt || (Date.now() - item.refreshedAt > STALE_THRESHOLD);
 
-        // Fetch metadata for refreshed event if not already loaded
-        if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
-          fetch(refreshedEvent.metadata_url)
-            .then(res => res.json())
-            .then((metadata: EventMetadata) => {
-              setEventMetadata(prev => ({
-                ...prev,
-                [refreshedEvent.event_id]: metadata
-              }));
-            })
-            .catch(err => console.warn("Failed to fetch metadata for refreshed event:", err));
+    if (isStale) {
+      console.log(`🔄 Item ${item.event_id} is stale. Refreshing in background...`);
+      const eventIdToRefresh = item.event_id;
+      refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
+        if (refreshedEvent) {
+          // Trigger predictive refresh for neighbors
+          refreshNeighborUrls(eventIdToRefresh);
+
+          // Fetch metadata for refreshed event if not already loaded
+          if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
+            fetch(refreshedEvent.metadata_url)
+              .then(res => res.json())
+              .then((metadata: EventMetadata) => {
+                setEventMetadata(prev => ({
+                  ...prev,
+                  [refreshedEvent.event_id]: metadata
+                }));
+              })
+              .catch(err => console.warn("Failed to fetch metadata for refreshed event:", err));
+          }
         }
-      }
-    }).catch(err => {
-      console.warn("Background URL refresh failed:", err);
-      // Continue with original URLs - they might still work
-    });
+      }).catch(err => {
+        console.warn("Background URL refresh failed:", err);
+      });
+    } else {
+      // Still refresh neighbors, they might be stale
+      refreshNeighborUrls(item.event_id);
+    }
   };
 
   const renderEvent = ({ item }: { item: Event }) => {
@@ -514,18 +526,11 @@ export default function ColeInboxScreen() {
     // Stop speech if playing
     Speech.stop();
 
-    // Auto-flush pending updates when closing
-    if (pendingUpdates.length > 0) {
-      onFlushUpdates();
-    }
-
-    // Only fetch fresh list if we didn't just flush (optional, but robust)
-    if (pendingUpdates.length === 0) {
-      fetchEvents();
-    }
+    // Auto-fetch fresh list if closing (optional, but robust)
+    fetchEvents();
 
     setSelectedEvent(null);
-  }, [pendingUpdates, events]);
+  }, []);
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
@@ -893,8 +898,7 @@ export default function ColeInboxScreen() {
       cameraPermission={cameraPermission}
       requestCameraPermission={requestCameraPermission}
       isCapturingSelfie={isCapturingSelfie}
-      pendingCount={pendingUpdates.length > 0 ? Math.max(0, pendingUpdates.length - events.length) + (pendingUpdates[0]?.event_id !== events[0]?.event_id ? 1 : 0) : 0}
-      onFlushUpdates={onFlushUpdates}
+      recentlyArrivedIds={recentlyArrivedIds}
       readEventIds={readEventIds}
       onReplay={(event) => sendReplaySignal(event.event_id)}
     />
