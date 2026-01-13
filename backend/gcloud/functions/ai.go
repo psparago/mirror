@@ -43,7 +43,7 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
 	// 2. Get Image from S3 URL (passed in query)
 	imageURL := r.URL.Query().Get("image_url")

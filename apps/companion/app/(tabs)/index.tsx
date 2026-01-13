@@ -199,10 +199,12 @@ export default function CompanionHomeScreen() {
     setShowCameraModal(false);
   };
 
-  const getAIDescription = async (imageUrl: string) => {
+  const getAIDescription = async (imageUrl: string, options: { silent?: boolean } = {}) => {
     try {
-      setIsAiThinking(true);
-      setIsAiGenerated(false);
+      if (!options.silent) {
+        setIsAiThinking(true);
+        setIsAiGenerated(false);
+      }
 
       const response = await fetch(
         `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}`
@@ -222,17 +224,23 @@ export default function CompanionHomeScreen() {
         setDeepDive(aiResponse.deep_dive);
         setAiAudioUrl(aiResponse.audio_url || null);
         setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
-        // Show short_caption in the text input for user to see/edit
-        setDescription(aiResponse.short_caption);
-        setIsAiGenerated(true);
+
+        if (!options.silent) {
+          // Show short_caption in the text input for user to see/edit
+          setDescription(aiResponse.short_caption);
+          setIsAiGenerated(true);
+        }
+        return aiResponse;
       } else {
         throw new Error("Invalid response format from AI");
       }
     } catch (error: any) {
       console.error("Error getting AI description:", error);
-      // Don't show error to user - just let them type manually
+      return null;
     } finally {
-      setIsAiThinking(false);
+      if (!options.silent) {
+        setIsAiThinking(false);
+      }
     }
   };
 
@@ -536,6 +544,24 @@ export default function CompanionHomeScreen() {
     try {
       setUploading(true);
 
+      // FORCE DEEP DIVE: Ensure we have AI content even if user manual-typed or recorded audio
+      // We do this in the background if we don't have it yet
+      let activeDeepDive = deepDive;
+      let activeDeepDiveAudio = aiDeepDiveAudioUrl;
+      let activeShortCaption = shortCaption;
+      let activeAiAudio = aiAudioUrl;
+
+      if (!activeDeepDive) {
+        console.log("🛠️ Reflection missing Deep Dive, generating in background...");
+        const aiResult = await generateDeepDiveBackground();
+        if (aiResult) {
+          activeDeepDive = aiResult.deep_dive;
+          activeDeepDiveAudio = aiResult.deep_dive_audio_url;
+          activeShortCaption = aiResult.short_caption;
+          activeAiAudio = aiResult.audio_url;
+        }
+      }
+
       // Generate unique event_id (timestamp-based)
       const eventID = Date.now().toString();
       const timestamp = new Date().toISOString();
@@ -561,7 +587,7 @@ export default function CompanionHomeScreen() {
 
       // Check for AI Deep Dive audio
       let hasDeepDiveAudio = false;
-      if (aiDeepDiveAudioUrl) {
+      if (activeDeepDiveAudio) {
         filesToSign.push('deep_dive.m4a');
         hasDeepDiveAudio = true;
       }
@@ -626,15 +652,15 @@ export default function CompanionHomeScreen() {
 
       // 6. Queue Audio Upload
       if (hasAudio && urls['audio.m4a']) {
-        const audioSource = audioUri || aiAudioUrl;
+        const audioSource = audioUri || activeAiAudio;
         if (audioSource) {
           uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']));
         }
       }
 
       // 6.5 Queue Deep Dive Audio Upload
-      if (hasDeepDiveAudio && aiDeepDiveAudioUrl && urls['deep_dive.m4a']) {
-        uploadPromises.push(safeUploadToS3(aiDeepDiveAudioUrl, urls['deep_dive.m4a']));
+      if (hasDeepDiveAudio && activeDeepDiveAudio && urls['deep_dive.m4a']) {
+        uploadPromises.push(safeUploadToS3(activeDeepDiveAudio, urls['deep_dive.m4a']));
       }
 
       // 7. Queue Metadata Upload
@@ -646,9 +672,9 @@ export default function CompanionHomeScreen() {
         content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
       };
 
-      if (shortCaption && deepDive) {
-        metadata.short_caption = shortCaption;
-        metadata.deep_dive = deepDive;
+      if (activeShortCaption && activeDeepDive) {
+        metadata.short_caption = activeShortCaption;
+        metadata.deep_dive = activeDeepDive;
       }
 
       const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
@@ -764,14 +790,14 @@ export default function CompanionHomeScreen() {
     lastProcessedUriRef.current = null;
   };
 
-  const triggerAI = async () => {
-    if (!photo) return;
-
-    setIntent('ai');
-    setIsAiThinking(true);
-    setIsAiGenerated(false);
+  const generateDeepDiveBackground = async (options: { silent?: boolean } = { silent: true }) => {
+    if (!photo) return null;
 
     try {
+      if (!options.silent) {
+        setIsAiThinking(true);
+        setIsAiGenerated(false);
+      }
       // Generate staging event_id and upload image if not already uploaded
       let stagingId = stagingEventId;
       if (!stagingId) {
@@ -792,7 +818,6 @@ export default function CompanionHomeScreen() {
             isTempThumbnail = true;
           } catch (thumbnailError) {
             console.error("Failed to generate thumbnail for AI:", thumbnailError);
-            // Fallback to uploading video (will likely fail at AI step but better than crashing here)
           }
         }
 
@@ -805,9 +830,7 @@ export default function CompanionHomeScreen() {
         if (isTempThumbnail) {
           try {
             await FileSystem.deleteAsync(uriToUpload, { idempotent: true });
-          } catch (cleanupError) {
-            console.warn("Failed to delete temp thumbnail:", cleanupError);
-          }
+          } catch (cleanupError) { }
         }
       }
 
@@ -815,11 +838,25 @@ export default function CompanionHomeScreen() {
       const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
       if (getStagingUrlResponse.ok) {
         const { url: getStagingUrl } = await getStagingUrlResponse.json();
-        await getAIDescription(getStagingUrl);
+        return await getAIDescription(getStagingUrl, options);
       }
     } catch (error: any) {
-      console.error("Error uploading to staging or getting AI description:", error);
-      setIsAiThinking(false);
+      console.error("Error generating background Deep Dive:", error);
+    } finally {
+      if (!options.silent) {
+        setIsAiThinking(false);
+      }
+    }
+    return null;
+  };
+
+  const triggerAI = async () => {
+    if (!photo) return;
+    setIntent('ai');
+    const aiResult = await generateDeepDiveBackground({ silent: false });
+    // Special handling to ensure description is set from the now-fetched AI result
+    if (aiResult?.short_caption) {
+      setDescription(aiResult.short_caption);
     }
   };
 
@@ -1309,7 +1346,7 @@ export default function CompanionHomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+var styles = StyleSheet.create({
   container: {
     flex: 1,
     justifyContent: 'center'
