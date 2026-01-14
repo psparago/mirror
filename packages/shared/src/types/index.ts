@@ -22,6 +22,7 @@ export interface EventMetadata {
   // Note: audio_url/video_url are NOT stored in metadata.json (presigned URLs expire)
   // The backend ListMirrorEvents generates fresh presigned GET URLs in the Event object
   content_type?: 'text' | 'audio' | 'video';
+  image_source?: 'camera' | 'search'; // Where the image came from
   // AI-generated dual-story fields
   short_caption?: string; // Brief greeting - auto-played on load
   deep_dive?: string; // Detailed story - played when ✨ is tapped

@@ -699,10 +699,10 @@ export default function MainStageView({
                   <FontAwesome name="video-camera" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
                   <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Video</Text>
                 </>
-              ) : item.audio_url ? (
+              ) : itemMetadata?.image_source === 'search' ? (
                 <>
-                  <FontAwesome name="microphone" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
-                  <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Voice</Text>
+                  <FontAwesome name="search" size={12} color="rgba(255, 255, 255, 0.7)" style={{ marginRight: 4 }} />
+                  <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Image</Text>
                 </>
               ) : (
                 <>

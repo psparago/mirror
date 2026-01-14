@@ -23,7 +23,13 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
   // If remote URL (e.g. Unsplash or AI TTS), download to cache first
   if (localUri.startsWith('http')) {
     try {
-      const extension = localUri.split('?')[0].split('.').pop()?.toLowerCase() || 'jpg';
+      // Extract extension from URL path (before query params), default to jpg for images
+      const urlPath = localUri.split('?')[0];
+      const lastSegment = urlPath.split('/').pop() || '';
+      const dotParts = lastSegment.split('.');
+      // Only use extension if there's a proper file extension (2-4 chars), otherwise default to jpg
+      const extractedExt = dotParts.length > 1 ? dotParts.pop()?.toLowerCase() : null;
+      const extension = (extractedExt && extractedExt.length <= 4 && !extractedExt.includes('/')) ? extractedExt : 'jpg';
       const filename = `temp_upload_${Date.now()}.${extension}`;
       console.log(`📥 safeUploadToS3: Downloading remote file to ${filename}...`);
       const downloadRes = await FileSystem.downloadAsync(
@@ -93,6 +99,7 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -129,6 +136,22 @@ export default function CompanionHomeScreen() {
       console.log(`📱 [Companion App] AppState changed to: ${nextAppState}`);
     });
     return () => subscription.remove();
+  }, []);
+
+  // Keyboard visibility listener
+  useEffect(() => {
+    const showListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setKeyboardVisible(true)
+    );
+    const hideListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardVisible(false)
+    );
+    return () => {
+      showListener.remove();
+      hideListener.remove();
+    };
   }, []);
 
   // Request audio permissions on mount
@@ -1094,13 +1117,15 @@ export default function CompanionHomeScreen() {
                   </View>
                 )}
 
-                {/* Dismiss Keyboard */}
-                <TouchableOpacity
-                  style={styles.dismissKeyboardButton}
-                  onPress={Keyboard.dismiss}
-                >
-                  <Text style={styles.dismissKeyboardText}>Tap here to dismiss keyboard</Text>
-                </TouchableOpacity>
+                {/* Dismiss Keyboard - only show when keyboard is visible */}
+                {keyboardVisible && (
+                  <TouchableOpacity
+                    style={styles.dismissKeyboardButton}
+                    onPress={Keyboard.dismiss}
+                  >
+                    <Text style={styles.dismissKeyboardText}>Tap here to dismiss keyboard</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             )}
 
