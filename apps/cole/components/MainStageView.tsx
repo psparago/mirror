@@ -9,7 +9,6 @@ import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Animated,
   FlatList,
   Image,
@@ -174,9 +173,10 @@ export default function MainStageView({
     // ... actions ... (we keep the actions block same, just modify lines around it)
     actions: {
       stopAllMedia: async () => {
-        console.log('🛑 Stopping all media');
+        console.log(`🛑 Stopping all media (session before: ${captionSessionRef.current})`);
         // Increment session to invalidate any pending callbacks
         captionSessionRef.current += 1;
+        console.log(`🛑 Session incremented to: ${captionSessionRef.current}`);
         // Stop TTS immediately and forcefully
         Speech.stop();
         // Stop voice message audio
@@ -213,8 +213,10 @@ export default function MainStageView({
         const audioUrl = selectedEvent?.audio_url; // Companion-recorded caption
 
         // Start new caption session
+        console.log(`🎤 speakCaption called (session before: ${captionSessionRef.current})`);
         captionSessionRef.current += 1;
         const thisSession = captionSessionRef.current;
+        console.log(`🎤 New caption session: ${thisSession}`);
 
         // Hide controls while speaking
         Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
@@ -229,6 +231,7 @@ export default function MainStageView({
                 { shouldPlay: true },
                 (status) => {
                   if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
+                    console.log(`🔊 Audio callback fired - thisSession: ${thisSession}, current: ${captionSessionRef.current}`);
                     // Only send if this is still the active session
                     if (captionSessionRef.current === thisSession) {
                       console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
@@ -237,7 +240,7 @@ export default function MainStageView({
                       captionSoundRef.current = null;
                       send({ type: 'NARRATION_FINISHED' });
                     } else {
-                      console.log('🚫 Companion audio finished but session changed - ignoring');
+                      console.log(`🚫 Companion audio finished but session changed (${thisSession} vs ${captionSessionRef.current}) - ignoring`);
                       newCaptionSound.unloadAsync();
                       captionSoundRef.current = null;
                     }
@@ -431,6 +434,18 @@ export default function MainStageView({
 
       triggerSelfie: async () => {
         await performSelfieCapture(0);
+      },
+
+      pauseMedia: async () => {
+        if (player && state.hasTag('video_mode')) player.pause();
+        if (sound) await sound.pauseAsync();
+        if (captionSound) await captionSound.pauseAsync();
+      },
+
+      resumeMedia: async () => {
+        if (player && state.hasTag('video_mode')) player.play();
+        if (sound) await sound.playAsync();
+        if (captionSound) await captionSound.playAsync();
       }
     }
   }));
@@ -516,8 +531,8 @@ export default function MainStageView({
       // Finished: Show controls AND hide bubble
       Animated.timing(controlsOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
       Animated.timing(selfieMirrorOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start();
-    } else if (state.matches({ viewingPhoto: 'viewing' })) {
-      // Photo viewing: Show controls but DON'T touch bubble (it needs to stay visible!)
+    } else if (state.hasTag('paused') || state.matches({ viewingPhoto: 'viewing' })) {
+      // Paused or photo viewing: Show controls
       Animated.timing(controlsOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
     } else {
       // Playing: Hide controls
@@ -526,9 +541,9 @@ export default function MainStageView({
   }, [state, controlsOpacity, selfieMirrorOpacity]);
 
   // 4. ANIMATIONS (VU Meter & Pulse)
-  const isMachineSpeaking = state && (state.matches({ playingVideo: 'narrating' }) ||
+  const isMachineSpeaking = state && (state.matches({ playingVideo: { playback: 'narrating' } }) ||
     state.matches({ viewingPhoto: 'narrating' }) ||
-    state.matches('playingDeepDive'));
+    state.matches({ playingDeepDive: { active: 'playing' } }));
   const isPlayingAudioState = state && state.matches('playingAudio');
   const isAnyAudioPlaying = isMachineSpeaking || isPlayingAudioState || isVideoPlaying;
 
@@ -735,10 +750,27 @@ export default function MainStageView({
 
   const panResponder = useRef(
     PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (_, gestureState) => {
         return Math.abs(gestureState.dx) > 20;
       },
       onPanResponderRelease: (_, gestureState) => {
+        // Handle Single Tap (Pause/Resume)
+        if (Math.abs(gestureState.dx) < 10 && Math.abs(gestureState.dy) < 10) {
+          if (state && state.hasTag('active')) {
+            if (state.hasTag('paused')) {
+              console.log('⏯️ Tapped to Resume');
+              send({ type: 'RESUME' });
+            } else {
+              console.log('⏸️ Tapped to Pause');
+              send({ type: 'PAUSE' });
+            }
+          } else if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
+            handleReplay();
+          }
+          return;
+        }
+
         const currentEvents = eventsRef.current;
         const currentSelected = selectedEventRef.current;
 
@@ -788,54 +820,40 @@ export default function MainStageView({
             ) : (
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 {events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>}
-                {!isAdminMode && (
-                  <View style={styles.lockBadge}>
-                    <FontAwesome name="lock" size={10} color="rgba(255,255,255,0.6)" style={{ marginRight: 4 }} />
-                    <Text style={styles.lockText}>CAREGIVER LOCK</Text>
-                  </View>
-                )}
-                {isAdminMode && (
-                  <View style={styles.adminBadge}>
-                    <Text style={styles.adminBadgeText}>ADMIN MODE</Text>
-                  </View>
-                )}
               </View>
             )}
           </View>
 
           {/* Media Container */}
-          <TouchableOpacity
-            style={styles.mediaContainer}
-            activeOpacity={1}
-            onPress={() => {
-              if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
-                handleReplay();
-              }
-            }}
-          >
+          <View style={styles.mediaContainer}>
             {(selectedMetadata?.content_type === 'video' || !!selectedEvent.video_url) && videoSource ? (
               <VideoView player={player} style={styles.mediaImage} nativeControls={false} />
             ) : (
               <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} />
             )}
 
-            {/* Replay Button */}
-            <Animated.View style={[styles.playOverlay, { opacity: controlsOpacity }]}>
-              <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                <BlurView intensity={30} style={styles.playOverlayBlur}>
-                  <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
-                </BlurView>
-              </TouchableOpacity>
+            {/* Replay / Pause Icon Overlay */}
+            <Animated.View
+              style={[styles.playOverlay, { opacity: controlsOpacity }]}
+              pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
+            >
+              {state.matches('finished') ? (
+                <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
+                  <BlurView intensity={30} style={styles.playOverlayBlur}>
+                    <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
+                  </BlurView>
+                </TouchableOpacity>
+              ) : state.hasTag('paused') ? (
+                <View style={styles.playButton}>
+                  <BlurView intensity={30} style={styles.playOverlayBlur}>
+                    <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
+                  </BlurView>
+                </View>
+              ) : null}
             </Animated.View>
 
-            {/* Loading Indicator for slow iPad loads */}
-            {state && state.matches({ playingVideo: 'playing' }) && (!player || player.status !== 'readyToPlay') && (
-              <View style={styles.videoLoadingOverlay}>
-                <ActivityIndicator size="large" color="#fff" />
-                <Text style={styles.videoLoadingText}>Preparing video...</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+            {/* Loading Indicator removed - was blocking video */}
+          </View>
 
           {/* Capraion & Metadata */}
           <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
@@ -999,8 +1017,8 @@ const styles = StyleSheet.create({
   mediaContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   mediaImage: { width: '100%', height: '100%' },
   playOverlay: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, justifyContent: 'center', alignItems: 'center' },
-  playButton: { width: 100, height: 100, borderRadius: 50, overflow: 'hidden', justifyContent: 'center', alignItems: 'center' },
-  playOverlayBlur: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, borderRadius: 50, justifyContent: 'center', alignItems: 'center' },
+  playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
+  playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
   cameraBubble: { position: 'absolute', width: 100, height: 100, borderRadius: 50, overflow: 'hidden', borderWidth: 2, borderColor: '#fff', zIndex: 99999, elevation: 10 },
   cameraPreview: { flex: 1 },
   metadataContainer: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 20, backgroundColor: 'rgba(0,0,0,0.5)' },
