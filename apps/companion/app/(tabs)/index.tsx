@@ -109,6 +109,7 @@ export default function CompanionHomeScreen() {
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
+  const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
 
   // Video player for preview
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
@@ -323,6 +324,7 @@ export default function CompanionHomeScreen() {
 
   const handleImageSelect = async (imageUrl: string) => {
     setPhoto({ uri: imageUrl });
+    setImageSourceType('search');
     setIsSearchModalVisible(false);
     setShowDescriptionInput(true);
     setSearchQuery('');
@@ -379,6 +381,7 @@ export default function CompanionHomeScreen() {
           setMediaType('photo');
           setVideoUri(null);
           setPhoto({ uri: asset.uri });
+          setImageSourceType('camera');
         }
 
         setIsLoadingImage(true);
@@ -416,6 +419,7 @@ export default function CompanionHomeScreen() {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
       setPhoto(picture);
       setMediaType('photo');
+      setImageSourceType('camera');
       setShowDescriptionInput(true);
       setShowCameraModal(false); // Close camera modal after taking photo
       // Clear any previous audio recording when taking a new photo
@@ -726,6 +730,7 @@ export default function CompanionHomeScreen() {
         content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
         short_caption: finalCaption,
         deep_dive: finalDeepDive,
+        image_source: imageSourceType,
       };
 
       const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });

@@ -9,6 +9,7 @@ import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   FlatList,
   Image,
@@ -110,6 +111,52 @@ export default function MainStageView({
   const [mathChallenge, setMathChallenge] = useState({ a: 3, b: 3, sum: 6 });
   const lastTapRef = useRef<number>(0);
 
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dx) > 20;
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        // Handle Single Tap (Pause/Resume)
+        if (Math.abs(gestureState.dx) < 10 && Math.abs(gestureState.dy) < 10) {
+          if (state && state.hasTag('active')) {
+            if (state.hasTag('paused')) {
+              console.log('⏯️ Tapped to Resume');
+              send({ type: 'RESUME' });
+            } else {
+              console.log('⏸️ Tapped to Pause');
+              send({ type: 'PAUSE' });
+            }
+          } else if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
+            handleReplay();
+          }
+          return;
+        }
+
+        const currentEvents = eventsRef.current;
+        const currentSelected = selectedEventRef.current;
+
+        const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
+        if (currentIndex === -1) return;
+
+        if (gestureState.dx < -50) {
+          console.log('👈 Swiped Left (Next)');
+          if (currentIndex < currentEvents.length - 1) {
+            onEventSelect(currentEvents[currentIndex + 1]);
+          }
+        }
+
+        else if (gestureState.dx > 50) {
+          console.log('👉 Swiped Right (Previous)');
+          if (currentIndex > 0) {
+            onEventSelect(currentEvents[currentIndex - 1]);
+          }
+        }
+      },
+    })
+  ).current;
+
   // Show toast notification
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -173,10 +220,8 @@ export default function MainStageView({
     // ... actions ... (we keep the actions block same, just modify lines around it)
     actions: {
       stopAllMedia: async () => {
-        console.log(`🛑 Stopping all media (session before: ${captionSessionRef.current})`);
         // Increment session to invalidate any pending callbacks
         captionSessionRef.current += 1;
-        console.log(`🛑 Session incremented to: ${captionSessionRef.current}`);
         // Stop TTS immediately and forcefully
         Speech.stop();
         // Stop voice message audio
@@ -213,10 +258,8 @@ export default function MainStageView({
         const audioUrl = selectedEvent?.audio_url; // Companion-recorded caption
 
         // Start new caption session
-        console.log(`🎤 speakCaption called (session before: ${captionSessionRef.current})`);
         captionSessionRef.current += 1;
         const thisSession = captionSessionRef.current;
-        console.log(`🎤 New caption session: ${thisSession}`);
 
         // Hide controls while speaking
         Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
@@ -231,10 +274,8 @@ export default function MainStageView({
                 { shouldPlay: true },
                 (status) => {
                   if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
-                    console.log(`🔊 Audio callback fired - thisSession: ${thisSession}, current: ${captionSessionRef.current}`);
                     // Only send if this is still the active session
                     if (captionSessionRef.current === thisSession) {
-                      console.log('✅ Companion audio finished - sending NARRATION_FINISHED');
                       newCaptionSound.unloadAsync();
                       setCaptionSound(null);
                       captionSoundRef.current = null;
@@ -723,22 +764,30 @@ export default function MainStageView({
             </Text>
           </View>
 
-          {/* Delete Button - Only visible in Admin Mode and requires LONG press */}
-          {isAdminMode ? (
+          {/* Delete Button - Only visible in Admin Mode */}
+          {isAdminMode && (
             <TouchableOpacity
               style={styles.deleteButton}
-              onLongPress={() => {
-                onDelete(item);
-                showToast('🗑️ Reflection deleted');
+              onPress={() => {
+                Alert.alert(
+                  "Delete Reflection",
+                  "Are you sure you want to permanently delete this reflection?",
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Delete",
+                      style: "destructive",
+                      onPress: () => {
+                        onDelete(item);
+                        showToast('🗑️ Reflection deleted');
+                      }
+                    }
+                  ]
+                );
               }}
-              delayLongPress={1500}
             >
               <FontAwesome name="trash" size={20} color="rgba(255, 100, 100, 0.9)" />
             </TouchableOpacity>
-          ) : (
-            <View style={[styles.deleteButton, { opacity: 0.3 }]}>
-              <FontAwesome name="lock" size={16} color="rgba(255, 255, 255, 0.4)" />
-            </View>
           )}
         </TouchableOpacity>
       </View>
@@ -748,51 +797,6 @@ export default function MainStageView({
 
   if (!selectedEvent) return <View style={styles.modalContainer} />;
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        return Math.abs(gestureState.dx) > 20;
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        // Handle Single Tap (Pause/Resume)
-        if (Math.abs(gestureState.dx) < 10 && Math.abs(gestureState.dy) < 10) {
-          if (state && state.hasTag('active')) {
-            if (state.hasTag('paused')) {
-              console.log('⏯️ Tapped to Resume');
-              send({ type: 'RESUME' });
-            } else {
-              console.log('⏸️ Tapped to Pause');
-              send({ type: 'PAUSE' });
-            }
-          } else if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
-            handleReplay();
-          }
-          return;
-        }
-
-        const currentEvents = eventsRef.current;
-        const currentSelected = selectedEventRef.current;
-
-        const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
-        if (currentIndex === -1) return;
-
-        if (gestureState.dx < -50) {
-          console.log('👈 Swiped Left (Next)');
-          if (currentIndex < currentEvents.length - 1) {
-            onEventSelect(currentEvents[currentIndex + 1]);
-          }
-        }
-
-        else if (gestureState.dx > 50) {
-          console.log('👉 Swiped Right (Previous)');
-          if (currentIndex > 0) {
-            onEventSelect(currentEvents[currentIndex - 1]);
-          }
-        }
-      },
-    })
-  ).current;
 
   return (
     <LinearGradient

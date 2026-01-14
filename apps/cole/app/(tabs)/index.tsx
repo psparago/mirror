@@ -2,6 +2,7 @@ import MainStageView from '@/components/MainStageView';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
@@ -33,6 +34,26 @@ export default function ColeInboxScreen() {
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
+
+  // Play chime sound for new arrivals
+  const playArrivalChime = async () => {
+    try {
+      // Using a local chime asset for reliable playback
+      const { sound } = await Audio.Sound.createAsync(
+        require('../../assets/sounds/chime.mp3'),
+        { shouldPlay: true, volume: 0.7 }
+      );
+      // Clean up after playing
+      sound.setOnPlaybackStatusUpdate((status: any) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync();
+        }
+      });
+      console.log('🔔 Played arrival chime');
+    } catch (error) {
+      console.warn('Could not play arrival chime:', error);
+    }
+  };
 
   // Fetch events and listen for Firestore updates
   // Fetch events and listen for Firestore updates - Moved below to fix closure staleness
@@ -95,11 +116,20 @@ export default function ColeInboxScreen() {
     };
   }, []);
 
-  // Request camera permission on startup
-  // Request camera permission on startup
+  // Request permissions and configure audio on startup
   useEffect(() => {
-    console.log('📸 Triggering camera permission check on startup...');
-    // Always request explicitly on mount to ensure prompt appears
+    console.log('📸 Triggering permission check and audio setup on startup...');
+
+    // 1. Audio Mode setup
+    Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true, // Crucial for iPad usage
+      shouldDuckAndroid: true,
+      staysActiveInBackground: true,
+      playThroughEarpieceAndroid: false,
+    }).catch(err => console.warn('Audio.setAudioModeAsync failed:', err));
+
+    // 2. Camera Permission
     requestCameraPermission().then(result => {
       if (result.granted) {
         console.log('✅ Camera permission granted');
@@ -352,20 +382,14 @@ export default function ColeInboxScreen() {
                 return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
               });
 
-              // Brief delay to let state settle before auto-play (prevents hardware/network spam)
-              setTimeout(() => {
-                if (newItems.length > 0) {
-                  const newestId = newItems[0].event_id;
-                  console.log(`🚀 Auto-playing new arrival: ${newestId}`);
-                  setRecentlyArrivedIds(prev => [...prev, newestId]);
-
-                  // Find the fully prepared event object from the fresh list
-                  const autoPlayMatch = signedNewItems.find(e => e.event_id === newestId);
-                  if (autoPlayMatch) {
-                    setSelectedEvent(autoPlayMatch);
-                  }
-                }
-              }, 1000);
+              // Mark new arrivals (shows pill notification) but DO NOT auto-play
+              if (newItems.length > 0) {
+                const newIds = newItems.map(item => item.event_id);
+                console.log(`🔔 New arrivals detected: ${newIds.join(', ')} - showing pill (no auto-play)`);
+                setRecentlyArrivedIds(prev => [...prev, ...newIds]);
+                // Play a pleasant chime to notify the user
+                playArrivalChime();
+              }
             });
           }
 
