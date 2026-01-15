@@ -1,5 +1,5 @@
 import MainStageView from '@/components/MainStageView';
-import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
+import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
@@ -8,7 +8,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Speech from 'expo-speech';
-import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -306,9 +306,13 @@ export default function ColeInboxScreen() {
     fetchEventsRef.current(); // Initial fetch
 
     // 1. Set up Firestore listener (The "Doorbell")
-    const signalsRef = collection(db, 'signals');
-    const q = query(signalsRef, orderBy('timestamp', 'desc'), limit(10));
-
+    const signalsRef = collection(db, ExplorerIdentity.collections.reflections);
+    const q = query(
+      signalsRef,
+      where('explorerId', '==', ExplorerIdentity.currentExplorerId),
+      orderBy('timestamp', 'desc'),
+      limit(10)
+    );
     let isInitialLoad = true;
 
     const unsubscribe = onSnapshot(
@@ -673,7 +677,7 @@ export default function ColeInboxScreen() {
     if (hasEngagedRef.current[eventId]) return; // Already sent
 
     try {
-      const signalRef = doc(db, 'signals', eventId);
+      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
         status: 'engaged',
@@ -691,7 +695,7 @@ export default function ColeInboxScreen() {
     // REPLAY SIGNAL: Always send to update timestamp (bubbling up list)
 
     try {
-      const signalRef = doc(db, 'signals', eventId);
+      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
         status: 'replayed',
@@ -794,8 +798,9 @@ export default function ColeInboxScreen() {
 
       // Create reflection_response document in Firestore (non-blocking)
       // Use original event_id as document ID for easy lookup
-      const responseRef = doc(db, 'reflection_responses', selectedEvent.event_id);
+      const responseRef = doc(db, ExplorerIdentity.collections.responses, selectedEvent.event_id);
       setDoc(responseRef, {
+        explorerId: ExplorerIdentity.currentExplorerId,
         event_id: selectedEvent.event_id, // Link to original Reflection
         response_event_id: responseEventId,
         timestamp: serverTimestamp(),
@@ -821,7 +826,7 @@ export default function ColeInboxScreen() {
 
       let errorMessage = "Failed to capture selfie. Please try again.";
       if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
-        errorMessage = "Permission error. Please check Firestore security rules for 'reflection_responses' collection.";
+        errorMessage = `Permission error. Please check Firestore security rules for '${ExplorerIdentity.collections.responses}' collection.`;
       }
 
       if (!silent) {
@@ -847,7 +852,7 @@ export default function ColeInboxScreen() {
 
       // 2. Delete selfie response image from S3 if it exists (keep the document)
       try {
-        const responseRef = doc(db, 'reflection_responses', event.event_id);
+        const responseRef = doc(db, ExplorerIdentity.collections.responses, event.event_id);
         const responseDoc = await getDoc(responseRef);
 
         if (responseDoc.exists()) {
@@ -873,7 +878,7 @@ export default function ColeInboxScreen() {
 
       // 3. Mark Firestore signal document as deleted (instead of deleting it)
       try {
-        const signalRef = doc(db, 'signals', event.event_id);
+        const signalRef = doc(db, ExplorerIdentity.collections.reflections, event.event_id);
         await setDoc(signalRef, {
           status: 'deleted',
           deleted_at: serverTimestamp(),

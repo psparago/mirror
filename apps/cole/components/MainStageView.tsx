@@ -167,10 +167,8 @@ export default function MainStageView({
     ]).start(() => setToastMessage(''));
   };
 
-  // Initialize Video Player
-  const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url
-    ? selectedEvent.video_url
-    : null;
+  // --- AUDIO/VIDEO REFS ---
+  const videoSource = selectedEvent?.video_url || null;
 
   const player = useVideoPlayer(videoSource || '', (player) => {
     setIsVideoPlaying(player.playing);
@@ -353,10 +351,12 @@ export default function MainStageView({
           if (player && player.duration > 0 && player.status === 'readyToPlay') {
             console.log(`▶️ Playing video: duration=${player.duration}s (waited ${waitedMs}ms)`);
 
+            // Reset to start IMMEDIATELY before the delay/play
+            player.currentTime = 0;
+
             // On iPad, sometimes a tiny delay helps the native layer attach before play()
             await new Promise(resolve => setTimeout(resolve, 300));
 
-            player.currentTime = 0;
             player.play();
             Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
             return;
@@ -547,13 +547,19 @@ export default function MainStageView({
   useEffect(() => {
     if (!player) return;
     const interval = setInterval(() => {
+      // ONLY check for finish if we are in the 'playing' state
+      if (!state.matches({ playingVideo: { playback: 'playing' } })) {
+        return;
+      }
+
       // Use 0.2s threshold to ensure we catch it before it actually stops
       if (player.duration > 0 && player.currentTime >= player.duration - 0.2) {
+        console.log(`🎬 Video finished at ${player.currentTime}/${player.duration}`);
         send({ type: 'VIDEO_FINISHED' });
       }
     }, 200);
     return () => clearInterval(interval);
-  }, [player, send]);
+  }, [player, send, state.value]); // Use state.value to minimize re-renders but still update on transition
 
   // 3. Rewind video on completion for deep dive context
   useEffect(() => {
@@ -830,7 +836,7 @@ export default function MainStageView({
 
           {/* Media Container */}
           <View style={styles.mediaContainer}>
-            {(selectedMetadata?.content_type === 'video' || !!selectedEvent.video_url) && videoSource ? (
+            {videoSource ? (
               <VideoView player={player} style={styles.mediaImage} nativeControls={false} />
             ) : (
               <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} />

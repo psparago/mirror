@@ -1,6 +1,6 @@
 import CameraModal from '@/components/CameraModal';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS } from '@projectmirror/shared';
+import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
@@ -657,6 +657,7 @@ export default function CompanionHomeScreen() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          explorer_id: ExplorerIdentity.currentExplorerId,
           event_id: eventID,
           path: 'to',
           files: filesToSign
@@ -779,7 +780,8 @@ export default function CompanionHomeScreen() {
       }
 
       // 11. Write Signal to Firestore
-      setDoc(doc(collection(db, 'signals'), eventID), {
+      setDoc(doc(collection(db, ExplorerIdentity.collections.reflections), eventID), {
+        explorerId: ExplorerIdentity.currentExplorerId,
         event_id: eventID,
         sender: "Granddad",
         status: "ready",

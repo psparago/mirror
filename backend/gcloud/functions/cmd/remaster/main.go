@@ -18,11 +18,18 @@ import (
 	"mirror.local/functions"
 )
 
-const (
+var (
 	BucketName = "mirror-uploads-sparago-2026"
-	UserID     = "cole"
+	UserID     = getEnv("EXPLORER_ID", "cole")
 	Region     = "us-east-1"
 )
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
 
 func main() {
 	// 1. Setup Environment
@@ -109,7 +116,8 @@ func main() {
 			}
 
 			imgData, _ := io.ReadAll(imgObj.Body)
-			prompt := "Analyze this image for a 15-year-old with Angelman Syndrome. Return a SINGLE JSON object: {\"short_caption\": \"...\", \"deep_dive\": \"...\"}"
+			explorerName := strings.Title(UserID)
+			prompt := fmt.Sprintf("Analyze this image for a 15-year-old with Angelman Syndrome (%s). Return a SINGLE JSON object: {\"short_caption\": \"...\", \"deep_dive\": \"...\"}", explorerName)
 
 			parts := []genai.Part{
 				genai.ImageData("jpeg", imgData),

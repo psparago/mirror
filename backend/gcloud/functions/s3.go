@@ -18,10 +18,6 @@ type Response struct {
 	URL string `json:"url"`
 }
 
-// UserID represents the current user - eventually this will come from Firebase
-// For now, hardcoded as "cole" but can be made configurable via query parameter or auth token
-const UserID = "cole"
-
 func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	// 1. CORS Headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -47,14 +43,21 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 4. Determine upload path: "to" (companion -> cole), "from" (cole -> companion), or "staging" (temporary)
+	// 4. Explorer ID extraction and validation
+	explorerID := getExplorerID(r)
+	if explorerID == "" {
+		http.Error(w, "explorer_id is required", 400)
+		return
+	}
+
+	// 5. Determine upload path: "to" (companion -> cole), "from" (cole -> companion), or "staging" (temporary)
 	// Default to "from" for Cole's responses, "to" for companion uploads
 	path := r.URL.Query().Get("path")
 	if path != "to" && path != "from" && path != "staging" {
 		path = "from" // Default to Cole's responses
 	}
 
-	// 5. Check if this is an event bundle upload (new structure)
+	// 6. Check if this is an event bundle upload (new structure)
 	eventID := r.URL.Query().Get("event_id")
 	filename := r.URL.Query().Get("filename") // "image.jpg" or "metadata.json"
 
@@ -64,16 +67,16 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 			// Staging is directly under bucket root: staging/{event_id}/{filename}
 			s3Key = fmt.Sprintf("staging/%s/%s", eventID, filename)
 		} else {
-			// Event bundle structure: {userID}/{path}/{event_id}/{filename}
-			s3Key = fmt.Sprintf("%s/%s/%s/%s", UserID, path, eventID, filename)
+			// Event bundle structure: {explorerID}/{path}/{event_id}/{filename}
+			s3Key = fmt.Sprintf("%s/%s/%s/%s", explorerID, path, eventID, filename)
 		}
 	} else {
 		if path == "staging" {
 			// Legacy staging structure: staging/{timestamp}.jpg
 			s3Key = fmt.Sprintf("staging/%d.jpg", time.Now().Unix())
 		} else {
-			// Legacy single photo structure: {userID}/{path}/{timestamp}.jpg
-			s3Key = fmt.Sprintf("%s/%s/%d.jpg", UserID, path, time.Now().Unix())
+			// Legacy single photo structure: {explorerID}/{path}/{timestamp}.jpg
+			s3Key = fmt.Sprintf("%s/%s/%d.jpg", explorerID, path, time.Now().Unix())
 		}
 	}
 
@@ -196,11 +199,18 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 4. List objects in the \"{userID}/to/\" prefix (Cole\'s inbox)
+	// 4. Explorer ID extraction and validation
+	explorerID := getExplorerID(r)
+	if explorerID == "" {
+		http.Error(w, "explorer_id is required", 400)
+		return
+	}
+
+	// 5. List objects in the "{explorerID}/to/" prefix (Cole's inbox)
 	// Don't use delimiter - we need to see all nested objects
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String("mirror-uploads-sparago-2026"),
-		Prefix: aws.String(fmt.Sprintf("%s/to/", UserID)),
+		Prefix: aws.String(fmt.Sprintf("%s/to/", explorerID)),
 	}
 
 	result, err := s3Client.ListObjectsV2(ctx, input)
@@ -209,9 +219,9 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Organize events by folder (event_id)
+	// 6. Organize events by folder (event_id)
 	eventMap := make(map[string]*Event)
-	folderPrefix := fmt.Sprintf("%s/to/", UserID)
+	folderPrefix := fmt.Sprintf("%s/to/", explorerID)
 
 	// Process all objects to find image.jpg and metadata.json files
 	// (No need to process CommonPrefixes since we removed the delimiter)
@@ -319,8 +329,16 @@ func GetEventBundle(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 3. List objects for this specific event folder: {userID}/to/{eventID}/
-	prefix := fmt.Sprintf("%s/to/%s/", UserID, eventID)
+	// 3. Explorer ID extraction and validation
+	explorerID := getExplorerID(r)
+	if explorerID == "" {
+		http.Error(w, "explorer_id is required", 400)
+		return
+	}
+
+	// 4. List objects for this specific event folder: {explorerID}/to/{eventID}/
+	prefix := fmt.Sprintf("%s/to/%s/", explorerID, eventID)
+
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String("mirror-uploads-sparago-2026"),
 		Prefix: aws.String(prefix),
@@ -387,7 +405,14 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Load Config with region
+	// 3. Explorer ID extraction and validation
+	explorerID := getExplorerID(r)
+	if explorerID == "" {
+		http.Error(w, "explorer_id is required", 400)
+		return
+	}
+
+	// 4. Load Config with region
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion("us-east-1"),
 	)
@@ -396,13 +421,13 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Initialize S3 Client
+	// 5. Initialize S3 Client
 	s3Client := s3.NewFromConfig(cfg)
 
-	// 5. Determine path: \"to\" (companion -> cole), \"from\" (cole -> companion, selfie responses), or \"staging\" (temporary)
+	// 6. Determine path: "to" (companion -> cole), "from" (cole -> companion, selfie responses), or "staging" (temporary)
 	path := r.URL.Query().Get("path")
 	if path != "to" && path != "from" && path != "staging" {
-		path = "to" // Default to \"to\" for backward compatibility
+		path = "to" // Default to "to" for backward compatibility
 	}
 
 	bucket := "mirror-uploads-sparago-2026"
@@ -411,7 +436,7 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	if path == "from" {
 		// For selfie responses, only delete image.jpg
 		objectsToDelete = []string{
-			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
 		}
 	} else if path == "staging" {
 		// For staging, only delete image.jpg (staging is directly under bucket root)
@@ -421,12 +446,12 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// For regular reflections, delete all associated media files
 		objectsToDelete = []string{
-			fmt.Sprintf("%s/%s/%s/image.jpg", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/metadata.json", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/audio.m4a", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/deep_dive.m4a", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/video.mp4", UserID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/video.mov", UserID, path, eventID), // Defensive: just in case a .mov slipped in
+			fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/metadata.json", explorerID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/audio.m4a", explorerID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/deep_dive.m4a", explorerID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/video.mp4", explorerID, path, eventID),
+			fmt.Sprintf("%s/%s/%s/video.mov", explorerID, path, eventID), // Defensive: just in case a .mov slipped in
 		}
 		fmt.Printf("Attempting to delete objects for event %s: %v\n", eventID, objectsToDelete)
 	}
@@ -462,9 +487,10 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 type BatchUploadRequest struct {
-	EventID string   `json:"event_id"`
-	Path    string   `json:"path"`
-	Files   []string `json:"files"`
+	ExplorerID string   `json:"explorer_id"`
+	EventID    string   `json:"event_id"`
+	Path       string   `json:"path"`
+	Files      []string `json:"files"`
 }
 
 // GetBatchS3UploadURLs generates presigned PUT URLs for multiple files in a single request
@@ -487,6 +513,11 @@ func GetBatchS3UploadURLs(w http.ResponseWriter, r *http.Request) {
 	var req BatchUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON: "+err.Error(), 400)
+		return
+	}
+
+	if req.ExplorerID == "" {
+		http.Error(w, "explorer_id required", 400)
 		return
 	}
 
@@ -520,7 +551,7 @@ func GetBatchS3UploadURLs(w http.ResponseWriter, r *http.Request) {
 		if path == "staging" {
 			s3Key = fmt.Sprintf("staging/%s/%s", req.EventID, filename)
 		} else {
-			s3Key = fmt.Sprintf("%s/%s/%s/%s", UserID, path, req.EventID, filename)
+			s3Key = fmt.Sprintf("%s/%s/%s/%s", req.ExplorerID, path, req.EventID, filename)
 		}
 
 		presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{

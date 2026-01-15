@@ -1,15 +1,16 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow read/write access to signals collection for testing
-    match /signals/{signalId} {
+    // Allow read/write access to reflections collection
+    match /reflections/{signalId} {
       allow read, write: if true;
     }
     
-    // Allow read/write access to reflection_responses collection
-    match /reflection_responses/{responseId} {
+    // Allow read/write access to responses collection
+    match /responses/{responseId} {
       allow read, write: if true;
     }
+
   }
 }
 

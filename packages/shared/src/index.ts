@@ -14,3 +14,5 @@ export * from './s3/upload';
 export * from './types';
 
 export * from './firebase';
+
+export * from './ExplorerIdentity';

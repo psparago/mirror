@@ -46,6 +46,13 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	model := client.GenerativeModel("gemini-2.5-flash-lite")
 
 	// 2. Get params
+	explorerID := getExplorerID(r)
+	if explorerID == "" {
+		http.Error(w, "explorer_id is required", 400)
+		return
+	}
+	explorerName := getExplorerName(explorerID)
+
 	imageURL := r.URL.Query().Get("image_url")
 	targetCaption := r.URL.Query().Get("target_caption")
 	targetDeepDive := r.URL.Query().Get("target_deep_dive")
@@ -87,13 +94,13 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Create multimodal input
-		promptText := `Analyze this image for a 15-year-old with Angelman Syndrome (Cole). 
+		promptText := fmt.Sprintf(`Analyze this image for a 15-year-old with Angelman Syndrome (%s). 
 IMPORTANT: DO NOT attempt to diagnose or guess if anyone in the photo has a medical disorder or syndrome (like Down Syndrome or Angelman Syndrome) based on their appearance, facial expressions, or gestures. Focus only on the observable activities, objects, and emotions.
 
 Return a SINGLE JSON object containing:
 "short_caption": A high-impact greeting (max 10 words).
 "deep_dive": A 2-3 sentence story about details in the photo.
-Format: {"short_caption": "string", "deep_dive": "string"}`
+Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 
 		parts := []genai.Part{
 			genai.Text(promptText),
@@ -155,7 +162,8 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 		log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
 		speechData, err := GenerateSpeech(result.ShortCaption)
 		if err == nil && len(speechData) > 0 {
-			audioKey := fmt.Sprintf("staging/tts/%d.mp3", time.Now().UnixNano())
+			audioKey := fmt.Sprintf("staging/%s/tts/%d.mp3", explorerID, time.Now().UnixNano())
+
 			err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
 			if err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
@@ -173,7 +181,8 @@ Format: {"short_caption": "string", "deep_dive": "string"}`
 		log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
 		deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
 		if err == nil && len(deepDiveSpeechData) > 0 {
-			deepDiveAudioKey := fmt.Sprintf("staging/tts/deepdive_%d.mp3", time.Now().UnixNano())
+			deepDiveAudioKey := fmt.Sprintf("staging/%s/tts/deepdive_%d.mp3", explorerID, time.Now().UnixNano())
+
 			err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
 			if err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{

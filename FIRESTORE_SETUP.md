@@ -18,10 +18,11 @@ After creating the database, go to **Rules** tab and use these rules:
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow read/write access to signals collection
-    match /signals/{signalId} {
+    // Allow read/write access to reflections collection
+    match /reflections/{signalId} {
       allow read, write: if true; // For testing - will secure later
     }
+
   }
 }
 ```
@@ -30,14 +31,16 @@ Click **Publish** to save the rules.
 
 ## Step 3: Verify Collection Structure
 
-The app will automatically create the `signals` collection when you send your first photo. Each document will have:
+The app will automatically create the `reflections` collection when you send your first photo. Each document will have:
 - Document ID: `event_id` (timestamp)
 - Fields:
+  - `explorerId`: string (e.g., "cole" or "peter")
   - `event_id`: string
   - `sender`: "Granddad"
   - `status`: "ready"
   - `timestamp`: serverTimestamp
   - `type`: "mirror_event"
+
 
 ## Troubleshooting
 

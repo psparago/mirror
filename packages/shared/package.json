@@ -10,6 +10,8 @@
     "@types/react": "~19.1.0",
     "typescript": "~5.9.2"
   },
+  "dependencies": {
+    "expo-application": "^7.0.8"
+  },
   "private": true
 }
-

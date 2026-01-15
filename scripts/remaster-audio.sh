@@ -21,8 +21,17 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Allow overriding Explorer ID via command line argument
+if [ ! -z "$1" ]; then
+    export EXPLORER_ID="$1"
+    echo "👤 Processing Explorer: $EXPLORER_ID"
+else
+    echo "👤 Processing Default Explorer: ${EXPLORER_ID:-cole}"
+fi
+
 # Navigate to the functions directory where go.mod lives
 cd "${PROJECT_ROOT}/backend/gcloud/functions"
 
 # Run the remaster tool
 go run cmd/remaster/main.go
+

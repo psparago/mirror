@@ -1,9 +1,9 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS } from '@projectmirror/shared';
+import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
-import { collection, onSnapshot, orderBy, query, QuerySnapshot } from 'firebase/firestore';
+import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -29,6 +29,8 @@ export default function SentHistoryScreen() {
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
+  const metadataCache = useRef<Map<string, any>>(new Map());
+  const isRefreshingRef = useRef(false);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState('');
@@ -46,8 +48,9 @@ export default function SentHistoryScreen() {
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
-    const responsesRef = collection(db, 'reflection_responses');
-    const unsubscribeResponses = onSnapshot(responsesRef, (snapshot) => {
+    const responsesRef = collection(db, ExplorerIdentity.collections.responses);
+    const q = query(responsesRef, where('explorerId', '==', ExplorerIdentity.currentExplorerId));
+    const unsubscribeResponses = onSnapshot(q, (snapshot) => {
       const eventIds = new Set<string>();
       const eventIdMap = new Map<string, string>();
       const timestampMap = new Map<string, any>();
@@ -79,8 +82,13 @@ export default function SentHistoryScreen() {
 
   useEffect(() => {
     // Listen to signals collection for sent Reflections
-    const signalsRef = collection(db, 'signals');
-    const q = query(signalsRef, orderBy('timestamp', 'desc'));
+    const signalsRef = collection(db, ExplorerIdentity.collections.reflections);
+    const q = query(
+      signalsRef,
+      where('explorerId', '==', ExplorerIdentity.currentExplorerId),
+      orderBy('timestamp', 'desc'),
+      limit(100)
+    );
 
     const unsubscribe = onSnapshot(
       q,
@@ -181,32 +189,45 @@ export default function SentHistoryScreen() {
 
         // Debug: log deduplication results
 
+        // Fetch Mirror Events List ONCE for all reflections
+        let allMirrorEventsMap = new Map<string, any>();
+        try {
+          const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+          if (eventsResponse.ok) {
+            const eventsData = await eventsResponse.json();
+            (eventsData.events || []).forEach((e: any) => {
+              allMirrorEventsMap.set(e.event_id, e);
+            });
+          }
+        } catch (error) {
+          console.error('Error fetching reflection events list:', error);
+        }
+
         // Convert map to array and fetch additional data
         const reflectionPromises = Array.from(reflectionMap.values()).map(async (reflection) => {
           // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
-          try {
-            const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
-            if (eventsResponse.ok) {
-              const eventsData = await eventsResponse.json();
-              const matchingEvent = eventsData.events?.find((e: any) => e.event_id === reflection.event_id);
-              if (matchingEvent?.image_url) {
-                reflection.reflectionImageUrl = matchingEvent.image_url;
-                // Also fetch metadata for description (only for non-deleted)
-                if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
-                  try {
-                    const metaResponse = await fetch(matchingEvent.metadata_url);
-                    if (metaResponse.ok) {
-                      const metadata = await metaResponse.json();
-                      reflection.description = metadata.description;
-                    }
-                  } catch (err) {
-                    console.error('Error fetching metadata:', err);
+          const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
+          if (matchingEvent?.image_url) {
+            reflection.reflectionImageUrl = matchingEvent.image_url;
+
+            // Also fetch metadata for description (only for non-deleted)
+            if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
+              // Check cache first
+              if (metadataCache.current.has(matchingEvent.metadata_url)) {
+                reflection.description = metadataCache.current.get(matchingEvent.metadata_url).description;
+              } else {
+                try {
+                  const metaResponse = await fetch(matchingEvent.metadata_url);
+                  if (metaResponse.ok) {
+                    const metadata = await metaResponse.json();
+                    metadataCache.current.set(matchingEvent.metadata_url, metadata);
+                    reflection.description = metadata.description;
                   }
+                } catch (err) {
+                  console.error('Error fetching metadata:', err);
                 }
               }
             }
-          } catch (error) {
-            console.error('Error fetching reflection image:', error);
           }
 
           // Check for selfie response - use responseEventIds state (updated by listener)
