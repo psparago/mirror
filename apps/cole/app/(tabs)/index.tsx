@@ -31,6 +31,8 @@ export default function ColeInboxScreen() {
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
   const refreshingEventsRef = useRef<Set<string>>(new Set()); // Track events currently being refreshed
   const [readEventIds, setReadEventIds] = useState<string[]>([]);
+  const readEventIdsRef = useRef<string[]>([]);
+  const [isReadStateLoaded, setIsReadStateLoaded] = useState(false);
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -146,8 +148,11 @@ export default function ColeInboxScreen() {
       try {
         const storedIds = await AsyncStorage.getItem('read_events');
         if (storedIds) {
-          setReadEventIds(JSON.parse(storedIds));
+          const parsed = JSON.parse(storedIds);
+          setReadEventIds(parsed);
+          readEventIdsRef.current = parsed;
         }
+        setIsReadStateLoaded(true);
       } catch (error) {
         console.error('Failed to load read state:', error);
       }
@@ -217,10 +222,11 @@ export default function ColeInboxScreen() {
 
   // Auto-mark as read when an event is opened
   useEffect(() => {
-    if (selectedEvent) {
+    if (selectedEvent && isReadStateLoaded) {
+      console.log(`👁️ Auto-marking as read: ${selectedEvent.event_id} (readStateLoaded=${isReadStateLoaded})`);
       markEventAsRead(selectedEvent.event_id);
     }
-  }, [selectedEvent]);
+  }, [selectedEvent, isReadStateLoaded]);
 
   const fetchEvents = async () => {
     try {
@@ -390,10 +396,17 @@ export default function ColeInboxScreen() {
               // Mark new arrivals (shows pill notification) but DO NOT auto-play
               if (newItems.length > 0) {
                 const newIds = newItems.map(item => item.event_id);
-                console.log(`🔔 New arrivals detected: ${newIds.join(', ')} - showing pill (no auto-play)`);
-                setRecentlyArrivedIds(prev => [...prev, ...newIds]);
-                // Play a pleasant chime to notify the user
-                playArrivalChime();
+                console.log(`🔔 New arrivals detected: ${newIds.join(', ')} - checking against read state`);
+
+                setRecentlyArrivedIds(prev => {
+                  // Only add IDs that aren't already in recentlyArrivedIds AND aren't read (using Ref for freshest values)
+                  const freshIds = newIds.filter(id => !prev.includes(id) && !readEventIdsRef.current.includes(id));
+                  if (freshIds.length === 0) return prev;
+
+                  console.log(`✨ Adding ${freshIds.length} truly fresh arrivals to notify user`);
+                  playArrivalChime();
+                  return [...prev, ...freshIds];
+                });
               }
             });
           }
@@ -465,16 +478,17 @@ export default function ColeInboxScreen() {
   }, [refreshEventUrls]);
 
   const markEventAsRead = async (eventId: string) => {
-    if (readEventIds.includes(eventId)) return;
-
-    const newReadIds = [...readEventIds, eventId];
-    setReadEventIds(newReadIds);
-
-    try {
-      await AsyncStorage.setItem('read_events', JSON.stringify(newReadIds));
-    } catch (error) {
-      console.error('Failed to save read state:', error);
-    }
+    setReadEventIds(prev => {
+      if (prev.includes(eventId)) return prev;
+      const next = [...prev, eventId];
+      readEventIdsRef.current = next;
+      // Save to disk asynchronously
+      AsyncStorage.setItem('read_events', JSON.stringify(next)).catch(err => {
+        console.error('Failed to save read state:', err);
+      });
+      console.log(`✅ Marked event ${eventId} as read. Total read: ${next.length}`);
+      return next;
+    });
   };
 
   const handleEventPress = async (item: Event) => {
@@ -482,7 +496,14 @@ export default function ColeInboxScreen() {
     setSelectedEvent(item);
 
     // Remove from "Recent" arrivals once selected
-    setRecentlyArrivedIds(prev => prev.filter(id => id !== item.event_id));
+    console.log(`🖱️ Event ${item.event_id} selected. Removing from recent arrivals.`);
+    setRecentlyArrivedIds(prev => {
+      const filtered = prev.filter(id => id !== item.event_id);
+      if (filtered.length !== prev.length) {
+        console.log(`   Removed ${item.event_id} from recent arrivals. New count: ${filtered.length}`);
+      }
+      return filtered;
+    });
 
     // Fetch metadata if not already loaded
     if (!eventMetadata[item.event_id] && item.metadata_url) {
@@ -809,8 +830,19 @@ export default function ColeInboxScreen() {
       })
         .catch((firestoreError: any) => {
           console.error("Failed to save reflection response to Firestore:", firestoreError);
-          // Don't show error to user - S3 upload succeeded, which is the important part
-          // Firestore is just for tracking/display in Companion app
+        });
+
+      // 4. Update the ORIGINAL reflection status to 'responded'
+      const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, selectedEvent.event_id);
+      setDoc(reflectionRef, {
+        status: 'responded',
+        responded_at: serverTimestamp(),
+      }, { merge: true })
+        .then(() => {
+          console.log(`✅ Updated reflection ${selectedEvent.event_id} status to 'responded'`);
+        })
+        .catch(err => {
+          console.warn(`Failed to update reflection status:`, err);
         });
 
     } catch (error: any) {
