@@ -123,17 +123,19 @@ export default function MainStageView({
         Speech.stop();
 
         // Stop voice message audio
-        if (sound) {
+        const soundToUnload = sound;
+        setSound(null); // Clear state immediately to prevent race conditions
+        if (soundToUnload) {
           try {
-            const status = await sound.getStatusAsync();
+            const status = await soundToUnload.getStatusAsync();
             if (status.isLoaded) {
-              await sound.stopAsync();
-              await sound.unloadAsync();
+              await soundToUnload.stopAsync();
+              await soundToUnload.unloadAsync();
             }
           } catch (e) {
-            console.error('Error stopping sound:', e);
+            // Ignore errors - sound may already be unloaded
+            console.log('Sound already unloaded or error:', (e as Error).message);
           }
-          setSound(null);
         }
 
         // Stop companion caption audio
@@ -846,7 +848,7 @@ export default function MainStageView({
       <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
         {/* LEFT PANE */}
-        <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.4 }]}>
+        <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.55 }]}>
 
           {/* Header */}
           <View style={[styles.headerBar, { top: insets.top + 10 }]}>
@@ -869,53 +871,68 @@ export default function MainStageView({
 
           {/* Media Container */}
           <View style={styles.mediaContainer}>
-            {videoSource ? (
-              <VideoView player={player} style={styles.mediaImage} nativeControls={false} />
-            ) : (
-              <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} />
-            )}
+            <View style={styles.mediaFrame}>
+              {videoSource ? (
+                <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
+              ) : (
+                <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+              )}
 
-            {/* Replay / Pause Icon Overlay */}
-            <Animated.View
-              style={[styles.playOverlay, { opacity: controlsOpacity }]}
-              pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
-            >
-              {state.matches('finished') ? (
-                <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                  <BlurView intensity={30} style={styles.playOverlayBlur}>
-                    <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
-                  </BlurView>
-                </TouchableOpacity>
-              ) : state.hasTag('paused') ? (
-                <View style={styles.playButton}>
-                  <BlurView intensity={30} style={styles.playOverlayBlur}>
-                    <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
-                  </BlurView>
-                </View>
-              ) : null}
-            </Animated.View>
+
+              {/* Replay / Pause Icon Overlay */}
+              <Animated.View
+                style={[styles.playOverlay, { opacity: controlsOpacity }]}
+                pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
+              >
+                {state.matches('finished') ? (
+                  <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
+                    <BlurView intensity={30} style={styles.playOverlayBlur}>
+                      <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
+                    </BlurView>
+                  </TouchableOpacity>
+                ) : state.hasTag('paused') ? (
+                  <View style={styles.playButton}>
+                    <BlurView intensity={30} style={styles.playOverlayBlur}>
+                      <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
+                    </BlurView>
+                  </View>
+                ) : null}
+              </Animated.View>
+            </View>
 
             {/* Loading Indicator removed - was blocking video */}
           </View>
 
-          {/* Capraion & Metadata */}
+          {/* Caption & Metadata */}
           <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
               {/* VU Meter for audio playback */}
               {isAnyAudioPlaying && (
-                <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 10 }}>
+                <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 12, marginTop: 2 }}>
                   <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
                 </Animated.View>
               )}
-              {/* Microphone icon for voice recordings */}
-              {selectedEvent?.audio_url && (
-                <View style={{ marginRight: 10 }}>
-                  <FontAwesome name="microphone" size={18} color="rgba(255, 255, 255, 0.9)" />
-                </View>
-              )}
-              <Text style={styles.descriptionText}>
-                {selectedEvent?.audio_url ? 'Voice recording' : selectedMetadata?.description}
-              </Text>
+
+              <View style={{ flex: 1 }}>
+                {/* Caption/Description - FIRST */}
+                <Text style={styles.descriptionText} numberOfLines={2}>
+                  {selectedMetadata?.short_caption || selectedMetadata?.description || ''}
+                </Text>
+
+                {/* From + Date line - SECOND */}
+                {selectedMetadata?.sender && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                    <Text style={styles.senderText}>
+                      From {selectedMetadata.sender}
+                    </Text>
+                    {selectedEvent?.event_id && (
+                      <Text style={styles.dateText}>
+                        {' • '}{formatEventDate(selectedEvent.event_id)}
+                      </Text>
+                    )}
+                  </View>
+                )}
+              </View>
             </View>
 
             {/* Tell Me More FAB */}
@@ -938,7 +955,7 @@ export default function MainStageView({
         </View>
 
         {/* RIGHT PANE */}
-        <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.6 }, { paddingTop: insets.top + 10 }]}>
+        <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
           <View style={styles.upNextHeader}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Text style={styles.upNextHeaderText}>Up Next</Text>
@@ -1057,25 +1074,82 @@ const styles = StyleSheet.create({
   reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   newUpdatesButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFD700', padding: 8, borderRadius: 20 },
   newUpdatesText: { color: '#000', fontWeight: 'bold' },
-  mediaContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  mediaImage: { width: '100%', height: '100%' },
+  mediaContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+    paddingTop: 80, // More space for header
+    paddingBottom: 120, // More space for caption bar
+  },
+  mediaFrame: {
+    flex: 1,
+    width: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#1a3a44', // Match gradient midpoint instead of black
+    // Subtle shadow for depth
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+    // Subtle border
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   playOverlay: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, justifyContent: 'center', alignItems: 'center' },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
   cameraBubble: { position: 'absolute', width: 100, height: 100, borderRadius: 50, overflow: 'hidden', borderWidth: 2, borderColor: '#fff', zIndex: 99999, elevation: 10 },
   cameraPreview: { flex: 1 },
-  metadataContainer: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 20, backgroundColor: 'rgba(0,0,0,0.5)' },
-  descriptionText: { color: '#fff', fontSize: 18, flex: 1 },
-  tellMeMoreFAB: { position: 'absolute', bottom: 100, right: 20, width: 64, height: 64, borderRadius: 32, overflow: 'hidden' },
-  tellMeMoreBlur: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' },
-  upNextPane: { borderLeftWidth: 1, borderColor: '#333' },
-  upNextHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 10 },
-  upNextHeaderText: { color: '#fff', fontWeight: 'bold' },
+  metadataContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    right: 20,
+    padding: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20,
+  },
+  senderText: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  dateText: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 14,
+  },
+  descriptionText: { color: '#fff', fontSize: 18, lineHeight: 24 },
+
+
+  tellMeMoreFAB: {
+    position: 'absolute',
+    bottom: 120,
+    right: 30,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  tellMeMoreBlur: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
+  upNextPane: {
+    borderLeftWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    paddingHorizontal: 12,
+  },
+
+  upNextHeader: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 10, paddingHorizontal: 4 },
+  upNextHeaderText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   upNextCount: { color: '#ccc' },
-  upNextItemContainer: { margin: 5 },
-  upNextItem: { flexDirection: 'row', padding: 10, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 8 },
+  upNextItemContainer: { marginVertical: 6, marginHorizontal: 4 },
+  upNextItem: { flexDirection: 'row', padding: 12, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12 },
   upNextItemNowPlaying: { backgroundColor: 'rgba(0,122,255,0.3)' },
-  upNextThumbnail: { width: 50, height: 50, borderRadius: 4, marginRight: 10 },
+  upNextThumbnail: { width: 56, height: 56, borderRadius: 8, marginRight: 12 },
+
   upNextTitle: { color: '#fff' },
   upNextTitleNowPlaying: { color: '#4FC3F7', fontWeight: 'bold' },
   upNextDate: { color: '#aaa', fontSize: 12, marginTop: 2 },

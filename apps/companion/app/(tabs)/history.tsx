@@ -4,7 +4,7 @@ import { db } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
 import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
@@ -31,6 +31,39 @@ export default function SentHistoryScreen() {
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
   const metadataCache = useRef<Map<string, any>>(new Map());
   const isRefreshingRef = useRef(false);
+
+  // Derive display reflections with fresh hasResponse values
+  // This ensures the list updates when responseEventIds changes
+  // SORTED BY: Response timestamp (viewed) first, so most recently viewed are at top
+  const displayReflections = useMemo(() => {
+    const result = reflections.map(r => ({
+      ...r,
+      hasResponse: r.status !== 'deleted' && responseEventIds.has(r.event_id),
+    }));
+
+    // Helper to get timestamp value in milliseconds
+    const getTimestampMs = (ts: any): number => {
+      if (!ts) return 0;
+      if (ts.toMillis) return ts.toMillis();
+      if (ts.seconds !== undefined) return ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000;
+      if (typeof ts === 'number') return ts;
+      return 0;
+    };
+
+    // Sort by RESPONSE timestamp (viewed time) - most recent first
+    // If no response, use sent timestamp
+    result.sort((a, b) => {
+      const aResponseTs = responseTimestampMap.get(a.event_id);
+      const bResponseTs = responseTimestampMap.get(b.event_id);
+      const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.timestamp);
+      const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.timestamp);
+      return bTime - aTime; // Most recent first
+    });
+
+    return result;
+  }, [reflections, responseEventIds, responseTimestampMap]);
+
+
 
   // Toast state
   const [toastMessage, setToastMessage] = useState('');
@@ -77,6 +110,7 @@ export default function SentHistoryScreen() {
       console.error('Error listening to reflection_responses:', error);
     });
 
+
     return () => unsubscribeResponses();
   }, []);
 
@@ -95,6 +129,7 @@ export default function SentHistoryScreen() {
       async (snapshot: QuerySnapshot) => {
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
+
 
         // Status priority: replayed > engaged > ready > deleted
         const statusPriority: { [key: string]: number } = {
@@ -283,9 +318,7 @@ export default function SentHistoryScreen() {
 
   // Refresh local data when refreshTrigger changes
   useEffect(() => {
-    if (refreshTrigger > 0) {
-      console.log('🔄 [History] Refreshing data on foreground');
-    }
+    // Trigger refresh when app comes to foreground
   }, [refreshTrigger]);
 
   const getStatusText = (status?: string) => {
@@ -318,8 +351,25 @@ export default function SentHistoryScreen() {
     if (!timestamp) return '';
 
     try {
-      // Handle Firestore Timestamp
-      const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+      let date: Date;
+
+      // Handle Firestore Timestamp with toDate() method
+      if (timestamp.toDate) {
+        date = timestamp.toDate();
+      }
+      // Handle serialized Firestore timestamp {seconds, nanoseconds}
+      else if (timestamp.seconds !== undefined) {
+        date = new Date(timestamp.seconds * 1000 + (timestamp.nanoseconds || 0) / 1000000);
+      }
+      // Handle raw number (milliseconds)
+      else if (typeof timestamp === 'number') {
+        date = new Date(timestamp);
+      }
+      // Fallback
+      else {
+        date = new Date(timestamp);
+      }
+
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -337,6 +387,8 @@ export default function SentHistoryScreen() {
       return '';
     }
   };
+
+
 
   if (loading) {
     return (
@@ -465,7 +517,7 @@ export default function SentHistoryScreen() {
       </Modal>
 
       <FlatList
-        data={reflections}
+        data={displayReflections}
         keyExtractor={(item) => item.event_id}
         renderItem={({ item }) => (
           <View style={styles.reflectionItem}>
@@ -546,6 +598,8 @@ export default function SentHistoryScreen() {
                     </TouchableOpacity>
                   )}
                 </View>
+
+
                 {item.description && (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                     {item.description === 'Voice message' && (
@@ -556,7 +610,20 @@ export default function SentHistoryScreen() {
                     </Text>
                   </View>
                 )}
+                {/* Sent and Viewed dates on same line */}
+                <View style={styles.timestampRow}>
+                  <Text style={styles.sentDate}>
+                    Sent: {formatEngagementDate(item.timestamp)}
+                  </Text>
+                  {item.hasResponse && responseTimestampMap.get(item.event_id) && (
+                    <Text style={styles.viewedDate}>
+                      • Viewed: {formatEngagementDate(responseTimestampMap.get(item.event_id))}
+                    </Text>
+                  )}
+                </View>
                 <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
+
+
               </View>
             </View>
           </View>
@@ -686,11 +753,17 @@ const styles = StyleSheet.create({
     color: '#4ade80', // Brighter green for dark theme
     fontWeight: '600',
   },
+  sentDate: {
+    fontSize: 12,
+    color: '#9ca3af',
+    marginTop: 4,
+  },
   eventId: {
     fontSize: 12,
     color: '#888', // Lighter for visibility
     fontFamily: 'monospace',
   },
+
   loadingText: {
     marginTop: 12,
     fontSize: 16,
@@ -784,5 +857,23 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     fontStyle: 'italic',
   },
+  viewedTimestamp: {
+    color: '#4ade80',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 4,
+  },
+  timestampRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  viewedDate: {
+    fontSize: 12,
+    color: '#60a5fa', // Blue to differentiate from green Selfie button
+  },
 });
+
+
 

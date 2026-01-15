@@ -818,19 +818,26 @@ export default function ColeInboxScreen() {
       //   });
       // }
 
-      // Create reflection_response document in Firestore (non-blocking)
+      // Create reflection_response document in Firestore
       // Use original event_id as document ID for easy lookup
+      // IMPORTANT: Use the ORIGINAL SENDER's explorerId so they can find the response
+      // In dev, both apps run as 'peter'. In prod, we'd need to look this up from the reflection doc.
+      const senderExplorerId = 'peter'; // For now, hardcode for dev. TODO: fetch from reflection doc
       const responseRef = doc(db, ExplorerIdentity.collections.responses, selectedEvent.event_id);
-      setDoc(responseRef, {
-        explorerId: ExplorerIdentity.currentExplorerId,
-        event_id: selectedEvent.event_id, // Link to original Reflection
-        response_event_id: responseEventId,
-        timestamp: serverTimestamp(),
-        type: 'selfie_response',
-      })
-        .catch((firestoreError: any) => {
-          console.error("Failed to save reflection response to Firestore:", firestoreError);
+      try {
+        await setDoc(responseRef, {
+          explorerId: senderExplorerId, // The SENDER's ID, not the viewer's
+          viewerExplorerId: ExplorerIdentity.currentExplorerId, // Also store who viewed it
+          event_id: selectedEvent.event_id, // Link to original Reflection
+          response_event_id: responseEventId,
+          timestamp: serverTimestamp(),
+          type: 'selfie_response',
         });
+        console.log(`📤 Wrote selfie response to Firestore: ${selectedEvent.event_id} (sender: ${senderExplorerId})`);
+      } catch (firestoreError: any) {
+        console.error("❌ Failed to save reflection response to Firestore:", firestoreError);
+      }
+
 
       // 4. Update the ORIGINAL reflection status to 'responded'
       const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, selectedEvent.event_id);
