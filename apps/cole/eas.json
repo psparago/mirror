@@ -6,6 +6,9 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "development"
+      },
       "ios": {
         "resourceClass": "m-medium"
       }
@@ -20,6 +23,10 @@
       }
     },
     "production": {
+      "channel": "production",
+      "env": {
+        "APP_VARIANT": "production"
+      },
       "ios": {
         "resourceClass": "m-medium"
       }
@@ -29,4 +36,3 @@
     "production": {}
   }
 }
-

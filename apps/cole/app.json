@@ -48,7 +48,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Looking Glass Cole to see you.",
+          "cameraPermission": "Allow Looking Glass to see you.",
           "microphonePermission": "Allow Looking Glass to hear you."
         }
       ],
