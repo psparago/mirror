@@ -81,10 +81,10 @@ export default function SentHistoryScreen() {
   }, []);
 
   useEffect(() => {
-    // Listen to signals collection for sent Reflections
-    const signalsRef = collection(db, ExplorerIdentity.collections.reflections);
+    // Listen to reflections collection for sent Reflections
+    const reflectionsRef = collection(db, ExplorerIdentity.collections.reflections);
     const q = query(
-      signalsRef,
+      reflectionsRef,
       where('explorerId', '==', ExplorerIdentity.currentExplorerId),
       orderBy('timestamp', 'desc'),
       limit(100)
@@ -192,7 +192,7 @@ export default function SentHistoryScreen() {
         // Fetch Mirror Events List ONCE for all reflections
         let allMirrorEventsMap = new Map<string, any>();
         try {
-          const eventsResponse = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+          const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
           if (eventsResponse.ok) {
             const eventsData = await eventsResponse.json();
             (eventsData.events || []).forEach((e: any) => {
@@ -262,7 +262,7 @@ export default function SentHistoryScreen() {
         setLoading(false);
       },
       (error) => {
-        console.error('Error listening to signals:', error);
+        console.error('Error listening to reflections:', error);
         setLoading(false);
       }
     );
@@ -519,7 +519,7 @@ export default function SentHistoryScreen() {
 
                         try {
                           // Get presigned GET URL for the selfie image (method=GET for viewing)
-                          const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET`;
+                          const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`;
                           const imageResponse = await fetch(url);
                           if (imageResponse.ok) {
                             const data = await imageResponse.json();

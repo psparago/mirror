@@ -226,7 +226,7 @@ export default function ColeInboxScreen() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+      const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
 
       if (!response.ok) {
         throw new Error(`Failed to fetch events: ${response.status}`);
@@ -306,9 +306,9 @@ export default function ColeInboxScreen() {
     fetchEventsRef.current(); // Initial fetch
 
     // 1. Set up Firestore listener (The "Doorbell")
-    const signalsRef = collection(db, ExplorerIdentity.collections.reflections);
+    const reflectionsRef = collection(db, ExplorerIdentity.collections.reflections);
     const q = query(
-      signalsRef,
+      reflectionsRef,
       where('explorerId', '==', ExplorerIdentity.currentExplorerId),
       orderBy('timestamp', 'desc'),
       limit(10)
@@ -324,21 +324,22 @@ export default function ColeInboxScreen() {
           return;
         }
 
-        // 2. Check for NEW signals
-        const newSignalIds: string[] = [];
+        // 2. Check for NEW reflections
+        const newReflectionIds: string[] = [];
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
-            newSignalIds.push(change.doc.id);
+            newReflectionIds.push(change.doc.id);
           }
         });
 
-        if (newSignalIds.length === 0) return;
+        if (newReflectionIds.length === 0) return;
 
-        console.log(`🔔 Signals received for: ${newSignalIds.join(', ')}`);
+        console.log(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
+
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
         try {
-          const response = await fetch(API_ENDPOINTS.LIST_MIRROR_EVENTS);
+          const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
           if (!response.ok) throw new Error('Failed to fetch fresh events');
 
           const data: ListEventsResponse = await response.json();
@@ -398,7 +399,7 @@ export default function ColeInboxScreen() {
           }
 
         } catch (error) {
-          console.error('Error fetching fresh data on signal:', error);
+          console.error('Error fetching fresh data on reflection:', error);
         }
       },
       (error) => {
@@ -413,7 +414,7 @@ export default function ColeInboxScreen() {
   const refreshEventUrls = async (eventId: string): Promise<Event | null> => {
     try {
       // Fetch fresh URLs for a single event bundle (Expiry: 4 hours)
-      const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}`);
+      const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}&explorer_id=${ExplorerIdentity.currentExplorerId}`);
       if (!response.ok) {
         console.warn(`Failed to refresh URLs for event ${eventId}`);
         return null;
@@ -745,7 +746,7 @@ export default function ColeInboxScreen() {
         console.log("Getting presigned URL for selfie upload...");
         const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
           try {
-            const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg`);
+            const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
             if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
             return res;
           } catch (e: any) {
@@ -842,7 +843,7 @@ export default function ColeInboxScreen() {
     try {
       // 1. Delete S3 objects
       const deleteResponse = await fetch(
-        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}`
+        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}&explorer_id=${ExplorerIdentity.currentExplorerId}`
       );
 
       if (!deleteResponse.ok) {
@@ -863,7 +864,7 @@ export default function ColeInboxScreen() {
             // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
             // Keep the reflection_response document in Firestore for history
             const deleteSelfieResponse = await fetch(
-              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from`
+              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${ExplorerIdentity.currentExplorerId}`
             );
 
             if (!deleteSelfieResponse.ok) {

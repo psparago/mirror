@@ -245,7 +245,7 @@ export default function CompanionHomeScreen() {
       }
 
       const response = await fetch(
-        `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}`
+        `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${ExplorerIdentity.currentExplorerId}`
       );
 
       if (!response.ok) {
@@ -600,7 +600,7 @@ export default function CompanionHomeScreen() {
         console.log("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
 
         // Use our new backend capabilities to either generate missing fields or just refresh TTS
-        let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(photo.uri)}`;
+        let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(photo.uri)}&explorer_id=${ExplorerIdentity.currentExplorerId}`;
         if (finalCaption) fetchUrl += `&target_caption=${encodeURIComponent(finalCaption)}`;
         if (finalDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(finalDeepDive)}`;
 
@@ -686,7 +686,7 @@ export default function CompanionHomeScreen() {
       } else if (stagingEventId) {
         // If Staging exists, fetch the READ URL for the staging image
         // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
-        const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET`);
+        const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`);
         if (stagingRes.ok) {
           const { url } = await stagingRes.json();
           imageSource = url;
@@ -757,7 +757,7 @@ export default function CompanionHomeScreen() {
       }
 
       if (stagingEventId) {
-        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`).catch(() => { });
+        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`).catch(() => { });
       }
 
       if (photo.uri && !photo.uri.startsWith('http')) {
@@ -801,7 +801,7 @@ export default function CompanionHomeScreen() {
     // Clean up staging image if it exists
     if (stagingEventId) {
       try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`);
       } catch (error: any) {
         console.error("Error deleting staging image:", error);
         // Continue with cleanup anyway
@@ -826,7 +826,7 @@ export default function CompanionHomeScreen() {
     // Clean up staging image
     if (stagingEventId) {
       try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging`);
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`);
       } catch (error: any) {
         console.error("Error deleting staging image:", error);
       }
@@ -880,7 +880,7 @@ export default function CompanionHomeScreen() {
         }
 
         // Upload to staging first
-        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg`);
+        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
         const { url: stagingUrl } = await stagingResponse.json();
         await safeUploadToS3(uriToUpload, stagingUrl);
 
@@ -893,7 +893,7 @@ export default function CompanionHomeScreen() {
       }
 
       // Get presigned GET URL for staging image
-      const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET`);
+      const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`);
       if (getStagingUrlResponse.ok) {
         const { url: getStagingUrl } = await getStagingUrlResponse.json();
         return await getAIDescription(getStagingUrl, options);

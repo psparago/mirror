@@ -109,6 +109,300 @@ export default function MainStageView({
   const [showAdminChallenge, setShowAdminChallenge] = useState(false);
   const [adminAnswer, setAdminAnswer] = useState('');
   const [mathChallenge, setMathChallenge] = useState({ a: 3, b: 3, sum: 6 });
+  // --- THE XSTATE MACHINE ---
+  // Using let to allow for closure usage in refs defined later
+  let [state, send] = useMachine(playerMachine.provide({
+    actions: {
+      stopAllMedia: async () => {
+        // Increment session IMMEDIATELY and SYNCHRONOUSLY to invalidate any pending Narration/TTS
+        captionSessionRef.current += 1;
+        const thisStopSession = captionSessionRef.current;
+        console.log(`🛑 stopAllMedia [Session: ${thisStopSession}]`);
+
+        // Stop TTS immediately and forcefully
+        Speech.stop();
+
+        // Stop voice message audio
+        if (sound) {
+          try {
+            const status = await sound.getStatusAsync();
+            if (status.isLoaded) {
+              await sound.stopAsync();
+              await sound.unloadAsync();
+            }
+          } catch (e) {
+            console.error('Error stopping sound:', e);
+          }
+          setSound(null);
+        }
+
+        // Stop companion caption audio
+        const soundToStop = captionSound || captionSoundRef.current;
+        if (soundToStop) {
+          try {
+            const status = await soundToStop.getStatusAsync();
+            if (status.isLoaded) {
+              await soundToStop.stopAsync();
+              await soundToStop.unloadAsync();
+            }
+          } catch (e) {
+            console.error('Error stopping caption:', e);
+          }
+          captionSoundRef.current = null;
+          setCaptionSound(null);
+        }
+
+        if (player) {
+          try {
+            player.pause();
+            player.currentTime = 0;
+          } catch (err) {
+            console.warn('Silent failure stopping player:', err);
+          }
+        }
+        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+
+        // Small delay to ensure everything stops
+        await new Promise(resolve => setTimeout(resolve, 100));
+      },
+
+      speakCaption: async () => {
+        const text = selectedMetadata?.description;
+        const audioUrl = selectedEvent?.audio_url;
+
+        // Use current session (already incremented by stopAllMedia or initial)
+        const thisSession = captionSessionRef.current;
+        console.log(`🎙️ speakCaption [Session: ${thisSession}]`);
+
+        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+
+        if (audioUrl) {
+          const playAudioWithRetry = async (retryCount = 0) => {
+            try {
+              console.log(`🎧 Loading narration [Session: ${thisSession}] (Attempt ${retryCount + 1}): ${audioUrl.substring(0, 50)}...`);
+
+              const { sound: newCaptionSound, status } = await Audio.Sound.createAsync(
+                { uri: audioUrl },
+                { shouldPlay: false },
+                (status) => {
+                  if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
+                    if (captionSessionRef.current === thisSession) {
+                      newCaptionSound.unloadAsync();
+                      setCaptionSound(null);
+                      captionSoundRef.current = null;
+                      console.log(`✅ Narration finished [Session: ${thisSession}] - sending NARRATION_FINISHED`);
+                      send({ type: 'NARRATION_FINISHED' });
+                    } else {
+                      console.log(`🚫 Narration finished but session changed [${thisSession} vs ${captionSessionRef.current}] - cleaning up`);
+                      newCaptionSound.unloadAsync();
+                      captionSoundRef.current = null;
+                    }
+                  }
+                }
+              );
+
+              // CHECK SESSION AGAIN after load completes
+              if (captionSessionRef.current !== thisSession) {
+                console.log(`🚫 Session changed during narration load [${thisSession} vs ${captionSessionRef.current}] - discarding`);
+                newCaptionSound.unloadAsync();
+                return;
+              }
+
+              captionSoundRef.current = newCaptionSound;
+              setCaptionSound(newCaptionSound);
+
+              await newCaptionSound.playAsync();
+              console.log(`🎧 Narration playing [Session: ${thisSession}]`);
+
+              // Smart Fallback based on actual duration
+              const duration = (status as any).durationMillis || 5000;
+              const safetyTimeout = duration + 2500; // Small buffer
+
+              setTimeout(() => {
+                if (captionSessionRef.current === thisSession) {
+                  console.warn(`⚠️ Narration safety fallback triggered [Session: ${thisSession}]`);
+                  send({ type: 'NARRATION_FINISHED' });
+                }
+              }, safetyTimeout);
+
+            } catch (error: any) {
+              console.error(`❌ Audio caption error (Attempt ${retryCount + 1}):`, error);
+              if (retryCount < 1 && captionSessionRef.current === thisSession) {
+                await new Promise(r => setTimeout(r, 1500));
+                return playAudioWithRetry(retryCount + 1);
+              }
+              if (captionSessionRef.current === thisSession) {
+                send({ type: 'NARRATION_FINISHED' });
+              }
+            }
+          };
+          playAudioWithRetry();
+        } else if (text) {
+          Speech.speak(text, {
+            onDone: () => {
+              if (captionSessionRef.current === thisSession) {
+                console.log('✅ TTS finished - sending NARRATION_FINISHED');
+                send({ type: 'NARRATION_FINISHED' });
+              }
+            },
+            onError: () => {
+              if (captionSessionRef.current === thisSession) {
+                send({ type: 'NARRATION_FINISHED' });
+              }
+            }
+          });
+
+          // TTS Fallback
+          setTimeout(() => {
+            if (captionSessionRef.current === thisSession) {
+              console.warn('⚠️ TTS safety fallback triggered');
+              send({ type: 'NARRATION_FINISHED' });
+            }
+          }, 15000);
+        } else {
+          if (captionSessionRef.current === thisSession) {
+            send({ type: 'NARRATION_FINISHED' });
+          }
+        }
+      },
+
+      playVideo: async () => {
+        // Preparation logic for video
+        if (!player) return;
+
+        console.log(`🎬 playVideo called: status=${player.status}`);
+
+        // Reset to start
+        player.currentTime = 0;
+
+        // Trigger bubble animation
+        Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+
+        // The actual .play() call is now managed by the Hardware Sync useEffect for maximum reliability
+      },
+
+      playAudio: async () => {
+        const playWithRetry = async (retryCount = 0) => {
+          try {
+            if (sound) await sound.unloadAsync();
+
+            if (!selectedEvent?.audio_url) {
+              send({ type: 'AUDIO_FINISHED' });
+              return;
+            }
+
+            console.log(`🎧 Playing audio: ${selectedEvent.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+            const { sound: newSound } = await Audio.Sound.createAsync(
+              { uri: selectedEvent.audio_url as string },
+              { shouldPlay: true }
+            );
+
+            newSound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                send({ type: 'AUDIO_FINISHED' });
+              }
+            });
+            setSound(newSound);
+
+          } catch (err: any) {
+            console.error(`❌ Audio error (Attempt ${retryCount + 1}):`, err);
+
+            if (retryCount < 1) {
+              console.log('🔄 Retrying audio load in 1.5s...');
+              await new Promise(r => setTimeout(r, 1500));
+              return playWithRetry(retryCount + 1);
+            }
+
+            if (err && typeof err === 'object') {
+              console.error("❌ Detailed Audio Error:", {
+                message: err.message,
+                code: err.code,
+                domain: err.domain
+              });
+            }
+            send({ type: 'AUDIO_FINISHED' });
+          }
+        };
+
+        playWithRetry();
+      },
+
+      playDeepDive: async () => {
+        const playDeepDiveWithRetry = async (retryCount = 0) => {
+          try {
+            if (sound) await sound.unloadAsync();
+
+            if (selectedEvent?.deep_dive_audio_url) {
+              console.log(`🧠 Playing deep dive audio: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+              const { sound: newSound } = await Audio.Sound.createAsync(
+                { uri: selectedEvent.deep_dive_audio_url },
+                { shouldPlay: true }
+              );
+              newSound.setOnPlaybackStatusUpdate((status) => {
+                if (status.isLoaded && status.didJustFinish) {
+                  console.log('✅ Deep dive audio finished - sending NARRATION_FINISHED');
+                  send({ type: 'NARRATION_FINISHED' });
+                }
+              });
+              setSound(newSound);
+            } else if (selectedMetadata?.deep_dive) {
+              Speech.speak(selectedMetadata.deep_dive, {
+                onDone: () => send({ type: 'NARRATION_FINISHED' }),
+                onError: () => send({ type: 'NARRATION_FINISHED' })
+              });
+            } else {
+              send({ type: 'NARRATION_FINISHED' });
+            }
+          } catch (err: any) {
+            console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
+
+            if (retryCount < 1 && selectedEvent?.deep_dive_audio_url) {
+              console.log('🔄 Retrying deep dive audio load in 1.5s...');
+              await new Promise(r => setTimeout(r, 1500));
+              return playDeepDiveWithRetry(retryCount + 1);
+            }
+
+            if (err && typeof err === 'object') {
+              console.error("❌ Detailed Deep Dive Error:", {
+                message: err.message,
+                code: err.code,
+                domain: err.domain
+              });
+            }
+            send({ type: 'NARRATION_FINISHED' });
+          }
+        };
+        playDeepDiveWithRetry();
+
+        // Safety fallback: force narration finished if audio hangs
+        setTimeout(() => {
+          console.warn('⚠️ Deep dive safety timeout reached');
+          send({ type: 'NARRATION_FINISHED' });
+        }, 15000);
+      },
+
+      showSelfieBubble: () => {
+        Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 0, useNativeDriver: true }).start();
+      },
+
+      triggerSelfie: async () => {
+        await performSelfieCapture(0);
+      },
+
+      pauseMedia: async () => {
+        if (player && state.hasTag('video_mode')) player.pause();
+        if (sound) await sound.pauseAsync();
+        if (captionSound) await captionSound.pauseAsync();
+      },
+
+      resumeMedia: async () => {
+        if (player && state.hasTag('video_mode')) player.play();
+        if (sound) await sound.playAsync();
+        if (captionSound) await captionSound.playAsync();
+      }
+    }
+  }));
+
   const lastTapRef = useRef<number>(0);
 
   const panResponder = useRef(
@@ -208,288 +502,27 @@ export default function MainStageView({
     }, delay);
   }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity]);
 
-  // --- THE XSTATE MACHINE ---
-  // Debug: Check if machine is imported correctly
-  if (!playerMachine) {
-    console.error('CRITICAL: playerMachine is undefined in MainStageView!');
-  }
 
-  const [state, send] = useMachine(playerMachine.provide({
-    // ... actions ... (we keep the actions block same, just modify lines around it)
-    actions: {
-      stopAllMedia: async () => {
-        // Increment session to invalidate any pending callbacks
-        captionSessionRef.current += 1;
-        // Stop TTS immediately and forcefully
-        Speech.stop();
-        // Stop voice message audio
-        if (sound) {
-          try {
-            await sound.stopAsync();
-            await sound.unloadAsync();
-          } catch (e) {
-            console.error('Error stopping sound:', e);
-          }
-          setSound(null);
-        }
-        // Stop companion caption audio (check both state AND ref for race condition)
-        const soundToStop = captionSound || captionSoundRef.current;
-        if (soundToStop) {
-          try {
-            await soundToStop.stopAsync();
-            await soundToStop.unloadAsync();
-          } catch (e) {
-            console.error('Error stopping caption:', e);
-          }
-          setCaptionSound(null);
-          captionSoundRef.current = null;
-        }
-        if (player) player.pause();
-        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
 
-        // Small delay to ensure everything stops
-        await new Promise(resolve => setTimeout(resolve, 100));
-      },
+  // --- HARDWARE SYNC (Side Effects) ---
+  // This effect ensures the actual hardware (Video/Audio) matches the machine state.
+  // This is more reliable than actions due to closure staleness in active rendercycles.
+  useEffect(() => {
+    if (!player) return;
 
-      speakCaption: async () => {
-        const text = selectedMetadata?.description;
-        const audioUrl = selectedEvent?.audio_url; // Companion-recorded caption
+    const isMachinePlayingVideo = state.matches({ playingVideo: { playback: 'playing' } });
+    const isMachinePaused = state.hasTag('paused');
 
-        // Start new caption session
-        captionSessionRef.current += 1;
-        const thisSession = captionSessionRef.current;
-
-        // Hide controls while speaking
-        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
-
-        // If there's a companion audio recording, play that instead of TTS
-        if (audioUrl) {
-          const playAudioWithRetry = async (retryCount = 0) => {
-            try {
-              console.log(`🎧 Narrating caption from: ${audioUrl.substring(0, 80)}... (Attempt ${retryCount + 1})`);
-              const { sound: newCaptionSound } = await Audio.Sound.createAsync(
-                { uri: audioUrl },
-                { shouldPlay: true },
-                (status) => {
-                  if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
-                    // Only send if this is still the active session
-                    if (captionSessionRef.current === thisSession) {
-                      newCaptionSound.unloadAsync();
-                      setCaptionSound(null);
-                      captionSoundRef.current = null;
-                      send({ type: 'NARRATION_FINISHED' });
-                    } else {
-                      console.log(`🚫 Companion audio finished but session changed (${thisSession} vs ${captionSessionRef.current}) - ignoring`);
-                      newCaptionSound.unloadAsync();
-                      captionSoundRef.current = null;
-                    }
-                  }
-                }
-              );
-              // Set ref immediately for stopAllMedia race condition protection
-              captionSoundRef.current = newCaptionSound;
-              setCaptionSound(newCaptionSound);
-              console.log('🎧 Companion audio started, waiting for completion...');
-            } catch (error: any) {
-              console.error(`❌ Audio caption error (Attempt ${retryCount + 1}):`, error);
-
-              if (retryCount < 1 && captionSessionRef.current === thisSession) {
-                console.log('🔄 Retrying audio load in 1.5s...');
-                await new Promise(r => setTimeout(r, 1500));
-                return playAudioWithRetry(retryCount + 1);
-              }
-
-              if (captionSessionRef.current === thisSession) {
-                if (error && typeof error === 'object') {
-                  console.error("❌ Detailed Caption Error:", {
-                    message: error.message,
-                    code: error.code,
-                    domain: error.domain
-                  });
-                }
-                send({ type: 'NARRATION_FINISHED' });
-              }
-            }
-          };
-
-          playAudioWithRetry();
-        } else if (text) {
-          Speech.speak(text, {
-            onDone: () => {
-              // Only send if this is still the active session
-              if (captionSessionRef.current === thisSession) {
-                console.log('✅ TTS finished - sending NARRATION_FINISHED');
-                send({ type: 'NARRATION_FINISHED' });
-              } else {
-                console.log('🚫 TTS finished but session changed - ignoring');
-              }
-            },
-            onError: () => {
-              if (captionSessionRef.current === thisSession) {
-                console.error('❌ TTS error - sending NARRATION_FINISHED');
-                send({ type: 'NARRATION_FINISHED' });
-              }
-            }
-          });
-        } else {
-          if (captionSessionRef.current === thisSession) {
-            console.log('⚠️ No caption - sending NARRATION_FINISHED immediately');
-            send({ type: 'NARRATION_FINISHED' });
-          }
-        }
-      },
-
-      playVideo: async () => {
-        // Wait for video to be ready (max 10 seconds)
-        const maxWaitMs = 10000;
-        const checkIntervalMs = 200;
-        let waitedMs = 0;
-
-        console.log(`🎬 playVideo called: source=${videoSource?.substring(0, 50)}...`);
-
-        while (waitedMs < maxWaitMs) {
-          if (player && player.duration > 0 && player.status === 'readyToPlay') {
-            console.log(`▶️ Playing video: duration=${player.duration}s (waited ${waitedMs}ms)`);
-
-            // Reset to start IMMEDIATELY before the delay/play
-            player.currentTime = 0;
-
-            // On iPad, sometimes a tiny delay helps the native layer attach before play()
-            await new Promise(resolve => setTimeout(resolve, 300));
-
-            player.play();
-            Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
-            return;
-          }
-
-          if (waitedMs % 1000 === 0) {
-            console.log(`⏳ Still waiting for video... status=${player?.status}, waited=${waitedMs}ms`);
-          }
-
-          await new Promise(resolve => setTimeout(resolve, checkIntervalMs));
-          waitedMs += checkIntervalMs;
-        }
-
-        // Video never loaded
-        console.error(`⚠️ Video not ready after ${waitedMs}ms - status=${player?.status}, duration=${player?.duration || 0}s`);
-        send({ type: 'VIDEO_FINISHED' });
-      },
-
-      playAudio: async () => {
-        const playWithRetry = async (retryCount = 0) => {
-          try {
-            if (sound) await sound.unloadAsync();
-
-            if (!selectedEvent?.audio_url) {
-              send({ type: 'AUDIO_FINISHED' });
-              return;
-            }
-
-            console.log(`🎧 Playing audio: ${selectedEvent.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
-            const { sound: newSound } = await Audio.Sound.createAsync(
-              { uri: selectedEvent.audio_url as string },
-              { shouldPlay: true }
-            );
-
-            newSound.setOnPlaybackStatusUpdate((status) => {
-              if (status.isLoaded && status.didJustFinish) {
-                send({ type: 'AUDIO_FINISHED' });
-              }
-            });
-            setSound(newSound);
-
-          } catch (err: any) {
-            console.error(`❌ Audio error (Attempt ${retryCount + 1}):`, err);
-
-            if (retryCount < 1) {
-              console.log('🔄 Retrying audio load in 1.5s...');
-              await new Promise(r => setTimeout(r, 1500));
-              return playWithRetry(retryCount + 1);
-            }
-
-            if (err && typeof err === 'object') {
-              console.error("❌ Detailed Audio Error:", {
-                message: err.message,
-                code: err.code,
-                domain: err.domain
-              });
-            }
-            send({ type: 'AUDIO_FINISHED' });
-          }
-        };
-
-        playWithRetry();
-      },
-
-      playDeepDive: async () => {
-        const playDeepDiveWithRetry = async (retryCount = 0) => {
-          try {
-            if (sound) await sound.unloadAsync();
-
-            if (selectedEvent?.deep_dive_audio_url) {
-              console.log(`🧠 Playing deep dive audio: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
-              const { sound: newSound } = await Audio.Sound.createAsync(
-                { uri: selectedEvent.deep_dive_audio_url },
-                { shouldPlay: true }
-              );
-              newSound.setOnPlaybackStatusUpdate((status) => {
-                if (status.isLoaded && status.didJustFinish) {
-                  send({ type: 'NARRATION_FINISHED' });
-                }
-              });
-              setSound(newSound);
-            } else if (selectedMetadata?.deep_dive) {
-              Speech.speak(selectedMetadata.deep_dive, {
-                onDone: () => send({ type: 'NARRATION_FINISHED' }),
-                onError: () => send({ type: 'NARRATION_FINISHED' })
-              });
-            } else {
-              send({ type: 'NARRATION_FINISHED' });
-            }
-          } catch (err: any) {
-            console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
-
-            if (retryCount < 1 && selectedEvent?.deep_dive_audio_url) {
-              console.log('🔄 Retrying deep dive audio load in 1.5s...');
-              await new Promise(r => setTimeout(r, 1500));
-              return playDeepDiveWithRetry(retryCount + 1);
-            }
-
-            if (err && typeof err === 'object') {
-              console.error("❌ Detailed Deep Dive Error:", {
-                message: err.message,
-                code: err.code,
-                domain: err.domain
-              });
-            }
-            send({ type: 'NARRATION_FINISHED' });
-          }
-        };
-
-        playDeepDiveWithRetry();
-      },
-
-      showSelfieBubble: () => {
-        Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 0, useNativeDriver: true }).start();
-      },
-
-      triggerSelfie: async () => {
-        await performSelfieCapture(0);
-      },
-
-      pauseMedia: async () => {
-        if (player && state.hasTag('video_mode')) player.pause();
-        if (sound) await sound.pauseAsync();
-        if (captionSound) await captionSound.pauseAsync();
-      },
-
-      resumeMedia: async () => {
-        if (player && state.hasTag('video_mode')) player.play();
-        if (sound) await sound.playAsync();
-        if (captionSound) await captionSound.playAsync();
+    if (isMachinePlayingVideo) {
+      if (!isVideoPlaying) {
+        console.log('⚡ Hardware Sync: Playing Video');
+        player.play();
       }
+    } else if (isMachinePaused) {
+      console.log('⚡ Hardware Sync: Pausing Video');
+      player.pause();
     }
-  }));
+  }, [state.value, player, isVideoPlaying]);
 
   // --- DEBUG LOGGER (State Transitions) ---
   const prevStateRef = useRef<any>(null);
