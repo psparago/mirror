@@ -30,15 +30,15 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
       // Only use extension if there's a proper file extension (2-4 chars), otherwise default to jpg
       const extractedExt = dotParts.length > 1 ? dotParts.pop()?.toLowerCase() : null;
       const extension = (extractedExt && extractedExt.length <= 4 && !extractedExt.includes('/')) ? extractedExt : 'jpg';
-      const filename = `temp_upload_${Date.now()}.${extension}`;
-      console.log(`📥 safeUploadToS3: Downloading remote file to ${filename}...`);
+      const filename = `temp_upload_${Date.now()}_${Math.floor(Math.random() * 1000)}.${extension}`;
+      console.log(`📥 safeUploadToS3 [${filename}]: Downloading remote file...`);
       const downloadRes = await FileSystem.downloadAsync(
         localUri,
         `${FileSystem.cacheDirectory}${filename}`
       );
       uriToUpload = downloadRes.uri;
       tempUri = downloadRes.uri;
-      console.log(`✅ safeUploadToS3: Download complete: ${uriToUpload}`);
+      console.log(`✅ safeUploadToS3 [${filename}]: Download complete`);
     } catch (err) {
       console.error(`❌ safeUploadToS3: Download failed:`, err);
       throw err;
@@ -264,8 +264,13 @@ export default function CompanionHomeScreen() {
         setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
 
         if (!options.silent) {
-          // Show short_caption in the text input for user to see/edit
-          setDescription(aiResponse.short_caption);
+          // PROTECTION: Only update the description if the current one is empty
+          // OR if it's already an AI generated one (user hasn't manually tweaked it yet)
+          if (!description.trim() || isAiGenerated) {
+            setDescription(aiResponse.short_caption);
+          } else {
+            console.log('📝 User has custom text, keeping it but updating AI metadata in background');
+          }
           setIsAiGenerated(true);
         }
         return aiResponse;
@@ -604,13 +609,23 @@ export default function CompanionHomeScreen() {
         if (finalCaption) fetchUrl += `&target_caption=${encodeURIComponent(finalCaption)}`;
         if (finalDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(finalDeepDive)}`;
 
+        // HINT: If we already have human audio, tell backend to skip TTS generation to save time/compute
+        if (audioUri) fetchUrl += `&skip_tts=true`;
+
         const aiResponse = await fetch(fetchUrl);
         if (aiResponse.ok) {
           const aiResult = await aiResponse.json();
-          finalCaption = aiResult.short_caption;
+
+          // PROTECTION: Never overwrite the user's manual caption during this final polish phase
+          // if it doesn't match the AI's returned version. We favor what the user sees on screen.
+          if (!finalCaption && aiResult.short_caption) {
+            finalCaption = aiResult.short_caption;
+          }
+
           finalDeepDive = aiResult.deep_dive;
-          finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio if exists
+          finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio as absolute priority
           finalDeepDiveAudio = aiResult.deep_dive_audio_url;
+          console.log(`✨ AI Enhancement result: ${finalDeepDive ? 'Deep Dive OK' : 'No Deep Dive'}, ${aiResult.audio_url ? 'TTS OK' : 'TTS Skipped'}`);
         } else {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
@@ -694,7 +709,15 @@ export default function CompanionHomeScreen() {
       }
 
       // 4. Queue Image Upload
-      uploadPromises.push(safeUploadToS3(imageSource, urls['image.jpg']));
+      if (urls['image.jpg']) {
+        console.log('📤 uploadEventBundle: Queuing image upload...');
+        uploadPromises.push(safeUploadToS3(imageSource, urls['image.jpg']).then(res => {
+          console.log('✅ uploadEventBundle: Image upload completed');
+          return res;
+        }));
+      } else {
+        console.error('❌ uploadEventBundle: Missing image.jpg presigned URL');
+      }
 
       // 5. Queue Video Upload
       if (mediaType === 'video' && videoUri && urls['video.mp4']) {
@@ -713,13 +736,21 @@ export default function CompanionHomeScreen() {
       if (hasAudio && urls['audio.m4a']) {
         const audioSource = audioUri || finalCaptionAudio;
         if (audioSource) {
-          uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']));
+          console.log('📤 uploadEventBundle: Queuing audio upload...');
+          uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']).then(res => {
+            console.log('✅ uploadEventBundle: Audio upload completed');
+            return res;
+          }));
         }
       }
 
       // 6.5 Queue Deep Dive Audio Upload
       if (hasDeepDiveAudio && finalDeepDiveAudio && urls['deep_dive.m4a']) {
-        uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, urls['deep_dive.m4a']));
+        console.log('📤 uploadEventBundle: Queuing deep dive audio upload...');
+        uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, urls['deep_dive.m4a']).then(res => {
+          console.log('✅ uploadEventBundle: Deep dive audio upload completed');
+          return res;
+        }));
       }
 
       // 7. Queue Metadata Upload
@@ -734,20 +765,27 @@ export default function CompanionHomeScreen() {
         image_source: imageSourceType,
       };
 
-      const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
-      uploadPromises.push(
-        fetch(urls['metadata.json'], {
-          method: 'PUT',
-          body: metadataBlob,
-          headers: { 'Content-Type': 'application/json' },
-        }).then(async res => {
-          if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
-          return res;
-        })
-      );
+      if (urls['metadata.json']) {
+        console.log('📤 uploadEventBundle: Queuing metadata upload...');
+        uploadPromises.push(
+          fetch(urls['metadata.json'], {
+            method: 'PUT',
+            body: JSON.stringify(metadata, null, 2),
+            headers: { 'Content-Type': 'application/json' },
+          }).then(async res => {
+            if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
+            console.log('✅ uploadEventBundle: Metadata upload SUCCESS');
+            return res;
+          })
+        );
+      } else {
+        console.error('❌ uploadEventBundle: Missing metadata.json presigned URL');
+      }
 
       // 8. Execute All Uploads Parallelly
+      console.log(`📡 uploadEventBundle: Executing ${uploadPromises.length} uploads in parallel...`);
       await Promise.all(uploadPromises);
+      console.log('✅ uploadEventBundle: All uploads completed successfully');
 
       // 9. Cleanup Staging & Local
       showToast('✅ Reflection sent!');

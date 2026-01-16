@@ -82,10 +82,6 @@ export default function MainStageView({
   const [sound, setSound] = useState<Audio.Sound | null>(null); // Voice messages
   const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null); // Companion audio captions
 
-  // --- Live refs used by pan responder ---
-  const eventsRef = useRef(events);
-  const selectedEventRef = useRef(selectedEvent);
-
   // Track caption sound in ref to handle race condition with stopAllMedia
   const captionSoundRef = useRef<Audio.Sound | null>(null);
 
@@ -109,6 +105,17 @@ export default function MainStageView({
   const [showAdminChallenge, setShowAdminChallenge] = useState(false);
   const [adminAnswer, setAdminAnswer] = useState('');
   const [mathChallenge, setMathChallenge] = useState({ a: 3, b: 3, sum: 6 });
+  const safetyTimeoutRef = useRef<any>(null);
+
+  // --- STABILITY REFS (Anti-stale closure) ---
+  const eventsRef = useRef(events);
+  const selectedEventRef = useRef(selectedEvent);
+  const stateRef = useRef<any>(null);
+  const onEventSelectRef = useRef(onEventSelect);
+  const onDeleteRef = useRef(onDelete);
+  const onCaptureSelfieRef = useRef(onCaptureSelfie);
+  const onReplayRef = useRef(onReplay);
+  const selectedMetadataRef = useRef(selectedMetadata);
   // --- THE XSTATE MACHINE ---
   // Using let to allow for closure usage in refs defined later
   let [state, send] = useMachine(playerMachine.provide({
@@ -118,6 +125,12 @@ export default function MainStageView({
         captionSessionRef.current += 1;
         const thisStopSession = captionSessionRef.current;
         console.log(`🛑 stopAllMedia [Session: ${thisStopSession}]`);
+
+        // Clear any existing safety timers
+        if (safetyTimeoutRef.current) {
+          clearTimeout(safetyTimeoutRef.current);
+          safetyTimeoutRef.current = null;
+        }
 
         // Stop TTS immediately and forcefully
         Speech.stop();
@@ -169,8 +182,8 @@ export default function MainStageView({
       },
 
       speakCaption: async () => {
-        const text = selectedMetadata?.description;
-        const audioUrl = selectedEvent?.audio_url;
+        const text = selectedMetadataRef.current?.description;
+        const audioUrl = selectedEventRef.current?.audio_url;
 
         // Use current session (already incremented by stopAllMedia or initial)
         const thisSession = captionSessionRef.current;
@@ -189,6 +202,10 @@ export default function MainStageView({
                 (status) => {
                   if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
                     if (captionSessionRef.current === thisSession) {
+                      if (safetyTimeoutRef.current) {
+                        clearTimeout(safetyTimeoutRef.current);
+                        safetyTimeoutRef.current = null;
+                      }
                       newCaptionSound.unloadAsync();
                       setCaptionSound(null);
                       captionSoundRef.current = null;
@@ -220,9 +237,10 @@ export default function MainStageView({
               const duration = (status as any).durationMillis || 5000;
               const safetyTimeout = duration + 2500; // Small buffer
 
-              setTimeout(() => {
+              safetyTimeoutRef.current = setTimeout(() => {
                 if (captionSessionRef.current === thisSession) {
                   console.warn(`⚠️ Narration safety fallback triggered [Session: ${thisSession}]`);
+                  safetyTimeoutRef.current = null;
                   send({ type: 'NARRATION_FINISHED' });
                 }
               }, safetyTimeout);
@@ -243,21 +261,30 @@ export default function MainStageView({
           Speech.speak(text, {
             onDone: () => {
               if (captionSessionRef.current === thisSession) {
+                if (safetyTimeoutRef.current) {
+                  clearTimeout(safetyTimeoutRef.current);
+                  safetyTimeoutRef.current = null;
+                }
                 console.log('✅ TTS finished - sending NARRATION_FINISHED');
                 send({ type: 'NARRATION_FINISHED' });
               }
             },
             onError: () => {
               if (captionSessionRef.current === thisSession) {
+                if (safetyTimeoutRef.current) {
+                  clearTimeout(safetyTimeoutRef.current);
+                  safetyTimeoutRef.current = null;
+                }
                 send({ type: 'NARRATION_FINISHED' });
               }
             }
           });
 
           // TTS Fallback
-          setTimeout(() => {
+          safetyTimeoutRef.current = setTimeout(() => {
             if (captionSessionRef.current === thisSession) {
               console.warn('⚠️ TTS safety fallback triggered');
+              safetyTimeoutRef.current = null;
               send({ type: 'NARRATION_FINISHED' });
             }
           }, 15000);
@@ -288,14 +315,14 @@ export default function MainStageView({
           try {
             if (sound) await sound.unloadAsync();
 
-            if (!selectedEvent?.audio_url) {
+            if (!selectedEventRef.current?.audio_url) {
               send({ type: 'AUDIO_FINISHED' });
               return;
             }
 
-            console.log(`🎧 Playing audio: ${selectedEvent.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+            console.log(`🎧 Playing audio: ${selectedEventRef.current.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
             const { sound: newSound } = await Audio.Sound.createAsync(
-              { uri: selectedEvent.audio_url as string },
+              { uri: selectedEventRef.current.audio_url as string },
               { shouldPlay: true }
             );
 
@@ -334,23 +361,39 @@ export default function MainStageView({
           try {
             if (sound) await sound.unloadAsync();
 
-            if (selectedEvent?.deep_dive_audio_url) {
-              console.log(`🧠 Playing deep dive audio: ${selectedEvent.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+            if (selectedEventRef.current?.deep_dive_audio_url) {
+              console.log(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
               const { sound: newSound } = await Audio.Sound.createAsync(
-                { uri: selectedEvent.deep_dive_audio_url },
+                { uri: selectedEventRef.current.deep_dive_audio_url },
                 { shouldPlay: true }
               );
               newSound.setOnPlaybackStatusUpdate((status) => {
                 if (status.isLoaded && status.didJustFinish) {
+                  if (safetyTimeoutRef.current) {
+                    clearTimeout(safetyTimeoutRef.current);
+                    safetyTimeoutRef.current = null;
+                  }
                   console.log('✅ Deep dive audio finished - sending NARRATION_FINISHED');
                   send({ type: 'NARRATION_FINISHED' });
                 }
               });
               setSound(newSound);
-            } else if (selectedMetadata?.deep_dive) {
-              Speech.speak(selectedMetadata.deep_dive, {
-                onDone: () => send({ type: 'NARRATION_FINISHED' }),
-                onError: () => send({ type: 'NARRATION_FINISHED' })
+            } else if (selectedMetadataRef.current?.deep_dive) {
+              Speech.speak(selectedMetadataRef.current.deep_dive, {
+                onDone: () => {
+                  if (safetyTimeoutRef.current) {
+                    clearTimeout(safetyTimeoutRef.current);
+                    safetyTimeoutRef.current = null;
+                  }
+                  send({ type: 'NARRATION_FINISHED' });
+                },
+                onError: () => {
+                  if (safetyTimeoutRef.current) {
+                    clearTimeout(safetyTimeoutRef.current);
+                    safetyTimeoutRef.current = null;
+                  }
+                  send({ type: 'NARRATION_FINISHED' });
+                }
               });
             } else {
               send({ type: 'NARRATION_FINISHED' });
@@ -358,7 +401,7 @@ export default function MainStageView({
           } catch (err: any) {
             console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
 
-            if (retryCount < 1 && selectedEvent?.deep_dive_audio_url) {
+            if (retryCount < 1 && selectedEventRef.current?.deep_dive_audio_url) {
               console.log('🔄 Retrying deep dive audio load in 1.5s...');
               await new Promise(r => setTimeout(r, 1500));
               return playDeepDiveWithRetry(retryCount + 1);
@@ -377,8 +420,9 @@ export default function MainStageView({
         playDeepDiveWithRetry();
 
         // Safety fallback: force narration finished if audio hangs
-        setTimeout(() => {
+        safetyTimeoutRef.current = setTimeout(() => {
           console.warn('⚠️ Deep dive safety timeout reached');
+          safetyTimeoutRef.current = null;
           send({ type: 'NARRATION_FINISHED' });
         }, 15000);
       },
@@ -416,15 +460,16 @@ export default function MainStageView({
       onPanResponderRelease: (_, gestureState) => {
         // Handle Single Tap (Pause/Resume)
         if (Math.abs(gestureState.dx) < 10 && Math.abs(gestureState.dy) < 10) {
-          if (state && state.hasTag('active')) {
-            if (state.hasTag('paused')) {
+          const currentState = stateRef.current;
+          if (currentState && currentState.hasTag('active')) {
+            if (currentState.hasTag('paused')) {
               console.log('⏯️ Tapped to Resume');
               send({ type: 'RESUME' });
             } else {
               console.log('⏸️ Tapped to Pause');
               send({ type: 'PAUSE' });
             }
-          } else if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
+          } else if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
             handleReplay();
           }
           return;
@@ -439,14 +484,14 @@ export default function MainStageView({
         if (gestureState.dx < -50) {
           console.log('👈 Swiped Left (Next)');
           if (currentIndex < currentEvents.length - 1) {
-            onEventSelect(currentEvents[currentIndex + 1]);
+            onEventSelectRef.current(currentEvents[currentIndex + 1]);
           }
         }
 
         else if (gestureState.dx > 50) {
           console.log('👉 Swiped Right (Previous)');
           if (currentIndex > 0) {
-            onEventSelect(currentEvents[currentIndex - 1]);
+            onEventSelectRef.current(currentEvents[currentIndex - 1]);
           }
         }
       },
@@ -494,7 +539,7 @@ export default function MainStageView({
       ]).start();
 
       // Capture
-      await onCaptureSelfie();
+      await onCaptureSelfieRef.current();
 
       // Fade out
       setTimeout(() => {
@@ -543,7 +588,13 @@ export default function MainStageView({
   useEffect(() => {
     eventsRef.current = events;
     selectedEventRef.current = selectedEvent;
-  }, [events, selectedEvent]);
+    stateRef.current = state;
+    onEventSelectRef.current = onEventSelect;
+    onDeleteRef.current = onDelete;
+    onCaptureSelfieRef.current = onCaptureSelfie;
+    onReplayRef.current = onReplay;
+    selectedMetadataRef.current = selectedMetadata;
+  }, [events, selectedEvent, state, onEventSelect, onDelete, onCaptureSelfie, onReplay, selectedMetadata]);
 
   // --- SYNC REACT EVENTS TO MACHINE ---
 
@@ -662,7 +713,7 @@ export default function MainStageView({
   const handleReplay = () => {
     console.log('🔁 User pressed REPLAY');
     send({ type: 'REPLAY' });
-    if (onReplay && selectedEvent) onReplay(selectedEvent);
+    if (onReplayRef.current && selectedEventRef.current) onReplayRef.current(selectedEventRef.current);
   };
 
   const handleAdminToggle = () => {
