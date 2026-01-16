@@ -363,7 +363,7 @@ export default function MainStageView({
 
             if (selectedEventRef.current?.deep_dive_audio_url) {
               console.log(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
-              const { sound: newSound } = await Audio.Sound.createAsync(
+              const { sound: newSound, status } = await Audio.Sound.createAsync(
                 { uri: selectedEventRef.current.deep_dive_audio_url },
                 { shouldPlay: true }
               );
@@ -378,6 +378,18 @@ export default function MainStageView({
                 }
               });
               setSound(newSound);
+
+              // Smart Fallback for deep dive
+              const duration = (status as any).durationMillis || 15000;
+              const safetyTimeout = duration + 5000; // Extra generous buffer for deep dives
+
+              if (safetyTimeoutRef.current) clearTimeout(safetyTimeoutRef.current);
+              safetyTimeoutRef.current = setTimeout(() => {
+                console.warn('⚠️ Deep dive safety timeout reached (Smart Fallback)');
+                safetyTimeoutRef.current = null;
+                send({ type: 'NARRATION_FINISHED' });
+              }, safetyTimeout);
+
             } else if (selectedMetadataRef.current?.deep_dive) {
               Speech.speak(selectedMetadataRef.current.deep_dive, {
                 onDone: () => {
@@ -395,6 +407,14 @@ export default function MainStageView({
                   send({ type: 'NARRATION_FINISHED' });
                 }
               });
+
+              // TTS Fallback - Deep dives are long, give it 60s
+              if (safetyTimeoutRef.current) clearTimeout(safetyTimeoutRef.current);
+              safetyTimeoutRef.current = setTimeout(() => {
+                console.warn('⚠️ Deep dive TTS safety timeout reached');
+                safetyTimeoutRef.current = null;
+                send({ type: 'NARRATION_FINISHED' });
+              }, 60000);
             } else {
               send({ type: 'NARRATION_FINISHED' });
             }
@@ -418,13 +438,6 @@ export default function MainStageView({
           }
         };
         playDeepDiveWithRetry();
-
-        // Safety fallback: force narration finished if audio hangs
-        safetyTimeoutRef.current = setTimeout(() => {
-          console.warn('⚠️ Deep dive safety timeout reached');
-          safetyTimeoutRef.current = null;
-          send({ type: 'NARRATION_FINISHED' });
-        }, 15000);
       },
 
       showSelfieBubble: () => {
