@@ -822,7 +822,7 @@ export default function ColeInboxScreen() {
       // Use original event_id as document ID for easy lookup
       // IMPORTANT: Use the ORIGINAL SENDER's explorerId so they can find the response
       // In dev, both apps run as 'peter'. In prod, we'd need to look this up from the reflection doc.
-      const senderExplorerId = 'peter'; // For now, hardcode for dev. TODO: fetch from reflection doc
+      const senderExplorerId = ExplorerIdentity.currentExplorerId; // Use the current explorer ID (peter in dev, cole in prod)
       const responseRef = doc(db, ExplorerIdentity.collections.responses, selectedEvent.event_id);
       try {
         await setDoc(responseRef, {
