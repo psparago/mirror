@@ -33,6 +33,12 @@
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "ios": {
+        "appleId": "peter.sparago@gmail.com",
+        "ascAppId": "6757921983",
+        "waitToSubmit": false
+      }
+    }
   }
 }
