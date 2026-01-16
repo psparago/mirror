@@ -2,7 +2,7 @@
   "expo": {
     "name": "Looking Glass Companion",
     "slug": "mirror-companion",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "mirror-companion",
@@ -43,7 +43,7 @@
         "expo-camera",
         {
           "cameraPermission": "Allow Looking Glass Companion to access your camera to send video responses.",
-          "microphonePermission": "Allow Looking Glass Companion to access your microphone for video and audio features."        
+          "microphonePermission": "Allow Looking Glass Companion to access your microphone for video and audio features."
         }
       ],
       [
