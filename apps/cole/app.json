@@ -17,6 +17,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass",
+      "buildNumber": "2",
       "googleServicesFile": "./GoogleService-Info.plist",
       "icon": "./assets/images/icon-lg.png",
       "infoPlist": {
