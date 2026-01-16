@@ -1,7 +1,7 @@
 {
-  "name": "@projectmirror/cole",
-  "version": "1.0.0",
+  "name": "looking-glass",
   "main": "expo-router/entry",
+  "version": "1.0.2",
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",

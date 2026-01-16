@@ -34,6 +34,9 @@
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
@@ -70,6 +73,12 @@
       "eas": {
         "projectId": "c68c385b-fb1c-4beb-b226-5750b49b20d2"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/c68c385b-fb1c-4beb-b226-5750b49b20d2"
     }
   }
 }

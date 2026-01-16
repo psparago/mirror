@@ -11,7 +11,8 @@
       },
       "ios": {
         "resourceClass": "m-medium"
-      }
+      },
+      "channel": "development"
     },
     "preview": {
       "distribution": "internal",
@@ -20,7 +21,8 @@
       },
       "android": {
         "buildType": "apk"
-      }
+      },
+      "channel": "preview"
     },
     "production": {
       "channel": "production",
@@ -36,8 +38,7 @@
     "production": {
       "ios": {
         "appleId": "peter.sparago@gmail.com",
-        "ascAppId": "6757921651",
-        "waitToSubmit": false
+        "ascAppId": "6757921651"
       }
     }
   }

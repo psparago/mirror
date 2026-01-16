@@ -29,7 +29,12 @@
       },
       "package": "com.psparago.lookingglass.companion",
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -72,6 +77,12 @@
         "projectId": "a21eb601-52c9-4d66-97d9-0891967bedee"
       }
     },
-    "owner": "psparago"
+    "owner": "psparago",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/a21eb601-52c9-4d66-97d9-0891967bedee"
+    }
   }
 }
