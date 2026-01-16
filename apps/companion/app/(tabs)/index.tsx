@@ -237,16 +237,19 @@ export default function CompanionHomeScreen() {
     setShowCameraModal(false);
   };
 
-  const getAIDescription = async (imageUrl: string, options: { silent?: boolean } = {}) => {
+  const getAIDescription = async (imageUrl: string, options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = {}) => {
     try {
       if (!options.silent) {
         setIsAiThinking(true);
         setIsAiGenerated(false);
       }
 
-      const response = await fetch(
-        `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${ExplorerIdentity.currentExplorerId}`
-      );
+      let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${ExplorerIdentity.currentExplorerId}`;
+      if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
+      if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
+      if (options.skipTts) fetchUrl += `&skip_tts=true`;
+
+      const response = await fetch(fetchUrl);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -601,21 +604,21 @@ export default function CompanionHomeScreen() {
       const needsDeepDive = !finalDeepDive;
       const needsCaptionAudio = !audioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
 
+      console.log(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive.substring(0, 20)}..."`);
+
       if (needsDeepDive || needsCaptionAudio) {
         console.log("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
 
-        // Use our new backend capabilities to either generate missing fields or just refresh TTS
-        let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(photo.uri)}&explorer_id=${ExplorerIdentity.currentExplorerId}`;
-        if (finalCaption) fetchUrl += `&target_caption=${encodeURIComponent(finalCaption)}`;
-        if (finalDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(finalDeepDive)}`;
+        // Use our robust background generator which handles staging uploads and thumbnails correctly
+        const aiResult = await generateDeepDiveBackground({
+          silent: true,
+          targetCaption: finalCaption,
+          targetDeepDive: finalDeepDive,
+          skipTts: !!audioUri
+        });
 
-        // HINT: If we already have human audio, tell backend to skip TTS generation to save time/compute
-        if (audioUri) fetchUrl += `&skip_tts=true`;
-
-        const aiResponse = await fetch(fetchUrl);
-        if (aiResponse.ok) {
-          const aiResult = await aiResponse.json();
-
+        if (aiResult) {
+          console.log(`✅ AI Enhancement Success: Caption="${aiResult.short_caption?.substring(0, 30)}...", DeepDive="${aiResult.deep_dive?.substring(0, 30)}..."`);
           // PROTECTION: Never overwrite the user's manual caption during this final polish phase
           // if it doesn't match the AI's returned version. We favor what the user sees on screen.
           if (!finalCaption && aiResult.short_caption) {
@@ -625,7 +628,7 @@ export default function CompanionHomeScreen() {
           finalDeepDive = aiResult.deep_dive;
           finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio as absolute priority
           finalDeepDiveAudio = aiResult.deep_dive_audio_url;
-          console.log(`✨ AI Enhancement result: ${finalDeepDive ? 'Deep Dive OK' : 'No Deep Dive'}, ${aiResult.audio_url ? 'TTS OK' : 'TTS Skipped'}`);
+          console.log(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
         } else {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
@@ -765,6 +768,8 @@ export default function CompanionHomeScreen() {
         image_source: imageSourceType,
       };
 
+      console.log('📄 Final Metadata to upload:', JSON.stringify(metadata, null, 2));
+
       if (urls['metadata.json']) {
         console.log('📤 uploadEventBundle: Queuing metadata upload...');
         uploadPromises.push(
@@ -825,6 +830,9 @@ export default function CompanionHomeScreen() {
         status: "ready",
         timestamp: serverTimestamp(),
         type: "mirror_event",
+        // Explicitly include paths so Mirror knows exactly what files are available
+        audio_url: hasAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/audio.m4a` : null,
+        deep_dive_audio_url: hasDeepDiveAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {
@@ -886,7 +894,7 @@ export default function CompanionHomeScreen() {
     lastProcessedUriRef.current = null;
   };
 
-  const generateDeepDiveBackground = async (options: { silent?: boolean } = { silent: true }) => {
+  const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
     if (!photo) return null;
 
     try {
