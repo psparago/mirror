@@ -1,13 +1,17 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { Event, EventMetadata } from '@projectmirror/shared';
+
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
+
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
 import {
   Alert,
   Animated,
@@ -26,6 +30,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { playerMachine } from '../machines/playerMachine';
+
 interface MainStageProps {
   visible: boolean;
   selectedEvent: Event | null;
@@ -72,6 +77,8 @@ export default function MainStageView({
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
+  const router = useRouter();
+
 
   // --- LOCAL STATE (Visuals Only) ---
   const [flashOpacity] = useState(new Animated.Value(0));
@@ -472,8 +479,20 @@ export default function MainStageView({
 
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: (evt) => {
+        // Don't capture touches in the top header area or the Up Next sidebar
+        // This allows buttons (Gear icon) and list items to receive touches
+        const isHeader = evt.nativeEvent.pageY < 120;
+        const isSidebar = isLandscape ? evt.nativeEvent.pageX > width * 0.65 : false;
+
+        if (isHeader || isSidebar) {
+          return false;
+        }
+        return true;
+      },
       onMoveShouldSetPanResponder: (_, gestureState) => {
+
+
         return Math.abs(gestureState.dx) > 20;
       },
       onPanResponderRelease: (_, gestureState) => {
@@ -922,21 +941,26 @@ export default function MainStageView({
 
           {/* Header */}
           <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-            {recentlyArrivedIds.length > 0 ? (
-              <TouchableOpacity
-                onPress={scrollToNewestArrival}
-                style={styles.newArrivalNotification}
-                activeOpacity={0.7}
-              >
-                <BlurView intensity={80} style={styles.notificationBlur}>
-                  <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
-                </BlurView>
-              </TouchableOpacity>
-            ) : (
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                {events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>}
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', backgroundColor: 'transparent' }}>
+              <View style={{ flex: 1 }}>
+                {recentlyArrivedIds.length > 0 ? (
+                  <TouchableOpacity
+                    onPress={scrollToNewestArrival}
+                    style={styles.newArrivalNotification}
+                    activeOpacity={0.7}
+                  >
+                    <BlurView intensity={80} style={styles.notificationBlur}>
+                      <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                    </BlurView>
+                  </TouchableOpacity>
+                ) : (
+                  events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
+                )}
               </View>
-            )}
+            </View>
+
+
+
           </View>
 
           {/* Media Container */}
@@ -1027,22 +1051,30 @@ export default function MainStageView({
         {/* RIGHT PANE */}
         <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
           <View style={styles.upNextHeader}>
+            <Text style={styles.upNextHeaderText}>Up Next</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={styles.upNextHeaderText}>Up Next</Text>
               <TouchableOpacity
                 onPress={handleAdminTrigger}
                 activeOpacity={0.6}
-                style={{ marginLeft: 8, padding: 4 }}
+                style={{ padding: 4 }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <FontAwesome
                   name={isAdminMode ? "unlock" : "cog"}
-                  size={14}
+                  size={15}
                   color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.4)"}
                 />
               </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => router.push('/settings')}
+                style={{ marginLeft: 12, padding: 4 }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <FontAwesome name="info-circle" size={15} color="rgba(255,255,255,0.4)" />
+              </TouchableOpacity>
             </View>
-            <Text style={styles.upNextCount}>{events.length}</Text>
           </View>
+
           <FlatList
             ref={flatListRef}
             data={upNextEvents}
@@ -1056,6 +1088,8 @@ export default function MainStageView({
             }}
           />
         </View>
+
+
 
       </View>
 
@@ -1140,7 +1174,8 @@ const styles = StyleSheet.create({
   splitContainerLandscape: { flexDirection: 'row' },
   splitContainerPortrait: { flexDirection: 'column' },
   stagePane: { position: 'relative' },
-  headerBar: { position: 'absolute', left: 20, zIndex: 100 },
+  headerBar: { position: 'absolute', left: 20, right: 20, zIndex: 100 },
+
   reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   newUpdatesButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFD700', padding: 8, borderRadius: 20 },
   newUpdatesText: { color: '#000', fontWeight: 'bold' },

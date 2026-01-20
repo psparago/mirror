@@ -1,5 +1,7 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
+
+
 import { db } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
@@ -630,6 +632,8 @@ export default function SentHistoryScreen() {
         )}
         contentContainerStyle={styles.listContainer}
       />
+
+
     </View>
   );
 }

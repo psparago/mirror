@@ -1,4 +1,5 @@
 import MainStageView from '@/components/MainStageView';
+import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,13 +8,18 @@ import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
+
+
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function ColeInboxScreen() {
+  const router = useRouter();
+
   const [events, setEvents] = useState<Event[]>([]);
   const [recentlyArrivedIds, setRecentlyArrivedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -980,38 +986,59 @@ export default function ColeInboxScreen() {
   if (loading) {
     return (
       <LinearGradient
-        colors={['#A1C4FD', '#C2E9FB']}
+        colors={['#0f2027', '#203a43', '#2c5364']}
         style={styles.centerContainer}
       >
-        <ActivityIndicator size="large" color="#2e78b7" />
-        <Text style={styles.loadingText}>Loading Reflections...</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/settings')}
+          style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+        >
+          <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
+        </TouchableOpacity>
+
+        <ActivityIndicator size="large" color="#fff" />
+        <Text style={[styles.loadingText, { color: '#fff' }]}>Loading Reflections...</Text>
       </LinearGradient>
+
+
     );
   }
 
   if (error) {
     return (
       <LinearGradient
-        colors={['#A1C4FD', '#C2E9FB']}
+        colors={['#0f2027', '#203a43', '#2c5364']}
         style={styles.centerContainer}
       >
-        <Text style={styles.errorText}>Error: {error}</Text>
-        <Text style={styles.retryText} onPress={fetchEvents}>
+        <Text style={[styles.errorText, { color: '#fff' }]}>Error: {error}</Text>
+        <Text style={[styles.retryText, { color: '#4FC3F7' }]} onPress={fetchEvents}>
           Tap to retry
         </Text>
       </LinearGradient>
+
     );
   }
 
   if (events.length === 0) {
     return (
       <LinearGradient
-        colors={['#A1C4FD', '#C2E9FB']}
+        colors={['#0f2027', '#203a43', '#2c5364']}
         style={styles.centerContainer}
       >
-        <Text style={styles.emptyText}>No Reflections yet</Text>
-        <Text style={styles.emptySubtext}>Reflections from companions will appear here</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/settings')}
+          style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+        >
+          <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
+        </TouchableOpacity>
+
+        <Text style={[styles.emptyText, { color: '#fff' }]}>No Reflections yet</Text>
+        <Text style={[styles.emptySubtext, { color: 'rgba(255,255,255,0.7)' }]}>Reflections from companions will appear here</Text>
       </LinearGradient>
+
+
     );
   }
 
