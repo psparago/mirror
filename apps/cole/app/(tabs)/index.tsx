@@ -37,6 +37,14 @@ export default function ColeInboxScreen() {
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
+  // Explorer config placeholder
+  const EXPLORER_CONFIG = {
+    playVideoCaptions: false,
+    autoplay: true,
+    loopFeed: true,
+    showStartMarker: true,
+  };
+
   // Play chime sound for new arrivals
   const playArrivalChime = async () => {
     try {
@@ -949,6 +957,26 @@ export default function ColeInboxScreen() {
     }
   };
 
+  const processedEvents = useMemo(() => {
+    if (!events.length) return [];
+    if (!EXPLORER_CONFIG.loopFeed) return events;
+
+    // Repeat the whole list 10 times.
+    // [A,B,C] -> [A,B,C, A,B,C, A,B,C ...]
+    const loops = 10;
+    let combined: Event[] = [];
+
+    for (let i = 0; i < loops; i++) {
+      const loopChunk = events.map((e, index) => ({
+        ...e,
+        // Mark the start of a loop so you can show the "Replaying" badge
+        isLoopStart: index === 0 && i > 0,
+      }));
+      combined = [...combined, ...loopChunk];
+    }
+    return combined;
+  }, [events]);
+
   if (loading) {
     return (
       <LinearGradient
@@ -991,7 +1019,7 @@ export default function ColeInboxScreen() {
     <MainStageView
       visible={!!selectedEvent}
       selectedEvent={selectedEvent}
-      events={events}
+      events={processedEvents}
       eventMetadata={eventMetadata}
       onClose={closeFullScreen}
       onEventSelect={handleEventPress}
@@ -1005,6 +1033,7 @@ export default function ColeInboxScreen() {
       recentlyArrivedIds={recentlyArrivedIds}
       readEventIds={readEventIds}
       onReplay={(event) => sendReplaySignal(event.event_id)}
+      config={EXPLORER_CONFIG}
     />
   );
 }

@@ -43,6 +43,12 @@ interface MainStageProps {
   readEventIds: string[];
   recentlyArrivedIds: string[]; // State for items that arrived during this session
   onReplay?: (event: Event) => void;
+  config?: {
+    autoplay?: boolean;
+    loopFeed?: boolean;
+    showStartMarker?: boolean;
+    playVideoCaptions?: boolean;
+  };
 }
 
 export default function MainStageView({
@@ -1041,7 +1047,7 @@ export default function MainStageView({
             ref={flatListRef}
             data={upNextEvents}
             renderItem={renderUpNextItem}
-            keyExtractor={(item) => item.event_id}
+            keyExtractor={(item, index) => `${item.event_id}_${index}`}
             onScrollToIndexFailed={(info) => {
               const wait = new Promise(resolve => setTimeout(resolve, 500));
               wait.then(() => {

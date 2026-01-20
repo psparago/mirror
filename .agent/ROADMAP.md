@@ -1,17 +1,34 @@
 # 🗺️ Looking Glass Roadmap
 
 **Current Version:** 1.0.1 (Prototype)
-**Status:** Live Testing (Cole)
+**Status:** Live Beta (Cole - Initial 7-min Session Success)
 
 ---
 
-## 🟢 Phase 1: The "Explorer Feedback" Loop
-*Focus: Stabilizing the experience for the current Explorer (Cole) based on real-world usage.*
+## 🟢 Phase 1: The "Cole UX" Refinement (Immediate Priority)
+*Focus: Addressing the "Zero Latency" requirement and matching Cole's "YouTube Muscle Memory".*
 
-- [ ] **UX Hotfixes:** Adjust button sizes, colors, and timeouts based on Cole's initial feedback.
-- [ ] **Video Player Tuning:** Ensure latency/delay feels natural.
-- [ ] **YouTube Handoff:** Validate the "pop to YouTube" flow is smooth and rewarding.
-- [ ] **Branch Management:** executing hotfixes on `hotfix/cole-ux` branch to avoid blocking architecture work.
+- [ ] **Zero Latency Player:**
+    - [ ] Implement aggressive pre-fetching (buffer next video while current plays).
+    - [ ] Enable **Autoplay** on scroll (mute/unmute logic) to prevent "boredom bail-out".
+- [ ] **Gesture Alignment (The "YouTube Reflex"):**
+    - [ ] **Swipe Down Action:** Implement a specific behavior for swiping down on the player (e.g., minimize video, show "Grid of Reflections").
+    - [ ] **Grid View:** A visual gallery of previous/available videos to give him agency when bored with the current one.
+- [ ] **Explorer Configuration (The "Spectrum" Toggles):**
+    - [ ] Create a local config object (eventually remote) to toggle UI elements.
+    - [ ] `showCaptions` (Default: False for Cole).
+    - [ ] `showDeepDives` (Default: False for Cole).
+    - [ ] `autoplay` (Default: True).
+- [ ] **The "Content Desert" Fix:**
+    - [ ] **Shuffle/Rediscover Mode:** Inject older "Reflections" back into the feed to solve low content volume.
+
+---
+
+## 🔵 Phase 1.5: The Super User Tools (Jessica/PCA)
+*Focus: Empowering the 2-day-a-week PCA to generate content and data.*
+
+- [ ] **Reaction Recorder:** Simple tool for Jessica to film Cole's reaction to a specific video (for Peter's review).
+- [ ] **Quick Capture:** Streamline the Companion flow so she can record and send a video in < 3 taps.
 
 ---
 
@@ -43,13 +60,12 @@
     - `Companion` = The Planet (Orbits specific Explorers).
 - [ ] **Onboarding:** "Invite Link" flow to add a Companion to a specific Explorer's circle.
 - [ ] **Tenant Isolation:** Ensure content for Explorer A never leaks to Explorer B.
-- [ ] **Switching View:** Allow a Companion (like Peter) to switch between multiple Explorers (Cole vs. Grandson).
 
 ---
 
 ## 🔮 Future Concepts (The V2 Parking Lot)
 
-- [ ] **The "Satellite" UI:** Revive the Angelshare concept—Explorer sees themselves in the center, with Companions orbiting as satellites to choose content from.
+- [ ] **The "Satellite" UI:** Revive the Angelshare concept—Explorer sees themselves in the center, with Companions orbiting as satellites.
 - [ ] **Smart Reactions:** Using more advanced detection to gauge Explorer delight.
 
 ---
