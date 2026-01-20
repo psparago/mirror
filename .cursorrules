@@ -19,3 +19,20 @@
 ## Development Workflow
 - When suggesting terminal commands for building, always prioritize the EAS CLI for development builds: `eas build --profile development --platform ios`.
 - Do not suggest `npx expo run:ios` for local development unless explicitly asked, as it often fails on this environment's specific hardware constraints.
+
+# PRODUCT NOMENCLATURE & BRANDING RULES
+You must adhere to the following naming conventions in all code, comments, and discussions:
+
+1. **Looking Glass Explorer (LGE):**
+   - Formerly known as: "Cole's App", "LG", "The Main App".
+   - The iPad app used by the Explorer (the primary user).
+   - User Role: "Explorer".
+
+2. **Looking Glass Companion (LGC):**
+   - Formerly known as: "The Companion App", "Remote".
+   - The iPhone/iPad app used by family/caregivers.
+   - User Role: "Companion".
+
+3. **General Rule:**
+   - Never use "Patient" or "Subject" or "Star". Always use **"Explorer"**.
+   - Never use "Admin" or "Controller". Always use **"Companion"**.
