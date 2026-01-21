@@ -808,7 +808,30 @@ export default function MainStageView({
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  const upNextEvents = useMemo(() => events, [events]);
+  // --- LAZY INFINITE SCROLL ---
+  // Local state for the feed data that can be appended
+  const [feedData, setFeedData] = useState<Event[]>([]);
+  const originalEventsRef = useRef<Event[]>([]);
+
+  // Initialize/reset feedData when original events change
+  useEffect(() => {
+    if (events.length > 0) {
+      originalEventsRef.current = events;
+      setFeedData(events);
+    }
+  }, [events]);
+
+  // Handler for infinite scroll - append more events when near the end
+  const handleEndReached = useCallback(() => {
+    if (originalEventsRef.current.length === 0) return;
+
+    console.log('📜 End reached - appending more events for infinite scroll');
+    setFeedData(prev => [...prev, ...originalEventsRef.current]);
+  }, []);
+
+  // Use feedData for the list, fallback to events if feedData is empty
+  const upNextEvents = feedData.length > 0 ? feedData : events;
+
 
   const scrollToNewestArrival = () => {
     if (recentlyArrivedIds.length === 0 || !flatListRef.current) return;
@@ -1080,6 +1103,11 @@ export default function MainStageView({
             data={upNextEvents}
             renderItem={renderUpNextItem}
             keyExtractor={(item, index) => `${item.event_id}_${index}`}
+            onEndReached={handleEndReached}
+            onEndReachedThreshold={0.5}
+            removeClippedSubviews={true}
+            maxToRenderPerBatch={10}
+            windowSize={5}
             onScrollToIndexFailed={(info) => {
               const wait = new Promise(resolve => setTimeout(resolve, 500));
               wait.then(() => {
@@ -1087,6 +1115,7 @@ export default function MainStageView({
               });
             }}
           />
+
         </View>
 
 
