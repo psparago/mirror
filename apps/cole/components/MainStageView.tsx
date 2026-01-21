@@ -15,11 +15,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Animated,
+  FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -27,11 +28,8 @@ import {
   useWindowDimensions,
   View
 } from 'react-native';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import Carousel, { ICarouselInstance } from 'react-native-reanimated-carousel';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { playerMachine } from '../machines/playerMachine';
-
 
 interface MainStageProps {
   visible: boolean;
@@ -88,8 +86,7 @@ export default function MainStageView({
   const [selfieMirrorOpacity] = useState(new Animated.Value(0));
   const [audioIndicatorAnim] = useState(new Animated.Value(0.7));
   const [tellMeMorePulse] = useState(new Animated.Value(1));
-  const carouselRef = useRef<ICarouselInstance>(null);
-
+  const flatListRef = useRef<FlatList>(null);
 
   // Need to track video playing for VU meter
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -651,16 +648,24 @@ export default function MainStageView({
       console.log(`📩 User selected reflection: ${currentEventId}`);
       send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
 
-      // Sync carousel index
-      if (carouselRef.current) {
+      // Auto-scroll the list to show the selected item
+      if (flatListRef.current) {
         const index = events.findIndex(e => e.event_id === currentEventId);
-        if (index !== -1 && index !== carouselRef.current.getCurrentIndex()) {
-          carouselRef.current.scrollTo({ index, animated: true });
+        if (index !== -1) {
+          try {
+            flatListRef.current.scrollToIndex({
+              index,
+              animated: true,
+              viewPosition: 0.5 // Center the item in the list
+            });
+          } catch (err) {
+            // scrollToOffset as fallback if scrollToIndex fails (common in early renders)
+            console.warn('Scroll to index failed, using fallback');
+          }
         }
       }
     }
   }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events]);
-
 
   // 2. Video Player Finished
   useEffect(() => {
@@ -806,7 +811,7 @@ export default function MainStageView({
   const upNextEvents = useMemo(() => events, [events]);
 
   const scrollToNewestArrival = () => {
-    if (recentlyArrivedIds.length === 0 || !carouselRef.current) return;
+    if (recentlyArrivedIds.length === 0 || !flatListRef.current) return;
 
     // Find the first (newest) event in the list that is currently marked as a recent arrival
     const newestIndex = events.findIndex(e => recentlyArrivedIds.includes(e.event_id));
@@ -819,13 +824,16 @@ export default function MainStageView({
 
       // 2. Scroll to it
       try {
-        carouselRef.current.scrollTo({ index: newestIndex, animated: true });
+        flatListRef.current.scrollToIndex({
+          index: newestIndex,
+          animated: true,
+          viewPosition: 0.5 // Center it
+        });
       } catch (err) {
         console.warn('Scroll to newest arrival failed');
       }
     }
   };
-
 
   const renderUpNextItem = ({ item }: { item: Event }) => {
     const itemMetadata = eventMetadata[item.event_id];
@@ -919,271 +927,246 @@ export default function MainStageView({
 
   if (!selectedEvent) return <View style={styles.modalContainer} />;
 
+
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <LinearGradient
-        colors={['#0f2027', '#203a43', '#2c5364']}
-        style={styles.modalContainer}
-      >
-        <Carousel
-          ref={carouselRef}
-          width={width}
-          height={height}
-          vertical={true}
-          loop={true}
-          data={events}
-          defaultIndex={events.findIndex(e => e.event_id === selectedEvent?.event_id)}
-          onSnapToItem={(index) => {
-            onEventSelect(events[index]);
-          }}
-          renderItem={({ item, index }) => {
-            const isSelected = item.event_id === selectedEvent?.event_id;
-            const itemMetadata = eventMetadata[item.event_id];
+    <LinearGradient
+      colors={['#0f2027', '#203a43', '#2c5364']}
+      style={styles.modalContainer}
+      {...panResponder.panHandlers}
+    >
+      <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
-            return (
-              <View style={{ width, height }}>
-                {/* Media Container */}
-                <Pressable
-                  style={styles.mediaContainer}
-                  onPress={() => {
-                    if (state.hasTag('active')) {
-                      if (state.hasTag('paused')) {
-                        console.log('⏯️ Pressed to Resume');
-                        send({ type: 'RESUME' });
-                      } else {
-                        console.log('⏸️ Pressed to Pause');
-                        send({ type: 'PAUSE' });
-                      }
-                    } else if (state.matches('finished')) {
-                      handleReplay();
-                    }
-                  }}
-                >
-                  <View style={styles.mediaFrame}>
-                    {isSelected && item.video_url ? (
-                      <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
-                    ) : (
-                      <Image source={{ uri: item.image_url }} style={styles.mediaImage} resizeMode="contain" />
-                    )}
+        {/* LEFT PANE */}
+        <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.55 }]}>
 
-                    {/* Replay / Pause Icon Overlay (only if selected) */}
-                    {isSelected && (
-                      <Animated.View
-                        style={[styles.playOverlay, { opacity: controlsOpacity }]}
-                        pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
-                      >
-                        {state.matches('finished') ? (
-                          <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                            <BlurView intensity={30} style={styles.playOverlayBlur}>
-                              <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
-                            </BlurView>
-                          </TouchableOpacity>
-                        ) : state.hasTag('paused') ? (
-                          <View style={styles.playButton}>
-                            <BlurView intensity={30} style={styles.playOverlayBlur}>
-                              <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
-                            </BlurView>
-                          </View>
-                        ) : null}
-                      </Animated.View>
-                    )}
-                  </View>
-                </Pressable>
-
-                {/* Caption & Metadata (scrolling with item) */}
-                <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-                  <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-                    {isSelected && isAnyAudioPlaying && (
-                      <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 12, marginTop: 2 }}>
-                        <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
-                      </Animated.View>
-                    )}
-
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.descriptionText} numberOfLines={2}>
-                        {itemMetadata?.short_caption || itemMetadata?.description || ''}
-                      </Text>
-
-                      {itemMetadata?.sender && (
-                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-                          <Text style={styles.senderText}>
-                            From {itemMetadata.sender}
-                          </Text>
-                          <Text style={styles.dateText}>
-                            {' • '}{formatEventDate(item.event_id)}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  </View>
-
-                  {/* Tell Me More FAB */}
-                  {isSelected && itemMetadata?.deep_dive && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
-                    <Animated.View style={[styles.tellMeMoreFAB, { transform: [{ scale: tellMeMorePulse }] }]}>
-                      <TouchableOpacity
-                        onPress={() => {
-                          console.log('✨ User pressed Tell Me More button');
-                          send({ type: 'TELL_ME_MORE' });
-                        }}
-                        style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
-                      >
-                        <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                          <Text style={{ fontSize: 32 }}>✨</Text>
-                        </BlurView>
-                      </TouchableOpacity>
-                    </Animated.View>
-                  )}
-                </View>
+          {/* Header */}
+          <View style={[styles.headerBar, { top: insets.top + 10 }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', backgroundColor: 'transparent' }}>
+              <View style={{ flex: 1 }}>
+                {recentlyArrivedIds.length > 0 ? (
+                  <TouchableOpacity
+                    onPress={scrollToNewestArrival}
+                    style={styles.newArrivalNotification}
+                    activeOpacity={0.7}
+                  >
+                    <BlurView intensity={80} style={styles.notificationBlur}>
+                      <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                    </BlurView>
+                  </TouchableOpacity>
+                ) : (
+                  events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
+                )}
               </View>
-            );
-          }}
-        />
+            </View>
 
-        {/* STATIC OVERLAYS (Buttons & Header) */}
 
-        {/* Top Header Layer */}
-        <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-            {/* Left: New Arrival Notification or Title */}
-            <View style={{ flex: 1 }}>
-              {recentlyArrivedIds.length > 0 ? (
+
+          </View>
+
+          {/* Media Container */}
+          <View style={styles.mediaContainer}>
+            <View style={styles.mediaFrame}>
+              {videoSource ? (
+                <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
+              ) : (
+                <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+              )}
+
+
+              {/* Replay / Pause Icon Overlay */}
+              <Animated.View
+                style={[styles.playOverlay, { opacity: controlsOpacity }]}
+                pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
+              >
+                {state.matches('finished') ? (
+                  <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
+                    <BlurView intensity={30} style={styles.playOverlayBlur}>
+                      <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
+                    </BlurView>
+                  </TouchableOpacity>
+                ) : state.hasTag('paused') ? (
+                  <View style={styles.playButton}>
+                    <BlurView intensity={30} style={styles.playOverlayBlur}>
+                      <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
+                    </BlurView>
+                  </View>
+                ) : null}
+              </Animated.View>
+            </View>
+
+            {/* Loading Indicator removed - was blocking video */}
+          </View>
+
+          {/* Caption & Metadata */}
+          <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+              {/* VU Meter for audio playback */}
+              {isAnyAudioPlaying && (
+                <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 12, marginTop: 2 }}>
+                  <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
+                </Animated.View>
+              )}
+
+              <View style={{ flex: 1 }}>
+                {/* Caption/Description - FIRST */}
+                <Text style={styles.descriptionText} numberOfLines={2}>
+                  {selectedMetadata?.short_caption || selectedMetadata?.description || ''}
+                </Text>
+
+                {/* From + Date line - SECOND */}
+                {selectedMetadata?.sender && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                    <Text style={styles.senderText}>
+                      From {selectedMetadata.sender}
+                    </Text>
+                    {selectedEvent?.event_id && (
+                      <Text style={styles.dateText}>
+                        {' • '}{formatEventDate(selectedEvent.event_id)}
+                      </Text>
+                    )}
+                  </View>
+                )}
+              </View>
+            </View>
+
+            {/* Tell Me More FAB */}
+            {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
+              <Animated.View style={[styles.tellMeMoreFAB, { transform: [{ scale: tellMeMorePulse }] }]}>
                 <TouchableOpacity
-                  onPress={scrollToNewestArrival}
-                  style={styles.newArrivalNotification}
-                  activeOpacity={0.7}
+                  onPress={() => {
+                    console.log('✨ User pressed Tell Me More button');
+                    send({ type: 'TELL_ME_MORE' });
+                  }}
+                  style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
                 >
-                  <BlurView intensity={80} style={styles.notificationBlur}>
-                    <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                  <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                    <Text style={{ fontSize: 32 }}>✨</Text>
                   </BlurView>
                 </TouchableOpacity>
-              ) : (
-                <Text style={styles.reflectionsTitle}>Reflections</Text>
-              )}
-            </View>
-
-            {/* Right: Admin and Info Buttons */}
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity
-                onPress={handleAdminTrigger}
-                style={styles.floatingButton}
-              >
-                <BlurView intensity={30} style={styles.floatingButtonBlur}>
-                  <FontAwesome
-                    name={isAdminMode ? "unlock" : "cog"}
-                    size={20}
-                    color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.7)"}
-                  />
-                </BlurView>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => router.push('/settings')}
-                style={[styles.floatingButton, { marginLeft: 12 }]}
-              >
-                <BlurView intensity={30} style={styles.floatingButtonBlur}>
-                  <FontAwesome name="info-circle" size={20} color="rgba(255,255,255,0.7)" />
-                </BlurView>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={onClose}
-                style={[styles.floatingButton, { marginLeft: 12 }]}
-              >
-                <BlurView intensity={30} style={styles.floatingButtonBlur}>
-                  <FontAwesome name="times" size={20} color="rgba(255,255,255,0.7)" />
-                </BlurView>
-              </TouchableOpacity>
-            </View>
+              </Animated.View>
+            )}
           </View>
         </View>
 
-        {/* Selfie Mode Floating Button */}
-        {!isCapturingSelfie && cameraPermission?.granted && (
-          <TouchableOpacity
-            onPress={() => performSelfieCapture(0)}
-            style={styles.selfieToggleButton}
-          >
-            <BlurView intensity={30} style={styles.selfieToggleBlur}>
-              <FontAwesome name="camera" size={24} color="#fff" />
-              <Text style={styles.selfieToggleText}>Selfie Mode</Text>
-            </BlurView>
-          </TouchableOpacity>
-        )}
-
-        {/* Selfie Mirror Bubble */}
-        <Animated.View style={[styles.cameraBubble, {
-          top: 100, // Positioned below header
-          right: 20,
-          opacity: selfieMirrorOpacity
-        }]}>
-          {cameraPermission?.granted ? (
-            <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
-          ) : null}
-          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white', opacity: flashOpacity }]} />
-        </Animated.View>
-
-        {/* Toast Notification */}
-        {toastMessage ? (
-          <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
-            <Text style={styles.toastText}>{toastMessage}</Text>
-          </Animated.View>
-        ) : null}
-
-        {/* Admin Challenge Modal */}
-        <Modal
-          visible={showAdminChallenge}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowAdminChallenge(false)}
-        >
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.adminChallengeOverlay}
-          >
-            <View style={styles.adminChallengeBox}>
-              <View style={styles.adminLockIcon}>
-                <FontAwesome name="lock" size={32} color="#007AFF" />
-              </View>
-              <Text style={styles.adminChallengeTitle}>Caregiver Mode</Text>
-              <Text style={styles.adminChallengeSub}>To toggle delete access, please solve:</Text>
-              <Text style={styles.mathProblem}>{mathChallenge.a} + {mathChallenge.b} = ?</Text>
-
-              <TextInput
-                style={styles.adminInput}
-                keyboardType="number-pad"
-                autoFocus
-                maxLength={2}
-                value={adminAnswer}
-                onChangeText={setAdminAnswer}
-                onSubmitEditing={handleAdminToggle}
-                placeholder="?"
-              />
-
-              <View style={styles.adminButtonRow}>
-                <TouchableOpacity
-                  style={[styles.adminButton, styles.adminCancelButton]}
-                  onPress={() => {
-                    setShowAdminChallenge(false);
-                    setAdminAnswer('');
-                  }}
-                >
-                  <Text style={styles.adminCancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.adminButton, styles.adminSubmitButton]}
-                  onPress={handleAdminToggle}
-                >
-                  <Text style={styles.adminButtonText}>Verify</Text>
-                </TouchableOpacity>
-              </View>
+        {/* RIGHT PANE */}
+        <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
+          <View style={styles.upNextHeader}>
+            <Text style={styles.upNextHeaderText}>Up Next</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <TouchableOpacity
+                onPress={handleAdminTrigger}
+                activeOpacity={0.6}
+                style={{ padding: 4 }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <FontAwesome
+                  name={isAdminMode ? "unlock" : "cog"}
+                  size={15}
+                  color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.4)"}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => router.push('/settings')}
+                style={{ marginLeft: 12, padding: 4 }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <FontAwesome name="info-circle" size={15} color="rgba(255,255,255,0.4)" />
+              </TouchableOpacity>
             </View>
-          </KeyboardAvoidingView>
-        </Modal>
-      </LinearGradient>
-    </GestureHandlerRootView>
+          </View>
+
+          <FlatList
+            ref={flatListRef}
+            data={upNextEvents}
+            renderItem={renderUpNextItem}
+            keyExtractor={(item, index) => `${item.event_id}_${index}`}
+            onScrollToIndexFailed={(info) => {
+              const wait = new Promise(resolve => setTimeout(resolve, 500));
+              wait.then(() => {
+                flatListRef.current?.scrollToIndex({ index: info.index, animated: true });
+              });
+            }}
+          />
+        </View>
+
+
+
+      </View>
+
+      {/* Selfie Mirror - Rendered at ROOT level to override native Image/Video layers */}
+      <Animated.View style={[styles.cameraBubble, {
+        top: insets.top + 16,
+        // In landscape, offset by right pane width (30%) to keep bubble in left pane
+        right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
+        opacity: selfieMirrorOpacity
+      }]}>
+        {cameraPermission?.granted ? (
+          <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
+        ) : null}
+        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white', opacity: flashOpacity }]} />
+      </Animated.View>
+
+      {/* Toast Notification */}
+      {toastMessage ? (
+        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+          <Text style={styles.toastText}>{toastMessage}</Text>
+        </Animated.View>
+      ) : null}
+
+      {/* Admin Challenge Modal */}
+      <Modal
+        visible={showAdminChallenge}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAdminChallenge(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.adminChallengeOverlay}
+        >
+          <View style={styles.adminChallengeBox}>
+            <View style={styles.adminLockIcon}>
+              <FontAwesome name="lock" size={32} color="#007AFF" />
+            </View>
+            <Text style={styles.adminChallengeTitle}>Caregiver Mode</Text>
+            <Text style={styles.adminChallengeSub}>To toggle delete access, please solve:</Text>
+            <Text style={styles.mathProblem}>{mathChallenge.a} + {mathChallenge.b} = ?</Text>
+
+            <TextInput
+              style={styles.adminInput}
+              keyboardType="number-pad"
+              autoFocus
+              maxLength={2}
+              value={adminAnswer}
+              onChangeText={setAdminAnswer}
+              onSubmitEditing={handleAdminToggle}
+              placeholder="?"
+            />
+
+            <View style={styles.adminButtonRow}>
+              <TouchableOpacity
+                style={[styles.adminButton, styles.adminCancelButton]}
+                onPress={() => {
+                  setShowAdminChallenge(false);
+                  setAdminAnswer('');
+                }}
+              >
+                <Text style={styles.adminCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.adminButton, styles.adminSubmitButton]}
+                onPress={handleAdminToggle}
+              >
+                <Text style={styles.adminButtonText}>Verify</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    </LinearGradient>
   );
 }
-
-
 
 const styles = StyleSheet.create({
   modalContainer: { flex: 1 },
@@ -1224,16 +1207,8 @@ const styles = StyleSheet.create({
   playOverlay: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, justifyContent: 'center', alignItems: 'center' },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
-  cameraBubble: { position: 'absolute', width: 120, height: 120, borderRadius: 60, overflow: 'hidden', borderWidth: 3, borderColor: '#fff', zIndex: 99999, elevation: 15, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
+  cameraBubble: { position: 'absolute', width: 100, height: 100, borderRadius: 50, overflow: 'hidden', borderWidth: 2, borderColor: '#fff', zIndex: 99999, elevation: 10 },
   cameraPreview: { flex: 1 },
-
-  floatingButton: { width: 44, height: 44, borderRadius: 22, overflow: 'hidden', backgroundColor: 'rgba(0,0,0,0.3)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
-  floatingButtonBlur: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-
-  selfieToggleButton: { position: 'absolute', bottom: 100, right: 20, borderRadius: 30, overflow: 'hidden', backgroundColor: 'rgba(0,122,255,0.5)', zIndex: 1000 },
-  selfieToggleBlur: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20 },
-  selfieToggleText: { color: '#fff', fontWeight: 'bold', marginLeft: 8, fontSize: 16 },
-
   metadataContainer: {
     position: 'absolute',
     bottom: 20,
