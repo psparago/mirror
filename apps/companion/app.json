@@ -68,7 +68,13 @@
       ],
       "expo-video",
       "expo-av",
-      "@sentry/react-native"
+      [
+        "@sentry/react-native",
+        {
+          "organization": "angelwareorg",
+          "project": "looking-glass-companion"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
