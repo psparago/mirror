@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass.companion",
-      "buildNumber": "2",
+      "buildNumber": "3",
       "icon": "./assets/images/icon-lgc.png",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
@@ -67,7 +67,8 @@
         }
       ],
       "expo-video",
-      "expo-av"
+      "expo-av",
+      "@sentry/react-native"
     ],
     "experiments": {
       "typedRoutes": true

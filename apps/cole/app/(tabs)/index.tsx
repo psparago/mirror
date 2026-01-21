@@ -47,9 +47,9 @@ export default function ColeInboxScreen() {
   const EXPLORER_CONFIG = {
     playVideoCaptions: false,
     autoplay: true,
-    loopFeed: true,
     showStartMarker: true,
   };
+
 
   // Play chime sound for new arrivals
   const playArrivalChime = async () => {
@@ -963,25 +963,7 @@ export default function ColeInboxScreen() {
     }
   };
 
-  const processedEvents = useMemo(() => {
-    if (!events.length) return [];
-    if (!EXPLORER_CONFIG.loopFeed) return events;
 
-    // Repeat the whole list 10 times.
-    // [A,B,C] -> [A,B,C, A,B,C, A,B,C ...]
-    const loops = 10;
-    let combined: Event[] = [];
-
-    for (let i = 0; i < loops; i++) {
-      const loopChunk = events.map((e, index) => ({
-        ...e,
-        // Mark the start of a loop so you can show the "Replaying" badge
-        isLoopStart: index === 0 && i > 0,
-      }));
-      combined = [...combined, ...loopChunk];
-    }
-    return combined;
-  }, [events]);
 
   if (loading) {
     return (
@@ -1046,7 +1028,7 @@ export default function ColeInboxScreen() {
     <MainStageView
       visible={!!selectedEvent}
       selectedEvent={selectedEvent}
-      events={processedEvents}
+      events={events}
       eventMetadata={eventMetadata}
       onClose={closeFullScreen}
       onEventSelect={handleEventPress}

@@ -15,6 +15,7 @@
 - This is a monorepo with apps in `/apps/*` and shared code in `/packages/*`.
 - Core native dependencies (React, RN, Expo) must be identical across the root `package.json` and all app-level `package.json` files to prevent hoisting conflicts.
 - Always run `npm install` from the root directory.
+- Never use npm install package inside an app folder. Always use npx expo install package to ensure the version matches the SDK.
 
 ## Development Workflow
 - When suggesting terminal commands for building, always prioritize the EAS CLI for development builds: `eas build --profile development --platform ios`.
