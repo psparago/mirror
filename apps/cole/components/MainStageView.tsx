@@ -53,7 +53,9 @@ interface MainStageProps {
     loopFeed?: boolean;
     showStartMarker?: boolean;
     playVideoCaptions?: boolean;
+    enableInfiniteScroll?: boolean;
   };
+
 }
 
 export default function MainStageView({
@@ -73,7 +75,9 @@ export default function MainStageView({
   readEventIds,
   recentlyArrivedIds,
   onReplay,
+  config,
 }: MainStageProps) {
+
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
@@ -812,22 +816,38 @@ export default function MainStageView({
   // Local state for the feed data that can be appended
   const [feedData, setFeedData] = useState<Event[]>([]);
   const originalEventsRef = useRef<Event[]>([]);
+  const prevEventIdsRef = useRef<string>('');
 
-  // Initialize/reset feedData when original events change
+  // Initialize/reset feedData only when the actual source events change (not just reference)
   useEffect(() => {
     if (events.length > 0) {
-      originalEventsRef.current = events;
-      setFeedData(events);
+      // Create a stable ID string from event IDs to detect actual changes
+      const currentEventIds = events.map(e => e.event_id).join(',');
+
+      if (currentEventIds !== prevEventIdsRef.current) {
+        console.log('📜 Source events changed - resetting feed data');
+        prevEventIdsRef.current = currentEventIds;
+        originalEventsRef.current = events;
+        setFeedData(events);
+      }
     }
   }, [events]);
 
+
   // Handler for infinite scroll - append more events when near the end
   const handleEndReached = useCallback(() => {
+    // Check if infinite scroll is enabled (default to true if not specified)
+    if (config?.enableInfiniteScroll === false) {
+      console.log('📜 End reached - infinite scroll disabled');
+      return;
+    }
+
     if (originalEventsRef.current.length === 0) return;
 
     console.log('📜 End reached - appending more events for infinite scroll');
     setFeedData(prev => [...prev, ...originalEventsRef.current]);
-  }, []);
+  }, [config?.enableInfiniteScroll]);
+
 
   // Use feedData for the list, fallback to events if feedData is empty
   const upNextEvents = feedData.length > 0 ? feedData : events;

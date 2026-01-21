@@ -1,13 +1,36 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay } from '@projectmirror/shared';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useRouter } from 'expo-router';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 
 export default function SettingsScreen() {
     const colorScheme = useColorScheme();
     const tintColor = Colors[colorScheme ?? 'light'].tint;
     const router = useRouter();
+
+    // Infinite scroll setting
+    const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
+
+    useEffect(() => {
+        AsyncStorage.getItem('enableInfiniteScroll').then(value => {
+            if (value !== null) {
+                setEnableInfiniteScroll(value === 'true');
+            }
+        }).catch(err => console.warn('Failed to load setting:', err));
+    }, []);
+
+    const toggleInfiniteScroll = async (value: boolean) => {
+        setEnableInfiniteScroll(value);
+        try {
+            await AsyncStorage.setItem('enableInfiniteScroll', value.toString());
+            console.log('✅ Infinite scroll setting saved:', value);
+        } catch (err) {
+            console.warn('Failed to save setting:', err);
+        }
+    };
 
     return (
         <View style={styles.container}>
@@ -31,6 +54,26 @@ export default function SettingsScreen() {
                     <Text style={[styles.sectionTitle, { color: tintColor }]}>Device & Build</Text>
                     <View style={styles.card}>
                         <VersionDisplay />
+                    </View>
+                </View>
+
+                <View style={styles.section}>
+                    <Text style={[styles.sectionTitle, { color: tintColor }]}>Preferences</Text>
+                    <View style={styles.card}>
+                        <View style={styles.settingRow}>
+                            <View style={styles.settingInfo}>
+                                <Text style={styles.settingLabel}>Infinite Scroll</Text>
+                                <Text style={styles.settingDescription}>
+                                    Loop reflections when reaching the end
+                                </Text>
+                            </View>
+                            <Switch
+                                value={enableInfiniteScroll}
+                                onValueChange={toggleInfiniteScroll}
+                                trackColor={{ false: '#767577', true: '#4FC3F7' }}
+                                thumbColor={enableInfiniteScroll ? '#fff' : '#f4f3f4'}
+                            />
+                        </View>
                     </View>
                 </View>
 
@@ -82,6 +125,25 @@ const styles = StyleSheet.create({
         borderWidth: 1,
         borderColor: 'rgba(255, 255, 255, 0.2)',
     },
+    settingRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+    },
+    settingInfo: {
+        flex: 1,
+        marginRight: 16,
+    },
+    settingLabel: {
+        color: '#fff',
+        fontSize: 16,
+        fontWeight: '600',
+    },
+    settingDescription: {
+        color: 'rgba(255, 255, 255, 0.6)',
+        fontSize: 13,
+        marginTop: 4,
+    },
     backButton: {
         backgroundColor: 'rgba(255, 255, 255, 0.2)',
         paddingVertical: 16,
@@ -110,3 +172,4 @@ const styles = StyleSheet.create({
         marginTop: 4,
     },
 });
+

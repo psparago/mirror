@@ -43,13 +43,28 @@ export default function ColeInboxScreen() {
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
-  // Explorer config placeholder
-  const EXPLORER_CONFIG = {
+  // Explorer config with state for toggleable settings
+  const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
+
+  // Load infinite scroll setting from storage
+  useEffect(() => {
+    AsyncStorage.getItem('enableInfiniteScroll').then(value => {
+      if (value !== null) {
+        setEnableInfiniteScroll(value === 'true');
+      }
+    }).catch(err => console.warn('Failed to load infinite scroll setting:', err));
+  }, []);
+
+  // Memoize config to prevent unnecessary re-renders
+  const EXPLORER_CONFIG = useMemo(() => ({
     playVideoCaptions: false,
     autoplay: true,
     loopFeed: true,
     showStartMarker: true,
-  };
+    enableInfiniteScroll,
+  }), [enableInfiniteScroll]);
+
+
 
   // Play chime sound for new arrivals
   const playArrivalChime = async () => {
