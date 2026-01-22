@@ -1221,6 +1221,65 @@ export default function MainStageView({
                       </View>
                     )}
                   </View>
+
+                  {/* Play Caption Button - for videos */}
+                  {(() => {
+                    const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
+                    const isDisabled = isMediaPlaying;
+
+                    return selectedEvent?.video_url && (selectedEvent?.audio_url || selectedMetadata?.description) && (
+                      <TouchableOpacity
+                        style={[styles.playCaptionButton, isDisabled && styles.playCaptionButtonDisabled]}
+                        onPress={async () => {
+                          if (isDisabled) return;
+
+                          // Use audio file narration
+                          if (selectedEvent?.audio_url) {
+                            console.log('🔊 Playing caption audio file');
+                            try {
+                              // Stop any existing caption sound
+                              if (captionSound) {
+                                await captionSound.stopAsync();
+                                await captionSound.unloadAsync();
+                              }
+
+                              const { sound: newSound } = await Audio.Sound.createAsync(
+                                { uri: selectedEvent.audio_url },
+                                { shouldPlay: true }
+                              );
+
+                              newSound.setOnPlaybackStatusUpdate((status) => {
+                                if (status.isLoaded && status.didJustFinish) {
+                                  console.log('✅ Caption audio finished');
+                                  newSound.unloadAsync();
+                                }
+                              });
+                              setCaptionSound(newSound);
+                            } catch (err) {
+                              console.warn('Audio playback error:', err);
+                            }
+                          } else if (selectedMetadata?.description) {
+                            // Only use TTS as a last resort if audio file is missing (despite expectation)
+                            console.log('🔊 Playing caption via TTS (Fallback)');
+                            Speech.stop();
+                            const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
+                            Speech.speak(textToSpeak, {
+                              onDone: () => console.log('✅ Caption TTS finished'),
+                              onError: (err) => console.warn('TTS error:', err)
+                            });
+                          }
+                        }}
+                        activeOpacity={isDisabled ? 1 : 0.7}
+                        disabled={isDisabled}
+                      >
+                        <FontAwesome
+                          name="volume-up"
+                          size={18}
+                          color={isDisabled ? "rgba(255, 255, 255, 0.3)" : "rgba(255, 255, 255, 0.8)"}
+                        />
+                      </TouchableOpacity>
+                    );
+                  })()}
                 </View>
 
                 {/* Tell Me More FAB */}
@@ -1429,7 +1488,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   descriptionText: { color: '#fff', fontSize: 18, lineHeight: 24 },
-
+  playCaptionButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 12,
+  },
+  playCaptionButtonDisabled: {
+    opacity: 0.4,
+  },
 
   tellMeMoreFAB: {
     position: 'absolute',
