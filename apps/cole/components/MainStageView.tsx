@@ -60,6 +60,8 @@ interface MainStageProps {
     showStartMarker?: boolean;
     playVideoCaptions?: boolean;
     enableInfiniteScroll?: boolean;
+    instantVideoPlayback?: boolean;
+    readVideoCaptions?: boolean;
   };
 
 }
@@ -686,7 +688,9 @@ export default function MainStageView({
   useEffect(() => {
     if (!player) return;
 
-    const isMachinePlayingVideo = state.matches({ playingVideo: { playback: 'playing' } });
+    // Check for both regular and instant video playback states
+    const isMachinePlayingVideo = state.matches({ playingVideo: { playback: 'playing' } }) ||
+      state.matches({ playingVideoInstant: { playback: 'playing' } });
     const isMachinePaused = state.hasTag('paused');
 
     if (isMachinePlayingVideo) {
@@ -737,7 +741,17 @@ export default function MainStageView({
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
       prevEventIdRef.current = currentEventId;
       console.log(`📩 User selected reflection: ${currentEventId}`);
-      send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
+
+      // Use instant video playback if configured and this is a video
+      const isVideo = !!selectedEvent?.video_url;
+      const useInstantPlayback = config?.instantVideoPlayback && isVideo;
+
+      if (useInstantPlayback) {
+        console.log('⚡ Using instant video playback (skipping narration)');
+        send({ type: 'SELECT_EVENT_INSTANT', event: selectedEvent!, metadata: selectedMetadata! });
+      } else {
+        send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
+      }
 
       // Reset swipe-to-dismiss animation values for fresh overlay opening
       translateY.value = 0;
@@ -761,14 +775,16 @@ export default function MainStageView({
         }
       }
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events, translateY, scale, opacity]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events, translateY, scale, opacity, config?.instantVideoPlayback]);
 
   // 2. Video Player Finished
   useEffect(() => {
     if (!player) return;
     const interval = setInterval(() => {
-      // ONLY check for finish if we are in the 'playing' state
-      if (!state.matches({ playingVideo: { playback: 'playing' } })) {
+      // ONLY check for finish if we are in the 'playing' state (regular or instant)
+      const isPlaying = state.matches({ playingVideo: { playback: 'playing' } }) ||
+        state.matches({ playingVideoInstant: { playback: 'playing' } });
+      if (!isPlaying) {
         return;
       }
 

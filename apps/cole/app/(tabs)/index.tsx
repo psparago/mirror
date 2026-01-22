@@ -45,14 +45,28 @@ export default function ColeInboxScreen() {
 
   // Explorer config with state for toggleable settings
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
+  const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
+  const [readVideoCaptions, setReadVideoCaptions] = useState(false);
 
-  // Load infinite scroll setting from storage
+  // Load settings from storage
   useEffect(() => {
     AsyncStorage.getItem('enableInfiniteScroll').then(value => {
       if (value !== null) {
         setEnableInfiniteScroll(value === 'true');
       }
     }).catch(err => console.warn('Failed to load infinite scroll setting:', err));
+
+    AsyncStorage.getItem('instantVideoPlayback').then(value => {
+      if (value !== null) {
+        setInstantVideoPlayback(value === 'true');
+      }
+    }).catch(err => console.warn('Failed to load instant video setting:', err));
+
+    AsyncStorage.getItem('readVideoCaptions').then(value => {
+      if (value !== null) {
+        setReadVideoCaptions(value === 'true');
+      }
+    }).catch(err => console.warn('Failed to load read video captions setting:', err));
   }, []);
 
   // Memoize config to prevent unnecessary re-renders
@@ -62,7 +76,9 @@ export default function ColeInboxScreen() {
     loopFeed: true,
     showStartMarker: true,
     enableInfiniteScroll,
-  }), [enableInfiniteScroll]);
+    instantVideoPlayback,
+    readVideoCaptions,
+  }), [enableInfiniteScroll, instantVideoPlayback, readVideoCaptions]);
 
 
 

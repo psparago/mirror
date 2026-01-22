@@ -13,11 +13,19 @@ export default function SettingsScreen() {
 
     // Infinite scroll setting
     const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
+    // Instant video playback setting
+    const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
 
     useEffect(() => {
         AsyncStorage.getItem('enableInfiniteScroll').then(value => {
             if (value !== null) {
                 setEnableInfiniteScroll(value === 'true');
+            }
+        }).catch(err => console.warn('Failed to load setting:', err));
+
+        AsyncStorage.getItem('instantVideoPlayback').then(value => {
+            if (value !== null) {
+                setInstantVideoPlayback(value === 'true');
             }
         }).catch(err => console.warn('Failed to load setting:', err));
     }, []);
@@ -27,6 +35,16 @@ export default function SettingsScreen() {
         try {
             await AsyncStorage.setItem('enableInfiniteScroll', value.toString());
             console.log('✅ Infinite scroll setting saved:', value);
+        } catch (err) {
+            console.warn('Failed to save setting:', err);
+        }
+    };
+
+    const toggleInstantVideoPlayback = async (value: boolean) => {
+        setInstantVideoPlayback(value);
+        try {
+            await AsyncStorage.setItem('instantVideoPlayback', value.toString());
+            console.log('✅ Instant video playback setting saved:', value);
         } catch (err) {
             console.warn('Failed to save setting:', err);
         }
@@ -61,6 +79,21 @@ export default function SettingsScreen() {
                     <Text style={[styles.sectionTitle, { color: tintColor }]}>Preferences</Text>
                     <View style={styles.card}>
                         <View style={styles.settingRow}>
+                            <View style={styles.settingInfo}>
+                                <Text style={styles.settingLabel}>Instant Video Playback</Text>
+                                <Text style={styles.settingDescription}>
+                                    Start videos immediately without reading caption
+                                </Text>
+                            </View>
+                            <Switch
+                                value={instantVideoPlayback}
+                                onValueChange={toggleInstantVideoPlayback}
+                                trackColor={{ false: '#767577', true: '#4FC3F7' }}
+                                thumbColor={instantVideoPlayback ? '#fff' : '#f4f3f4'}
+                            />
+                        </View>
+
+                        <View style={[styles.settingRow, { marginTop: 20 }]}>
                             <View style={styles.settingInfo}>
                                 <Text style={styles.settingLabel}>Infinite Scroll</Text>
                                 <Text style={styles.settingDescription}>

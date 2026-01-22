@@ -13,6 +13,7 @@ export interface PlayerContext {
 // 2. EVENTS
 export type PlayerEvent =
     | { type: 'SELECT_EVENT'; event: Event; metadata: EventMetadata }
+    | { type: 'SELECT_EVENT_INSTANT'; event: Event; metadata: EventMetadata }
     | { type: 'METADATA_LOADED'; metadata: EventMetadata }
     | { type: 'NARRATION_FINISHED' }
     | { type: 'VIDEO_FINISHED' }
@@ -71,6 +72,19 @@ export const playerMachine = setup({
                     selfieTaken: false
                 })
             ]
+        },
+        SELECT_EVENT_INSTANT: {
+            target: '.loadingInstant',
+            actions: [
+                'stopAllMedia',
+                assign({
+                    event: ({ event }) => event.event,
+                    metadata: ({ event }) => event.metadata,
+                    hasSpoken: true, // Skip narration
+                    videoFinished: false,
+                    selfieTaken: false
+                })
+            ]
         }
     },
 
@@ -82,6 +96,25 @@ export const playerMachine = setup({
                 {
                     guard: ({ context }) => !!(context.event as any)?.video_url,
                     target: 'playingVideo'
+                },
+                {
+                    guard: ({ context }) => {
+                        const hasAudio = !!(context.event as any)?.audio_url;
+                        const hasVideo = !!(context.event as any)?.video_url;
+                        return hasAudio && !hasVideo;
+                    },
+                    target: 'playingAudio'
+                },
+                { target: 'viewingPhoto' }
+            ]
+        },
+
+        // Instant loading - skips narration for videos
+        loadingInstant: {
+            always: [
+                {
+                    guard: ({ context }) => !!(context.event as any)?.video_url,
+                    target: 'playingVideoInstant'
                 },
                 {
                     guard: ({ context }) => {
@@ -141,6 +174,56 @@ export const playerMachine = setup({
                                 target: 'evaluating'
                             }
                         },
+                        evaluating: {
+                            always: [
+                                { guard: ({ context }: { context: PlayerContext }) => context.selfieTaken, target: 'done' },
+                                { target: 'waiting' }
+                            ]
+                        },
+                        waiting: {
+                            after: { 2000: 'snap' }
+                        },
+                        snap: {
+                            entry: ['triggerSelfie', assign({ selfieTaken: true })],
+                            target: 'done'
+                        },
+                        done: { type: 'final' }
+                    }
+                }
+            }
+        },
+
+        // Instant video playback - skips narration, starts video immediately
+        playingVideoInstant: {
+            type: 'parallel',
+            tags: ['video_mode'],
+            states: {
+                playback: {
+                    initial: 'playing',
+                    entry: 'playVideo', // Start video immediately
+                    states: {
+                        playing: {
+                            tags: ['playing', 'active', 'video', 'loadingVideo'],
+                            on: {
+                                PAUSE: 'paused',
+                                VIDEO_FINISHED: '#lookingGlassPlayer.finished'
+                            }
+                        },
+                        paused: {
+                            tags: ['paused', 'active'],
+                            entry: 'pauseMedia',
+                            on: {
+                                RESUME: {
+                                    target: 'playing',
+                                    actions: 'resumeMedia'
+                                }
+                            }
+                        }
+                    }
+                },
+                selfie: {
+                    initial: 'evaluating',
+                    states: {
                         evaluating: {
                             always: [
                                 { guard: ({ context }: { context: PlayerContext }) => context.selfieTaken, target: 'done' },
