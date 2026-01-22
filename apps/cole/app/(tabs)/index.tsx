@@ -12,7 +12,7 @@ import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -584,9 +584,22 @@ export default function ColeInboxScreen() {
     }
   };
 
+  // Helper to format event date
+  const formatEventDate = (eventId: string): string => {
+    const timestamp = parseInt(eventId, 10);
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (diffDays === 0) return 'today';
+    if (diffDays === 1) return 'yesterday';
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
-    const hasDescription = metadata?.description;
+    const isRead = readEventIds.includes(item.event_id);
+    const isNewArrival = recentlyArrivedIds.includes(item.event_id);
 
     // Don't render if no image URL
     if (!item.image_url || item.image_url === '') {
@@ -595,20 +608,64 @@ export default function ColeInboxScreen() {
 
     return (
       <TouchableOpacity
-        style={styles.photoContainer}
+        style={[
+          styles.gridCard,
+          isNewArrival && styles.gridCardNewArrival
+        ]}
         onPress={() => handleEventPress(item)}
         activeOpacity={0.8}
       >
-        <BlurView intensity={30} style={styles.photoBlurContainer}>
+        {/* Unread indicator dot */}
+        {!isRead && (
+          <View style={styles.unreadDot} />
+        )}
+
+        {/* Thumbnail */}
+        <View style={styles.gridThumbnailContainer}>
           <Image
             source={{ uri: item.image_url }}
-            style={styles.photo}
+            style={styles.gridThumbnail}
             resizeMode="cover"
             onError={(error) => {
               console.error(`Error loading image for event ${item.event_id}:`, error);
             }}
           />
-        </BlurView>
+          {/* Media type badge overlay */}
+          <View style={styles.mediaTypeBadge}>
+            {item.video_url ? (
+              <FontAwesome name="video-camera" size={12} color="#fff" />
+            ) : metadata?.image_source === 'search' ? (
+              <FontAwesome name="search" size={12} color="#fff" />
+            ) : (
+              <FontAwesome name="camera" size={12} color="#fff" />
+            )}
+          </View>
+        </View>
+
+        {/* Card Content */}
+        <View style={styles.gridCardContent}>
+          {/* Description/Title */}
+          <Text style={styles.gridCardTitle} numberOfLines={2}>
+            {metadata?.description || metadata?.short_caption || 'Reflection'}
+          </Text>
+
+          {/* Metadata row */}
+          <View style={styles.gridCardMeta}>
+            <Text style={styles.gridCardDate}>
+              {formatEventDate(item.event_id)}
+            </Text>
+            {isNewArrival && (
+              <Text style={styles.gridCardNewBadge}>NEW</Text>
+            )}
+          </View>
+
+          {/* Sender */}
+          {metadata?.sender && (
+            <Text style={styles.gridCardSender} numberOfLines={1}>
+              From {metadata.sender}
+            </Text>
+          )}
+        </View>
       </TouchableOpacity>
     );
   };
@@ -1057,26 +1114,88 @@ export default function ColeInboxScreen() {
     );
   }
 
+  // Z-Stack Layout: Grid (bottom) + MainStageView Overlay (top)
   return (
-    <MainStageView
-      visible={!!selectedEvent}
-      selectedEvent={selectedEvent}
-      events={processedEvents}
-      eventMetadata={eventMetadata}
-      onClose={closeFullScreen}
-      onEventSelect={handleEventPress}
-      onDelete={deleteEvent}
-      onCaptureSelfie={captureSelfieResponse}
-      onMediaError={handleMediaError}
-      cameraRef={cameraRef}
-      cameraPermission={cameraPermission}
-      requestCameraPermission={requestCameraPermission}
-      isCapturingSelfie={isCapturingSelfie}
-      recentlyArrivedIds={recentlyArrivedIds}
-      readEventIds={readEventIds}
-      onReplay={(event) => sendReplaySignal(event.event_id)}
-      config={EXPLORER_CONFIG}
-    />
+    <LinearGradient
+      colors={['#0f2027', '#203a43', '#2c5364']}
+      style={styles.container}
+    >
+      {/* Header Bar */}
+      <View style={[styles.gridHeader, { paddingTop: insets.top + 12 }]}>
+        <View style={styles.gridHeaderLeft}>
+          {recentlyArrivedIds.length > 0 ? (
+            <TouchableOpacity
+              onPress={() => {
+                // Find and select the first new arrival
+                const newestArrival = events.find(e => recentlyArrivedIds.includes(e.event_id));
+                if (newestArrival) {
+                  handleEventPress(newestArrival);
+                }
+              }}
+              style={styles.newArrivalPill}
+              activeOpacity={0.7}
+            >
+              <BlurView intensity={80} style={styles.newArrivalPillBlur}>
+                <Text style={styles.newArrivalPillText}>
+                  ✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}
+                </Text>
+              </BlurView>
+            </TouchableOpacity>
+          ) : (
+            <Text style={styles.gridHeaderTitle}>Reflections</Text>
+          )}
+        </View>
+        <View style={styles.gridHeaderActions}>
+          <TouchableOpacity
+            onPress={() => router.push('/settings')}
+            style={styles.gridHeaderButton}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <FontAwesome name="info-circle" size={20} color="rgba(255, 255, 255, 0.6)" />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Layer 1 (Bottom): Always-rendered Grid of Reflections */}
+      <FlatList
+        data={processedEvents}
+        renderItem={renderEvent}
+        keyExtractor={(item, index) => `${item.event_id}_grid_${index}`}
+        numColumns={numColumns}
+        key={numColumns} // Force re-render when column count changes
+        contentContainerStyle={[
+          styles.listContainer,
+          { paddingBottom: insets.bottom + 20 }
+        ]}
+        columnWrapperStyle={styles.row}
+        showsVerticalScrollIndicator={false}
+      />
+
+      {/* Layer 2 (Top): MainStageView Overlay - Only rendered when event selected */}
+      {selectedEvent !== null && (
+        <View style={[StyleSheet.absoluteFill, { zIndex: 100 }]}>
+          <MainStageView
+            visible={true}
+            selectedEvent={selectedEvent}
+            events={processedEvents}
+            eventMetadata={eventMetadata}
+            onClose={closeFullScreen}
+            onEventSelect={handleEventPress}
+            onDelete={deleteEvent}
+            onCaptureSelfie={captureSelfieResponse}
+            onMediaError={handleMediaError}
+            cameraRef={cameraRef}
+            cameraPermission={cameraPermission}
+            requestCameraPermission={requestCameraPermission}
+            isCapturingSelfie={isCapturingSelfie}
+            recentlyArrivedIds={recentlyArrivedIds}
+            readEventIds={readEventIds}
+            onReplay={(event) => sendReplaySignal(event.event_id)}
+            config={EXPLORER_CONFIG}
+          />
+        </View>
+      )}
+    </LinearGradient>
   );
 }
 
@@ -1097,12 +1216,60 @@ const styles = StyleSheet.create({
     color: '#2C3E50',
     backgroundColor: 'transparent',
   },
-  listContainer: {
+  // --- Grid Header Styles ---
+  gridHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    backgroundColor: 'transparent',
+  },
+  gridHeaderLeft: {
+    flex: 1,
+  },
+  gridHeaderTitle: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#fff',
+    letterSpacing: -0.5,
+  },
+  gridHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  gridHeaderButton: {
     padding: 8,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  // --- New Arrival Pill Notification ---
+  newArrivalPill: {
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 215, 0, 0.2)',
+    alignSelf: 'flex-start',
+  },
+  newArrivalPillBlur: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  newArrivalPillText: {
+    color: '#FFD700',
+    fontWeight: 'bold',
+    fontSize: 16,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  listContainer: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
   },
   row: {
-    justifyContent: 'space-between',
-    marginBottom: 8,
+    justifyContent: 'flex-start',
+    marginBottom: 4,
   },
   photoContainer: {
     flex: 1,
@@ -1418,5 +1585,80 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
     borderRadius: 60,
+  },
+  // --- YouTube-Style Grid Card Styles ---
+  gridCard: {
+    flex: 1,
+    margin: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 16,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  gridCardNewArrival: {
+    backgroundColor: 'rgba(255, 215, 0, 0.15)',
+    borderColor: 'rgba(255, 215, 0, 0.5)',
+    borderWidth: 1,
+  },
+  unreadDot: {
+    position: 'absolute',
+    left: 8,
+    top: 8,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#007AFF',
+    zIndex: 10,
+  },
+  gridThumbnailContainer: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    backgroundColor: '#1a3a44',
+    position: 'relative',
+  },
+  gridThumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  mediaTypeBadge: {
+    position: 'absolute',
+    bottom: 8,
+    right: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  gridCardContent: {
+    padding: 12,
+  },
+  gridCardTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    lineHeight: 18,
+    marginBottom: 6,
+  },
+  gridCardMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  gridCardDate: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 12,
+  },
+  gridCardNewBadge: {
+    color: '#FFD700',
+    fontSize: 10,
+    fontWeight: 'bold',
+    marginLeft: 8,
+  },
+  gridCardSender: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 11,
+    marginTop: 2,
   },
 });

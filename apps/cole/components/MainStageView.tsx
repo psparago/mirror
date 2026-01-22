@@ -97,12 +97,12 @@ export default function MainStageView({
   const selfieMirrorOpacity = useSharedValue(0);
   const audioIndicatorAnim = useSharedValue(0.7);
   const tellMeMorePulse = useSharedValue(1);
-  
+
   // Swipe-to-minimize shared values
   const translateY = useSharedValue(0);
   const scale = useSharedValue(1);
   const opacity = useSharedValue(1);
-  
+
   const flatListRef = useRef<FlatList>(null);
 
   // Need to track video playing for VU meter
@@ -498,9 +498,9 @@ export default function MainStageView({
     const currentEvents = eventsRef.current;
     const currentSelected = selectedEventRef.current;
     const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
-    
+
     if (currentIndex === -1) return;
-    
+
     if (translationX < -50) {
       console.log('👈 Swiped Left (Next)');
       if (currentIndex < currentEvents.length - 1) {
@@ -513,6 +513,37 @@ export default function MainStageView({
       }
     }
   }, []);
+
+  // Handle swipe-down dismiss - stops all media before closing
+  const handleSwipeDismiss = useCallback(() => {
+    console.log('👇 Swipe Dismiss - stopping all media');
+
+    // 1. Increment session to invalidate any pending callbacks
+    captionSessionRef.current += 1;
+
+    // 2. Stop TTS immediately
+    Speech.stop();
+
+    // 3. Stop any playing audio
+    if (sound) {
+      sound.stopAsync().catch(() => { });
+      sound.unloadAsync().catch(() => { });
+    }
+    if (captionSound || captionSoundRef.current) {
+      const soundToStop = captionSound || captionSoundRef.current;
+      soundToStop?.stopAsync().catch(() => { });
+      soundToStop?.unloadAsync().catch(() => { });
+    }
+
+    // 4. Clear safety timers
+    if (safetyTimeoutRef.current) {
+      clearTimeout(safetyTimeoutRef.current);
+      safetyTimeoutRef.current = null;
+    }
+
+    // 5. Call the actual close handler (video stops when component unmounts)
+    onClose();
+  }, [sound, captionSound, onClose]);
 
   const handleSingleTap = useCallback(() => {
     const currentState = stateRef.current;
@@ -555,7 +586,7 @@ export default function MainStageView({
       if (Math.abs(event.translationX) > 50 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
         runOnJS(handleHorizontalSwipe)(event.translationX);
       }
-      
+
       // Handle single tap (pause/resume/replay)
       if (Math.abs(event.translationX) < 10 && Math.abs(event.translationY) < 10) {
         runOnJS(handleSingleTap)();
@@ -582,7 +613,7 @@ export default function MainStageView({
         translateY.value = withTiming(height, { duration: 300 });
         scale.value = withTiming(0.8, { duration: 300 });
         opacity.value = withTiming(0, { duration: 300 }, () => {
-          runOnJS(onClose)();
+          runOnJS(handleSwipeDismiss)();
         });
       } else {
         // Spring back to original position
@@ -594,7 +625,7 @@ export default function MainStageView({
 
   // Toast opacity shared value
   const toastOpacityShared = useSharedValue(0);
-  
+
   // Show toast notification
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -708,6 +739,11 @@ export default function MainStageView({
       console.log(`📩 User selected reflection: ${currentEventId}`);
       send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
 
+      // Reset swipe-to-dismiss animation values for fresh overlay opening
+      translateY.value = 0;
+      scale.value = 1;
+      opacity.value = 1;
+
       // Auto-scroll the list to show the selected item
       if (flatListRef.current) {
         const index = events.findIndex(e => e.event_id === currentEventId);
@@ -725,7 +761,7 @@ export default function MainStageView({
         }
       }
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events, translateY, scale, opacity]);
 
   // 2. Video Player Finished
   useEffect(() => {
@@ -760,8 +796,8 @@ export default function MainStageView({
 
     if (state.matches('finished')) {
       // Finished: Show controls AND hide bubble
-        controlsOpacity.value = withTiming(1, { duration: 200 });
-        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
+      controlsOpacity.value = withTiming(1, { duration: 200 });
+      selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
     } else if (state.hasTag('paused') || state.matches({ viewingPhoto: 'viewing' })) {
       // Paused or photo viewing: Show controls
       controlsOpacity.value = withTiming(1, { duration: 200 });
@@ -1027,7 +1063,8 @@ export default function MainStageView({
   };
 
 
-  if (!selectedEvent) return <View style={styles.modalContainer} />;
+  // CRITICAL: Return null (not empty View) so touches pass through to grid underneath
+  if (!selectedEvent) return null;
 
 
   // Animated style for root container (swipe-to-minimize)
@@ -1073,243 +1110,243 @@ export default function MainStageView({
           colors={['#0f2027', '#203a43', '#2c5364']}
           style={StyleSheet.absoluteFill}
         >
-      <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
+          <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
-        {/* LEFT PANE */}
-        <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.55 }]}>
+            {/* LEFT PANE */}
+            <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.55 }]}>
 
-          {/* Header */}
-          <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', backgroundColor: 'transparent' }}>
-              <View style={{ flex: 1 }}>
-                {recentlyArrivedIds.length > 0 ? (
-                  <TouchableOpacity
-                    onPress={scrollToNewestArrival}
-                    style={styles.newArrivalNotification}
-                    activeOpacity={0.7}
-                  >
-                    <BlurView intensity={80} style={styles.notificationBlur}>
-                      <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
-                    </BlurView>
-                  </TouchableOpacity>
-                ) : (
-                  events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
-                )}
-              </View>
-            </View>
-
-
-
-          </View>
-
-          {/* Media Container */}
-          <View style={styles.mediaContainer}>
-            <GestureDetector gesture={verticalSwipeGesture}>
-              <Animated.View style={styles.mediaFrame}>
-              {videoSource ? (
-                <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
-              ) : (
-                <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
-              )}
-
-
-              {/* Replay / Pause Icon Overlay */}
-              <Animated.View
-                style={[styles.playOverlay, controlsAnimatedStyle]}
-                pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
-              >
-                {state.matches('finished') ? (
-                  <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                    <BlurView intensity={30} style={styles.playOverlayBlur}>
-                      <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
-                    </BlurView>
-                  </TouchableOpacity>
-                ) : state.hasTag('paused') ? (
-                  <View style={styles.playButton}>
-                    <BlurView intensity={30} style={styles.playOverlayBlur}>
-                      <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
-                    </BlurView>
-                  </View>
-                ) : null}
-              </Animated.View>
-              </Animated.View>
-            </GestureDetector>
-
-            {/* Loading Indicator removed - was blocking video */}
-          </View>
-
-          {/* Caption & Metadata */}
-          <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-              {/* VU Meter for audio playback */}
-              {isAnyAudioPlaying && (
-                <Animated.View style={[audioIndicatorAnimatedStyle, { marginRight: 12, marginTop: 2 }]}>
-                  <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
-                </Animated.View>
-              )}
-
-              <View style={{ flex: 1 }}>
-                {/* Caption/Description - FIRST */}
-                <Text style={styles.descriptionText} numberOfLines={2}>
-                  {selectedMetadata?.short_caption || selectedMetadata?.description || ''}
-                </Text>
-
-                {/* From + Date line - SECOND */}
-                {selectedMetadata?.sender && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-                    <Text style={styles.senderText}>
-                      From {selectedMetadata.sender}
-                    </Text>
-                    {selectedEvent?.event_id && (
-                      <Text style={styles.dateText}>
-                        {' • '}{formatEventDate(selectedEvent.event_id)}
-                      </Text>
+              {/* Header */}
+              <View style={[styles.headerBar, { top: insets.top + 10 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', backgroundColor: 'transparent' }}>
+                  <View style={{ flex: 1 }}>
+                    {recentlyArrivedIds.length > 0 ? (
+                      <TouchableOpacity
+                        onPress={scrollToNewestArrival}
+                        style={styles.newArrivalNotification}
+                        activeOpacity={0.7}
+                      >
+                        <BlurView intensity={80} style={styles.notificationBlur}>
+                          <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                        </BlurView>
+                      </TouchableOpacity>
+                    ) : (
+                      events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
                     )}
                   </View>
+                </View>
+
+
+
+              </View>
+
+              {/* Media Container */}
+              <View style={styles.mediaContainer}>
+                <GestureDetector gesture={verticalSwipeGesture}>
+                  <Animated.View style={styles.mediaFrame}>
+                    {videoSource ? (
+                      <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
+                    ) : (
+                      <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+                    )}
+
+
+                    {/* Replay / Pause Icon Overlay */}
+                    <Animated.View
+                      style={[styles.playOverlay, controlsAnimatedStyle]}
+                      pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
+                    >
+                      {state.matches('finished') ? (
+                        <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
+                          <BlurView intensity={30} style={styles.playOverlayBlur}>
+                            <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
+                          </BlurView>
+                        </TouchableOpacity>
+                      ) : state.hasTag('paused') ? (
+                        <View style={styles.playButton}>
+                          <BlurView intensity={30} style={styles.playOverlayBlur}>
+                            <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
+                          </BlurView>
+                        </View>
+                      ) : null}
+                    </Animated.View>
+                  </Animated.View>
+                </GestureDetector>
+
+                {/* Loading Indicator removed - was blocking video */}
+              </View>
+
+              {/* Caption & Metadata */}
+              <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+                  {/* VU Meter for audio playback */}
+                  {isAnyAudioPlaying && (
+                    <Animated.View style={[audioIndicatorAnimatedStyle, { marginRight: 12, marginTop: 2 }]}>
+                      <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
+                    </Animated.View>
+                  )}
+
+                  <View style={{ flex: 1 }}>
+                    {/* Caption/Description - FIRST */}
+                    <Text style={styles.descriptionText} numberOfLines={2}>
+                      {selectedMetadata?.short_caption || selectedMetadata?.description || ''}
+                    </Text>
+
+                    {/* From + Date line - SECOND */}
+                    {selectedMetadata?.sender && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                        <Text style={styles.senderText}>
+                          From {selectedMetadata.sender}
+                        </Text>
+                        {selectedEvent?.event_id && (
+                          <Text style={styles.dateText}>
+                            {' • '}{formatEventDate(selectedEvent.event_id)}
+                          </Text>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                </View>
+
+                {/* Tell Me More FAB */}
+                {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
+                  <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        console.log('✨ User pressed Tell Me More button');
+                        send({ type: 'TELL_ME_MORE' });
+                      }}
+                      style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
+                    >
+                      <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                        <Text style={{ fontSize: 32 }}>✨</Text>
+                      </BlurView>
+                    </TouchableOpacity>
+                  </Animated.View>
                 )}
               </View>
             </View>
 
-            {/* Tell Me More FAB */}
-            {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
-              <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
-                <TouchableOpacity
-                  onPress={() => {
-                    console.log('✨ User pressed Tell Me More button');
-                    send({ type: 'TELL_ME_MORE' });
-                  }}
-                  style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
-                >
-                  <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                    <Text style={{ fontSize: 32 }}>✨</Text>
-                  </BlurView>
-                </TouchableOpacity>
-              </Animated.View>
-            )}
-          </View>
-        </View>
+            {/* RIGHT PANE */}
+            <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
+              <View style={styles.upNextHeader}>
+                <Text style={styles.upNextHeaderText}>Up Next</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <TouchableOpacity
+                    onPress={handleAdminTrigger}
+                    activeOpacity={0.6}
+                    style={{ padding: 4 }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <FontAwesome
+                      name={isAdminMode ? "unlock" : "cog"}
+                      size={15}
+                      color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.4)"}
+                    />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => router.push('/settings')}
+                    style={{ marginLeft: 12, padding: 4 }}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <FontAwesome name="info-circle" size={15} color="rgba(255,255,255,0.4)" />
+                  </TouchableOpacity>
+                </View>
+              </View>
 
-        {/* RIGHT PANE */}
-        <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
-          <View style={styles.upNextHeader}>
-            <Text style={styles.upNextHeaderText}>Up Next</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity
-                onPress={handleAdminTrigger}
-                activeOpacity={0.6}
-                style={{ padding: 4 }}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <FontAwesome
-                  name={isAdminMode ? "unlock" : "cog"}
-                  size={15}
-                  color={isAdminMode ? "#FF3B30" : "rgba(255,255,255,0.4)"}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => router.push('/settings')}
-                style={{ marginLeft: 12, padding: 4 }}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <FontAwesome name="info-circle" size={15} color="rgba(255,255,255,0.4)" />
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <FlatList
-            ref={flatListRef}
-            data={upNextEvents}
-            renderItem={renderUpNextItem}
-            keyExtractor={(item, index) => `${item.event_id}_${index}`}
-            onEndReached={handleEndReached}
-            onEndReachedThreshold={0.5}
-            removeClippedSubviews={true}
-            maxToRenderPerBatch={10}
-            windowSize={5}
-            onScrollToIndexFailed={(info) => {
-              const wait = new Promise(resolve => setTimeout(resolve, 500));
-              wait.then(() => {
-                flatListRef.current?.scrollToIndex({ index: info.index, animated: true });
-              });
-            }}
-          />
-
-        </View>
-
-
-
-      </View>
-
-      {/* Selfie Mirror - Rendered at ROOT level to override native Image/Video layers */}
-      <Animated.View style={[styles.cameraBubble, {
-        top: insets.top + 16,
-        // In landscape, offset by right pane width (30%) to keep bubble in left pane
-        right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
-      }, selfieMirrorAnimatedStyle]}>
-        {cameraPermission?.granted ? (
-          <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
-        ) : null}
-        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white' }, flashAnimatedStyle]} />
-      </Animated.View>
-
-      {/* Toast Notification */}
-      {toastMessage ? (
-        <Animated.View style={[styles.toast, toastAnimatedStyle]}>
-          <Text style={styles.toastText}>{toastMessage}</Text>
-        </Animated.View>
-      ) : null}
-
-      {/* Admin Challenge Modal */}
-      <Modal
-        visible={showAdminChallenge}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowAdminChallenge(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          style={styles.adminChallengeOverlay}
-        >
-          <View style={styles.adminChallengeBox}>
-            <View style={styles.adminLockIcon}>
-              <FontAwesome name="lock" size={32} color="#007AFF" />
-            </View>
-            <Text style={styles.adminChallengeTitle}>Caregiver Mode</Text>
-            <Text style={styles.adminChallengeSub}>To toggle delete access, please solve:</Text>
-            <Text style={styles.mathProblem}>{mathChallenge.a} + {mathChallenge.b} = ?</Text>
-
-            <TextInput
-              style={styles.adminInput}
-              keyboardType="number-pad"
-              autoFocus
-              maxLength={2}
-              value={adminAnswer}
-              onChangeText={setAdminAnswer}
-              onSubmitEditing={handleAdminToggle}
-              placeholder="?"
-            />
-
-            <View style={styles.adminButtonRow}>
-              <TouchableOpacity
-                style={[styles.adminButton, styles.adminCancelButton]}
-                onPress={() => {
-                  setShowAdminChallenge(false);
-                  setAdminAnswer('');
+              <FlatList
+                ref={flatListRef}
+                data={upNextEvents}
+                renderItem={renderUpNextItem}
+                keyExtractor={(item, index) => `${item.event_id}_${index}`}
+                onEndReached={handleEndReached}
+                onEndReachedThreshold={0.5}
+                removeClippedSubviews={true}
+                maxToRenderPerBatch={10}
+                windowSize={5}
+                onScrollToIndexFailed={(info) => {
+                  const wait = new Promise(resolve => setTimeout(resolve, 500));
+                  wait.then(() => {
+                    flatListRef.current?.scrollToIndex({ index: info.index, animated: true });
+                  });
                 }}
-              >
-                <Text style={styles.adminCancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
+              />
 
-              <TouchableOpacity
-                style={[styles.adminButton, styles.adminSubmitButton]}
-                onPress={handleAdminToggle}
-              >
-                <Text style={styles.adminButtonText}>Verify</Text>
-              </TouchableOpacity>
             </View>
+
+
+
           </View>
-        </KeyboardAvoidingView>
-      </Modal>
+
+          {/* Selfie Mirror - Rendered at ROOT level to override native Image/Video layers */}
+          <Animated.View style={[styles.cameraBubble, {
+            top: insets.top + 16,
+            // In landscape, offset by right pane width (30%) to keep bubble in left pane
+            right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
+          }, selfieMirrorAnimatedStyle]}>
+            {cameraPermission?.granted ? (
+              <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
+            ) : null}
+            <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white' }, flashAnimatedStyle]} />
+          </Animated.View>
+
+          {/* Toast Notification */}
+          {toastMessage ? (
+            <Animated.View style={[styles.toast, toastAnimatedStyle]}>
+              <Text style={styles.toastText}>{toastMessage}</Text>
+            </Animated.View>
+          ) : null}
+
+          {/* Admin Challenge Modal */}
+          <Modal
+            visible={showAdminChallenge}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setShowAdminChallenge(false)}
+          >
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+              style={styles.adminChallengeOverlay}
+            >
+              <View style={styles.adminChallengeBox}>
+                <View style={styles.adminLockIcon}>
+                  <FontAwesome name="lock" size={32} color="#007AFF" />
+                </View>
+                <Text style={styles.adminChallengeTitle}>Caregiver Mode</Text>
+                <Text style={styles.adminChallengeSub}>To toggle delete access, please solve:</Text>
+                <Text style={styles.mathProblem}>{mathChallenge.a} + {mathChallenge.b} = ?</Text>
+
+                <TextInput
+                  style={styles.adminInput}
+                  keyboardType="number-pad"
+                  autoFocus
+                  maxLength={2}
+                  value={adminAnswer}
+                  onChangeText={setAdminAnswer}
+                  onSubmitEditing={handleAdminToggle}
+                  placeholder="?"
+                />
+
+                <View style={styles.adminButtonRow}>
+                  <TouchableOpacity
+                    style={[styles.adminButton, styles.adminCancelButton]}
+                    onPress={() => {
+                      setShowAdminChallenge(false);
+                      setAdminAnswer('');
+                    }}
+                  >
+                    <Text style={styles.adminCancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.adminButton, styles.adminSubmitButton]}
+                    onPress={handleAdminToggle}
+                  >
+                    <Text style={styles.adminButtonText}>Verify</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
         </LinearGradient>
       </Animated.View>
     </GestureDetector>
