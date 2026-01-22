@@ -14,12 +14,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   Alert,
-  Animated,
   FlatList,
   Image,
   KeyboardAvoidingView,
   Modal,
-  PanResponder,
   Platform,
   StyleSheet,
   Text,
@@ -28,6 +26,14 @@ import {
   useWindowDimensions,
   View
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { playerMachine } from '../machines/playerMachine';
 
@@ -85,11 +91,18 @@ export default function MainStageView({
 
 
   // --- LOCAL STATE (Visuals Only) ---
-  const [flashOpacity] = useState(new Animated.Value(0));
-  const [controlsOpacity] = useState(new Animated.Value(0)); // 0 = Hidden
-  const [selfieMirrorOpacity] = useState(new Animated.Value(0));
-  const [audioIndicatorAnim] = useState(new Animated.Value(0.7));
-  const [tellMeMorePulse] = useState(new Animated.Value(1));
+  // Reanimated shared values
+  const flashOpacity = useSharedValue(0);
+  const controlsOpacity = useSharedValue(0); // 0 = Hidden
+  const selfieMirrorOpacity = useSharedValue(0);
+  const audioIndicatorAnim = useSharedValue(0.7);
+  const tellMeMorePulse = useSharedValue(1);
+  
+  // Swipe-to-minimize shared values
+  const translateY = useSharedValue(0);
+  const scale = useSharedValue(1);
+  const opacity = useSharedValue(1);
+  
   const flatListRef = useRef<FlatList>(null);
 
   // Need to track video playing for VU meter
@@ -104,7 +117,6 @@ export default function MainStageView({
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
-  const toastOpacity = useRef(new Animated.Value(0)).current;
 
   // Get metadata (memoized to prevent unnecessary re-renders)
   const selectedMetadata = useMemo(
@@ -192,7 +204,7 @@ export default function MainStageView({
             console.warn('Silent failure stopping player:', err);
           }
         }
-        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+        controlsOpacity.value = withTiming(0, { duration: 300 });
 
         // Small delay to ensure everything stops
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -206,7 +218,7 @@ export default function MainStageView({
         const thisSession = captionSessionRef.current;
         console.log(`🎙️ speakCaption [Session: ${thisSession}]`);
 
-        Animated.timing(controlsOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+        controlsOpacity.value = withTiming(0, { duration: 300 });
 
         if (audioUrl) {
           const playAudioWithRetry = async (retryCount = 0) => {
@@ -322,7 +334,7 @@ export default function MainStageView({
         player.currentTime = 0;
 
         // Trigger bubble animation
-        Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+        selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
 
         // The actual .play() call is now managed by the Hardware Sync useEffect for maximum reliability
       },
@@ -458,7 +470,7 @@ export default function MainStageView({
       },
 
       showSelfieBubble: () => {
-        Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 0, useNativeDriver: true }).start();
+        selfieMirrorOpacity.value = 1;
       },
 
       triggerSelfie: async () => {
@@ -481,73 +493,118 @@ export default function MainStageView({
 
   const lastTapRef = useRef<number>(0);
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: (evt) => {
-        // Don't capture touches in the top header area or the Up Next sidebar
-        // This allows buttons (Gear icon) and list items to receive touches
-        const isHeader = evt.nativeEvent.pageY < 120;
-        const isSidebar = isLandscape ? evt.nativeEvent.pageX > width * 0.65 : false;
+  // Helper functions to handle gestures (must be on JS thread, not worklets)
+  const handleHorizontalSwipe = useCallback((translationX: number) => {
+    const currentEvents = eventsRef.current;
+    const currentSelected = selectedEventRef.current;
+    const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
+    
+    if (currentIndex === -1) return;
+    
+    if (translationX < -50) {
+      console.log('👈 Swiped Left (Next)');
+      if (currentIndex < currentEvents.length - 1) {
+        onEventSelectRef.current(currentEvents[currentIndex + 1]);
+      }
+    } else if (translationX > 50) {
+      console.log('👉 Swiped Right (Previous)');
+      if (currentIndex > 0) {
+        onEventSelectRef.current(currentEvents[currentIndex - 1]);
+      }
+    }
+  }, []);
 
-        if (isHeader || isSidebar) {
-          return false;
-        }
-        return true;
-      },
-      onMoveShouldSetPanResponder: (_, gestureState) => {
+  const handleSingleTap = useCallback(() => {
+    const currentState = stateRef.current;
+    if (currentState && currentState.hasTag('active')) {
+      if (currentState.hasTag('paused')) {
+        console.log('⏯️ Tapped to Resume');
+        send({ type: 'RESUME' });
+      } else {
+        console.log('⏸️ Tapped to Pause');
+        send({ type: 'PAUSE' });
+      }
+    } else if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
+      console.log('🔁 User pressed REPLAY');
+      send({ type: 'REPLAY' });
+      if (onReplayRef.current && selectedEventRef.current) {
+        onReplayRef.current(selectedEventRef.current);
+      }
+    }
+  }, [send]);
 
-
-        return Math.abs(gestureState.dx) > 20;
-      },
-      onPanResponderRelease: (_, gestureState) => {
-        // Handle Single Tap (Pause/Resume)
-        if (Math.abs(gestureState.dx) < 10 && Math.abs(gestureState.dy) < 10) {
-          const currentState = stateRef.current;
-          if (currentState && currentState.hasTag('active')) {
-            if (currentState.hasTag('paused')) {
-              console.log('⏯️ Tapped to Resume');
-              send({ type: 'RESUME' });
-            } else {
-              console.log('⏸️ Tapped to Pause');
-              send({ type: 'PAUSE' });
-            }
-          } else if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
-            handleReplay();
-          }
-          return;
-        }
-
-        const currentEvents = eventsRef.current;
-        const currentSelected = selectedEventRef.current;
-
-        const currentIndex = currentEvents.findIndex(e => e.event_id === currentSelected?.event_id);
-        if (currentIndex === -1) return;
-
-        if (gestureState.dx < -50) {
-          console.log('👈 Swiped Left (Next)');
-          if (currentIndex < currentEvents.length - 1) {
-            onEventSelectRef.current(currentEvents[currentIndex + 1]);
-          }
-        }
-
-        else if (gestureState.dx > 50) {
-          console.log('👉 Swiped Right (Previous)');
-          if (currentIndex > 0) {
-            onEventSelectRef.current(currentEvents[currentIndex - 1]);
-          }
-        }
-      },
+  // Horizontal swipe gesture for next/prev (applied to root container)
+  const horizontalSwipeGesture = Gesture.Pan()
+    .onStart((event) => {
+      // Don't capture touches in header or sidebar
+      const isHeader = event.y < 120;
+      const isSidebar = isLandscape ? event.x > width * 0.65 : false;
+      if (isHeader || isSidebar) {
+        return;
+      }
     })
-  ).current;
+    .onUpdate((event) => {
+      // Only handle horizontal swipes when not dragging down
+      if (Math.abs(event.translationX) > Math.abs(event.translationY) && Math.abs(event.translationX) > 20) {
+        // Horizontal swipe detected - let it continue
+      }
+    })
+    .onEnd((event) => {
+      'worklet';
+      // Handle horizontal swipe for next/prev
+      if (Math.abs(event.translationX) > 50 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
+        runOnJS(handleHorizontalSwipe)(event.translationX);
+      }
+      
+      // Handle single tap (pause/resume/replay)
+      if (Math.abs(event.translationX) < 10 && Math.abs(event.translationY) < 10) {
+        runOnJS(handleSingleTap)();
+      }
+    });
 
+  // Vertical swipe gesture for minimize (ONLY on mediaFrame)
+  // Threshold set to ~80px (roughly 1-2" on iPad) for easier triggering
+  const verticalSwipeGesture = Gesture.Pan()
+    .onUpdate((event) => {
+      // Only respond to downward drags
+      if (event.translationY > 0) {
+        translateY.value = event.translationY;
+        // Scale down and fade out as we drag (more responsive)
+        const progress = Math.min(event.translationY / 200, 1);
+        scale.value = 1 - progress * 0.1; // Scale down by 10% max
+        opacity.value = 1 - progress * 0.5; // Fade out by 50% max
+      }
+    })
+    .onEnd((event) => {
+      const threshold = 80; // Reduced from 150px to ~1-2" swipe
+      if (event.translationY > threshold) {
+        // Animate off-screen and close
+        translateY.value = withTiming(height, { duration: 300 });
+        scale.value = withTiming(0.8, { duration: 300 });
+        opacity.value = withTiming(0, { duration: 300 }, () => {
+          runOnJS(onClose)();
+        });
+      } else {
+        // Spring back to original position
+        translateY.value = withSpring(0, { damping: 20, stiffness: 300 });
+        scale.value = withSpring(1, { damping: 20, stiffness: 300 });
+        opacity.value = withSpring(1, { damping: 20, stiffness: 300 });
+      }
+    });
+
+  // Toast opacity shared value
+  const toastOpacityShared = useSharedValue(0);
+  
   // Show toast notification
   const showToast = (message: string) => {
     setToastMessage(message);
-    Animated.sequence([
-      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.delay(2000),
-      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
-    ]).start(() => setToastMessage(''));
+    toastOpacityShared.value = withTiming(1, { duration: 300 }, () => {
+      setTimeout(() => {
+        toastOpacityShared.value = withTiming(0, { duration: 300 }, () => {
+          runOnJS(setToastMessage)('');
+        });
+      }, 2000);
+    });
   };
 
   // --- AUDIO/VIDEO REFS ---
@@ -569,16 +626,15 @@ export default function MainStageView({
 
     console.log(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
     // Fade in mirror
-    Animated.timing(selfieMirrorOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
+    selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
 
     // Wait...
     setTimeout(async () => {
       console.log('📸 Helper: Snapping now...');
       // Flash
-      Animated.sequence([
-        Animated.timing(flashOpacity, { toValue: 1, duration: 150, useNativeDriver: true }),
-        Animated.timing(flashOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
-      ]).start();
+      flashOpacity.value = withTiming(1, { duration: 150 }, () => {
+        flashOpacity.value = withTiming(0, { duration: 250 });
+      });
 
       // Capture
       await onCaptureSelfieRef.current();
@@ -586,7 +642,7 @@ export default function MainStageView({
       // Fade out
       setTimeout(() => {
         console.log('📸 Helper: Fading out bubble');
-        Animated.timing(selfieMirrorOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start();
+        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
       }, 500);
     }, delay);
   }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity]);
@@ -704,14 +760,14 @@ export default function MainStageView({
 
     if (state.matches('finished')) {
       // Finished: Show controls AND hide bubble
-      Animated.timing(controlsOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
-      Animated.timing(selfieMirrorOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start();
+        controlsOpacity.value = withTiming(1, { duration: 200 });
+        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
     } else if (state.hasTag('paused') || state.matches({ viewingPhoto: 'viewing' })) {
       // Paused or photo viewing: Show controls
-      Animated.timing(controlsOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+      controlsOpacity.value = withTiming(1, { duration: 200 });
     } else {
       // Playing: Hide controls
-      Animated.timing(controlsOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
+      controlsOpacity.value = withTiming(0, { duration: 200 });
     }
   }, [state, controlsOpacity, selfieMirrorOpacity]);
 
@@ -724,30 +780,33 @@ export default function MainStageView({
 
   useEffect(() => {
     if (isAnyAudioPlaying) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(audioIndicatorAnim, { toValue: 1, duration: 300, useNativeDriver: true }),
-          Animated.timing(audioIndicatorAnim, { toValue: 0.7, duration: 300, useNativeDriver: true }),
-        ])
-      ).start();
+      // Use Reanimated worklet for loop animation
+      const loop = () => {
+        'worklet';
+        audioIndicatorAnim.value = withTiming(1, { duration: 300 }, () => {
+          audioIndicatorAnim.value = withTiming(0.7, { duration: 300 }, loop);
+        });
+      };
+      loop();
     } else {
-      audioIndicatorAnim.setValue(0.7);
+      audioIndicatorAnim.value = 0.7;
     }
-  }, [isAnyAudioPlaying, audioIndicatorAnim]);
+  }, [isAnyAudioPlaying]);
 
   // Pulse animation for Tell Me More button
   useEffect(() => {
     if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(tellMeMorePulse, { toValue: 1.15, duration: 600, useNativeDriver: true }),
-          Animated.timing(tellMeMorePulse, { toValue: 1, duration: 600, useNativeDriver: true }),
-        ])
-      ).start();
+      const loop = () => {
+        'worklet';
+        tellMeMorePulse.value = withTiming(1.15, { duration: 600 }, () => {
+          tellMeMorePulse.value = withTiming(1, { duration: 600 }, loop);
+        });
+      };
+      loop();
     } else {
-      tellMeMorePulse.setValue(1);  // stop animation
+      tellMeMorePulse.value = 1;
     }
-  }, [state, tellMeMorePulse]);
+  }, [state]);
 
 
   // --- RENDERING HELPERS ---
@@ -971,12 +1030,49 @@ export default function MainStageView({
   if (!selectedEvent) return <View style={styles.modalContainer} />;
 
 
+  // Animated style for root container (swipe-to-minimize)
+  const rootAnimatedStyle = useAnimatedStyle(() => {
+    return {
+      transform: [
+        { translateY: translateY.value },
+        { scale: scale.value },
+      ],
+      opacity: opacity.value,
+    };
+  });
+
+  // Animated styles for other components
+  const controlsAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: controlsOpacity.value,
+  }));
+
+  const selfieMirrorAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: selfieMirrorOpacity.value,
+  }));
+
+  const flashAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: flashOpacity.value,
+  }));
+
+  const audioIndicatorAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: audioIndicatorAnim.value,
+  }));
+
+  const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: tellMeMorePulse.value }],
+  }));
+
+  const toastAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: toastOpacityShared.value,
+  }));
+
   return (
-    <LinearGradient
-      colors={['#0f2027', '#203a43', '#2c5364']}
-      style={styles.modalContainer}
-      {...panResponder.panHandlers}
-    >
+    <GestureDetector gesture={horizontalSwipeGesture}>
+      <Animated.View style={[styles.modalContainer, rootAnimatedStyle]}>
+        <LinearGradient
+          colors={['#0f2027', '#203a43', '#2c5364']}
+          style={StyleSheet.absoluteFill}
+        >
       <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
         {/* LEFT PANE */}
@@ -1008,7 +1104,8 @@ export default function MainStageView({
 
           {/* Media Container */}
           <View style={styles.mediaContainer}>
-            <View style={styles.mediaFrame}>
+            <GestureDetector gesture={verticalSwipeGesture}>
+              <Animated.View style={styles.mediaFrame}>
               {videoSource ? (
                 <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
               ) : (
@@ -1018,7 +1115,7 @@ export default function MainStageView({
 
               {/* Replay / Pause Icon Overlay */}
               <Animated.View
-                style={[styles.playOverlay, { opacity: controlsOpacity }]}
+                style={[styles.playOverlay, controlsAnimatedStyle]}
                 pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
               >
                 {state.matches('finished') ? (
@@ -1035,7 +1132,8 @@ export default function MainStageView({
                   </View>
                 ) : null}
               </Animated.View>
-            </View>
+              </Animated.View>
+            </GestureDetector>
 
             {/* Loading Indicator removed - was blocking video */}
           </View>
@@ -1045,7 +1143,7 @@ export default function MainStageView({
             <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
               {/* VU Meter for audio playback */}
               {isAnyAudioPlaying && (
-                <Animated.View style={{ opacity: audioIndicatorAnim, marginRight: 12, marginTop: 2 }}>
+                <Animated.View style={[audioIndicatorAnimatedStyle, { marginRight: 12, marginTop: 2 }]}>
                   <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
                 </Animated.View>
               )}
@@ -1074,7 +1172,7 @@ export default function MainStageView({
 
             {/* Tell Me More FAB */}
             {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
-              <Animated.View style={[styles.tellMeMoreFAB, { transform: [{ scale: tellMeMorePulse }] }]}>
+              <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
                 <TouchableOpacity
                   onPress={() => {
                     console.log('✨ User pressed Tell Me More button');
@@ -1147,17 +1245,16 @@ export default function MainStageView({
         top: insets.top + 16,
         // In landscape, offset by right pane width (30%) to keep bubble in left pane
         right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
-        opacity: selfieMirrorOpacity
-      }]}>
+      }, selfieMirrorAnimatedStyle]}>
         {cameraPermission?.granted ? (
           <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
         ) : null}
-        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white', opacity: flashOpacity }]} />
+        <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white' }, flashAnimatedStyle]} />
       </Animated.View>
 
       {/* Toast Notification */}
       {toastMessage ? (
-        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+        <Animated.View style={[styles.toast, toastAnimatedStyle]}>
           <Text style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>
       ) : null}
@@ -1213,7 +1310,9 @@ export default function MainStageView({
           </View>
         </KeyboardAvoidingView>
       </Modal>
-    </LinearGradient>
+        </LinearGradient>
+      </Animated.View>
+    </GestureDetector>
   );
 }
 
