@@ -19,6 +19,7 @@ interface SentReflection {
   responseImageUrl?: string;
   reflectionImageUrl?: string;
   description?: string;
+  sender?: string;
 }
 
 export default function SentHistoryScreen() {
@@ -183,6 +184,7 @@ export default function SentHistoryScreen() {
               status: currentStatus,
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
+              sender: data.sender,
             });
           } else {
             // We already have this event_id - always update to higher priority status
@@ -193,6 +195,10 @@ export default function SentHistoryScreen() {
             if (currentPriority > existingPriority) {
               existing.status = currentStatus;
               existing.timestamp = data.timestamp;
+              // Update sender if available
+              if (data.sender) {
+                existing.sender = data.sender;
+              }
               // Update engagement timestamp for engaged/replayed
               if (currentStatus === 'engaged' || currentStatus === 'replayed') {
                 existing.engagementTimestamp = data.timestamp;
@@ -209,6 +215,10 @@ export default function SentHistoryScreen() {
                 if ((currentStatus === 'engaged' || currentStatus === 'replayed')) {
                   existing.engagementTimestamp = data.timestamp;
                 }
+              }
+              // Update sender if available (even if timestamp isn't newer)
+              if (data.sender) {
+                existing.sender = data.sender;
               }
             } else if (currentPriority === existingPriority && currentStatus !== existing.status) {
               // Same priority but different status - this shouldn't happen, but log it
@@ -612,16 +622,23 @@ export default function SentHistoryScreen() {
                     </Text>
                   </View>
                 )}
-                {/* Sent and Viewed dates on same line */}
+                {/* Viewed date on its own line */}
+                {item.hasResponse && responseTimestampMap.get(item.event_id) && (
+                  <Text style={styles.viewedDate}>
+                    Viewed: {formatEngagementDate(responseTimestampMap.get(item.event_id))}
+                  </Text>
+                )}
+                {/* Sent date */}
                 <View style={styles.timestampRow}>
                   <Text style={styles.sentDate}>
-                    Sent: {formatEngagementDate(item.timestamp)}
+                    {item.sender ? (
+                      <>
+                        Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(item.timestamp)}
+                      </>
+                    ) : (
+                      <>Sent • {formatEngagementDate(item.timestamp)}</>
+                    )}
                   </Text>
-                  {item.hasResponse && responseTimestampMap.get(item.event_id) && (
-                    <Text style={styles.viewedDate}>
-                      • Viewed: {formatEngagementDate(responseTimestampMap.get(item.event_id))}
-                    </Text>
-                  )}
                 </View>
                 <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
 
@@ -762,6 +779,11 @@ const styles = StyleSheet.create({
     color: '#9ca3af',
     marginTop: 4,
   },
+  senderName: {
+    fontSize: 12,
+    color: '#fff',
+    fontWeight: '600',
+  },
   eventId: {
     fontSize: 12,
     color: '#888', // Lighter for visibility
@@ -868,14 +890,12 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   timestampRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
     marginTop: 4,
   },
   viewedDate: {
     fontSize: 12,
     color: '#60a5fa', // Blue to differentiate from green Selfie button
+    marginTop: 4,
   },
 });
 

@@ -2,16 +2,18 @@ import CameraModal from '@/components/CameraModal';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
 
 // Helper to upload securely using FileSystem
@@ -110,6 +112,9 @@ export default function CompanionHomeScreen() {
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
+  const [companionName, setCompanionName] = useState<string>('');
+  const [showNameModal, setShowNameModal] = useState(false);
+  const router = useRouter();
 
   // Video player for preview
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
@@ -154,6 +159,34 @@ export default function CompanionHomeScreen() {
       hideListener.remove();
     };
   }, []);
+
+  // Check for companion name on mount and when screen comes into focus
+  const loadCompanionName = useCallback(async () => {
+    try {
+      const storedName = await AsyncStorage.getItem('companion_name');
+      if (storedName) {
+        setCompanionName(storedName);
+        setShowNameModal(false);
+      } else {
+        setShowNameModal(true);
+      }
+    } catch (error) {
+      console.error('Error reading companion name:', error);
+      setShowNameModal(true);
+    }
+  }, []);
+
+  // Load name on mount
+  useEffect(() => {
+    loadCompanionName();
+  }, [loadCompanionName]);
+
+  // Reload name when screen comes into focus (e.g., returning from settings)
+  useFocusEffect(
+    useCallback(() => {
+      loadCompanionName();
+    }, [loadCompanionName])
+  );
 
   // Request audio permissions on mount
   useEffect(() => {
@@ -759,7 +792,7 @@ export default function CompanionHomeScreen() {
       // 7. Queue Metadata Upload
       const metadata: any = {
         description: finalCaption || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
-        sender: "Granddad",
+        sender: companionName || "Companion",
         timestamp: timestamp,
         event_id: eventID,
         content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
@@ -826,7 +859,7 @@ export default function CompanionHomeScreen() {
       setDoc(doc(collection(db, ExplorerIdentity.collections.reflections), eventID), {
         explorerId: ExplorerIdentity.currentExplorerId,
         event_id: eventID,
-        sender: "Granddad",
+        sender: companionName || "Companion",
         status: "ready",
         timestamp: serverTimestamp(),
         type: "mirror_event",
@@ -1186,6 +1219,7 @@ export default function CompanionHomeScreen() {
     );
   }
 
+
   // Dashboard view
   return (
     <LinearGradient
@@ -1194,6 +1228,13 @@ export default function CompanionHomeScreen() {
     >
       <View style={styles.dashboardContent}>
         <Text style={styles.dashboardTitle}>Create a Reflection</Text>
+        
+        {/* Companion Name Display */}
+        {companionName && (
+          <View style={styles.companionNameContainer}>
+            <Text style={styles.companionNameText}>Posting as {companionName}</Text>
+          </View>
+        )}
 
         <View style={styles.dashboardButtons}>
           <TouchableOpacity
@@ -1412,6 +1453,37 @@ export default function CompanionHomeScreen() {
                 <Text style={styles.emptyText}>Search for images to get started</Text>
               </View>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Name Modal - First Launch Only */}
+      <Modal
+        visible={showNameModal}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => {
+          // Don't allow closing without setting a name on first launch
+          if (companionName) {
+            setShowNameModal(false);
+          }
+        }}
+      >
+        <View style={styles.nameModalOverlay}>
+          <View style={styles.nameModalContent}>
+            <Text style={styles.nameModalTitle}>Who is this?</Text>
+            <Text style={styles.nameModalDescription}>
+              Please set your name in Settings. This name will appear as the sender of your Reflections.
+            </Text>
+            <TouchableOpacity
+              style={styles.nameModalButton}
+              onPress={() => {
+                setShowNameModal(false);
+                router.push('/settings');
+              }}
+            >
+              <Text style={styles.nameModalButtonText}>Go to Settings</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -2212,5 +2284,62 @@ var styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  companionNameContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: -40,
+    marginBottom: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  companionNameText: {
+    color: '#2C3E50',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  nameModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  nameModalContent: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 20,
+    padding: 30,
+    width: '100%',
+    maxWidth: 400,
+    alignItems: 'center',
+    gap: 20,
+  },
+  nameModalTitle: {
+    fontSize: 24,
+    fontWeight: '600',
+    color: '#fff',
+    textAlign: 'center',
+  },
+  nameModalDescription: {
+    fontSize: 16,
+    color: '#999',
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 8,
+  },
+  nameModalButton: {
+    width: '100%',
+    backgroundColor: '#2e78b7',
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  nameModalButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
