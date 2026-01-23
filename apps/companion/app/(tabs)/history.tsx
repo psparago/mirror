@@ -3,10 +3,12 @@ import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 
 
 import { db } from '@projectmirror/shared/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as MediaLibrary from 'expo-media-library';
+import { useFocusEffect } from 'expo-router';
 import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 interface SentReflection {
@@ -32,17 +34,40 @@ export default function SentHistoryScreen() {
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
+  const [currentIdentity, setCurrentIdentity] = useState<string | null>(null);
+  const [filterMode, setFilterMode] = useState<'mine' | 'all'>('mine');
   const metadataCache = useRef<Map<string, any>>(new Map());
   const isRefreshingRef = useRef(false);
+
+  // Load current identity from AsyncStorage
+  useFocusEffect(
+    useCallback(() => {
+      const loadIdentity = async () => {
+        try {
+          const storedName = await AsyncStorage.getItem('companion_name');
+          setCurrentIdentity(storedName || null);
+        } catch (error) {
+          console.error('Error loading companion name:', error);
+          setCurrentIdentity(null);
+        }
+      };
+      loadIdentity();
+    }, [])
+  );
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
   // SORTED BY: Response timestamp (viewed) first, so most recently viewed are at top
   const displayReflections = useMemo(() => {
-    const result = reflections.map(r => ({
+    let result = reflections.map(r => ({
       ...r,
       hasResponse: r.status !== 'deleted' && responseEventIds.has(r.event_id),
     }));
+
+    // Filter by sender if filterMode is 'mine'
+    if (filterMode === 'mine' && currentIdentity) {
+      result = result.filter(r => r.sender === currentIdentity);
+    }
 
     // Helper to get timestamp value in milliseconds
     const getTimestampMs = (ts: any): number => {
@@ -64,7 +89,7 @@ export default function SentHistoryScreen() {
     });
 
     return result;
-  }, [reflections, responseEventIds, responseTimestampMap]);
+  }, [reflections, responseEventIds, responseTimestampMap, filterMode, currentIdentity]);
 
 
 
@@ -411,15 +436,9 @@ export default function SentHistoryScreen() {
     );
   }
 
-  if (reflections.length === 0) {
-    return (
-      <View style={styles.centerContainer}>
-        <FontAwesome name="inbox" size={64} color="#999" />
-        <Text style={styles.emptyText}>No Reflections sent yet</Text>
-        <Text style={styles.emptySubtext}>Send a Reflection to see it here</Text>
-      </View>
-    );
-  }
+  // Check if we should show empty state (use displayReflections for filtered view)
+  const hasReflections = displayReflections.length > 0;
+  const hasAnyReflections = reflections.length > 0;
 
   // Save selfie to camera roll
   const saveSelfieToPhotos = async () => {
@@ -528,10 +547,57 @@ export default function SentHistoryScreen() {
         </TouchableOpacity>
       </Modal>
 
-      <FlatList
-        data={displayReflections}
-        keyExtractor={(item) => item.event_id}
-        renderItem={({ item }) => (
+      {/* Filter Tabs */}
+      <View style={styles.tabContainer}>
+        <TouchableOpacity
+          style={[styles.tab, filterMode === 'mine' && styles.tabActive]}
+          onPress={() => setFilterMode('mine')}
+          activeOpacity={0.7}
+          disabled={!currentIdentity}
+        >
+          <Text style={[
+            styles.tabText,
+            filterMode === 'mine' && styles.tabTextActive,
+            !currentIdentity && styles.tabTextDisabled
+          ]}>
+            My Reflections
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, filterMode === 'all' && styles.tabActive]}
+          onPress={() => setFilterMode('all')}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.tabText, filterMode === 'all' && styles.tabTextActive]}>
+            All Reflections
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Empty State */}
+      {!hasReflections && hasAnyReflections && filterMode === 'mine' && (
+        <View style={styles.centerContainer}>
+          <FontAwesome name="inbox" size={64} color="#999" />
+          <Text style={styles.emptyText}>No Reflections from you yet</Text>
+          <Text style={styles.emptySubtext}>
+            {currentIdentity ? `Send a Reflection as ${currentIdentity} to see it here` : 'Set your name in Settings to filter your Reflections'}
+          </Text>
+        </View>
+      )}
+
+      {!hasAnyReflections && (
+        <View style={styles.centerContainer}>
+          <FontAwesome name="inbox" size={64} color="#999" />
+          <Text style={styles.emptyText}>No Reflections sent yet</Text>
+          <Text style={styles.emptySubtext}>Send a Reflection to see it here</Text>
+        </View>
+      )}
+
+      {hasReflections && (
+        <FlatList
+          data={displayReflections}
+          keyExtractor={(item) => item.event_id}
+          renderItem={({ item }) => (
           <View style={styles.reflectionItem}>
             <View style={styles.reflectionRow}>
               {item.reflectionImageUrl ? (
@@ -647,8 +713,9 @@ export default function SentHistoryScreen() {
             </View>
           </View>
         )}
-        contentContainerStyle={styles.listContainer}
-      />
+          contentContainerStyle={styles.listContainer}
+        />
+      )}
 
 
     </View>
@@ -896,6 +963,37 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#60a5fa', // Blue to differentiate from green Selfie button
     marginTop: 4,
+  },
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a1a',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    paddingHorizontal: 8,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderBottomWidth: 2,
+    borderBottomColor: 'transparent',
+  },
+  tabActive: {
+    borderBottomColor: '#2e78b7',
+  },
+  tabText: {
+    fontSize: 16,
+    color: '#666',
+    fontWeight: '500',
+  },
+  tabTextActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  tabTextDisabled: {
+    color: '#444',
+    opacity: 0.5,
   },
 });
 
