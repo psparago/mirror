@@ -1102,6 +1102,18 @@ export default function CompanionHomeScreen() {
                     <Text style={styles.intentButtonText}>✨ Ask AI to Describe</Text>
                   </BlurView>
                 </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.intentButton}
+                  onPress={() => setIntent('note')}
+                  disabled={uploading}
+                  activeOpacity={0.8}
+                >
+                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
+                    <FontAwesome name="pencil" size={32} color="#2C3E50" />
+                    <Text style={styles.intentButtonText}>📝 Type a Note</Text>
+                  </BlurView>
+                </TouchableOpacity>
               </View>
             )}
 
@@ -1148,14 +1160,18 @@ export default function CompanionHomeScreen() {
               </View>
             )}
 
-            {/* AI Intent - Dominated by Text Output (Read-only-ish) */}
-            {intent === 'ai' && (
+            {/* AI or Manual Note Intent - Dominated by Text Output */}
+            {(intent === 'ai' || intent === 'note') && (
               <View style={styles.textIntentContainer}>
                 <View style={styles.inputRow}>
                   <TextInput
                     ref={textInputRef}
                     style={styles.descriptionInputLarge}
-                    placeholder={isAiThinking ? "✨ Gemini is thinking..." : "AI is generating a description..."}
+                    placeholder={
+                      intent === 'note' 
+                        ? "Type your reflection here..." 
+                        : (isAiThinking ? "✨ Gemini is thinking..." : "AI is generating a description...")
+                    }
                     placeholderTextColor="#999"
                     value={description}
                     onChangeText={(text) => {
@@ -2107,8 +2123,8 @@ var styles = StyleSheet.create({
   },
   actionButtonsContainer: {
     padding: 20,
-    gap: 40,
-    marginTop: 20,
+    gap: 20,
+    marginTop: 10,
   },
   intentButton: {
     borderRadius: 24,
