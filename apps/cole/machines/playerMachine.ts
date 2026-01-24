@@ -181,7 +181,7 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 2000: 'snap' }
+                            after: { 5000: 'snap' }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
@@ -231,7 +231,7 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 2000: 'snap' }
+                            after: { 5000: 'snap' }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
@@ -279,7 +279,7 @@ export const playerMachine = setup({
                                 { target: 'waiting' }
                             ]
                         },
-                        waiting: { after: { 1500: 'snap' } },
+                        waiting: { after: { 5000: 'snap' } },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
                             target: 'done'
@@ -306,7 +306,7 @@ export const playerMachine = setup({
                     entry: 'showSelfieBubble',
                     initial: 'waiting',
                     states: {
-                        waiting: { after: { 200: 'snap' } },
+                        waiting: { after: { 5000: 'snap' } },
                         snap: {
                             entry: 'triggerSelfie',
                             type: 'final'

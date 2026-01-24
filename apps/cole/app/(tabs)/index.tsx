@@ -273,7 +273,7 @@ export default function ColeInboxScreen() {
     }
   }, [selectedEvent, isReadStateLoaded]);
 
-  const fetchEvents = async () => {
+  const fetchEvents = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -338,7 +338,7 @@ export default function ColeInboxScreen() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   // Keep ref to latest fetchEvents to avoid dependency cycles
   const fetchEventsRef = useRef(fetchEvents);
@@ -352,9 +352,12 @@ export default function ColeInboxScreen() {
     selectedEventRef.current = selectedEvent;
   }, [events, selectedEvent, fetchEvents]);
 
-  // Fetch events and listen for Firestore updates
+  // STABLE Firestore Listener
   useEffect(() => {
-    fetchEventsRef.current(); // Initial fetch
+    console.log('🔌 Firestore listener attached');
+    
+    // Initial fetch
+    fetchEventsRef.current();
 
     // 1. Set up Firestore listener (The "Doorbell")
     const reflectionsRef = collection(db, ExplorerIdentity.collections.reflections);
@@ -465,11 +468,14 @@ export default function ColeInboxScreen() {
       }
     );
 
-    return () => unsubscribe();
-  }, []); // Empty dependency array - strict run-once
+    return () => {
+      console.log('🔌 Firestore listener detached');
+      unsubscribe();
+    };
+  }, [ExplorerIdentity.currentExplorerId]); // Stable dependency
 
 
-  const refreshEventUrls = async (eventId: string): Promise<Event | null> => {
+  const refreshEventUrls = useCallback(async (eventId: string): Promise<Event | null> => {
     try {
       // Fetch fresh URLs for a single event bundle (Expiry: 4 hours)
       const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}&explorer_id=${ExplorerIdentity.currentExplorerId}`);
@@ -490,10 +496,10 @@ export default function ColeInboxScreen() {
       console.error(`Error refreshing URLs for event ${eventId}:`, error);
       return null;
     }
-  };
+  }, []);
 
   // Predictive Neighbor Refresh: Silently refresh the next 2 events in circular order
-  const refreshNeighborUrls = async (currentEventId: string) => {
+  const refreshNeighborUrls = useCallback(async (currentEventId: string) => {
     if (events.length <= 1) return;
 
     const currentIndex = events.findIndex(e => e.event_id === currentEventId);
@@ -514,7 +520,7 @@ export default function ColeInboxScreen() {
         refreshEventUrls(neighbor.event_id).catch(() => { });
       }
     }
-  };
+  }, [events, refreshEventUrls]);
 
   // Keep ref to latest refreshEventUrls
   const refreshEventUrlsRef = useRef(refreshEventUrls);
@@ -522,7 +528,7 @@ export default function ColeInboxScreen() {
     refreshEventUrlsRef.current = refreshEventUrls;
   }, [refreshEventUrls]);
 
-  const markEventAsRead = async (eventId: string) => {
+  const markEventAsRead = useCallback(async (eventId: string) => {
     setReadEventIds(prev => {
       if (prev.includes(eventId)) return prev;
       const next = [...prev, eventId];
@@ -534,9 +540,9 @@ export default function ColeInboxScreen() {
       console.log(`✅ Marked event ${eventId} as read. Total read: ${next.length}`);
       return next;
     });
-  };
+  }, []);
 
-  const handleEventPress = async (item: Event) => {
+  const handleEventPress = useCallback(async (item: Event) => {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
 
@@ -598,7 +604,7 @@ export default function ColeInboxScreen() {
       // Still refresh neighbors, they might be stale
       refreshNeighborUrls(item.event_id);
     }
-  };
+  }, [eventMetadata, refreshEventUrls, refreshNeighborUrls]);
 
   // Helper to format event date
   const formatEventDate = (eventId: string): string => {
@@ -694,7 +700,7 @@ export default function ColeInboxScreen() {
     fetchEvents();
 
     setSelectedEvent(null);
-  }, []);
+  }, [fetchEvents]);
 
   const navigateToPhoto = useCallback(async (direction: 'prev' | 'next') => {
     if (!selectedEvent) return;
@@ -1069,7 +1075,7 @@ export default function ColeInboxScreen() {
       combined = [...combined, ...loopChunk];
     }
     return combined;
-  }, [events]);
+  }, [events, EXPLORER_CONFIG.loopFeed]);
 
   if (loading) {
     return (
