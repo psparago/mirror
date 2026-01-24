@@ -568,22 +568,19 @@ export default function MainStageView({
 
   // Horizontal swipe gesture for next/prev (applied to root container)
   const horizontalSwipeGesture = Gesture.Pan()
-    .onStart((event) => {
-      // Don't capture touches in header or sidebar
-      const isHeader = event.y < 120;
-      const isSidebar = isLandscape ? event.x > width * 0.65 : false;
-      if (isHeader || isSidebar) {
-        return;
-      }
-    })
-    .onUpdate((event) => {
-      // Only handle horizontal swipes when not dragging down
-      if (Math.abs(event.translationX) > Math.abs(event.translationY) && Math.abs(event.translationX) > 20) {
-        // Horizontal swipe detected - let it continue
-      }
-    })
+    .activeOffsetX([-20, 20]) // Activate after 20px horizontal movement
+    .failOffsetY([-30, 30]) // Fail if vertical movement exceeds 30px first
     .onEnd((event) => {
       'worklet';
+      // Only process swipes in the stage area (exclude bottom grid in portrait)
+      const isInBottomGrid = !isLandscape && event.y > height * 0.55;
+      const isHeader = event.y < 120;
+      const isSidebar = isLandscape && event.x > width * 0.65;
+      
+      if (isHeader || isSidebar || isInBottomGrid) {
+        return;
+      }
+      
       // Handle horizontal swipe for next/prev
       if (Math.abs(event.translationX) > 50 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
         runOnJS(handleHorizontalSwipe)(event.translationX);
@@ -598,6 +595,8 @@ export default function MainStageView({
   // Vertical swipe gesture for minimize (ONLY on mediaFrame)
   // Threshold set to ~80px (roughly 1-2" on iPad) for easier triggering
   const verticalSwipeGesture = Gesture.Pan()
+    .activeOffsetY([-20, 20]) // Activate after 20px vertical movement
+    .failOffsetX([-30, 30]) // Fail if horizontal movement exceeds 30px first
     .onUpdate((event) => {
       // Only respond to downward drags
       if (event.translationY > 0) {
@@ -996,7 +995,7 @@ export default function MainStageView({
     const isNewArrival = recentlyArrivedIds.includes(item.event_id);
 
     return (
-      <View style={styles.upNextItemContainer}>
+      <View style={[styles.upNextItemContainer, !isLandscape && { flex: 1 }]}>
         <TouchableOpacity
           style={[
             styles.upNextItem,
@@ -1040,7 +1039,7 @@ export default function MainStageView({
             </View>
 
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
-              {formatEventDate(item.event_id)}
+              {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDate(item.event_id)}
             </Text>
 
             <Text style={styles.reflectionId}>
@@ -1338,6 +1337,9 @@ export default function MainStageView({
                 removeClippedSubviews={true}
                 maxToRenderPerBatch={10}
                 windowSize={5}
+                key={isLandscape ? 'list' : 'grid'}
+                numColumns={isLandscape ? 1 : 2}
+                columnWrapperStyle={!isLandscape ? { gap: 8 } : undefined}
                 onScrollToIndexFailed={(info) => {
                   const wait = new Promise(resolve => setTimeout(resolve, 500));
                   wait.then(() => {
