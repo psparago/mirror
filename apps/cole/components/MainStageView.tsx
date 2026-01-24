@@ -1141,7 +1141,7 @@ export default function MainStageView({
           <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
             {/* LEFT PANE */}
-            <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.55 }]}>
+            <View style={[styles.stagePane, isLandscape ? { flex: 0.7 } : { flex: 0.60 }]}>
 
               {/* Header */}
               <View style={[styles.headerBar, { top: insets.top + 10 }]}>
@@ -1320,7 +1320,7 @@ export default function MainStageView({
             </View>
 
             {/* RIGHT PANE */}
-            <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.45 }, { paddingTop: insets.top + 10 }]}>
+            <View style={[styles.upNextPane, isLandscape ? { flex: 0.3 } : { flex: 0.40 }, { paddingTop: isLandscape ? insets.top + 10 : 5 }]}>
               <View style={styles.upNextHeader}>
                 <Text style={styles.upNextHeaderText}>Up Next</Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
