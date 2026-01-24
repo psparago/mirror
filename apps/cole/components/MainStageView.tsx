@@ -388,6 +388,19 @@ export default function MainStageView({
       },
 
       playDeepDive: async () => {
+        // Stop any existing audio before playing deep dive
+        Speech.stop();
+        if (captionSound) {
+          try {
+            await captionSound.stopAsync();
+            await captionSound.unloadAsync();
+          } catch (e) {
+            console.log('Caption already stopped');
+          }
+          setCaptionSound(null);
+          captionSoundRef.current = null;
+        }
+        
         const playDeepDiveWithRetry = async (retryCount = 0) => {
           try {
             if (sound) await sound.unloadAsync();
@@ -1221,27 +1234,33 @@ export default function MainStageView({
                     )}
                   </View>
 
-                  {/* Play Caption Button - for videos */}
+                  {/* Play Caption Button - for videos and photos */}
                   {(() => {
                     const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
                     const isDisabled = isMediaPlaying;
 
-                    return selectedEvent?.video_url && (selectedEvent?.audio_url || selectedMetadata?.description) && (
+                    return (selectedEvent?.audio_url || selectedMetadata?.description) && (
                       <TouchableOpacity
                         style={[styles.playCaptionButton, isDisabled && styles.playCaptionButtonDisabled]}
                         onPress={async () => {
                           if (isDisabled) return;
 
+                          // Stop any existing audio first
+                          Speech.stop();
+                          if (captionSound) {
+                            try {
+                              await captionSound.stopAsync();
+                              await captionSound.unloadAsync();
+                            } catch (e) {
+                              console.log('Caption already stopped');
+                            }
+                            setCaptionSound(null);
+                          }
+
                           // Use audio file narration
                           if (selectedEvent?.audio_url) {
                             console.log('🔊 Playing caption audio file');
                             try {
-                              // Stop any existing caption sound
-                              if (captionSound) {
-                                await captionSound.stopAsync();
-                                await captionSound.unloadAsync();
-                              }
-
                               const { sound: newSound } = await Audio.Sound.createAsync(
                                 { uri: selectedEvent.audio_url },
                                 { shouldPlay: true }
