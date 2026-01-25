@@ -38,6 +38,21 @@ export default function SentHistoryScreen() {
   const [filterMode, setFilterMode] = useState<'mine' | 'all'>('mine');
   const metadataCache = useRef<Map<string, any>>(new Map());
   const isRefreshingRef = useRef(false);
+  const METADATA_CACHE_MAX = 50;
+
+  const setMetadataCache = (key: string, value: any) => {
+    const cache = metadataCache.current;
+    if (cache.has(key)) {
+      cache.delete(key); // refresh LRU position
+    }
+    cache.set(key, value);
+    if (cache.size > METADATA_CACHE_MAX) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) {
+        cache.delete(oldestKey);
+      }
+    }
+  };
 
   // Load current identity from AsyncStorage
   useFocusEffect(
@@ -286,13 +301,17 @@ export default function SentHistoryScreen() {
             if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
               // Check cache first
               if (metadataCache.current.has(matchingEvent.metadata_url)) {
-                reflection.description = metadataCache.current.get(matchingEvent.metadata_url).description;
+                const cachedMetadata = metadataCache.current.get(matchingEvent.metadata_url);
+                if (cachedMetadata) {
+                  setMetadataCache(matchingEvent.metadata_url, cachedMetadata);
+                  reflection.description = cachedMetadata.description;
+                }
               } else {
                 try {
                   const metaResponse = await fetch(matchingEvent.metadata_url);
                   if (metaResponse.ok) {
                     const metadata = await metaResponse.json();
-                    metadataCache.current.set(matchingEvent.metadata_url, metadata);
+                    setMetadataCache(matchingEvent.metadata_url, metadata);
                     reflection.description = metadata.description;
                   }
                 } catch (err) {

@@ -121,6 +121,20 @@ export default function CompanionHomeScreen() {
     // Optional: handle status updates
   });
 
+  // Cleanup video player on unmount
+  useEffect(() => {
+    return () => {
+      if (videoPlayer) {
+        try {
+          videoPlayer.pause();
+          videoPlayer.replace(''); // Clear source to release resources
+        } catch (e) {
+          // Player may already be released
+        }
+      }
+    };
+  }, [videoPlayer]);
+
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);

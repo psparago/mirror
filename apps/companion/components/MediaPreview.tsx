@@ -1,7 +1,7 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { ActivityIndicator, Image, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 interface MediaPreviewProps {
@@ -53,6 +53,20 @@ export default function MediaPreview({
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
     // Optional: handle status updates
   });
+
+  // Cleanup video player on unmount
+  useEffect(() => {
+    return () => {
+      if (videoPlayer) {
+        try {
+          videoPlayer.pause();
+          videoPlayer.replace(''); // Clear source to release resources
+        } catch (e) {
+          // Player may already be released
+        }
+      }
+    };
+  }, [videoPlayer]);
   
   return (
     <ScrollView 

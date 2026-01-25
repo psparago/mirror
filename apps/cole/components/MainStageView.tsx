@@ -682,6 +682,20 @@ export default function MainStageView({
     setIsVideoPlaying(player.playing);
   });
 
+  // Cleanup video player on unmount
+  useEffect(() => {
+    return () => {
+      if (player) {
+        try {
+          player.pause();
+          player.replace(''); // Clear source to release resources
+        } catch (e) {
+          // Player may already be released
+        }
+      }
+    };
+  }, [player]);
+
   // --- ACTIONS IMPLEMENTATION ---
 
   // Helper for reused selfie logic
