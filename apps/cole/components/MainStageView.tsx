@@ -1407,12 +1407,67 @@ export default function MainStageView({
                 </View>
 
                 {/* Tell Me More FAB */}
-                {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches('viewingPhoto')) && (
+                {selectedMetadata?.deep_dive && state && (() => {
+                  const isFinished = state.matches('finished');
+                  const isViewingPhoto = state.matches('viewingPhoto');
+                  const isNarrating = state.matches({ viewingPhoto: 'narrating' });
+                  // Check if audio is done but stuck waiting for selfie (for images with audio_url)
+                  const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
+                  const canShow = isFinished || isAudioDoneButStuck || (isViewingPhoto && !isNarrating);
+                  
+                  return canShow;
+                })() && (
                   <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
                     <TouchableOpacity
-                      onPress={() => {
+                      onPress={async () => {
                         console.log('✨ User pressed Tell Me More button');
-                        send({ type: 'TELL_ME_MORE' });
+                        const currentState = state;
+                        
+                        // If we're in playingAudio state with audio done, play deep dive directly
+                        // (the state machine doesn't handle TELL_ME_MORE in playingAudio)
+                        if (currentState.matches({ playingAudio: { playback: 'done' } })) {
+                          console.log('🔄 In playingAudio state - directly playing deep dive');
+                          
+                          // Stop any existing audio/speech
+                          Speech.stop();
+                          if (captionSoundRefForActions.current) {
+                            try {
+                              await captionSoundRefForActions.current.stopAsync();
+                              await captionSoundRefForActions.current.unloadAsync();
+                            } catch (e) {}
+                            captionSoundRefForActions.current = null;
+                          }
+                          
+                          // Play deep dive directly
+                          const event = selectedEventRef.current;
+                          const metadata = selectedMetadataRef.current;
+                          
+                          if (event?.deep_dive_audio_url) {
+                            try {
+                              if (soundRef.current) await soundRef.current.unloadAsync();
+                              const { sound: newSound } = await Audio.Sound.createAsync(
+                                { uri: event.deep_dive_audio_url },
+                                { shouldPlay: true, volume: 1.0 }
+                              );
+                              soundRef.current = newSound;
+                              newSound.setOnPlaybackStatusUpdate((status) => {
+                                if (status.isLoaded && status.didJustFinish) {
+                                  newSound.unloadAsync();
+                                  soundRef.current = null;
+                                }
+                              });
+                            } catch (err) {
+                              if (metadata?.deep_dive) {
+                                Speech.speak(metadata.deep_dive, { volume: 1.0 });
+                              }
+                            }
+                          } else if (metadata?.deep_dive) {
+                            Speech.speak(metadata.deep_dive, { volume: 1.0 });
+                          }
+                        } else {
+                          // For other states, use the state machine
+                          send({ type: 'TELL_ME_MORE' });
+                        }
                       }}
                       style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
                     >
