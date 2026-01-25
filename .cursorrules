@@ -15,25 +15,88 @@
 - This is a monorepo with apps in `/apps/*` and shared code in `/packages/*`.
 - Core native dependencies (React, RN, Expo) must be identical across the root `package.json` and all app-level `package.json` files to prevent hoisting conflicts.
 - Always run `npm install` from the root directory.
-- Never use npm install package inside an app folder. Always use npx expo install package to ensure the version matches the SDK.
+- Never use `npm install package` inside an app folder. Always use `npx expo install package` to ensure the version matches the SDK.
 
 ## Development Workflow
 - When suggesting terminal commands for building, always prioritize the EAS CLI for development builds: `eas build --profile development --platform ios`.
 - Do not suggest `npx expo run:ios` for local development unless explicitly asked, as it often fails on this environment's specific hardware constraints.
 
 # PRODUCT NOMENCLATURE & BRANDING RULES
-You must adhere to the following naming conventions in all code, comments, and discussions:
+You must adhere to the following naming conventions in all code, comments, and discussions.
 
-1. **Looking Glass Explorer (LGE):**
-   - Formerly known as: "Cole's App", "LG", "The Main App".
-   - The iPad app used by the Explorer (the primary user).
-   - User Role: "Explorer".
+1. **Reflections Explorer:**
+   - **Path:** `apps/cole`
+   - **Identity:** The iPad app used by the primary user (The Explorer).
+   - **Formerly known as:** "Looking Glass Explorer", "Cole's App", "LG".
+   - **User Role:** "Explorer".
 
-2. **Looking Glass Companion (LGC):**
-   - Formerly known as: "The Companion App", "Remote".
-   - The iPhone/iPad app used by family/caregivers.
-   - User Role: "Companion".
+2. **Reflections Companion:**
+   - **Path:** `apps/companion`
+   - **Identity:** The iPhone/iPad app used by family and caregivers.
+   - **Formerly known as:** "Looking Glass Companion", "Remote", "LGC".
+   - **User Role:** "Companion" or "Caregiver".
 
-3. **General Rule:**
-   - Never use "Patient" or "Subject" or "Star". Always use **"Explorer"**.
-   - Never use "Admin" or "Controller". Always use **"Companion"**.
+3. **Strict Terminology:**
+   - **DO NOT USE:** "Patient", "Subject", "Star", "Looking Glass".
+   - **ALWAYS USE:** "Explorer" (for the user) and "Reflections" (for the app/content).
+
+---
+
+# Project Context: Mission & Architecture
+
+## 🎯 The Mission
+Project Mirror is the internal codename. The public apps are **Reflections Explorer** and **Reflections Companion**.
+
+* **The Goal:** Connection, not consumption. A "directed social media" experience for individuals with cognitive disabilities.
+* **The "Reflections" Pattern:** Content shared between Companions and the Explorer are called **Reflections**.
+* **The Vision:** Providing a gift to the special needs community to foster high-agency social connection.
+* **The UX Philosophy:** "Lean Back" experience. Low friction, high agency.
+* **The "No Doom Scrolling" Rule:** Content never auto-advances. It stops and waits for the Explorer to choose.
+
+## 🏗️ The Monorepo Structure
+* **`apps/cole` (Reflections Explorer):** The consumer iPad app.
+* **`apps/companion` (Reflections Companion):** The creator/manager iPhone app.
+* **`backend`:** Go (Cloud Functions), Firestore, S3 (Storage).
+* **`packages/shared`:** Shared TypeScript types and Firebase config.
+
+## 👥 Roles & Multi-User Governance
+* **Explorer:** The primary user of Reflections Explorer.
+* **Companion:** Family/Friends who record and send "Reflections."
+* **Caregiver:** A special Companion with administrative rights (via Reflections Companion) to manage the Explorer's settings.
+* **Access Model:** Invitation-only via "Circles of Care."
+
+## 🧠 Key Architecture Patterns
+
+### 1. The "Split View" (Reflections Explorer)
+* **Layout:** Modeled after classic YouTube iPad interfaces.
+    * **Left (70%):** Main Stage (Reflection playback).
+    * **Right (30%):** "Up Next" Sidebar (Static list).
+
+### 2. The "Context First" Flow
+* **Sequence:** When a Reflection loads, it is **Paused**.
+    1.  **Audio Intro (Context):** The context is provided first via a voice recording from the Companion. If no audio is recorded, AI-generated TTS is used as a fallback.
+    2.  **Auto-Play:** ONLY after the audio intro finishes, the video starts.
+    3.  **Kill Switch:** Immediate cessation of all audio/video on navigation.
+
+### 3. The "One Voice" Rule
+* TTS buttons are disabled during video playback to prevent sensory overload.
+
+### 4. Video Pipeline (The "Tri-File" Strategy)
+* **Data Structure:** A `Reflection` object manages three assets:
+    1.  `image_url` (Thumbnail/Poster).
+    2.  `video_url` (The main content, MP4).
+    3.  `audio_url` (The Companion Intro/Context).
+
+## 🛠️ Technical Decisions & Constraints
+
+### 1. Video Playback
+* **Library:** `expo-video` (using Native AVPlayer/ExoPlayer).
+* **Constraint:** Videos < 10 seconds (soft target for cognitive load management).
+
+### 2. Camera & Recording
+* **Reflections Companion:** Uses Native Intents via `ImagePicker`.
+* **Reflections Explorer:** Uses `expo-camera` for custom "Reaction/Selfie" features.
+
+### 3. Backend & Security
+* **Storage:** S3 (Media) & Firestore (Metadata/Signals).
+* **Encryption:** Future state will implement E
