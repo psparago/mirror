@@ -138,6 +138,20 @@ export default function CompanionHomeScreen() {
   const cameraRef = useRef<any>(null);
   const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
+  
+  // Timeout refs for cleanup
+  const cameraModalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadingImageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioUriTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup timeouts on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraModalTimeoutRef.current) clearTimeout(cameraModalTimeoutRef.current);
+      if (loadingImageTimeoutRef.current) clearTimeout(loadingImageTimeoutRef.current);
+      if (audioUriTimeoutRef.current) clearTimeout(audioUriTimeoutRef.current);
+    };
+  }, []);
 
   // Show toast notification
   const showToast = (message: string) => {
@@ -275,7 +289,8 @@ export default function CompanionHomeScreen() {
     setCameraMode('photo');
     setFacing('front');
     // Small delay to ensure facing state is updated before modal renders
-    setTimeout(() => {
+    if (cameraModalTimeoutRef.current) clearTimeout(cameraModalTimeoutRef.current);
+    cameraModalTimeoutRef.current = setTimeout(() => {
       setShowCameraModal(true);
     }, 50);
   };
@@ -456,7 +471,8 @@ export default function CompanionHomeScreen() {
         lastProcessedUriRef.current = null;
 
         // Small delay to ensure media loads
-        setTimeout(() => setIsLoadingImage(false), 300);
+        if (loadingImageTimeoutRef.current) clearTimeout(loadingImageTimeoutRef.current);
+        loadingImageTimeoutRef.current = setTimeout(() => setIsLoadingImage(false), 300);
       }
       setIsLoadingGallery(false);
     } catch (error: any) {
@@ -614,7 +630,8 @@ export default function CompanionHomeScreen() {
 
       // Wait a bit for URI to be available, then set it directly
       // The useEffect will also catch it, but setting it here ensures it happens
-      setTimeout(() => {
+      if (audioUriTimeoutRef.current) clearTimeout(audioUriTimeoutRef.current);
+      audioUriTimeoutRef.current = setTimeout(() => {
         if (audioRecorder.uri && audioRecorder.uri !== lastProcessedUriRef.current) {
           setAudioUri(audioRecorder.uri);
           lastProcessedUriRef.current = audioRecorder.uri;
