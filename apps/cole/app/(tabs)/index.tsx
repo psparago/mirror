@@ -12,7 +12,8 @@ import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Image, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Image } from 'expo-image';
 
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -647,7 +648,9 @@ export default function ColeInboxScreen() {
           <Image
             source={{ uri: item.image_url }}
             style={styles.gridThumbnail}
-            resizeMode="cover"
+            contentFit="cover"
+            recyclingKey={item.event_id}
+            cachePolicy="memory-disk"
             onError={(error) => {
               console.error(`Error loading image for event ${item.event_id}:`, error);
             }}

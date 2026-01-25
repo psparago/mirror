@@ -1,4 +1,4 @@
-import { Event, EventMetadata } from '@projectmirror/shared';
+import { Event, EventMetadata } from '../types';
 import { assign, setup } from 'xstate';
 
 // 1. CONTEXT

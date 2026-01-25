@@ -2,7 +2,8 @@ import { FontAwesome } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useEffect } from 'react';
-import { ActivityIndicator, Image, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Image } from 'expo-image';
 
 interface MediaPreviewProps {
   photo: { uri: string } | null;
@@ -100,7 +101,8 @@ export default function MediaPreview({
               <Image
                 source={{ uri: photo?.uri }}
                 style={styles.previewImage}
-                resizeMode="contain"
+                contentFit="contain"
+                cachePolicy="memory-disk"
               />
             )}
             <View style={styles.imageTopButtons}>

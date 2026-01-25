@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { Event, EventMetadata } from '@projectmirror/shared';
+import { Event, EventMetadata, playerMachine } from '@projectmirror/shared';
 
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
@@ -15,7 +15,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   FlatList,
-  Image,
+  Image as RNImage,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -26,6 +26,7 @@ import {
   useWindowDimensions,
   View
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   runOnJS,
@@ -35,7 +36,6 @@ import Animated, {
   withTiming
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { playerMachine } from '../machines/playerMachine';
 
 interface MainStageProps {
   visible: boolean;
@@ -1085,7 +1085,13 @@ export default function MainStageView({
               position: 'absolute', left: -6, top: '50%', marginTop: -5, zIndex: 10
             }} />
           )}
-          <Image source={{ uri: item.image_url }} style={styles.upNextThumbnail} />
+          <Image 
+            source={{ uri: item.image_url }} 
+            style={styles.upNextThumbnail} 
+            contentFit="cover"
+            recyclingKey={item.event_id}
+            cachePolicy="memory-disk"
+          />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
               {isNowPlaying && '▶️ '}{itemMetadata?.description || 'Reflection'}
@@ -1235,7 +1241,7 @@ export default function MainStageView({
                     {videoSource ? (
                       <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
                     ) : (
-                      <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+                      <RNImage source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
                     )}
 
 

@@ -14,7 +14,8 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
+import { Image } from 'expo-image';
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
@@ -1080,7 +1081,8 @@ export default function CompanionHomeScreen() {
                     <Image
                       source={{ uri: photo.uri }}
                       style={styles.previewImage}
-                      resizeMode="contain"
+                      contentFit="contain"
+                      cachePolicy="memory-disk"
                     />
                   )}
                   <View style={styles.imageTopButtons}>
@@ -1483,7 +1485,9 @@ export default function CompanionHomeScreen() {
                     <Image
                       source={{ uri: item.urls.small || item.urls.regular }}
                       style={styles.resultImage}
-                      resizeMode="cover"
+                      contentFit="cover"
+                      recyclingKey={item.id}
+                      cachePolicy="memory-disk"
                     />
                   </TouchableOpacity>
                 )}

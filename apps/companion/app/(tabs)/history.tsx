@@ -9,7 +9,8 @@ import * as MediaLibrary from 'expo-media-library';
 import { useFocusEffect } from 'expo-router';
 import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, FlatList, Image, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Image } from 'expo-image';
 
 interface SentReflection {
   event_id: string;
@@ -524,7 +525,8 @@ export default function SentHistoryScreen() {
               <Image
                 source={{ uri: selfieImageUrl }}
                 style={styles.selfieImage}
-                resizeMode="contain"
+                contentFit="contain"
+                cachePolicy="memory-disk"
                 onError={(error) => {
                   console.error('Error loading selfie image:', error);
                 }}
@@ -624,7 +626,9 @@ export default function SentHistoryScreen() {
                   <Image
                     source={{ uri: item.reflectionImageUrl }}
                     style={styles.reflectionImage}
-                    resizeMode="cover"
+                    contentFit="cover"
+                    recyclingKey={item.event_id}
+                    cachePolicy="memory-disk"
                   />
                   {item.status === 'deleted' && (
                     <View style={styles.deletedOverlay}>
