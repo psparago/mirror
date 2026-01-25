@@ -1009,6 +1009,7 @@ export default function MainStageView({
 
 
   // Handler for infinite scroll - append more events when near the end
+  const FEED_MAX_MULTIPLIER = 5; // Cap feed at 5x original size to prevent memory growth
   const handleEndReached = useCallback(() => {
     // Check if infinite scroll is enabled (default to true if not specified)
     if (config?.enableInfiniteScroll === false) {
@@ -1018,8 +1019,17 @@ export default function MainStageView({
 
     if (originalEventsRef.current.length === 0) return;
 
-    console.log('📜 End reached - appending more events for infinite scroll');
-    setFeedData(prev => [...prev, ...originalEventsRef.current]);
+    const maxFeedSize = originalEventsRef.current.length * FEED_MAX_MULTIPLIER;
+    
+    setFeedData(prev => {
+      // Don't grow beyond max size
+      if (prev.length >= maxFeedSize) {
+        console.log(`📜 Feed at max size (${maxFeedSize}) - not appending`);
+        return prev;
+      }
+      console.log('📜 End reached - appending more events for infinite scroll');
+      return [...prev, ...originalEventsRef.current];
+    });
   }, [config?.enableInfiniteScroll]);
 
 
