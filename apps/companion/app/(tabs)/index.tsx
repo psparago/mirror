@@ -860,10 +860,6 @@ export default function CompanionHomeScreen() {
       // 9. Cleanup Staging & Local
       showToast('✅ Reflection sent!');
 
-      if (tempThumbnail) {
-        FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
-      }
-
       if (stagingEventId) {
         fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`).catch(() => { });
       }
@@ -904,6 +900,9 @@ export default function CompanionHomeScreen() {
       console.error("Full Upload Error:", error);
       Alert.alert("Upload Error", error.message);
     } finally {
+      if (tempThumbnail) {
+        FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
+      }
       setUploading(false);
     }
   };
