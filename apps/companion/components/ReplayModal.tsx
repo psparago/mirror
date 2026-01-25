@@ -3,11 +3,14 @@ import { Event, EventMetadata, playerMachine } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
-import { Image } from 'expo-image'; // leveraging your new build!
+import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import React, { useEffect, useMemo, useRef } from 'react';
-import { ActivityIndicator, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Modal, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface ReplayModalProps {
   visible: boolean;
@@ -16,96 +19,216 @@ interface ReplayModalProps {
 }
 
 export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
-  // 1. Audio Player Ref (for voice notes)
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  
+  // 1. Audio Player Refs
   const soundRef = useRef<Audio.Sound | null>(null);
+  const captionSoundRef = useRef<Audio.Sound | null>(null);
+  const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null);
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
     player.loop = false;
   });
 
-  // 3. The State Machine
+  // 3. Animation for sparkle button
+  const tellMeMorePulse = useSharedValue(1);
+  
+  useEffect(() => {
+    if (event?.metadata?.deep_dive) {
+      tellMeMorePulse.value = withRepeat(
+        withTiming(1.15, { duration: 600 }),
+        -1,
+        true
+      );
+    } else {
+      tellMeMorePulse.value = 1;
+    }
+  }, [event?.metadata?.deep_dive]);
+
+  const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: tellMeMorePulse.value }],
+  }));
+
+  // 4. The State Machine & Refs
   const sendRef = useRef<any>(() => {});
+  const eventRef = useRef<Event | null>(event);
+  
+  useEffect(() => {
+    eventRef.current = event;
+  }, [event]);
+
   const machine = useMemo(() => playerMachine.provide({
     actions: {
       // --- MEDIA CONTROL ---
       stopAllMedia: async () => {
-        Speech.stop();
+        try { Speech.stop(); } catch (e) {}
+        
         if (soundRef.current) {
-          await soundRef.current.stopAsync();
-          await soundRef.current.unloadAsync();
+          try {
+            await soundRef.current.stopAsync();
+            await soundRef.current.unloadAsync();
+          } catch (e) {}
           soundRef.current = null;
         }
-        videoPlayer.pause();
-        videoPlayer.currentTime = 0;
+        
+        if (captionSoundRef.current) {
+          try {
+            await captionSoundRef.current.stopAsync();
+            await captionSoundRef.current.unloadAsync();
+          } catch (e) {}
+          captionSoundRef.current = null;
+        }
+        setCaptionSound(null);
+        
+        try {
+          videoPlayer.pause();
+          videoPlayer.currentTime = 0;
+        } catch (e) {}
       },
+
       speakCaption: () => {
-        // Only speak if there's no audio recording attached (Machine logic handles this guard usually, 
-        // but safe to check metadata).
-        if (event?.metadata?.short_caption) {
-           Speech.speak(event.metadata.short_caption, {
-             onDone: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
-             // If speech fails/interrupted, we must fail forward or the machine gets stuck
-             onStopped: () => sendRef.current({ type: 'NARRATION_FINISHED' }), 
-           });
+        if (eventRef.current?.audio_url) {
+          console.log('🔊 [speakCaption] Playing caption audio file');
+          
+          // FIX: Await logic inside the async creator isn't available in sync action, 
+          // so we use the promise chain, but ensure we set volume immediately.
+          Audio.Sound.createAsync(
+            { uri: eventRef.current.audio_url },
+            { shouldPlay: true, volume: 1.0 }
+          ).then(({ sound }) => {
+            captionSoundRef.current = sound;
+            sound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                console.log('✅ [speakCaption] Caption audio finished');
+                sound.unloadAsync();
+                captionSoundRef.current = null;
+                sendRef.current({ type: 'NARRATION_FINISHED' });
+              }
+            });
+          }).catch((err) => {
+            console.warn('Audio error, using fallback:', err);
+            sendRef.current({ type: 'NARRATION_FINISHED' });
+          });
+        } else if (eventRef.current?.metadata?.short_caption || eventRef.current?.metadata?.description) {
+          const textToSpeak = eventRef.current.metadata.short_caption || eventRef.current.metadata.description;
+          Speech.speak(textToSpeak, {
+            volume: 1.0,
+            onDone: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
+            onStopped: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
+            onError: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
+          });
         } else {
-           // No caption? Skip step.
-           sendRef.current({ type: 'NARRATION_FINISHED' });
+          sendRef.current({ type: 'NARRATION_FINISHED' });
         }
       },
+
       playVideo: () => {
         videoPlayer.play();
       },
+
       playAudio: async () => {
-        if (event?.audio_url) {
-          const { sound } = await Audio.Sound.createAsync(
-            { uri: event.audio_url },
-            { shouldPlay: true }
-          );
-          soundRef.current = sound;
-          sound.setOnPlaybackStatusUpdate((status) => {
-            if (status.isLoaded && status.didJustFinish) {
-               sendRef.current({ type: 'AUDIO_FINISHED' });
-            }
-          });
+        // This is the main audio for an "Image + Audio" reflection
+        if (eventRef.current?.audio_url) {
+          try {
+            const { sound } = await Audio.Sound.createAsync(
+              { uri: eventRef.current.audio_url },
+              { shouldPlay: true, volume: 1.0 }
+            );
+            soundRef.current = sound;
+            
+            sound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                // CRITICAL FIX: Send AUDIO_FINISHED when playback is done.
+                // In Companion mode, we do not wait for the selfie.
+                console.log("✅ Main Audio Finished");
+                sendRef.current({ type: 'AUDIO_FINISHED' });
+              }
+            });
+          } catch (e) {
+            console.error("Audio Load Error", e);
+            sendRef.current({ type: 'AUDIO_FINISHED' });
+          }
         } else {
           sendRef.current({ type: 'AUDIO_FINISHED' });
         }
       },
+
       pauseMedia: () => {
         videoPlayer.pause();
         if (soundRef.current) soundRef.current.pauseAsync();
+        if (captionSoundRef.current) captionSoundRef.current.pauseAsync();
         Speech.stop();
       },
+      
       resumeMedia: () => {
-        // This is complex, simplified for Replay: just replay
         videoPlayer.play();
         if (soundRef.current) soundRef.current.playAsync();
+        if (captionSoundRef.current) captionSoundRef.current.playAsync();
       },
 
-      // --- SELFIE ACTIONS (DISABLE FOR COMPANION) ---
+      // --- SELFIE ACTIONS ---
       triggerSelfie: () => {
-        console.log("📸 [Replay] Selfie trigger ignored in Companion mode");
-        // We pretend we took it so the machine moves to 'done'
-        // But in 'Replay', we likely won't even reach this state if we don't start the camera
+        console.log("📸 [Replay] Selfie trigger - marking as taken to allow state machine to progress");
+        // In Companion mode, we need to mark selfie as taken so the parallel state can complete
+        // The state machine's assign({ selfieTaken: true }) should handle this,
+        // but we also send a signal to ensure the state progresses
+        // Actually, the assign happens automatically in the state machine, so we just log
       },
+      
       showSelfieBubble: () => {}, 
-      playDeepDive: () => {}, // Implement if you want Emily to hear the AI explanation
+
+      playDeepDive: async () => {
+        // Stop previous media
+        Speech.stop();
+        if (captionSoundRef.current) {
+          await captionSoundRef.current.unloadAsync().catch(()=>{});
+          setCaptionSound(null);
+          captionSoundRef.current = null;
+        }
+
+        if (eventRef.current?.deep_dive_audio_url) {
+          console.log('🧠 Playing deep dive audio');
+          try {
+            const { sound: newSound } = await Audio.Sound.createAsync(
+              { uri: eventRef.current.deep_dive_audio_url },
+              { shouldPlay: true, volume: 1.0 }
+            );
+            soundRef.current = newSound;
+            
+            newSound.setOnPlaybackStatusUpdate((status) => {
+              if (status.isLoaded && status.didJustFinish) {
+                console.log('✅ Deep dive audio finished');
+                sendRef.current({ type: 'NARRATION_FINISHED' });
+                newSound.unloadAsync();
+                soundRef.current = null;
+              }
+            });
+          } catch (err) {
+            console.warn('Deep dive error, fallback to TTS');
+            sendRef.current({ type: 'NARRATION_FINISHED' });
+          }
+        } else if (eventRef.current?.metadata?.deep_dive) {
+           Speech.speak(eventRef.current.metadata.deep_dive, {
+             onDone: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
+             onError: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
+           });
+        } else {
+          sendRef.current({ type: 'NARRATION_FINISHED' });
+        }
+      },
     }
   }), [event, videoPlayer]);
 
-  // 4. Initialize the Hook
   const [state, send] = useMachine(machine);
 
-  // 5. Update the Send Function
   useEffect(() => {
     sendRef.current = send;
   }, [send]);
 
-  // 6. Drive the Machine
   useEffect(() => {
     if (visible && event) {
-      // Initialize machine with this event
       sendRef.current({ 
         type: 'SELECT_EVENT_INSTANT', 
         event: event, 
@@ -114,14 +237,9 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
     } else {
       sendRef.current({ type: 'CLOSE' });
     }
-    
-    // Cleanup on unmount/close
-    return () => {
-      sendRef.current({ type: 'CLOSE' });
-    };
+    return () => { sendRef.current({ type: 'CLOSE' }); };
   }, [visible, event, send]);
 
-  // Video Player Event Listener (to notify machine)
   useEffect(() => {
     const subscription = videoPlayer.addListener('playToEnd', () => {
        send({ type: 'VIDEO_FINISHED' });
@@ -130,59 +248,237 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   }, [videoPlayer, send]);
 
 
+  // LOGIC FOR SPARKLE BUTTON
+  // Check if we are stuck in the "Done but waiting for selfie" state
+  const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
+  
+  // For images (non-video, non-audio), check if we're in viewingPhoto state
+  // The state machine accepts TELL_ME_MORE from any viewingPhoto sub-state
+  const isViewingPhoto = state.matches('viewingPhoto');
+  const isViewingPhotoViewing = state.matches({ viewingPhoto: 'viewing' });
+  const isViewingPhotoNarrating = state.matches({ viewingPhoto: 'narrating' });
+  
+  const isFinished = state.matches('finished');
+  
+  // Show sparkle if:
+  // 1. Finished state
+  // 2. Audio done (bypassing selfie wait)
+  // 3. Viewing photo - show after a short delay to allow narration to start, or if we're in viewing sub-state
+  // For images, we use SELECT_EVENT_INSTANT which sets hasSpoken: true, but viewingPhoto still calls speakCaption
+  // So we show the button when not actively narrating
+  const canShowSparkle = event?.metadata?.deep_dive && (
+    isFinished || 
+    isAudioDoneButStuck ||
+    (isViewingPhoto && !isViewingPhotoNarrating) // Show when in viewingPhoto but not narrating
+  );
+
   if (!visible || !event) return null;
 
   // --- RENDER ---
   const isVideo = state.hasTag('video_mode');
-  const isAudio = state.hasTag('audio_mode');
   const isSpeaking = state.hasTag('speaking');
+  const isPlaying = state.hasTag('playing');
+  const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null);
+
+  const handleSwipeClose = () => {
+    sendRef.current({ type: 'CLOSE' });
+    setTimeout(() => { onClose(); }, 100);
+  };
+
+  const swipeDownGesture = Gesture.Pan()
+    .activeOffsetY([10, 200])
+    .failOffsetX([-50, 50])
+    .onEnd((event) => {
+      if (event.translationY > 100) runOnJS(handleSwipeClose)();
+    });
+
+  const handlePlayCaption = async () => {
+    if (isAnyAudioPlaying) return; // Prevent overlapping
+
+    // Stop existing
+    Speech.stop();
+    if (captionSoundRef.current) await captionSoundRef.current.unloadAsync().catch(()=>{});
+
+    if (event?.audio_url) {
+      // Replay the main audio
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: event.audio_url },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      setCaptionSound(sound);
+      captionSoundRef.current = sound;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          sound.unloadAsync();
+          setCaptionSound(null);
+          captionSoundRef.current = null;
+        }
+      });
+    } else if (event?.metadata?.description) {
+      Speech.speak(event.metadata.description, { volume: 1.0 });
+    }
+  };
 
   return (
     <Modal visible={visible} animationType="slide" transparent={false}>
-      <View style={styles.container}>
-        
-        {/* Header / Close Button */}
-        <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-           <FontAwesome name="times" size={24} color="#fff" />
-        </TouchableOpacity>
+      <GestureDetector gesture={swipeDownGesture}>
+        <View style={styles.container}>
+          
+          <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
+             <FontAwesome name="times" size={24} color="#fff" />
+          </TouchableOpacity>
 
-        {/* --- MAIN STAGE CONTENT --- */}
-        
-        {/* 1. VIDEO VIEW */}
-        {isVideo ? (
-           <VideoView 
-             player={videoPlayer} 
-             style={styles.fullscreenMedia} 
-             contentFit="contain"
-           />
-        ) : (
-           /* 2. IMAGE VIEW (For Audio or Photo events) */
-           <Image
-             source={{ uri: event.image_url }}
-             style={styles.fullscreenMedia}
-             contentFit="contain" // "contain" lets us see the whole polaroid framing if image is weird
-           />
-        )}
+          {/* MAIN STAGE */}
+          <View style={styles.mediaContainer}>
+            <View style={styles.mediaFrame}>
+              {isVideo ? (
+                 <VideoView 
+                   player={videoPlayer} 
+                   style={styles.mediaImage} 
+                   contentFit="contain"
+                   nativeControls={false}
+                 />
+              ) : (
+                 <Image
+                   source={{ uri: event.image_url }}
+                   style={styles.mediaImage}
+                   contentFit="contain"
+                   cachePolicy="memory-disk"
+                 />
+              )}
+            </View>
+          </View>
 
-        {/* 3. AUDIO VISUALIZER (Simple placeholder) */}
-        {isAudio && (
-           <BlurView intensity={30} style={styles.audioOverlay}>
-             <FontAwesome name="volume-up" size={48} color="#fff" />
-             <Text style={styles.audioText}>Playing Audio Message...</Text>
-           </BlurView>
-        )}
+          {/* CAPTION BAR */}
+          <View style={[styles.captionBar, { paddingBottom: insets.bottom + 16 }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
+              {isAnyAudioPlaying && (
+                <View style={{ marginRight: 12, marginTop: 2 }}>
+                  <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
+                </View>
+              )}
 
-        {/* 4. CAPTION OVERLAY (Mimics Cole's Bottom Bar) */}
-        <View style={styles.captionBar}>
-           <Text style={styles.captionText}>
-             {event.metadata?.short_caption || event.metadata?.description || "No caption"}
-           </Text>
-           {isSpeaking && (
-              <ActivityIndicator size="small" color="#fff" style={{marginLeft: 10}}/>
-           )}
+              <View style={{ flex: 1 }}>
+                <Text style={styles.captionText} numberOfLines={2}>
+                  {event.metadata?.short_caption || event.metadata?.description || 'No caption'}
+                </Text>
+                {event.metadata?.sender && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
+                    <Text style={styles.senderText}>From {event.metadata.sender}</Text>
+                  </View>
+                )}
+              </View>
+
+              {(event?.audio_url || event?.metadata?.description) && (
+                <TouchableOpacity
+                  style={[styles.playCaptionButton, isAnyAudioPlaying && styles.playCaptionButtonDisabled]}
+                  onPress={handlePlayCaption}
+                  disabled={!!isAnyAudioPlaying}
+                >
+                  <FontAwesome
+                    name="volume-up"
+                    size={18}
+                    color={isAnyAudioPlaying ? "rgba(255, 255, 255, 0.3)" : "rgba(255, 255, 255, 0.8)"}
+                  />
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* TELL ME MORE SPARKLE */}
+          {canShowSparkle && (
+            <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
+              <TouchableOpacity
+                onPress={async () => {
+                  // If we're stuck in playingAudio state, directly play deep dive (bypass state machine)
+                  if (isAudioDoneButStuck || state.matches('playingAudio')) {
+                    // Stop previous media
+                    Speech.stop();
+                    if (captionSoundRef.current) {
+                      await captionSoundRef.current.unloadAsync().catch(()=>{});
+                      setCaptionSound(null);
+                      captionSoundRef.current = null;
+                    }
+                    if (soundRef.current) {
+                      await soundRef.current.unloadAsync().catch(()=>{});
+                      soundRef.current = null;
+                    }
+
+                    // Play deep dive directly
+                    if (event?.deep_dive_audio_url) {
+                      try {
+                        const { sound: newSound } = await Audio.Sound.createAsync(
+                          { uri: event.deep_dive_audio_url },
+                          { shouldPlay: true, volume: 1.0 }
+                        );
+                        soundRef.current = newSound;
+                        newSound.setOnPlaybackStatusUpdate((status) => {
+                          if (status.isLoaded && status.didJustFinish) {
+                            newSound.unloadAsync();
+                            soundRef.current = null;
+                          }
+                        });
+                      } catch (err) {
+                        if (event?.metadata?.deep_dive) {
+                          Speech.speak(event.metadata.deep_dive, {
+                            volume: 1.0,
+                            onError: () => {},
+                          });
+                        }
+                      }
+                    } else if (event?.metadata?.deep_dive) {
+                      Speech.speak(event.metadata.deep_dive, {
+                        volume: 1.0,
+                        onError: () => {},
+                      });
+                    }
+                  } else if (isViewingPhoto) {
+                    // For viewingPhoto state, try state machine first, but have fallback
+                    send({ type: 'TELL_ME_MORE' });
+                    
+                    // Fallback: if state doesn't change after a short delay, play directly
+                    setTimeout(() => {
+                      if (state.matches('viewingPhoto') && !state.matches('playingDeepDive')) {
+                        // Play deep dive directly
+                        Speech.stop();
+                        if (event?.deep_dive_audio_url) {
+                          Audio.Sound.createAsync(
+                            { uri: event.deep_dive_audio_url },
+                            { shouldPlay: true, volume: 1.0 }
+                          ).then(({ sound }) => {
+                            soundRef.current = sound;
+                            sound.setOnPlaybackStatusUpdate((status) => {
+                              if (status.isLoaded && status.didJustFinish) {
+                                sound.unloadAsync();
+                                soundRef.current = null;
+                              }
+                            });
+                          }).catch(() => {
+                            if (event?.metadata?.deep_dive) {
+                              Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
+                            }
+                          });
+                        } else if (event?.metadata?.deep_dive) {
+                          Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
+                        }
+                      }
+                    }, 300);
+                  } else {
+                    // For finished state or any other state, use state machine
+                    send({ type: 'TELL_ME_MORE' });
+                  }
+                }}
+                style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
+              >
+                <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                  <Text style={{ fontSize: 32 }}>✨</Text>
+                </BlurView>
+              </TouchableOpacity>
+            </Animated.View>
+          )}
+
         </View>
-
-      </View>
+      </GestureDetector>
     </Modal>
   );
 }
@@ -191,8 +487,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   closeButton: {
     position: 'absolute',
@@ -203,41 +497,79 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.2)',
     borderRadius: 20,
   },
-  fullscreenMedia: {
-    width: '100%',
-    height: '80%',
-  },
-  audioOverlay: {
-    position: 'absolute',
+  mediaContainer: {
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 40,
-    borderRadius: 20,
-    overflow: 'hidden',
+    padding: 20,
+    paddingTop: 80, 
+    paddingBottom: 120, 
   },
-  audioText: {
-    color: '#fff',
-    marginTop: 20,
-    fontSize: 18,
-    fontWeight: '600',
+  mediaFrame: {
+    flex: 1,
+    width: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#1a3a44',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  mediaImage: {
+    width: '100%',
+    height: '100%',
   },
   captionBar: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    paddingBottom: 40, // Safe area
     paddingTop: 20,
     paddingHorizontal: 20,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20,
   },
   captionText: {
     color: '#fff',
-    fontSize: 24,
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  senderText: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 14,
     fontWeight: '600',
-    textAlign: 'center',
-  }
+  },
+  playCaptionButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 12,
+  },
+  playCaptionButtonDisabled: {
+    opacity: 0.4,
+  },
+  tellMeMoreFAB: {
+    position: 'absolute',
+    bottom: 120,
+    right: 30,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  tellMeMoreBlur: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
 });

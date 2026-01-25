@@ -1,20 +1,23 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 
-
 import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
+import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
 import { useFocusEffect } from 'expo-router';
 import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { Image } from 'expo-image';
+import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+
+import { ReplayModal } from '@/components/ReplayModal';
+import { Event, EventMetadata } from '@projectmirror/shared';
 
 interface SentReflection {
   event_id: string;
-  timestamp: any;
+  timestamp: any; // Current status timestamp (may be engagement/replay time)
+  sentTimestamp?: any; // Original "sent" timestamp (preserved from 'ready' status)
   status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
   engagementTimestamp?: any;
   deletedAt?: any;
@@ -40,7 +43,9 @@ export default function SentHistoryScreen() {
   const metadataCache = useRef<Map<string, any>>(new Map());
   const isRefreshingRef = useRef(false);
   const METADATA_CACHE_MAX = 50;
-
+  const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
+  const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
+  
   const setMetadataCache = (key: string, value: any) => {
     const cache = metadataCache.current;
     if (cache.has(key)) {
@@ -95,12 +100,12 @@ export default function SentHistoryScreen() {
     };
 
     // Sort by RESPONSE timestamp (viewed time) - most recent first
-    // If no response, use sent timestamp
+    // If no response, use sent timestamp (original sent time, not engagement time)
     result.sort((a, b) => {
       const aResponseTs = responseTimestampMap.get(a.event_id);
       const bResponseTs = responseTimestampMap.get(b.event_id);
-      const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.timestamp);
-      const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.timestamp);
+      const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.sentTimestamp || a.timestamp);
+      const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.sentTimestamp || b.timestamp);
       return bTime - aTime; // Most recent first
     });
 
@@ -222,6 +227,7 @@ export default function SentHistoryScreen() {
             reflectionMap.set(actualEventId, {
               event_id: actualEventId,
               timestamp: data.timestamp,
+              sentTimestamp: currentStatus === 'ready' ? data.timestamp : undefined, // Preserve original sent time
               status: currentStatus,
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
@@ -231,6 +237,11 @@ export default function SentHistoryScreen() {
             // We already have this event_id - always update to higher priority status
             const existingTime = getTimestampValue(existing.timestamp);
             const existingEngTime = getTimestampValue(existing.engagementTimestamp);
+
+            // Preserve original sent timestamp if we see a 'ready' status and don't have one yet
+            if (currentStatus === 'ready' && !existing.sentTimestamp) {
+              existing.sentTimestamp = data.timestamp;
+            }
 
             // Always update status if this signal has higher priority
             if (currentPriority > existingPriority) {
@@ -298,7 +309,7 @@ export default function SentHistoryScreen() {
           if (matchingEvent?.image_url) {
             reflection.reflectionImageUrl = matchingEvent.image_url;
 
-            // Also fetch metadata for description (only for non-deleted)
+            // Also fetch metadata for description and timestamp (only for non-deleted)
             if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
               // Check cache first
               if (metadataCache.current.has(matchingEvent.metadata_url)) {
@@ -306,6 +317,14 @@ export default function SentHistoryScreen() {
                 if (cachedMetadata) {
                   setMetadataCache(matchingEvent.metadata_url, cachedMetadata);
                   reflection.description = cachedMetadata.description;
+                  // Use metadata timestamp as sentTimestamp if we don't have one
+                  if (!reflection.sentTimestamp && cachedMetadata.timestamp) {
+                    try {
+                      reflection.sentTimestamp = new Date(cachedMetadata.timestamp);
+                    } catch (e) {
+                      // Invalid timestamp in metadata, ignore
+                    }
+                  }
                 }
               } else {
                 try {
@@ -314,6 +333,14 @@ export default function SentHistoryScreen() {
                     const metadata = await metaResponse.json();
                     setMetadataCache(matchingEvent.metadata_url, metadata);
                     reflection.description = metadata.description;
+                    // Use metadata timestamp as sentTimestamp if we don't have one
+                    if (!reflection.sentTimestamp && metadata.timestamp) {
+                      try {
+                        reflection.sentTimestamp = new Date(metadata.timestamp);
+                      } catch (e) {
+                        // Invalid timestamp in metadata, ignore
+                      }
+                    }
                   }
                 } catch (err) {
                   console.error('Error fetching metadata:', err);
@@ -331,13 +358,19 @@ export default function SentHistoryScreen() {
 
         const reflectionsList = await Promise.all(reflectionPromises);
 
+        // Store Event objects in state for replay functionality
+        const eventsMap = new Map<string, Event>();
+        allMirrorEventsMap.forEach((event, eventId) => {
+          eventsMap.set(eventId, event as Event);
+        });
+        setEventObjectsMap(eventsMap);
+
         // Sort by timestamp descending (most recent first)
-        // Use engagementTimestamp if available (for engaged/replayed), otherwise use timestamp
-        // Use engagementTimestamp if available (for engaged/replayed), otherwise use timestamp
+        // Sort by engagementTimestamp (viewed time) if available, otherwise use sentTimestamp (original sent time)
         reflectionsList.sort((a, b) => {
           // Helper to get timestamp value
           const getTime = (reflection: SentReflection): number => {
-            const ts = reflection.engagementTimestamp || reflection.timestamp;
+            const ts = reflection.engagementTimestamp || reflection.sentTimestamp || reflection.timestamp;
             if (!ts) return 0;
             if (ts.toMillis) return ts.toMillis();
             if (ts.seconds) return ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000;
@@ -405,7 +438,7 @@ export default function SentHistoryScreen() {
   };
 
   const formatEngagementDate = (timestamp: any) => {
-    if (!timestamp) return '';
+    if (!timestamp) return 'in the past';
 
     try {
       let date: Date;
@@ -427,6 +460,11 @@ export default function SentHistoryScreen() {
         date = new Date(timestamp);
       }
 
+      // Validate the date is actually valid
+      if (isNaN(date.getTime())) {
+        return 'in the past';
+      }
+
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);
@@ -441,7 +479,7 @@ export default function SentHistoryScreen() {
       // For older dates, show month/day
       return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     } catch (error) {
-      return '';
+      return 'in the past';
     }
   };
 
@@ -490,7 +528,7 @@ export default function SentHistoryScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       {/* Selfie Image Modal */}
       <Modal
         visible={selectedSelfieEventId !== null}
@@ -619,7 +657,80 @@ export default function SentHistoryScreen() {
           data={displayReflections}
           keyExtractor={(item) => item.event_id}
           renderItem={({ item }) => (
-          <View style={styles.reflectionItem}>
+            <TouchableOpacity 
+              style={styles.reflectionItem}
+              activeOpacity={0.7}
+              onPress={async () => {
+                // Get the full Event object if available
+                let fullEvent = eventObjectsMap.get(item.event_id);
+                
+                // If we don't have the Event object, fetch it from the API
+                if (!fullEvent) {
+                  try {
+                    const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+                    if (eventsResponse.ok) {
+                      const eventsData = await eventsResponse.json();
+                      const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
+                      if (matchingEvent) {
+                        fullEvent = matchingEvent;
+                        // Update the map for future use
+                        setEventObjectsMap(prev => new Map(prev).set(item.event_id, matchingEvent));
+                      }
+                    }
+                  } catch (err) {
+                    console.error('Error fetching event for replay:', err);
+                  }
+                }
+                
+                // Fetch metadata if not already cached or in Event object
+                let metadata = fullEvent?.metadata as EventMetadata | undefined;
+                if (!metadata && fullEvent?.metadata_url) {
+                  if (metadataCache.current.has(fullEvent.metadata_url)) {
+                    metadata = metadataCache.current.get(fullEvent.metadata_url);
+                  } else {
+                    try {
+                      const metaResponse = await fetch(fullEvent.metadata_url);
+                      if (metaResponse.ok) {
+                        metadata = await metaResponse.json();
+                        setMetadataCache(fullEvent.metadata_url, metadata);
+                      }
+                    } catch (err) {
+                      console.error('Error fetching metadata for replay:', err);
+                    }
+                  }
+                }
+
+                // Helper to convert timestamp to ISO string
+                const timestampToISO = (ts: any): string => {
+                  if (!ts) return new Date().toISOString();
+                  if (ts.toDate) return ts.toDate().toISOString();
+                  if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
+                  if (typeof ts === 'number') return new Date(ts).toISOString();
+                  if (typeof ts === 'string') return ts;
+                  return new Date(ts).toISOString();
+                };
+
+                // Construct Event object with all required fields
+                const eventForReplay: Event = {
+                  event_id: item.event_id,
+                  image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
+                  metadata_url: fullEvent?.metadata_url || '',
+                  audio_url: fullEvent?.audio_url,
+                  video_url: fullEvent?.video_url,
+                  deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
+                  metadata: metadata || {
+                    description: item.description || 'Reflection',
+                    sender: item.sender || 'Companion',
+                    timestamp: timestampToISO(item.sentTimestamp || item.timestamp),
+                    event_id: item.event_id,
+                    short_caption: item.description || 'Reflection',
+                  },
+                };
+                
+                console.log("▶️ Opening Replay for:", item.event_id);
+                setSelectedReflection(eventForReplay);
+              }}
+            >
             <View style={styles.reflectionRow}>
               {item.reflectionImageUrl ? (
                 <View style={styles.reflectionImageContainer}>
@@ -722,10 +833,16 @@ export default function SentHistoryScreen() {
                   <Text style={styles.sentDate}>
                     {item.sender ? (
                       <>
-                        Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(item.timestamp)}
+                        Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(
+                          item.sentTimestamp || 
+                          (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
+                        )}
                       </>
                     ) : (
-                      <>Sent • {formatEngagementDate(item.timestamp)}</>
+                      <>Sent • {formatEngagementDate(
+                        item.sentTimestamp || 
+                        (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
+                      )}</>
                     )}
                   </Text>
                 </View>
@@ -734,14 +851,18 @@ export default function SentHistoryScreen() {
 
               </View>
             </View>
-          </View>
+          </TouchableOpacity>
         )}
           contentContainerStyle={styles.listContainer}
         />
       )}
 
-
-    </View>
+      <ReplayModal 
+        visible={!!selectedReflection}
+        event={selectedReflection}
+        onClose={() => setSelectedReflection(null)}
+      />
+    </SafeAreaView>
   );
 }
 
