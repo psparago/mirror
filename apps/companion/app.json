@@ -69,7 +69,6 @@
       "expo-video",
       "expo-av",
       "expo-audio",
-      "expo-image",
       [
         "@sentry/react-native",
         {
