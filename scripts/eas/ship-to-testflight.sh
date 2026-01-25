@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Initialize nvm if available
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Use Node 20 (required for this project)
+nvm use 20 2>/dev/null || true
+
 # --- PRE-FLIGHT CHECKLIST ---
 echo "========================================================"
 echo "🛑 STOP! PRE-FLIGHT CHECKLIST (Avoid Expensive Errors)"

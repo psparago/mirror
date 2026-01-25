@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Initialize nvm if available
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Use Node 20 (required for this project)
+nvm use 20 2>/dev/null || true
+
 echo "📦 Building Looking Glass (LG) - Preview Build for iOS"
 echo "This build is optimized for internal distribution to family devices"
 echo ""

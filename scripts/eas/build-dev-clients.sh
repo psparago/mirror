@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Initialize nvm if available
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Use Node 20 (required for this project)
+nvm use 20 2>/dev/null || true
+
 echo "🛠️  Building Development Clients (Simulator & Physical Device)"
 echo "This enables you to code without overwriting the TestFlight apps."
 echo ""
