@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-# Initialize nvm if available
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-# Use Node 20 (required for this project)
-nvm use 20 2>/dev/null || true
+# Initialize nvm if npx is not available
+if ! command -v npx &> /dev/null; then
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
+fi
 
 # --- PRE-FLIGHT CHECKLIST ---
 echo "========================================================"
@@ -52,7 +52,15 @@ PROJECT_ROOT="$SCRIPT_DIR/../.."
 # Build Companion
 echo "🔨 Building Looking Glass Companion..."
 cd "$PROJECT_ROOT/apps/companion"
-npx eas build \
+
+# Use eas directly if available, otherwise npx eas
+if command -v eas &> /dev/null; then
+  EAS_CMD="eas"
+else
+  EAS_CMD="npx eas"
+fi
+
+$EAS_CMD build \
   --profile production \
   --platform ios \
   --non-interactive \
