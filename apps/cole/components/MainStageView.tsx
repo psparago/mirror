@@ -12,10 +12,10 @@ import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { Image } from 'expo-image';
 import {
   Alert,
   FlatList,
-  Image as RNImage,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -26,7 +26,6 @@ import {
   useWindowDimensions,
   View
 } from 'react-native';
-import { Image } from 'expo-image';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   runOnJS,
@@ -147,10 +146,17 @@ export default function MainStageView({
   const onCaptureSelfieRef = useRef(onCaptureSelfie);
   const onReplayRef = useRef(onReplay);
   const selectedMetadataRef = useRef(selectedMetadata);
+  
+  // Bridge pattern refs for machine actions
+  const sendRef = useRef<any>(() => {});
+  const soundRef = useRef<Audio.Sound | null>(null);
+  const playerRef = useRef<any>(null);
+  const captionSoundRefForActions = useRef<Audio.Sound | null>(null);
+  const performSelfieCaptureRef = useRef<((delay?: number) => Promise<void>) | null>(null);
+
   // --- THE XSTATE MACHINE ---
-  // Using let to allow for closure usage in refs defined later
-  let [state, send] = useMachine(playerMachine.provide({
-    actions: {
+  const machine = useMemo(() => playerMachine.provide({
+  actions: {
       stopAllMedia: async () => {
         // Increment session IMMEDIATELY and SYNCHRONOUSLY to invalidate any pending Narration/TTS
         captionSessionRef.current += 1;
@@ -167,7 +173,8 @@ export default function MainStageView({
         Speech.stop();
 
         // Stop voice message audio
-        const soundToUnload = sound;
+        const soundToUnload = soundRef.current;
+        soundRef.current = null;
         setSound(null); // Clear state immediately to prevent race conditions
         if (soundToUnload) {
           try {
@@ -183,7 +190,7 @@ export default function MainStageView({
         }
 
         // Stop companion caption audio
-        const soundToStop = captionSound || captionSoundRef.current;
+        const soundToStop = captionSoundRefForActions.current || captionSoundRef.current;
         if (soundToStop) {
           try {
             const status = await soundToStop.getStatusAsync();
@@ -195,13 +202,14 @@ export default function MainStageView({
             console.error('Error stopping caption:', e);
           }
           captionSoundRef.current = null;
+          captionSoundRefForActions.current = null;
           setCaptionSound(null);
         }
 
-        if (player) {
+        if (playerRef.current) {
           try {
-            player.pause();
-            player.currentTime = 0;
+            playerRef.current.pause();
+            playerRef.current.currentTime = 0;
           } catch (err) {
             console.warn('Silent failure stopping player:', err);
           }
@@ -241,7 +249,7 @@ export default function MainStageView({
                       setCaptionSound(null);
                       captionSoundRef.current = null;
                       console.log(`✅ Narration finished [Session: ${thisSession}] - sending NARRATION_FINISHED`);
-                      send({ type: 'NARRATION_FINISHED' });
+                      sendRef.current({ type: 'NARRATION_FINISHED' });
                     } else {
                       console.log(`🚫 Narration finished but session changed [${thisSession} vs ${captionSessionRef.current}] - cleaning up`);
                       newCaptionSound.unloadAsync();
@@ -259,6 +267,7 @@ export default function MainStageView({
               }
 
               captionSoundRef.current = newCaptionSound;
+              captionSoundRefForActions.current = newCaptionSound;
               setCaptionSound(newCaptionSound);
 
               await newCaptionSound.playAsync();
@@ -272,7 +281,7 @@ export default function MainStageView({
                 if (captionSessionRef.current === thisSession) {
                   console.warn(`⚠️ Narration safety fallback triggered [Session: ${thisSession}]`);
                   safetyTimeoutRef.current = null;
-                  send({ type: 'NARRATION_FINISHED' });
+                  sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               }, safetyTimeout);
 
@@ -283,7 +292,7 @@ export default function MainStageView({
                 return playAudioWithRetry(retryCount + 1);
               }
               if (captionSessionRef.current === thisSession) {
-                send({ type: 'NARRATION_FINISHED' });
+                sendRef.current({ type: 'NARRATION_FINISHED' });
               }
             }
           };
@@ -297,7 +306,7 @@ export default function MainStageView({
                   safetyTimeoutRef.current = null;
                 }
                 console.log('✅ TTS finished - sending NARRATION_FINISHED');
-                send({ type: 'NARRATION_FINISHED' });
+                sendRef.current({ type: 'NARRATION_FINISHED' });
               }
             },
             onError: () => {
@@ -306,7 +315,7 @@ export default function MainStageView({
                   clearTimeout(safetyTimeoutRef.current);
                   safetyTimeoutRef.current = null;
                 }
-                send({ type: 'NARRATION_FINISHED' });
+                sendRef.current({ type: 'NARRATION_FINISHED' });
               }
             }
           });
@@ -316,24 +325,24 @@ export default function MainStageView({
             if (captionSessionRef.current === thisSession) {
               console.warn('⚠️ TTS safety fallback triggered');
               safetyTimeoutRef.current = null;
-              send({ type: 'NARRATION_FINISHED' });
+              sendRef.current({ type: 'NARRATION_FINISHED' });
             }
           }, 15000);
         } else {
           if (captionSessionRef.current === thisSession) {
-            send({ type: 'NARRATION_FINISHED' });
+            sendRef.current({ type: 'NARRATION_FINISHED' });
           }
         }
       },
 
       playVideo: async () => {
         // Preparation logic for video
-        if (!player) return;
+        if (!playerRef.current) return;
 
-        console.log(`🎬 playVideo called: status=${player.status}`);
+        console.log(`🎬 playVideo called: status=${playerRef.current.status}`);
 
         // Reset to start
-        player.currentTime = 0;
+        playerRef.current.currentTime = 0;
 
         // Trigger bubble animation
         selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
@@ -344,10 +353,10 @@ export default function MainStageView({
       playAudio: async () => {
         const playWithRetry = async (retryCount = 0) => {
           try {
-            if (sound) await sound.unloadAsync();
+            if (soundRef.current) await soundRef.current.unloadAsync();
 
             if (!selectedEventRef.current?.audio_url) {
-              send({ type: 'AUDIO_FINISHED' });
+              sendRef.current({ type: 'AUDIO_FINISHED' });
               return;
             }
 
@@ -359,9 +368,10 @@ export default function MainStageView({
 
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
-                send({ type: 'AUDIO_FINISHED' });
+                sendRef.current({ type: 'AUDIO_FINISHED' });
               }
             });
+            soundRef.current = newSound;
             setSound(newSound);
 
           } catch (err: any) {
@@ -380,7 +390,7 @@ export default function MainStageView({
                 domain: err.domain
               });
             }
-            send({ type: 'AUDIO_FINISHED' });
+            sendRef.current({ type: 'AUDIO_FINISHED' });
           }
         };
 
@@ -390,20 +400,21 @@ export default function MainStageView({
       playDeepDive: async () => {
         // Stop any existing audio before playing deep dive
         Speech.stop();
-        if (captionSound) {
+        if (captionSoundRefForActions.current) {
           try {
-            await captionSound.stopAsync();
-            await captionSound.unloadAsync();
+            await captionSoundRefForActions.current.stopAsync();
+            await captionSoundRefForActions.current.unloadAsync();
           } catch (e) {
             console.log('Caption already stopped');
           }
           setCaptionSound(null);
           captionSoundRef.current = null;
+          captionSoundRefForActions.current = null;
         }
         
         const playDeepDiveWithRetry = async (retryCount = 0) => {
           try {
-            if (sound) await sound.unloadAsync();
+            if (soundRef.current) await soundRef.current.unloadAsync();
 
             if (selectedEventRef.current?.deep_dive_audio_url) {
               console.log(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
@@ -418,9 +429,10 @@ export default function MainStageView({
                     safetyTimeoutRef.current = null;
                   }
                   console.log('✅ Deep dive audio finished - sending NARRATION_FINISHED');
-                  send({ type: 'NARRATION_FINISHED' });
+                  sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               });
+              soundRef.current = newSound;
               setSound(newSound);
 
               // Smart Fallback for deep dive
@@ -431,7 +443,7 @@ export default function MainStageView({
               safetyTimeoutRef.current = setTimeout(() => {
                 console.warn('⚠️ Deep dive safety timeout reached (Smart Fallback)');
                 safetyTimeoutRef.current = null;
-                send({ type: 'NARRATION_FINISHED' });
+                sendRef.current({ type: 'NARRATION_FINISHED' });
               }, safetyTimeout);
 
             } else if (selectedMetadataRef.current?.deep_dive) {
@@ -441,14 +453,14 @@ export default function MainStageView({
                     clearTimeout(safetyTimeoutRef.current);
                     safetyTimeoutRef.current = null;
                   }
-                  send({ type: 'NARRATION_FINISHED' });
+                  sendRef.current({ type: 'NARRATION_FINISHED' });
                 },
                 onError: () => {
                   if (safetyTimeoutRef.current) {
                     clearTimeout(safetyTimeoutRef.current);
                     safetyTimeoutRef.current = null;
                   }
-                  send({ type: 'NARRATION_FINISHED' });
+                  sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               });
 
@@ -457,10 +469,10 @@ export default function MainStageView({
               safetyTimeoutRef.current = setTimeout(() => {
                 console.warn('⚠️ Deep dive TTS safety timeout reached');
                 safetyTimeoutRef.current = null;
-                send({ type: 'NARRATION_FINISHED' });
+                sendRef.current({ type: 'NARRATION_FINISHED' });
               }, 60000);
             } else {
-              send({ type: 'NARRATION_FINISHED' });
+              sendRef.current({ type: 'NARRATION_FINISHED' });
             }
           } catch (err: any) {
             console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
@@ -478,7 +490,7 @@ export default function MainStageView({
                 domain: err.domain
               });
             }
-            send({ type: 'NARRATION_FINISHED' });
+            sendRef.current({ type: 'NARRATION_FINISHED' });
           }
         };
         playDeepDiveWithRetry();
@@ -489,22 +501,39 @@ export default function MainStageView({
       },
 
       triggerSelfie: async () => {
-        await performSelfieCapture(0);
+        if (performSelfieCaptureRef.current) {
+          await performSelfieCaptureRef.current(0);
+        }
       },
 
       pauseMedia: async () => {
-        if (player && state.hasTag('video_mode')) player.pause();
-        if (sound) await sound.pauseAsync();
-        if (captionSound) await captionSound.pauseAsync();
+        if (playerRef.current && stateRef.current?.hasTag('video_mode')) {
+          playerRef.current.pause();
+        }
+        if (soundRef.current) await soundRef.current.pauseAsync();
+        if (captionSoundRefForActions.current) await captionSoundRefForActions.current.pauseAsync();
       },
 
       resumeMedia: async () => {
-        if (player && state.hasTag('video_mode')) player.play();
-        if (sound) await sound.playAsync();
-        if (captionSound) await captionSound.playAsync();
+        if (playerRef.current && stateRef.current?.hasTag('video_mode')) {
+          playerRef.current.play();
+        }
+        if (soundRef.current) await soundRef.current.playAsync();
+        if (captionSoundRefForActions.current) await captionSoundRefForActions.current.playAsync();
       }
     }
-  }));
+  }), []); // Empty deps - all values accessed via refs (bridge pattern)
+
+  // Initialize the Hook
+  const [state, send] = useMachine(machine);
+
+  // Update all bridge refs
+  useEffect(() => {
+    sendRef.current = send;
+    stateRef.current = state;
+    soundRef.current = sound;
+    captionSoundRefForActions.current = captionSound;
+  }, [send, state, sound, captionSound]);
 
   const lastTapRef = useRef<number>(0);
 
@@ -682,6 +711,11 @@ export default function MainStageView({
     setIsVideoPlaying(player.playing);
   });
 
+  // Update player ref when player changes
+  useEffect(() => {
+    playerRef.current = player;
+  }, [player]);
+
   // Cleanup video player on unmount
   useEffect(() => {
     return () => {
@@ -742,6 +776,11 @@ export default function MainStageView({
       }, 500);
     }, delay);
   }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity]);
+
+  // Update performSelfieCapture ref for machine
+  useEffect(() => {
+    performSelfieCaptureRef.current = performSelfieCapture;
+  }, [performSelfieCapture]);
 
 
 
@@ -1241,7 +1280,7 @@ export default function MainStageView({
                     {videoSource ? (
                       <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
                     ) : (
-                      <RNImage source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} resizeMode="contain" />
+                      <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} contentFit="contain" cachePolicy="memory-disk" />
                     )}
 
 
@@ -1368,7 +1407,7 @@ export default function MainStageView({
                 </View>
 
                 {/* Tell Me More FAB */}
-                {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' })) && (
+                {selectedMetadata?.deep_dive && state && (state.matches('finished') || state.matches('viewingPhoto')) && (
                   <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
                     <TouchableOpacity
                       onPress={() => {
