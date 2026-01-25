@@ -639,12 +639,35 @@ export default function MainStageView({
 
   // Toast opacity shared value
   const toastOpacityShared = useSharedValue(0);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selfieCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selfieFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+        toastTimeoutRef.current = null;
+      }
+      if (selfieCaptureTimeoutRef.current) {
+        clearTimeout(selfieCaptureTimeoutRef.current);
+        selfieCaptureTimeoutRef.current = null;
+      }
+      if (selfieFadeTimeoutRef.current) {
+        clearTimeout(selfieFadeTimeoutRef.current);
+        selfieFadeTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Show toast notification
   const showToast = (message: string) => {
     setToastMessage(message);
     toastOpacityShared.value = withTiming(1, { duration: 300 }, () => {
-      setTimeout(() => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+      }
+      toastTimeoutRef.current = setTimeout(() => {
         toastOpacityShared.value = withTiming(0, { duration: 300 }, () => {
           runOnJS(setToastMessage)('');
         });
@@ -663,10 +686,18 @@ export default function MainStageView({
 
   // Helper for reused selfie logic
   const performSelfieCapture = useCallback(async (delay = 0) => {
-    // Check permission first before starting ANY UI transitions (mirror, flash, etc)
+    // Ensure permission before starting ANY UI transitions (mirror, flash, etc)
     if (!cameraPermission?.granted) {
-      console.log('📸 Helper: Skipping selfie - camera permission not granted');
-      return;
+      try {
+        const result = await requestCameraPermission();
+        if (!result.granted) {
+          console.log('📸 Helper: Skipping selfie - camera permission not granted');
+          return;
+        }
+      } catch (error) {
+        console.log('📸 Helper: Skipping selfie - permission request failed', error);
+        return;
+      }
     }
 
     console.log(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
@@ -674,7 +705,10 @@ export default function MainStageView({
     selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
 
     // Wait...
-    setTimeout(async () => {
+    if (selfieCaptureTimeoutRef.current) {
+      clearTimeout(selfieCaptureTimeoutRef.current);
+    }
+    selfieCaptureTimeoutRef.current = setTimeout(async () => {
       console.log('📸 Helper: Snapping now...');
       // Flash
       flashOpacity.value = withTiming(1, { duration: 150 }, () => {
@@ -685,7 +719,10 @@ export default function MainStageView({
       await onCaptureSelfieRef.current();
 
       // Fade out
-      setTimeout(() => {
+      if (selfieFadeTimeoutRef.current) {
+        clearTimeout(selfieFadeTimeoutRef.current);
+      }
+      selfieFadeTimeoutRef.current = setTimeout(() => {
         console.log('📸 Helper: Fading out bubble');
         selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
       }, 500);

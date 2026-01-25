@@ -255,7 +255,7 @@ export const playerMachine = setup({
                             tags: ['playing', 'active'],
                             on: {
                                 PAUSE: 'paused',
-                                AUDIO_FINISHED: '#lookingGlassPlayer.finished'
+                                AUDIO_FINISHED: 'done'
                             }
                         },
                         paused: {
@@ -267,7 +267,8 @@ export const playerMachine = setup({
                                     actions: 'resumeMedia'
                                 }
                             }
-                        }
+                        },
+                        done: { type: 'final' }
                     }
                 },
                 selfie: {
@@ -287,7 +288,9 @@ export const playerMachine = setup({
                         done: { type: 'final' }
                     }
                 }
-            }
+            },
+            // Only finish after BOTH playback and selfie regions complete
+            onDone: '#lookingGlassPlayer.finished'
         },
 
         viewingPhoto: {
