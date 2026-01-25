@@ -38,29 +38,24 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# Build LG (Cole)
-# echo "🔨 Building Looking Glass (LG)..."
-# cd "$PROJECT_ROOT/apps/cole"
-# npx eas build \
-#   --profile production \
-#   --platform ios \
-#   --non-interactive \
-#   --auto-submit
+# --- BUILD EXPLORER (COLE) ---
+echo "🔨 Building Reflections Explorer..."
+cd "$PROJECT_ROOT/apps/cole"
+# FIX: Use 'npx eas-cli' explicitly to avoid ambiguous binary errors
+npx eas-cli build \
+  --profile production \
+  --platform ios \
+  --non-interactive \
+  --auto-submit
 
-# echo ""
+echo ""
 
-# Build Companion
-echo "🔨 Building Looking Glass Companion..."
+# --- BUILD COMPANION ---
+echo "🔨 Building Reflections Companion..."
 cd "$PROJECT_ROOT/apps/companion"
 
-# Use eas directly if available, otherwise npx eas
-if command -v eas &> /dev/null; then
-  EAS_CMD="eas"
-else
-  EAS_CMD="npx eas"
-fi
-
-$EAS_CMD build \
+# FIX: Replaced undefined $EAS_CMD with explicit 'npx eas-cli'
+npx eas-cli build \
   --profile production \
   --platform ios \
   --non-interactive \
