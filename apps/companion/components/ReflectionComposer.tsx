@@ -6,7 +6,7 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { ReplayModal } from './ReplayModal';
@@ -69,15 +69,15 @@ export default function ReflectionComposer({
 
   // TRIGGER AI ON MOUNT
   useEffect(() => {
-  // Only fire if:
-  // 1. We don't have a caption yet.
-  // 2. The parent isn't already thinking (prevent double-fire).
-  // 3. The user hasn't explicitly cancelled it.
-  if (!caption && !isAiThinking && !isAiCancelled) {
-    console.log("✨ Auto-triggering AI Magic...");
-    // Fire and forget (errors handled in parent)
-    onTriggerMagic().catch(() => console.log("Auto-magic failed"));
-  }
+    // Only fire if:
+    // 1. We don't have a caption yet.
+    // 2. The parent isn't already thinking (prevent double-fire).
+    // 3. The user hasn't explicitly cancelled it.
+    if (!caption && !isAiThinking && !isAiCancelled) {
+      console.log("✨ Auto-triggering AI Magic...");
+      // Fire and forget (errors handled in parent)
+      onTriggerMagic().catch(() => console.log("Auto-magic failed"));
+    }
   }, []);
 
   // Sync AI Caption if user hasn't typed yet
@@ -187,17 +187,6 @@ export default function ReflectionComposer({
     setIsPreviewOpen(true);
   };
 
-  const handleMagicTap = async () => {
-    if (isAiThinking) return;
-    try {
-      await onTriggerMagic();
-      // Optional: Auto-snap to text view to show result?
-      // switchToText(); 
-    } catch (e) {
-      Alert.alert("Magic Failed", "Could not generate AI description.");
-    }
-  };
-
   // --- TABS SWITCHERS ---
   const switchToVoice = () => { 
     setActiveTab('voice'); 
@@ -232,19 +221,15 @@ export default function ReflectionComposer({
 
       {/* TOP CONTROLS */}
       <View style={styles.topControls}>
-        <TouchableOpacity style={styles.cancelButton} onPress={onRetake} disabled={isSending}>
-          <FontAwesome name="times" size={20} color="#fff" />
-          <Text style={styles.cancelText}>Cancel</Text>
-        </TouchableOpacity>
+        <View style={{ flex: 1 }} />
 
-        {/* PREVIEW BUTTON */}
+        {/* CIRCLED X CANCEL BUTTON */}
         <TouchableOpacity 
-          style={styles.previewButton} 
-          onPress={handlePreview}
-          disabled={isSending || isAiThinking}
+          style={styles.circledCancelButton} 
+          onPress={onRetake} 
+          disabled={isSending}
         >
-          <FontAwesome name="eye" size={20} color="#fff" />
-          <Text style={styles.cancelText}>Preview</Text>
+          <FontAwesome name="times" size={18} color="#fff" />
         </TouchableOpacity>
       </View>
     </View>
@@ -252,7 +237,7 @@ export default function ReflectionComposer({
 
   const renderMainTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
-      <Text style={styles.helperText}>Add context to this reflection</Text>
+      <Text style={styles.helperText}>Add context to this Reflection</Text>
       <View style={styles.quickActionsRow}>
         
         {/* VOICE CHIP */}
@@ -271,22 +256,44 @@ export default function ReflectionComposer({
           <Text style={styles.actionChipText}>Text</Text>
         </TouchableOpacity>
 
-        {/* MAGIC CHIP */}
-        <TouchableOpacity 
-          style={[styles.actionChip, isAiThinking && styles.chipDisabled]} 
-          onPress={handleMagicTap}
-          disabled={isAiThinking}
-        >
-          {aiArtifacts?.deepDive ? <View style={styles.badge} /> : null}
-          {isAiThinking ? (
-            <ActivityIndicator size="small" color="#f39c12" />
-          ) : (
-            <FontAwesome name="magic" size={20} color="#f39c12" />
-          )}
-          <Text style={styles.actionChipText}>
-            {isAiThinking ? "Thinking..." : "Magic"}
-          </Text>
-        </TouchableOpacity>
+        {/* PREVIEW BUTTON */}
+        {!isBlockedByAi && (
+          <TouchableOpacity 
+            style={[
+              styles.actionChip,
+              styles.previewChip,
+              (isSending || isAiThinking) && styles.chipDisabled
+            ]} 
+            onPress={handlePreview}
+            disabled={isSending || isAiThinking}
+          >
+            <FontAwesome name="eye" size={20} color="#fff" />
+            <Text style={styles.actionChipText}>Preview</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* SEND BUTTON */}
+        {!isBlockedByAi && (
+          <TouchableOpacity 
+            style={[
+              styles.actionChip,
+              styles.sendChip,
+              isSending && styles.chipDisabled,
+              (!caption && !audioRecorder?.uri) && styles.chipDisabled
+            ]}
+            onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
+            disabled={isSending || (!caption && !audioRecorder?.uri)}
+          >
+            {isSending ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <FontAwesome name="paper-plane" size={20} color="#fff" />
+                <Text style={styles.actionChipText}>Send</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
       </View>
     </Animated.View>
   );
@@ -390,7 +397,7 @@ export default function ReflectionComposer({
               {/* Using tint="dark" to match your dark theme preference */}
               <BlurView intensity={30} tint="dark" style={styles.blurContainer}>
                 <ActivityIndicator size="large" color="#f39c12" />
-                <Text style={styles.aiOverlayText}>Adding sparkle to your reflection!</Text>
+                <Text style={styles.aiOverlayText}>Adding Sparkle to your Reflection!</Text>
                 <TouchableOpacity 
                   style={styles.cancelAiButton} 
                   onPress={() => setIsAiCancelled(true)} 
@@ -402,35 +409,6 @@ export default function ReflectionComposer({
           )}
         </BottomSheetView>
       </BottomSheet>
-
-      {/* FLOATING SEND BUTTON */}
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.floatingButtonContainer}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}
-      >
-        <TouchableOpacity 
-          style={[
-            styles.floatingSendButton, 
-            isSending && styles.sendingButton,
-            isBlockedByAi && styles.disabledSendButton,
-            (!caption && !audioRecorder?.uri && !isBlockedByAi) && styles.emptyStateButton
-          ]}
-          onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
-          disabled={isSending || isBlockedByAi}
-        >
-          {isSending ? (
-            <ActivityIndicator color="#fff" size="small" />
-          ) : (
-            <View style={styles.sendContent}>
-              <Text style={styles.sendButtonText}>
-                {isBlockedByAi ? "Wait..." : "Send"}
-              </Text>
-              {!isBlockedByAi && <FontAwesome name="paper-plane" size={16} color="#fff" />}
-            </View>
-          )}
-        </TouchableOpacity>
-      </KeyboardAvoidingView>
 
       {/* REPLAY PREVIEW MODAL */}
       <ReplayModal 
@@ -467,21 +445,22 @@ const styles = StyleSheet.create({
   },
   topControls: {
     position: 'absolute',
-    top: 20,
+    top: 10,
     left: 10,
-    right: 10,
+    right: 5,
     flexDirection: 'row',
     justifyContent: 'space-between',
     zIndex: 10,
   },
-  cancelButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+  circledCancelButton: {
+    width: 40,
+    height: 40,
     borderRadius: 20,
-    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.3)',
   },
   previewButton: {
     flexDirection: 'row',
@@ -542,7 +521,20 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   chipDisabled: {
-    opacity: 0.7,
+    opacity: 0.5,
+  },
+  previewChip: {
+    backgroundColor: '#3a3a3a', // Muted gray for preview button
+  },
+  sendChip: {
+    backgroundColor: '#2e78b7', // Bright blue for send button (dominant)
+    borderWidth: 2,
+    borderColor: '#4a9bd9', // Lighter blue border for emphasis
+    shadowColor: "#2e78b7",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+    elevation: 4,
   },
   actionChipText: {
     fontSize: 12,
@@ -677,18 +669,23 @@ cancelAiText: {
   color: '#fff',
 },
 
-// Floating Send Button
+// Floating Buttons Column
 floatingButtonContainer: {
   position: 'absolute',
   bottom: 30,
   right: 20,
   zIndex: 999,
 },
-floatingSendButton: {
-  backgroundColor: '#2e78b7',
-  borderRadius: 30,
-  paddingVertical: 16,
-  paddingHorizontal: 24,
+floatingButtonsColumn: {
+  flexDirection: 'column',
+  gap: 10,
+  alignItems: 'flex-end',
+},
+floatingPreviewButton: {
+  backgroundColor: 'rgba(46, 120, 183, 0.8)',
+  borderRadius: 25,
+  paddingVertical: 10,
+  paddingHorizontal: 20,
   shadowColor: "#000",
   shadowOffset: { width: 0, height: 4 },
   shadowOpacity: 0.3,
@@ -697,6 +694,26 @@ floatingSendButton: {
   flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'center',
+  gap: 6,
+},
+floatingSendButton: {
+  backgroundColor: '#2e78b7',
+  borderRadius: 25,
+  paddingVertical: 10,
+  paddingHorizontal: 20,
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 4 },
+  shadowOpacity: 0.3,
+  shadowRadius: 8,
+  elevation: 8,
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+floatingButtonText: {
+  color: '#fff',
+  fontWeight: '600',
+  fontSize: 14,
 },
 sendingButton: {
   backgroundColor: '#555',
