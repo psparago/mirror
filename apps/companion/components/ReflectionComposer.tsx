@@ -1,11 +1,12 @@
 import { FontAwesome } from '@expo/vector-icons';
 import BottomSheet, { BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
+import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { VideoView, useVideoPlayer } from 'expo-video';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { ReplayModal } from './ReplayModal';
@@ -60,8 +61,24 @@ export default function ReflectionComposer({
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewEvent, setPreviewEvent] = useState<Event | null>(null);
 
+  const [isAiCancelled, setIsAiCancelled] = useState(false);
+  const isBlockedByAi = isAiThinking && !isAiCancelled;
+
   // Get screen dimensions
   const { height: screenHeight } = useWindowDimensions();
+
+  // TRIGGER AI ON MOUNT
+  useEffect(() => {
+  // Only fire if:
+  // 1. We don't have a caption yet.
+  // 2. The parent isn't already thinking (prevent double-fire).
+  // 3. The user hasn't explicitly cancelled it.
+  if (!caption && !isAiThinking && !isAiCancelled) {
+    console.log("✨ Auto-triggering AI Magic...");
+    // Fire and forget (errors handled in parent)
+    onTriggerMagic().catch(() => console.log("Auto-magic failed"));
+  }
+  }, []);
 
   // Sync AI Caption if user hasn't typed yet
   useEffect(() => {
@@ -367,27 +384,55 @@ export default function ReflectionComposer({
           {activeTab === 'voice' && renderVoiceTab()}
           {activeTab === 'text' && renderTextTab()}
 
-          {/* GLOBAL SEND BUTTON */}
-          <View style={styles.footerContainer}>
-             <TouchableOpacity 
-               style={[styles.sendButton, isSending && styles.sendingButton]}
-               onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
-               disabled={isSending}
-             >
-               {isSending ? (
-                 <ActivityIndicator color="#fff" size="small" />
-               ) : (
-                 <>
-                   <Text style={styles.sendButtonText}>Send Reflection</Text>
-                   <FontAwesome name="paper-plane" size={16} color="#fff" style={{ marginLeft: 8 }} />
-                 </>
-               )}
-             </TouchableOpacity>
-          </View>
+          {/* AI LOCKDOWN OVERLAY */}
+          {isBlockedByAi && (
+            <View style={[StyleSheet.absoluteFill, styles.lockdownOverlay]}>
+              {/* Using tint="dark" to match your dark theme preference */}
+              <BlurView intensity={30} tint="dark" style={styles.blurContainer}>
+                <ActivityIndicator size="large" color="#f39c12" />
+                <Text style={styles.aiOverlayText}>Adding sparkle to your reflection!</Text>
+                <TouchableOpacity 
+                  style={styles.cancelAiButton} 
+                  onPress={() => setIsAiCancelled(true)} 
+                >
+                  <Text style={styles.cancelAiText}>Cancel</Text>
+                </TouchableOpacity>
+              </BlurView>
+            </View>
+          )}
         </BottomSheetView>
       </BottomSheet>
 
-      {/* 3. REPLAY PREVIEW MODAL */}
+      {/* FLOATING SEND BUTTON */}
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.floatingButtonContainer}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 20 : 0}
+      >
+        <TouchableOpacity 
+          style={[
+            styles.floatingSendButton, 
+            isSending && styles.sendingButton,
+            isBlockedByAi && styles.disabledSendButton,
+            (!caption && !audioRecorder?.uri && !isBlockedByAi) && styles.emptyStateButton
+          ]}
+          onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
+          disabled={isSending || isBlockedByAi}
+        >
+          {isSending ? (
+            <ActivityIndicator color="#fff" size="small" />
+          ) : (
+            <View style={styles.sendContent}>
+              <Text style={styles.sendButtonText}>
+                {isBlockedByAi ? "Wait..." : "Send"}
+              </Text>
+              {!isBlockedByAi && <FontAwesome name="paper-plane" size={16} color="#fff" />}
+            </View>
+          )}
+        </TouchableOpacity>
+      </KeyboardAvoidingView>
+
+      {/* REPLAY PREVIEW MODAL */}
       <ReplayModal 
         visible={isPreviewOpen}
         event={previewEvent}
@@ -599,12 +644,78 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendingButton: {
-    backgroundColor: '#95a5a6',
+
+  // AI LOCKDOWN OVERLAY
+  lockdownOverlay: {
+    zIndex: 100,
+    borderRadius: 0, // Matches sheet interior
+    overflow: 'hidden',
   },
-  sendButtonText: {
-    color: '#fff',
+  blurContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)', // Dark tint for dark mode
+  },
+  aiOverlayText: {
+    color: '#f39c12', // Gold/Orange for visibility on dark
+    fontWeight: '700',
     fontSize: 18,
-    fontWeight: 'bold',
-  },
+},
+cancelAiButton: {
+  paddingVertical: 10,
+  paddingHorizontal: 24,
+  backgroundColor: '#333', // Dark grey button
+  borderRadius: 20,
+  borderWidth: 1,
+  borderColor: '#666',
+},
+cancelAiText: {
+  fontSize: 14,
+  fontWeight: '600',
+  color: '#fff',
+},
+
+// Floating Send Button
+floatingButtonContainer: {
+  position: 'absolute',
+  bottom: 30,
+  right: 20,
+  zIndex: 999,
+},
+floatingSendButton: {
+  backgroundColor: '#2e78b7',
+  borderRadius: 30,
+  paddingVertical: 16,
+  paddingHorizontal: 24,
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 4 },
+  shadowOpacity: 0.3,
+  shadowRadius: 8,
+  elevation: 8,
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+sendingButton: {
+  backgroundColor: '#555',
+},
+disabledSendButton: {
+  backgroundColor: '#444',
+  opacity: 0.7,
+},
+emptyStateButton: {
+  opacity: 0.9,
+},
+sendContent: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 8,
+},
+sendButtonText: {
+  color: '#fff',
+  fontSize: 18,
+  fontWeight: 'bold',
+},
 });
