@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
 
-# Initialize nvm if available
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-
-# Use Node 20 (required for this project)
-nvm use 20 2>/dev/null || true
+# Initialize nvm if npx is not available
+if ! command -v npx &> /dev/null; then
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
+fi
 
 # Default branch is prod, can override with first argument
 BRANCH="${1:-prod}"
