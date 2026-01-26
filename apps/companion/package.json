@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@expo/vector-icons": "~14.0.4",
+    "@gorhom/bottom-sheet": "^5.2.8",
     "@projectmirror/shared": "*",
     "@react-native-async-storage/async-storage": "1.23.1",
     "@react-navigation/bottom-tabs": "^7.10.1",

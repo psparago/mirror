@@ -1,4 +1,5 @@
 import CameraModal from '@/components/CameraModal';
+import ReflectionComposer from '@/components/ReflectionComposer';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
@@ -7,15 +8,15 @@ import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, 
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
+import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { useVideoPlayer } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, TouchableWithoutFeedback, View } from 'react-native';
-import { Image } from 'expo-image';
+import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
@@ -102,7 +103,6 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
-  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -137,7 +137,6 @@ export default function CompanionHomeScreen() {
   }, [videoPlayer]);
 
   const cameraRef = useRef<any>(null);
-  const textInputRef = useRef<TextInput>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
   
   // Timeout refs for cleanup
@@ -171,22 +170,6 @@ export default function CompanionHomeScreen() {
       console.log(`📱 [Companion App] AppState changed to: ${nextAppState}`);
     });
     return () => subscription.remove();
-  }, []);
-
-  // Keyboard visibility listener
-  useEffect(() => {
-    const showListener = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => setKeyboardVisible(true)
-    );
-    const hideListener = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => setKeyboardVisible(false)
-    );
-    return () => {
-      showListener.remove();
-      hideListener.remove();
-    };
   }, []);
 
   // Check for companion name on mount and when screen comes into focus
@@ -644,21 +627,24 @@ export default function CompanionHomeScreen() {
     }
   };
 
-  const uploadEventBundle = async () => {
+  const uploadEventBundle = async (overrides?: { caption?: string, audioUri?: string | null, deepDive?: string | null }) => {
     if (!photo) return;
 
+    // 1. Resolve Data (Prefer overrides from Composer, fall back to State)
+    const activeAudioUri = overrides?.audioUri !== undefined ? overrides.audioUri : audioUri;
+    let finalCaption = (overrides?.caption !== undefined ? overrides.caption : description).trim();
+    let finalDeepDive = overrides?.deepDive !== undefined ? overrides.deepDive : deepDive;
+
     // Require either text description OR audio recording
-    if (!description.trim() && !audioUri) {
-      Alert.alert("Description Required", "Please add a text description or record an audio message before sending this Reflection.");
+    if (!finalCaption && !activeAudioUri) {
+      Alert.alert("Description Required", "Please add a text description or record an audio message.");
       return;
     }
 
     let tempThumbnail: string | null = null;
-    let finalCaption = description.trim();
-    let finalDeepDive = deepDive;
-    let finalCaptionAudio = audioUri || aiAudioUrl;
+    let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
-
+    
     try {
       setUploading(true);
 
@@ -669,7 +655,7 @@ export default function CompanionHomeScreen() {
       const needsDeepDive = !finalDeepDive;
       const needsCaptionAudio = !audioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
 
-      console.log(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive.substring(0, 20)}..."`);
+      console.log(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
 
       if (needsDeepDive || needsCaptionAudio) {
         console.log("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
@@ -678,7 +664,7 @@ export default function CompanionHomeScreen() {
         const aiResult = await generateDeepDiveBackground({
           silent: true,
           targetCaption: finalCaption,
-          targetDeepDive: finalDeepDive,
+          targetDeepDive: finalDeepDive || undefined,
           skipTts: !!audioUri
         });
 
@@ -1043,230 +1029,43 @@ export default function CompanionHomeScreen() {
   // Show description input overlay if photo is captured
   if (showDescriptionInput && photo) {
     return (
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-      >
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <ScrollView
-            contentContainerStyle={styles.previewContainer}
-            keyboardShouldPersistTaps="handled"
-          >
-            {/* Title */}
-            <Text style={styles.creationTitle}>Reflection Station</Text>
-
-            {/* Media Preview (Image or Video) with Retake Button */}
-            <View style={styles.previewImageContainer}>
-              {isLoadingImage ? (
-                <View style={styles.loadingContainer}>
-                  <ActivityIndicator size="large" color="#2e78b7" />
-                </View>
-              ) : (
-                <>
-                  {mediaType === 'video' && videoUri ? (
-                    <View style={styles.videoPreviewContainer}>
-                      <VideoView
-                        player={videoPlayer}
-                        style={styles.previewImage}
-                        contentFit="contain"
-                        nativeControls
-                      />
-                      <View style={styles.videoPlayIcon}>
-                        <FontAwesome name="play-circle" size={60} color="rgba(255, 255, 255, 0.8)" />
-                      </View>
-                    </View>
-                  ) : (
-                    <Image
-                      source={{ uri: photo.uri }}
-                      style={styles.previewImage}
-                      contentFit="contain"
-                      cachePolicy="memory-disk"
-                    />
-                  )}
-                  <View style={styles.imageTopButtons}>
-                    {intent !== 'none' && (
-                      <TouchableOpacity
-                        style={styles.backToActionsButton}
-                        onPress={changeMethod}
-                      >
-                        <FontAwesome name="arrow-left" size={16} color="#fff" />
-                        <Text style={styles.backToActionsButtonText}>Back</Text>
-                      </TouchableOpacity>
-                    )}
-                    <TouchableOpacity
-                      style={styles.retakeButton}
-                      onPress={retakePhoto}
-                    >
-                      <FontAwesome name="times" size={20} color="#fff" />
-                      <Text style={styles.retakeButtonText}>Retake</Text>
-                    </TouchableOpacity>
-                  </View>
-                </>
-              )}
-            </View>
-
-            {/* Action Buttons - Show when intent is 'none' */}
-            {intent === 'none' && (
-              <View style={styles.actionButtonsContainer}>
-                <TouchableOpacity
-                  style={styles.intentButton}
-                  onPress={() => {
-                    setIntent('voice');
-                  }}
-                  disabled={uploading}
-                  activeOpacity={0.8}
-                >
-                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
-                    <FontAwesome name="microphone" size={32} color="#2C3E50" />
-                    <Text style={styles.intentButtonText}>🎤 Add My Voice</Text>
-                  </BlurView>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.intentButton}
-                  onPress={triggerAI}
-                  disabled={uploading || isAiThinking}
-                  activeOpacity={0.8}
-                >
-                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
-                    <FontAwesome name="magic" size={32} color="#2C3E50" />
-                    <Text style={styles.intentButtonText}>✨ Ask AI to Describe</Text>
-                  </BlurView>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.intentButton}
-                  onPress={() => setIntent('note')}
-                  disabled={uploading}
-                  activeOpacity={0.8}
-                >
-                  <BlurView intensity={30} tint="light" style={styles.intentButtonBlur}>
-                    <FontAwesome name="pencil" size={32} color="#2C3E50" />
-                    <Text style={styles.intentButtonText}>📝 Type a Note</Text>
-                  </BlurView>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {/* Voice Intent - Dominated by Mic */}
-            {intent === 'voice' && (
-              <View style={styles.voiceIntentContainer}>
-                {audioRecorder.isRecording ? (
-                  <View style={styles.recordingContainer}>
-                    <View style={styles.recordingIndicator} />
-                    <Text style={styles.recordingText}>Recording...</Text>
-                    <TouchableOpacity
-                      style={styles.stopButton}
-                      onPress={stopRecording}
-                    >
-                      <Text style={styles.stopButtonText}>Stop</Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : audioUri ? (
-                  <View style={styles.audioPlaybackContainer}>
-                    <FontAwesome name="volume-up" size={40} color="#2e78b7" />
-                    <Text style={styles.audioPlaybackText}>Voice message recorded</Text>
-                    <TouchableOpacity
-                      style={styles.rerecordButton}
-                      onPress={() => {
-                        setAudioUri(null);
-                        lastProcessedUriRef.current = null;
-                      }}
-                    >
-                      <Text style={styles.rerecordButtonText}>Re-record</Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <TouchableOpacity
-                    style={styles.recordButtonLarge}
-                    onPress={startRecording}
-                    disabled={uploading || isStartingRecording}
-                  >
-                    <FontAwesome name="microphone" size={48} color="#fff" />
-                    <Text style={styles.recordButtonTextLarge}>
-                      {isStartingRecording ? "Starting..." : "Tap to Record"}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            )}
-
-            {/* AI or Manual Note Intent - Dominated by Text Output */}
-            {(intent === 'ai' || intent === 'note') && (
-              <View style={styles.textIntentContainer}>
-                <View style={styles.inputRow}>
-                  <TextInput
-                    ref={textInputRef}
-                    style={styles.descriptionInputLarge}
-                    placeholder={
-                      intent === 'note' 
-                        ? "Type your reflection here..." 
-                        : (isAiThinking ? "✨ Gemini is thinking..." : "AI is generating a description...")
-                    }
-                    placeholderTextColor="#999"
-                    value={description}
-                    onChangeText={(text) => {
-                      setDescription(text);
-                      // If user edits, mark as not AI-generated
-                      if (text !== description && isAiGenerated) {
-                        setIsAiGenerated(false);
-                      }
-                    }}
-                    multiline
-                    spellCheck={true}
-                    returnKeyType="done"
-                    blurOnSubmit={true}
-                    onSubmitEditing={Keyboard.dismiss}
-                    editable={!isAiThinking}
-                  />
-                </View>
-
-                {isAiThinking && (
-                  <View style={styles.aiIndicator}>
-                    <ActivityIndicator size="small" color="#9b59b6" style={{ marginRight: 6 }} />
-                    <Text style={styles.aiIndicatorText}>✨ Gemini is thinking...</Text>
-                  </View>
-                )}
-
-                {isAiGenerated && !isAiThinking && (
-                  <View style={styles.aiIndicator}>
-                    <Text style={styles.aiIndicatorText}>✨ Generated by AI</Text>
-                  </View>
-                )}
-              </View>
-            )}
-
-            <View style={styles.actionButtons}>
-              <TouchableOpacity
-                style={[styles.actionButton, styles.cancelButton]}
-                onPress={cancelPhoto}
-                disabled={uploading}
-              >
-                <Text style={styles.actionButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionButton, styles.sendButton]}
-                onPress={() => {
-                  if (!uploading && (description.trim() || audioUri)) {
-                    uploadEventBundle();
-                  } else {
-                    Alert.alert("Description Required", "Please add a text description or record an audio message before sending this Reflection.");
-                  }
-                }}
-                disabled={uploading}
-              >
-                <Text style={styles.actionButtonText}>
-                  {uploading ? "SENDING..." : "SEND REFLECTION"}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
+      <ReflectionComposer
+        mediaUri={photo.uri}
+        mediaType={mediaType}
+        // State Props
+        initialCaption={description} // Pass current state if any
+        aiArtifacts={{
+          caption: shortCaption,
+          deepDive: deepDive,
+          audioUrl: aiAudioUrl || undefined,
+          deepDiveAudioUrl: aiDeepDiveAudioUrl || undefined,
+        }}
+        isAiThinking={isAiThinking}
+        isSending={uploading}
+        
+        // Actions
+        onCancel={cancelPhoto} 
+        onTriggerMagic={async () => {
+          // Wrap your existing generator
+          const result = await generateDeepDiveBackground({ silent: false });
+          // If result exists, the composer handles the UI update via props
+        }}
+        onSend={(data) => {
+          // Pass data directly to the updated upload function
+          uploadEventBundle({
+            caption: data.caption,
+            audioUri: data.audioUri,
+            deepDive: data.deepDive
+          });
+        }}
+        
+        // Audio Props
+        audioRecorder={audioRecorder}
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
+      />
     );
   }
-
 
   // Dashboard view
   return (
@@ -1835,28 +1634,10 @@ var styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  descriptionContainer: {
-    marginBottom: 20,
-  },
-  descriptionLabel: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 10,
-  },
-  descriptionInput: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 15,
-    fontSize: 16,
-    minHeight: 100,
-    textAlignVertical: 'top',
   },
   micButton: {
     backgroundColor: '#fff',
@@ -1945,16 +1726,6 @@ var styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: 'bold',
   },
-  dismissKeyboardButton: {
-    marginTop: 8,
-    padding: 8,
-    alignItems: 'center',
-  },
-  dismissKeyboardText: {
-    color: '#999',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
   actionButtons: {
     flexDirection: 'row',
     gap: 10,
@@ -1966,9 +1737,6 @@ var styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  cancelButton: {
-    backgroundColor: '#666',
   },
   sendButton: {
     backgroundColor: '#2e78b7',
@@ -2141,7 +1909,7 @@ var styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
-  retakeButton: {
+  cancelButton: {
     backgroundColor: 'rgba(0, 0, 0, 0.7)',
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -2150,7 +1918,7 @@ var styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
   },
-  retakeButtonText: {
+  cancelButtonText: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
@@ -2207,17 +1975,6 @@ var styles = StyleSheet.create({
     flex: 1,
     padding: 20,
     gap: 15,
-  },
-  descriptionInputLarge: {
-    backgroundColor: '#333',
-    color: '#fff',
-    padding: 16,
-    borderRadius: 12,
-    fontSize: 18,
-    minHeight: 200,
-    textAlignVertical: 'top',
-    borderWidth: 2,
-    borderColor: '#2e78b7',
   },
   changeMethodLink: {
     paddingVertical: 12,

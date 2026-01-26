@@ -714,7 +714,7 @@ export default function SentHistoryScreen() {
                 const eventForReplay: Event = {
                   event_id: item.event_id,
                   image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
-                  metadata_url: fullEvent?.metadata_url || '',
+                  metadata_url: fullEvent?.metadata_url, // Optional - preserve undefined if not present
                   audio_url: fullEvent?.audio_url,
                   video_url: fullEvent?.video_url,
                   deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
@@ -876,13 +876,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    padding: 16,
-    backgroundColor: '#1a1a1a',
-    color: '#ffffff',
   },
   listContainer: {
     padding: 8,
@@ -1093,12 +1086,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 10,
     fontStyle: 'italic',
-  },
-  viewedTimestamp: {
-    color: '#4ade80',
-    fontSize: 12,
-    fontWeight: '500',
-    marginTop: 4,
   },
   timestampRow: {
     marginTop: 4,

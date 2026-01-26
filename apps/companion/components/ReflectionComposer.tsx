@@ -1,0 +1,536 @@
+import { FontAwesome } from '@expo/vector-icons';
+import BottomSheet, { BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
+import { Event } from '@projectmirror/shared';
+import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
+import { VideoView, useVideoPlayer } from 'expo-video';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Keyboard, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import { ReplayModal } from './ReplayModal';
+
+// --- TYPES ---
+interface ReflectionComposerProps {
+  mediaUri: string;
+  mediaType: 'photo' | 'video';
+  // State from Parent
+  initialCaption?: string;
+  aiArtifacts?: {
+    caption?: string;
+    deepDive?: string;
+    audioUrl?: string; // The URL of the generated AI audio (if any)
+    deepDiveAudioUrl?: string;
+  };
+  isAiThinking: boolean;
+  
+  // Actions
+  onCancel: () => void;
+  onSend: (data: { caption: string; audioUri: string | null; deepDive: string | null }) => void;
+  onTriggerMagic: () => Promise<void>; // The function to call API_ENDPOINTS.AI_DESCRIPTION
+  isSending: boolean;
+  
+  // Audio Recorder (passed from parent or hook)
+  audioRecorder?: any; 
+  onStartRecording?: () => void;
+  onStopRecording?: () => void;
+}
+
+export default function ReflectionComposer({
+  mediaUri,
+  mediaType,
+  initialCaption = '',
+  aiArtifacts,
+  isAiThinking,
+  onCancel: onRetake,
+  onSend,
+  onTriggerMagic,
+  isSending,
+  audioRecorder,
+  onStartRecording,
+  onStopRecording
+}: ReflectionComposerProps) {
+  // --- STATE ---
+  const sheetRef = useRef<BottomSheet>(null);
+  const [caption, setCaption] = useState(initialCaption);
+  const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
+  
+  // Preview State
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [previewEvent, setPreviewEvent] = useState<Event | null>(null);
+
+  // Sync AI Caption if user hasn't typed yet
+  useEffect(() => {
+    if (aiArtifacts?.caption && !caption) {
+      setCaption(aiArtifacts.caption);
+    }
+  }, [aiArtifacts?.caption]);
+
+  // Snap Points - higher max for keyboard input
+  const snapPoints = useMemo(() => ['18%', '45%', '92%'], []);
+
+  // Video Player
+  const player = useVideoPlayer(mediaUri, (p) => {
+    p.loop = true;
+    p.play();
+  });
+
+  // --- HANDLERS ---
+
+  const handleSheetChange = useCallback((index: number) => {
+    if (index < 2) Keyboard.dismiss();
+  }, []);
+
+  const handlePreview = () => {
+    const previewId = 'preview-temp';
+    const now = new Date();
+
+    // 1. Construct the Mock Event
+    const mockEvent: Event = {
+      event_id: previewId,
+      image_url: mediaUri,
+      video_url: mediaType === 'video' ? mediaUri : undefined,
+      
+      // PRIORITY: User Voice > AI Voice > None
+      audio_url: audioRecorder?.uri || aiArtifacts?.audioUrl,
+      
+      metadata: {
+        description: caption || "No description yet",
+        short_caption: caption || "No caption",
+        sender: 'You (Preview)',
+        
+        // --- REQUIRED FIELDS ADDED HERE ---
+        event_id: previewId,
+        timestamp: now.toISOString(), 
+        content_type: mediaType === 'video' ? 'video' : (audioRecorder?.uri ? 'audio' : 'text'),
+        image_source: 'camera', // Default for preview
+        
+        // Include Deep Dive data if available
+        deep_dive: aiArtifacts?.deepDive,
+      },
+      
+      // Pass the deep dive audio URL directly if we have it
+      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl
+    };
+
+    setPreviewEvent(mockEvent);
+    setIsPreviewOpen(true);
+  };
+
+  const handleMagicTap = async () => {
+    if (isAiThinking) return;
+    try {
+      await onTriggerMagic();
+      // Optional: Auto-snap to text view to show result?
+      // switchToText(); 
+    } catch (e) {
+      Alert.alert("Magic Failed", "Could not generate AI description.");
+    }
+  };
+
+  // --- TABS SWITCHERS ---
+  const switchToVoice = () => { setActiveTab('voice'); sheetRef.current?.snapToIndex(1); };
+  const switchToText = () => { setActiveTab('text'); sheetRef.current?.snapToIndex(2); };
+  const resetToMain = () => { setActiveTab('main'); sheetRef.current?.snapToIndex(0); Keyboard.dismiss(); };
+
+  // --- RENDERERS ---
+
+  const renderBackground = () => (
+    <View style={styles.backgroundContainer}>
+      {mediaType === 'video' ? (
+        <VideoView player={player} style={styles.media} contentFit="cover" nativeControls={false} />
+      ) : (
+        <Image source={{ uri: mediaUri }} style={styles.media} contentFit="cover" />
+      )}
+      <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
+
+      {/* TOP CONTROLS */}
+      <View style={styles.topControls}>
+        <TouchableOpacity style={styles.cancelButton} onPress={onRetake} disabled={isSending}>
+          <FontAwesome name="times" size={20} color="#fff" />
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+
+        {/* PREVIEW BUTTON */}
+        <TouchableOpacity 
+          style={styles.previewButton} 
+          onPress={handlePreview}
+          disabled={isSending || isAiThinking}
+        >
+          <FontAwesome name="eye" size={20} color="#fff" />
+          <Text style={styles.cancelText}>Preview</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  const renderMainTab = () => (
+    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
+      <Text style={styles.helperText}>Add context to this reflection</Text>
+      <View style={styles.quickActionsRow}>
+        
+        {/* VOICE CHIP */}
+        <TouchableOpacity style={styles.actionChip} onPress={switchToVoice}>
+          {audioRecorder?.uri ? (
+             <View style={styles.badge} />
+          ) : null}
+          <FontAwesome name="microphone" size={20} color={audioRecorder?.uri ? "#27ae60" : "#2e78b7"} />
+          <Text style={styles.actionChipText}>Voice</Text>
+        </TouchableOpacity>
+        
+        {/* TEXT CHIP */}
+        <TouchableOpacity style={styles.actionChip} onPress={switchToText}>
+          {caption ? <View style={styles.badge} /> : null}
+          <FontAwesome name="pencil" size={20} color={caption ? "#27ae60" : "#8e44ad"} />
+          <Text style={styles.actionChipText}>Text</Text>
+        </TouchableOpacity>
+
+        {/* MAGIC CHIP */}
+        <TouchableOpacity 
+          style={[styles.actionChip, isAiThinking && styles.chipDisabled]} 
+          onPress={handleMagicTap}
+          disabled={isAiThinking}
+        >
+          {aiArtifacts?.deepDive ? <View style={styles.badge} /> : null}
+          {isAiThinking ? (
+            <ActivityIndicator size="small" color="#f39c12" />
+          ) : (
+            <FontAwesome name="magic" size={20} color="#f39c12" />
+          )}
+          <Text style={styles.actionChipText}>
+            {isAiThinking ? "Thinking..." : "Magic"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </Animated.View>
+  );
+
+  const renderVoiceTab = () => (
+    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
+      <View style={styles.tabHeader}>
+        <TouchableOpacity onPress={resetToMain} style={styles.backLink}>
+          <FontAwesome name="chevron-left" size={16} color="#666" />
+          <Text style={styles.backText}>Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.tabTitle}>Voice Message</Text>
+        <View style={{ width: 40 }} />
+      </View>
+
+      <View style={styles.recorderContainer}>
+        {audioRecorder?.uri && !audioRecorder?.isRecording ? (
+           <View style={styles.playbackState}>
+             <FontAwesome name="check-circle" size={48} color="#27ae60" />
+             <Text style={styles.recordingStatus}>Voice Note Recorded</Text>
+             <TouchableOpacity onPress={() => { /* Logic to clear audio */ }}>
+                <Text style={styles.clearText}>Tap record to overwrite</Text>
+             </TouchableOpacity>
+           </View>
+        ) : null}
+
+        <TouchableOpacity 
+          style={[styles.recordButton, audioRecorder?.isRecording && styles.recordingActive]}
+          onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
+        >
+          <FontAwesome 
+            name={audioRecorder?.isRecording ? "stop" : "microphone"} 
+            size={32} 
+            color="#fff" 
+          />
+        </TouchableOpacity>
+        <Text style={styles.recordingStatus}>
+          {audioRecorder?.isRecording ? "Recording..." : (audioRecorder?.uri ? "Record New" : "Tap to Record")}
+        </Text>
+      </View>
+    </Animated.View>
+  );
+
+  const renderTextTab = () => (
+    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
+      <View style={styles.tabHeader}>
+        <TouchableOpacity onPress={resetToMain} style={styles.backLink}>
+          <FontAwesome name="chevron-left" size={16} color="#666" />
+          <Text style={styles.backText}>Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.tabTitle}>Description</Text>
+        <TouchableOpacity onPress={resetToMain}>
+          <Text style={styles.doneText}>Done</Text>
+        </TouchableOpacity>
+      </View>
+
+      <BottomSheetTextInput
+        style={styles.input}
+        placeholder="What is happening in this reflection?"
+        placeholderTextColor="#666"
+        value={caption}
+        onChangeText={setCaption}
+        multiline
+        autoFocus
+        onFocus={() => {
+          // Snap to highest point when text input is focused
+          sheetRef.current?.snapToIndex(2);
+        }}
+      />
+    </Animated.View>
+  );
+
+  return (
+    <GestureHandlerRootView style={styles.container}>
+      {/* 1. IMMERSIVE MEDIA */}
+      {renderBackground()}
+
+      {/* 2. BOTTOM SHEET TOOLKIT */}
+      <BottomSheet
+        ref={sheetRef}
+        index={0}
+        snapPoints={snapPoints}
+        onChange={handleSheetChange}
+        backgroundStyle={styles.sheetBackground}
+        handleIndicatorStyle={styles.sheetHandle}
+        keyboardBehavior="extend"
+      >
+        <BottomSheetView style={styles.sheetContent}>
+          {activeTab === 'main' && renderMainTab()}
+          {activeTab === 'voice' && renderVoiceTab()}
+          {activeTab === 'text' && renderTextTab()}
+
+          {/* GLOBAL SEND BUTTON */}
+          <View style={styles.footerContainer}>
+             <TouchableOpacity 
+               style={[styles.sendButton, isSending && styles.sendingButton]}
+               onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
+               disabled={isSending}
+             >
+               {isSending ? (
+                 <ActivityIndicator color="#fff" size="small" />
+               ) : (
+                 <>
+                   <Text style={styles.sendButtonText}>Send Reflection</Text>
+                   <FontAwesome name="paper-plane" size={16} color="#fff" style={{ marginLeft: 8 }} />
+                 </>
+               )}
+             </TouchableOpacity>
+          </View>
+        </BottomSheetView>
+      </BottomSheet>
+
+      {/* 3. REPLAY PREVIEW MODAL */}
+      <ReplayModal 
+        visible={isPreviewOpen}
+        event={previewEvent}
+        onClose={() => {
+          setIsPreviewOpen(false);
+          setPreviewEvent(null);
+        }}
+      />
+    </GestureHandlerRootView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  backgroundContainer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
+  },
+  media: {
+    width: '100%',
+    height: '100%',
+  },
+  gradientOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 350,
+  },
+  topControls: {
+    position: 'absolute',
+    top: 20,
+    left: 10,
+    right: 10,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    zIndex: 10,
+  },
+  cancelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    gap: 6,
+  },
+  previewButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(46, 120, 183, 0.8)', // Branded blue
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    gap: 6,
+  },
+  cancelText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  // Sheet
+  sheetBackground: {
+    backgroundColor: '#1a1a1a', // Dark background
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  sheetHandle: {
+    backgroundColor: '#666', // Lighter gray for dark background
+    width: 40,
+  },
+  sheetContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  tabContainer: {
+    flex: 1,
+    paddingTop: 10,
+  },
+  helperText: {
+    color: '#666',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  quickActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+    gap: 10,
+  },
+  actionChip: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    padding: 12,
+    borderRadius: 16,
+    backgroundColor: '#2a2a2a', // Dark background for chips
+    position: 'relative',
+  },
+  chipDisabled: {
+    opacity: 0.7,
+  },
+  actionChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#fff', // White text for dark background
+  },
+  badge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#27ae60',
+  },
+  // Header
+  tabHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  backLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  backText: {
+    color: '#666',
+    fontSize: 14,
+  },
+  tabTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#333',
+  },
+  doneText: {
+    color: '#2e78b7',
+    fontWeight: '600',
+    fontSize: 16,
+  },
+  input: {
+    fontSize: 18,
+    lineHeight: 24,
+    color: '#fff', // White text for dark background
+    minHeight: 150,
+    textAlignVertical: 'top',
+  },
+  // Voice
+  recorderContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+    gap: 20,
+  },
+  playbackState: {
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  recordButton: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#e74c3c',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: "#e74c3c",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  recordingActive: {
+    backgroundColor: '#c0392b',
+    transform: [{ scale: 1.1 }],
+  },
+  recordingStatus: {
+    fontSize: 16,
+    color: '#999', // Lighter for dark background
+    fontWeight: '500',
+  },
+  clearText: {
+    fontSize: 12,
+    color: '#666',
+    textDecorationLine: 'underline',
+  },
+  // Footer
+  footerContainer: {
+    paddingBottom: 40,
+    paddingTop: 20,
+    borderTopWidth: 1,
+    borderTopColor: '#333', // Darker border for dark background
+  },
+  sendButton: {
+    backgroundColor: '#2e78b7',
+    borderRadius: 16,
+    paddingVertical: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendingButton: {
+    backgroundColor: '#95a5a6',
+  },
+  sendButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+});
