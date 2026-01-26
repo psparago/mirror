@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Keyboard, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { ReplayModal } from './ReplayModal';
@@ -54,10 +54,14 @@ export default function ReflectionComposer({
   const sheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
   const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewEvent, setPreviewEvent] = useState<Event | null>(null);
+
+  // Get screen dimensions
+  const { height: screenHeight } = useWindowDimensions();
 
   // Sync AI Caption if user hasn't typed yet
   useEffect(() => {
@@ -66,8 +70,57 @@ export default function ReflectionComposer({
     }
   }, [aiArtifacts?.caption]);
 
-  // Snap Points - higher max for keyboard input
-  const snapPoints = useMemo(() => ['18%', '45%', '92%'], []);
+  // Track keyboard height
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => {
+        setKeyboardHeight(e.endCoordinates.height);
+      }
+    );
+    const hideSubscription = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => {
+        setKeyboardHeight(0);
+      }
+    );
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
+  // Calculate snap points dynamically based on screen height and keyboard
+  const snapPoints = useMemo(() => {
+    const mainHeight = screenHeight * 0.18; // 18% for main tab
+    const voiceHeight = screenHeight * 0.45; // 45% for voice tab
+    
+    // For text tab: fill the space above the keyboard
+    if (keyboardHeight > 0) {
+      // When keyboard is visible: sheet should fill from keyboard to near top of screen
+      // Leave small top margin (~60px) for status bar and some breathing room
+      const topMargin = 60;
+      const textHeight = screenHeight - keyboardHeight - topMargin;
+      return [mainHeight, voiceHeight, textHeight];
+    } else {
+      // When keyboard is not visible: use 92% of screen
+      return [mainHeight, voiceHeight, screenHeight * 0.92];
+    }
+  }, [screenHeight, keyboardHeight]);
+
+  // Ensure sheet snaps to correct position when tab changes or keyboard shows/hides
+  useEffect(() => {
+    if (!sheetRef.current) return;
+    
+    // Small delay to ensure the tab content has rendered and snap points are updated
+    const timeoutId = setTimeout(() => {
+      const targetIndex = activeTab === 'main' ? 0 : activeTab === 'voice' ? 1 : 2;
+      sheetRef.current?.snapToIndex(targetIndex);
+    }, 100);
+    
+    return () => clearTimeout(timeoutId);
+  }, [activeTab, snapPoints, keyboardHeight]);
 
   // Video Player
   const player = useVideoPlayer(mediaUri, (p) => {
@@ -129,9 +182,25 @@ export default function ReflectionComposer({
   };
 
   // --- TABS SWITCHERS ---
-  const switchToVoice = () => { setActiveTab('voice'); sheetRef.current?.snapToIndex(1); };
-  const switchToText = () => { setActiveTab('text'); sheetRef.current?.snapToIndex(2); };
-  const resetToMain = () => { setActiveTab('main'); sheetRef.current?.snapToIndex(0); Keyboard.dismiss(); };
+  const switchToVoice = () => { 
+    setActiveTab('voice'); 
+    requestAnimationFrame(() => {
+      sheetRef.current?.snapToIndex(1);
+    });
+  };
+  const switchToText = () => { 
+    setActiveTab('text'); 
+    requestAnimationFrame(() => {
+      sheetRef.current?.snapToIndex(2);
+    });
+  };
+  const resetToMain = () => { 
+    setActiveTab('main'); 
+    requestAnimationFrame(() => {
+      sheetRef.current?.snapToIndex(0);
+    });
+    Keyboard.dismiss(); 
+  };
 
   // --- RENDERERS ---
 
@@ -264,6 +333,8 @@ export default function ReflectionComposer({
         value={caption}
         onChangeText={setCaption}
         multiline
+        scrollEnabled
+        textAlignVertical="top"
         autoFocus
         onFocus={() => {
           // Snap to highest point when text input is focused
@@ -286,7 +357,10 @@ export default function ReflectionComposer({
         onChange={handleSheetChange}
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
-        keyboardBehavior="extend"
+        keyboardBehavior="interactive"
+        android_keyboardInputMode="adjustResize"
+        enablePanDownToClose={false}
+        enableOverDrag={false}
       >
         <BottomSheetView style={styles.sheetContent}>
           {activeTab === 'main' && renderMainTab()}
