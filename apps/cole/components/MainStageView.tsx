@@ -45,6 +45,9 @@ interface MainStageProps {
   onEventSelect: (event: Event) => void;
   onDelete: (event: Event) => void;
   onCaptureSelfie: () => Promise<void>;
+  // Called when MainStage becomes "idle" (playback finished or user dismissed).
+  // Used by the parent to flush pending work (e.g. selfie upload queue).
+  onPlaybackIdle?: () => void;
   onMediaError?: (event: Event) => void;
   cameraRef: React.RefObject<CameraView>;
   cameraPermission: PermissionResponse | null;
@@ -74,6 +77,7 @@ export default function MainStageView({
   onEventSelect,
   onDelete,
   onCaptureSelfie,
+  onPlaybackIdle,
   onMediaError,
   cameraRef,
   cameraPermission,
@@ -84,6 +88,12 @@ export default function MainStageView({
   onReplay,
   config,
 }: MainStageProps) {
+  // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
+  const DEBUG_TRANSITIONS = __DEV__ && false;
+  const DEBUG_LOGS = __DEV__ && false;
+  const debugLog = (...args: any[]) => {
+    if (DEBUG_LOGS) console.log(...args);
+  };
 
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -125,6 +135,13 @@ export default function MainStageView({
     [selectedEvent, eventMetadata]
   );
 
+  const positionText = useMemo(() => {
+    if (!selectedEvent || events.length === 0) return '';
+    const idx = events.findIndex(e => e.event_id === selectedEvent.event_id);
+    if (idx === -1) return '';
+    return `${idx + 1} of ${events.length}`;
+  }, [events, selectedEvent?.event_id]);
+
   // Track previous event to prevent restart loops
   const prevEventIdRef = useRef<string | null>(null);
 
@@ -146,6 +163,8 @@ export default function MainStageView({
   const onCaptureSelfieRef = useRef(onCaptureSelfie);
   const onReplayRef = useRef(onReplay);
   const selectedMetadataRef = useRef(selectedMetadata);
+  const onPlaybackIdleRef = useRef(onPlaybackIdle);
+  const configRef = useRef(config);
   
   // Bridge pattern refs for machine actions
   const sendRef = useRef<any>(() => {});
@@ -161,7 +180,7 @@ export default function MainStageView({
         // Increment session IMMEDIATELY and SYNCHRONOUSLY to invalidate any pending Narration/TTS
         captionSessionRef.current += 1;
         const thisStopSession = captionSessionRef.current;
-        console.log(`🛑 stopAllMedia [Session: ${thisStopSession}]`);
+        debugLog(`🛑 stopAllMedia [Session: ${thisStopSession}]`);
 
         // Clear any existing safety timers
         if (safetyTimeoutRef.current) {
@@ -185,7 +204,7 @@ export default function MainStageView({
             }
           } catch (e) {
             // Ignore errors - sound may already be unloaded
-            console.log('Sound already unloaded or error:', (e as Error).message);
+            debugLog('Sound already unloaded or error:', (e as Error).message);
           }
         }
 
@@ -226,14 +245,14 @@ export default function MainStageView({
 
         // Use current session (already incremented by stopAllMedia or initial)
         const thisSession = captionSessionRef.current;
-        console.log(`🎙️ speakCaption [Session: ${thisSession}]`);
+        debugLog(`🎙️ speakCaption [Session: ${thisSession}]`);
 
         controlsOpacity.value = withTiming(0, { duration: 300 });
 
         if (audioUrl) {
           const playAudioWithRetry = async (retryCount = 0) => {
             try {
-              console.log(`🎧 Loading narration [Session: ${thisSession}] (Attempt ${retryCount + 1}): ${audioUrl.substring(0, 50)}...`);
+              debugLog(`🎧 Loading narration [Session: ${thisSession}] (Attempt ${retryCount + 1}): ${audioUrl.substring(0, 50)}...`);
 
               const { sound: newCaptionSound, status } = await Audio.Sound.createAsync(
                 { uri: audioUrl },
@@ -248,10 +267,10 @@ export default function MainStageView({
                       newCaptionSound.unloadAsync();
                       setCaptionSound(null);
                       captionSoundRef.current = null;
-                      console.log(`✅ Narration finished [Session: ${thisSession}] - sending NARRATION_FINISHED`);
+                      debugLog(`✅ Narration finished [Session: ${thisSession}] - sending NARRATION_FINISHED`);
                       sendRef.current({ type: 'NARRATION_FINISHED' });
                     } else {
-                      console.log(`🚫 Narration finished but session changed [${thisSession} vs ${captionSessionRef.current}] - cleaning up`);
+                      debugLog(`🚫 Narration finished but session changed [${thisSession} vs ${captionSessionRef.current}] - cleaning up`);
                       newCaptionSound.unloadAsync();
                       captionSoundRef.current = null;
                     }
@@ -261,7 +280,7 @@ export default function MainStageView({
 
               // CHECK SESSION AGAIN after load completes
               if (captionSessionRef.current !== thisSession) {
-                console.log(`🚫 Session changed during narration load [${thisSession} vs ${captionSessionRef.current}] - discarding`);
+                debugLog(`🚫 Session changed during narration load [${thisSession} vs ${captionSessionRef.current}] - discarding`);
                 newCaptionSound.unloadAsync();
                 return;
               }
@@ -271,7 +290,7 @@ export default function MainStageView({
               setCaptionSound(newCaptionSound);
 
               await newCaptionSound.playAsync();
-              console.log(`🎧 Narration playing [Session: ${thisSession}]`);
+              debugLog(`🎧 Narration playing [Session: ${thisSession}]`);
 
               // Smart Fallback based on actual duration
               const duration = (status as any).durationMillis || 5000;
@@ -305,7 +324,7 @@ export default function MainStageView({
                   clearTimeout(safetyTimeoutRef.current);
                   safetyTimeoutRef.current = null;
                 }
-                console.log('✅ TTS finished - sending NARRATION_FINISHED');
+                debugLog('✅ TTS finished - sending NARRATION_FINISHED');
                 sendRef.current({ type: 'NARRATION_FINISHED' });
               }
             },
@@ -339,7 +358,7 @@ export default function MainStageView({
         // Preparation logic for video
         if (!playerRef.current) return;
 
-        console.log(`🎬 playVideo called: status=${playerRef.current.status}`);
+        debugLog(`🎬 playVideo called: status=${playerRef.current.status}`);
 
         // Reset to start
         playerRef.current.currentTime = 0;
@@ -360,7 +379,7 @@ export default function MainStageView({
               return;
             }
 
-            console.log(`🎧 Playing audio: ${selectedEventRef.current.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+            debugLog(`🎧 Playing audio: ${selectedEventRef.current.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: selectedEventRef.current.audio_url as string },
               { shouldPlay: true }
@@ -378,7 +397,7 @@ export default function MainStageView({
             console.error(`❌ Audio error (Attempt ${retryCount + 1}):`, err);
 
             if (retryCount < 1) {
-              console.log('🔄 Retrying audio load in 1.5s...');
+              debugLog('🔄 Retrying audio load in 1.5s...');
               await new Promise(r => setTimeout(r, 1500));
               return playWithRetry(retryCount + 1);
             }
@@ -405,7 +424,7 @@ export default function MainStageView({
             await captionSoundRefForActions.current.stopAsync();
             await captionSoundRefForActions.current.unloadAsync();
           } catch (e) {
-            console.log('Caption already stopped');
+            debugLog('Caption already stopped');
           }
           setCaptionSound(null);
           captionSoundRef.current = null;
@@ -417,7 +436,7 @@ export default function MainStageView({
             if (soundRef.current) await soundRef.current.unloadAsync();
 
             if (selectedEventRef.current?.deep_dive_audio_url) {
-              console.log(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+              debugLog(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
               const { sound: newSound, status } = await Audio.Sound.createAsync(
                 { uri: selectedEventRef.current.deep_dive_audio_url },
                 { shouldPlay: true }
@@ -428,7 +447,7 @@ export default function MainStageView({
                     clearTimeout(safetyTimeoutRef.current);
                     safetyTimeoutRef.current = null;
                   }
-                  console.log('✅ Deep dive audio finished - sending NARRATION_FINISHED');
+                  debugLog('✅ Deep dive audio finished - sending NARRATION_FINISHED');
                   sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               });
@@ -478,7 +497,7 @@ export default function MainStageView({
             console.error(`❌ Deep dive audio error (Attempt ${retryCount + 1}):`, err);
 
             if (retryCount < 1 && selectedEventRef.current?.deep_dive_audio_url) {
-              console.log('🔄 Retrying deep dive audio load in 1.5s...');
+              debugLog('🔄 Retrying deep dive audio load in 1.5s...');
               await new Promise(r => setTimeout(r, 1500));
               return playDeepDiveWithRetry(retryCount + 1);
             }
@@ -546,21 +565,33 @@ export default function MainStageView({
     if (currentIndex === -1) return;
 
     if (translationX < -50) {
-      console.log('👈 Swiped Left (Next)');
+      debugLog('👈 Swiped Left (Next)');
       if (currentIndex < currentEvents.length - 1) {
         onEventSelectRef.current(currentEvents[currentIndex + 1]);
+      } else if (configRef.current?.loopFeed && currentEvents.length > 0) {
+        debugLog('↩️ Wrapped to start');
+        onEventSelectRef.current(currentEvents[0]);
+        try {
+          flatListRef.current?.scrollToIndex({ index: 0, animated: true, viewPosition: 0.5 });
+        } catch { }
       }
     } else if (translationX > 50) {
-      console.log('👉 Swiped Right (Previous)');
+      debugLog('👉 Swiped Right (Previous)');
       if (currentIndex > 0) {
         onEventSelectRef.current(currentEvents[currentIndex - 1]);
+      } else if (configRef.current?.loopFeed && currentEvents.length > 0) {
+        debugLog('↪️ Wrapped to end');
+        onEventSelectRef.current(currentEvents[currentEvents.length - 1]);
+        try {
+          flatListRef.current?.scrollToIndex({ index: currentEvents.length - 1, animated: true, viewPosition: 0.5 });
+        } catch { }
       }
     }
   }, []);
 
   // Handle swipe-down dismiss - stops all media before closing
   const handleSwipeDismiss = useCallback(() => {
-    console.log('👇 Swipe Dismiss - stopping all media');
+    debugLog('👇 Swipe Dismiss - stopping all media');
 
     // 1. Increment session to invalidate any pending callbacks
     captionSessionRef.current += 1;
@@ -586,24 +617,26 @@ export default function MainStageView({
     }
 
     // 5. Call the actual close handler (video stops when component unmounts)
+    onPlaybackIdleRef.current?.();
     onClose();
   }, [sound, captionSound, onClose]);
 
   const handleSingleTap = useCallback(() => {
     const currentState = stateRef.current;
-    const isVideo = !!selectedEventRef.current?.video_url;
+    const isVideo =
+      !!selectedEventRef.current?.video_url || selectedMetadataRef.current?.content_type === 'video';
     
     // For videos: no pause/resume - only replay when finished
     if (isVideo) {
       if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
-        console.log('🔁 User pressed REPLAY (video)');
+        debugLog('🔁 User pressed REPLAY (video)');
         
         // For videos, respect instant playback config on replay
         const useInstantPlayback = config?.instantVideoPlayback;
         
         if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
           // Replay with instant playback (skip narration)
-          console.log('⚡ Replaying with instant video playback (skipping narration)');
+          debugLog('⚡ Replaying with instant video playback (skipping narration)');
           send({ 
             type: 'SELECT_EVENT_INSTANT', 
             event: selectedEventRef.current, 
@@ -625,14 +658,14 @@ export default function MainStageView({
     // For non-videos (audio/photos): allow pause/resume
     if (currentState && currentState.hasTag('active')) {
       if (currentState.hasTag('paused')) {
-        console.log('⏯️ Tapped to Resume');
+        debugLog('⏯️ Tapped to Resume');
         send({ type: 'RESUME' });
       } else {
-        console.log('⏸️ Tapped to Pause');
+        debugLog('⏸️ Tapped to Pause');
         send({ type: 'PAUSE' });
       }
     } else if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
-      console.log('🔁 User pressed REPLAY');
+      debugLog('🔁 User pressed REPLAY');
       send({ type: 'REPLAY' });
       if (onReplayRef.current && selectedEventRef.current) {
         onReplayRef.current(selectedEventRef.current);
@@ -774,16 +807,16 @@ export default function MainStageView({
       try {
         const result = await requestCameraPermission();
         if (!result.granted) {
-          console.log('📸 Helper: Skipping selfie - camera permission not granted');
+          debugLog('📸 Helper: Skipping selfie - camera permission not granted');
           return;
         }
       } catch (error) {
-        console.log('📸 Helper: Skipping selfie - permission request failed', error);
+        debugLog('📸 Helper: Skipping selfie - permission request failed', error);
         return;
       }
     }
 
-    console.log(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
+    debugLog(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
     // Fade in mirror
     selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
 
@@ -792,7 +825,7 @@ export default function MainStageView({
       clearTimeout(selfieCaptureTimeoutRef.current);
     }
     selfieCaptureTimeoutRef.current = setTimeout(async () => {
-      console.log('📸 Helper: Snapping now...');
+      debugLog('📸 Helper: Snapping now...');
       // Flash
       flashOpacity.value = withTiming(1, { duration: 150 }, () => {
         flashOpacity.value = withTiming(0, { duration: 250 });
@@ -806,7 +839,7 @@ export default function MainStageView({
         clearTimeout(selfieFadeTimeoutRef.current);
       }
       selfieFadeTimeoutRef.current = setTimeout(() => {
-        console.log('📸 Helper: Fading out bubble');
+        debugLog('📸 Helper: Fading out bubble');
         selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
       }, 500);
     }, delay);
@@ -832,7 +865,7 @@ export default function MainStageView({
     // Videos don't pause - only play or stop
     if (isMachinePlayingVideo) {
       if (!isVideoPlaying) {
-        console.log('⚡ Hardware Sync: Playing Video');
+        debugLog('⚡ Hardware Sync: Playing Video');
         player.play();
       }
     }
@@ -842,15 +875,16 @@ export default function MainStageView({
   // --- DEBUG LOGGER (State Transitions) ---
   const prevStateRef = useRef<any>(null);
   useEffect(() => {
+    if (!DEBUG_TRANSITIONS) return;
     if (state) {
       const stateStr = JSON.stringify(state.value);
       const prevStr = prevStateRef.current ? JSON.stringify(prevStateRef.current) : 'none';
       if (stateStr !== prevStr) {
-        console.log(`🤖 TRANSITION: ${prevStr} → ${stateStr}`);
+        debugLog(`🤖 TRANSITION: ${prevStr} → ${stateStr}`);
         prevStateRef.current = state.value;
       }
     }
-  }, [state]);
+  }, [state, DEBUG_TRANSITIONS]);
 
   // Sync Live refs on every render
   useEffect(() => {
@@ -862,7 +896,19 @@ export default function MainStageView({
     onCaptureSelfieRef.current = onCaptureSelfie;
     onReplayRef.current = onReplay;
     selectedMetadataRef.current = selectedMetadata;
+    onPlaybackIdleRef.current = onPlaybackIdle;
+    configRef.current = config;
   }, [events, selectedEvent, state, onEventSelect, onDelete, onCaptureSelfie, onReplay, selectedMetadata]);
+
+  // Notify parent when we enter the finished state (video/audio/narration completed).
+  const wasFinishedRef = useRef(false);
+  useEffect(() => {
+    const isFinished = !!state && state.matches('finished');
+    if (isFinished && !wasFinishedRef.current) {
+      onPlaybackIdleRef.current?.();
+    }
+    wasFinishedRef.current = isFinished;
+  }, [state?.value]);
 
   // --- SYNC REACT EVENTS TO MACHINE ---
 
@@ -874,15 +920,20 @@ export default function MainStageView({
 
     // Only send SELECT_EVENT if the event ID actually changed
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
+      // We are leaving the previous reflection; treat this as an "idle" moment for parent work
+      // (e.g. flush pending selfie upload queue).
+      if (prevEventIdRef.current) {
+        onPlaybackIdleRef.current?.();
+      }
       prevEventIdRef.current = currentEventId;
-      console.log(`📩 User selected reflection: ${currentEventId}`);
+        debugLog(`📩 User selected reflection: ${currentEventId}`);
 
       // Use instant video playback if configured and this is a video
       const isVideo = !!selectedEvent?.video_url;
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
 
       if (useInstantPlayback) {
-        console.log('⚡ Using instant video playback (skipping narration)');
+        debugLog('⚡ Using instant video playback (skipping narration)');
         send({ type: 'SELECT_EVENT_INSTANT', event: selectedEvent!, metadata: selectedMetadata! });
       } else {
         send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
@@ -925,7 +976,7 @@ export default function MainStageView({
 
       // Use 0.2s threshold to ensure we catch it before it actually stops
       if (player.duration > 0 && player.currentTime >= player.duration - 0.2) {
-        console.log(`🎬 Video finished at ${player.currentTime}/${player.duration}`);
+        debugLog(`🎬 Video finished at ${player.currentTime}/${player.duration}`);
         send({ type: 'VIDEO_FINISHED' });
       }
     }, 200);
@@ -935,7 +986,7 @@ export default function MainStageView({
   // 3. Rewind video on completion for deep dive context
   useEffect(() => {
     if (state?.matches('finished') && player && (selectedMetadata?.content_type === 'video' || !!selectedEvent?.video_url)) {
-      console.log('🏁 Rewinding video to start for deep dive context');
+      debugLog('🏁 Rewinding video to start for deep dive context');
       player.pause();
       player.currentTime = 0;
     }
@@ -1004,7 +1055,7 @@ export default function MainStageView({
   // --- RENDERING HELPERS ---
 
   const handleReplay = () => {
-    console.log('🔁 User pressed REPLAY');
+    debugLog('🔁 User pressed REPLAY');
     
     // For videos, respect instant playback config on replay
     const isVideo = !!selectedEventRef.current?.video_url;
@@ -1012,7 +1063,7 @@ export default function MainStageView({
     
     if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
       // Replay with instant playback (skip narration)
-      console.log('⚡ Replaying with instant video playback (skipping narration)');
+      debugLog('⚡ Replaying with instant video playback (skipping narration)');
       send({ 
         type: 'SELECT_EVENT_INSTANT', 
         event: selectedEventRef.current, 
@@ -1082,55 +1133,34 @@ export default function MainStageView({
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  // --- LAZY INFINITE SCROLL ---
-  // Local state for the feed data that can be appended
-  const [feedData, setFeedData] = useState<Event[]>([]);
-  const originalEventsRef = useRef<Event[]>([]);
-  const prevEventIdsRef = useRef<string>('');
+  // Up Next list uses the unique `events` list (no duplication).
+  // If looping is enabled, reaching the end wraps back to the top.
+  const upNextEvents = events;
+  // Require multiple "extra downward scrolls" at the end before wrapping.
+  // IMPORTANT: FlatList's `onEndReached` is not reliable (fires early, and may not fire again),
+  // and `scrollToIndex` can fail without `getItemLayout`. We rely on scroll metrics +
+  // end-drag events, and wrap using `scrollToOffset(0)` which is reliable.
+  const endWrapCountRef = useRef(0);
+  const isNearEndRef = useRef(false);
+  const lastUpNextScrollMetricsRef = useRef<{
+    distanceFromEnd: number;
+    offsetY: number;
+    contentHeight: number;
+    viewportHeight: number;
+  } | null>(null);
 
-  // Initialize/reset feedData only when the actual source events change (not just reference)
-  useEffect(() => {
-    if (events.length > 0) {
-      // Create a stable ID string from event IDs to detect actual changes
-      const currentEventIds = events.map(e => e.event_id).join(',');
-
-      if (currentEventIds !== prevEventIdsRef.current) {
-        console.log('📜 Source events changed - resetting feed data');
-        prevEventIdsRef.current = currentEventIds;
-        originalEventsRef.current = events;
-        setFeedData(events);
-      }
+  const wrapToTop = useCallback(() => {
+    endWrapCountRef.current = 0;
+    const m = lastUpNextScrollMetricsRef.current;
+    debugLog(
+      `📜 Wrapping Up Next to top (metrics: distanceFromEnd=${m?.distanceFromEnd ?? 'n/a'} offsetY=${m?.offsetY ?? 'n/a'} contentH=${m?.contentHeight ?? 'n/a'} viewportH=${m?.viewportHeight ?? 'n/a'})`
+    );
+    try {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    } catch (e) {
+      console.warn('📜 wrapToTop scrollToOffset failed:', e);
     }
-  }, [events]);
-
-
-  // Handler for infinite scroll - append more events when near the end
-  const FEED_MAX_MULTIPLIER = 5; // Cap feed at 5x original size to prevent memory growth
-  const handleEndReached = useCallback(() => {
-    // Check if infinite scroll is enabled (default to true if not specified)
-    if (config?.enableInfiniteScroll === false) {
-      console.log('📜 End reached - infinite scroll disabled');
-      return;
-    }
-
-    if (originalEventsRef.current.length === 0) return;
-
-    const maxFeedSize = originalEventsRef.current.length * FEED_MAX_MULTIPLIER;
-    
-    setFeedData(prev => {
-      // Don't grow beyond max size
-      if (prev.length >= maxFeedSize) {
-        console.log(`📜 Feed at max size (${maxFeedSize}) - not appending`);
-        return prev;
-      }
-      console.log('📜 End reached - appending more events for infinite scroll');
-      return [...prev, ...originalEventsRef.current];
-    });
-  }, [config?.enableInfiniteScroll]);
-
-
-  // Use feedData for the list, fallback to events if feedData is empty
-  const upNextEvents = feedData.length > 0 ? feedData : events;
+  }, []);
 
 
   const scrollToNewestArrival = () => {
@@ -1140,7 +1170,7 @@ export default function MainStageView({
     const newestIndex = events.findIndex(e => recentlyArrivedIds.includes(e.event_id));
 
     if (newestIndex !== -1) {
-      console.log(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
+      debugLog(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
 
       // 1. Select the event (Auto-play)
       onEventSelect(events[newestIndex]);
@@ -1308,7 +1338,7 @@ export default function MainStageView({
 
               {/* Header */}
               <View style={[styles.headerBar, { top: insets.top + 10 }]}>
-                <View style={{ flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', backgroundColor: 'transparent' }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'transparent' }}>
                   <View style={{ flex: 1 }}>
                     {recentlyArrivedIds.length > 0 ? (
                       <TouchableOpacity
@@ -1324,6 +1354,10 @@ export default function MainStageView({
                       events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
                     )}
                   </View>
+
+                  {!!positionText && (
+                    <Text style={styles.positionText}>{positionText}</Text>
+                  )}
                 </View>
 
 
@@ -1409,14 +1443,14 @@ export default function MainStageView({
                               await captionSound.stopAsync();
                               await captionSound.unloadAsync();
                             } catch (e) {
-                              console.log('Caption already stopped');
+                              debugLog('Caption already stopped');
                             }
                             setCaptionSound(null);
                           }
 
                           // Use audio file narration
                           if (selectedEvent?.audio_url) {
-                            console.log('🔊 Playing caption audio file');
+                            debugLog('🔊 Playing caption audio file');
                             try {
                               const { sound: newSound } = await Audio.Sound.createAsync(
                                 { uri: selectedEvent.audio_url },
@@ -1425,7 +1459,7 @@ export default function MainStageView({
 
                               newSound.setOnPlaybackStatusUpdate((status) => {
                                 if (status.isLoaded && status.didJustFinish) {
-                                  console.log('✅ Caption audio finished');
+                                  debugLog('✅ Caption audio finished');
                                   newSound.unloadAsync();
                                 }
                               });
@@ -1435,11 +1469,11 @@ export default function MainStageView({
                             }
                           } else if (selectedMetadata?.description) {
                             // Only use TTS as a last resort if audio file is missing (despite expectation)
-                            console.log('🔊 Playing caption via TTS (Fallback)');
+                            debugLog('🔊 Playing caption via TTS (Fallback)');
                             Speech.stop();
                             const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
                             Speech.speak(textToSpeak, {
-                              onDone: () => console.log('✅ Caption TTS finished'),
+                              onDone: () => debugLog('✅ Caption TTS finished'),
                               onError: (err) => console.warn('TTS error:', err)
                             });
                           }
@@ -1471,13 +1505,13 @@ export default function MainStageView({
                   <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
                     <TouchableOpacity
                       onPress={async () => {
-                        console.log('✨ User pressed Tell Me More button');
+                        debugLog('✨ User pressed Tell Me More button');
                         const currentState = state;
                         
                         // If we're in playingAudio state with audio done, play deep dive directly
                         // (the state machine doesn't handle TELL_ME_MORE in playingAudio)
                         if (currentState.matches({ playingAudio: { playback: 'done' } })) {
-                          console.log('🔄 In playingAudio state - directly playing deep dive');
+                          debugLog('🔄 In playingAudio state - directly playing deep dive');
                           
                           // Stop any existing audio/speech
                           Speech.stop();
@@ -1562,9 +1596,39 @@ export default function MainStageView({
                 ref={flatListRef}
                 data={upNextEvents}
                 renderItem={renderUpNextItem}
-                keyExtractor={(item, index) => `${item.event_id}_${index}`}
-                onEndReached={handleEndReached}
-                onEndReachedThreshold={0.5}
+                keyExtractor={(item) => item.event_id}
+                // NOTE: Avoid `onEndReached` for wrapping (it fires early and inconsistently).
+                onScroll={(e) => {
+                  const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+                  const distanceFromEnd = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+                  const nearEnd = distanceFromEnd < 80; // ~1–2 items worth of slack
+                  isNearEndRef.current = nearEnd;
+                  lastUpNextScrollMetricsRef.current = {
+                    distanceFromEnd,
+                    offsetY: contentOffset.y,
+                    contentHeight: contentSize.height,
+                    viewportHeight: layoutMeasurement.height,
+                  };
+                  // If user scrolls away from the end, reset the counter.
+                  if (!nearEnd) {
+                    endWrapCountRef.current = 0;
+                  }
+                }}
+                scrollEventThrottle={16}
+                onScrollEndDrag={() => {
+                  if (!configRef.current?.loopFeed) return;
+                  if (!isNearEndRef.current) return;
+                  if (upNextEvents.length < 2) return;
+
+                  endWrapCountRef.current += 1;
+                  const m = lastUpNextScrollMetricsRef.current;
+                  debugLog(
+                    `📜 End extra-scroll (${endWrapCountRef.current}/2) (metrics: distanceFromEnd=${m?.distanceFromEnd ?? 'n/a'} offsetY=${m?.offsetY ?? 'n/a'})`
+                  );
+
+                  if (endWrapCountRef.current < 2) return;
+                  wrapToTop();
+                }}
                 removeClippedSubviews={true}
                 maxToRenderPerBatch={10}
                 windowSize={5}
@@ -1670,6 +1734,12 @@ const styles = StyleSheet.create({
   headerBar: { position: 'absolute', left: 20, right: 20, zIndex: 100 },
 
   reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  positionText: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: 12,
+  },
   newUpdatesButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFD700', padding: 8, borderRadius: 20 },
   newUpdatesText: { color: '#000', fontWeight: 'bold' },
   mediaContainer: {

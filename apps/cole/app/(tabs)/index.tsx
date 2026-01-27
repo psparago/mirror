@@ -14,7 +14,7 @@ import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where, writeBatch } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, InteractionManager, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,9 +22,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 export default function ColeInboxScreen() {
   const router = useRouter();
 
+  // Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
+  const DEBUG_LOGS = __DEV__ && false;
+  const debugLog = (...args: any[]) => {
+    if (DEBUG_LOGS) console.log(...args);
+  };
+
   const [events, setEvents] = useState<Event[]>([]);
   const [recentlyArrivedIds, setRecentlyArrivedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
@@ -101,7 +108,7 @@ export default function ColeInboxScreen() {
           sound.unloadAsync();
         }
       });
-      console.log('🔔 Played arrival chime');
+      debugLog('🔔 Played arrival chime');
     } catch (error) {
       console.warn('Could not play arrival chime:', error);
     }
@@ -115,18 +122,18 @@ export default function ColeInboxScreen() {
     if (selfieUploadInFlightRef.current) return;
     selfieUploadInFlightRef.current = true;
     try {
-      console.log('[Queue] Phase: Process start');
+      debugLog('[Queue] Phase: Process start');
       while (true) {
         const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
         const queue = raw ? JSON.parse(raw) : [];
         if (!queue.length) {
-          console.log('[Queue] Phase: Process complete (queue empty)');
+          debugLog('[Queue] Phase: Process complete (queue empty)');
           break;
         }
 
         const job = queue[0];
         const jobStartTime = Date.now();
-        console.log(`[Queue] Processing job for event ${job.originalEventId}`);
+        debugLog(`[Queue] Processing job for event ${job.originalEventId}`);
         try {
           const fileInfo = await FileSystem.getInfoAsync(job.localUri);
           if (!fileInfo.exists) {
@@ -138,7 +145,7 @@ export default function ColeInboxScreen() {
 
           // Phase: Upload
           const uploadStartTime = Date.now();
-          console.log('[Queue] Phase: Upload to S3 (starting)');
+          debugLog('[Queue] Phase: Upload to S3 (starting)');
           
           // Get presigned URL for upload
           const presignedUrlStartTime = Date.now();
@@ -160,31 +167,28 @@ export default function ColeInboxScreen() {
           const imageData = await imageResponse.json();
           const imageUrl = imageData.url;
           const presignedUrlTime = Date.now() - presignedUrlStartTime;
-          console.log(`[Queue] Presigned URL obtained in ${presignedUrlTime}ms`);
+          debugLog(`[Queue] Presigned URL obtained in ${presignedUrlTime}ms`);
 
           const s3UploadStartTime = Date.now();
-          // Yield to main thread before large upload to prevent UI blocking
-          await new Promise(resolve => InteractionManager.runAfterInteractions(() => {
-            // Small additional delay to ensure UI is responsive
-            setTimeout(resolve, 50);
-          }));
+          // Yield once; do NOT wait for "no interactions" (that can delay uploads while swiping/scrolling).
+          await new Promise(resolve => setTimeout(resolve, 0));
           
           const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
             httpMethod: 'PUT',
             headers: { 'Content-Type': 'image/jpeg' },
           });
           const s3UploadTime = Date.now() - s3UploadStartTime;
-          console.log(`[Queue] S3 upload completed in ${s3UploadTime}ms`);
+          debugLog(`[Queue] S3 upload completed in ${s3UploadTime}ms`);
 
           if (uploadResult.status !== 200) {
             throw new Error(`Selfie upload failed: ${uploadResult.status}`);
           }
           
           const totalUploadTime = Date.now() - uploadStartTime;
-          console.log(`[Queue] Total upload phase: ${totalUploadTime}ms`);
+          debugLog(`[Queue] Total upload phase: ${totalUploadTime}ms`);
 
           // Phase: Firestore commit
-          console.log('[Queue] Phase: Firestore commit (atomic batch)');
+          debugLog('[Queue] Phase: Firestore commit (atomic batch)');
           // Atomic Firestore update: response + reflection status in one batch
           const batch = writeBatch(db);
           const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
@@ -212,11 +216,11 @@ export default function ColeInboxScreen() {
           } catch (cleanupError) {
             console.warn("Failed to delete selfie upload file:", cleanupError);
           } finally {
-            console.log(`[Queue] Selfie upload file deleted for event ${job.originalEventId}`);
+            debugLog(`[Queue] Selfie upload file deleted for event ${job.originalEventId}`);
           }
           
           const totalJobTime = Date.now() - jobStartTime;
-          console.log(`[Queue] Job complete for event ${job.originalEventId} (total: ${totalJobTime}ms)`);
+          debugLog(`[Queue] Job complete for event ${job.originalEventId} (total: ${totalJobTime}ms)`);
 
           queue.shift();
           await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
@@ -233,15 +237,15 @@ export default function ColeInboxScreen() {
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
-      console.log(`📱 AppState changed to: ${nextAppState}`);
+      debugLog(`📱 AppState changed to: ${nextAppState}`);
 
       if (nextAppState === 'active') {
-        console.log('🔄 App came to foreground - resuming network and refreshing data');
+        debugLog('🔄 App came to foreground - resuming network and refreshing data');
         processSelfieQueue();
         try {
           // 1. Resume Firestore
           await enableNetwork(db);
-          console.log('✅ Firestore network resumed');
+          debugLog('✅ Firestore network resumed');
         } catch (e) {
           console.warn('Error resuming Firestore network:', e);
         }
@@ -255,14 +259,14 @@ export default function ColeInboxScreen() {
         // (URLs likely expired if app was backgrounded for ~1 hour)
         if (selectedEventRef.current) {
           const eventId = selectedEventRef.current.event_id;
-          console.log(`🔄 Auto-refreshing URLs for currently selected event: ${eventId}`);
+          debugLog(`🔄 Auto-refreshing URLs for currently selected event: ${eventId}`);
 
           // Wait 1 second for app to stabilize before re-triggering playback
           await new Promise(resolve => setTimeout(resolve, 1000));
 
           refreshEventUrlsRef.current(eventId).then(refreshed => {
             if (refreshed) {
-              console.log(`✅ Successfully refreshed URLs for ${eventId}`);
+              debugLog(`✅ Successfully refreshed URLs for ${eventId}`);
               // Use a slight hack to force a re-trigger if it's the same object/content
               // by setting to null then back, but better to just set it and ensure MainStage handles it.
               setSelectedEvent(null);
@@ -277,7 +281,7 @@ export default function ColeInboxScreen() {
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
         try {
           await disableNetwork(db);
-          console.log(`⏸️ Firestore network paused (${nextAppState})`);
+          debugLog(`⏸️ Firestore network paused (${nextAppState})`);
         } catch (e) {
           console.warn('Error pausing Firestore network:', e);
         }
@@ -291,7 +295,7 @@ export default function ColeInboxScreen() {
 
   // Request permissions and configure audio on startup
   useEffect(() => {
-    console.log('📸 Triggering permission check and audio setup on startup...');
+    debugLog('📸 Triggering permission check and audio setup on startup...');
 
     // 1. Audio Mode setup
     Audio.setAudioModeAsync({
@@ -305,9 +309,9 @@ export default function ColeInboxScreen() {
     // 2. Camera Permission
     requestCameraPermission().then(result => {
       if (result.granted) {
-        console.log('✅ Camera permission granted');
+        debugLog('✅ Camera permission granted');
       } else {
-        console.log('❌ Camera permission denied');
+        debugLog('❌ Camera permission denied');
       }
     }).catch(err => console.warn('Camera permission request failed:', err));
   }, []);
@@ -394,14 +398,17 @@ export default function ColeInboxScreen() {
   // Auto-mark as read when an event is opened
   useEffect(() => {
     if (selectedEvent && isReadStateLoaded) {
-      console.log(`👁️ Auto-marking as read: ${selectedEvent.event_id} (readStateLoaded=${isReadStateLoaded})`);
+      debugLog(`👁️ Auto-marking as read: ${selectedEvent.event_id} (readStateLoaded=${isReadStateLoaded})`);
       markEventAsRead(selectedEvent.event_id);
     }
   }, [selectedEvent, isReadStateLoaded]);
 
   const fetchEvents = useCallback(async () => {
     try {
-      setLoading(true);
+      // Avoid blanking the grid during refreshes; only show full-screen loader on cold start.
+      const isInitialLoad = events.length === 0;
+      if (isInitialLoad) setLoading(true);
+      else setIsRefreshing(true);
       setError(null);
       const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
 
@@ -414,7 +421,7 @@ export default function ColeInboxScreen() {
       // Filter out events without image URLs and log issues
       const validEvents = (data.events || []).filter((event) => {
         if (!event.image_url || event.image_url === '') {
-          console.log(`Skipping incomplete event ${event.event_id} (no image_url)`);
+          debugLog(`Skipping incomplete event ${event.event_id} (no image_url)`);
           return false;
         }
         return true;
@@ -463,8 +470,9 @@ export default function ColeInboxScreen() {
       setError(err.message || 'Failed to load events');
     } finally {
       setLoading(false);
+      setIsRefreshing(false);
     }
-  }, []);
+  }, [events.length]);
 
   // Keep ref to latest fetchEvents to avoid dependency cycles
   const fetchEventsRef = useRef(fetchEvents);
@@ -480,7 +488,7 @@ export default function ColeInboxScreen() {
 
   // STABLE Firestore Listener
   useEffect(() => {
-    console.log('🔌 Firestore listener attached');
+    debugLog('🔌 Firestore listener attached');
     
     // Initial fetch
     fetchEventsRef.current();
@@ -514,7 +522,7 @@ export default function ColeInboxScreen() {
 
         if (newReflectionIds.length === 0) return;
 
-        console.log(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
+        debugLog(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
 
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
@@ -530,7 +538,7 @@ export default function ColeInboxScreen() {
           const newItems = freshEvents.filter(e => !currentIds.has(e.event_id));
 
           if (newItems.length > 0) {
-            console.log(`✨ Injecting ${newItems.length} new items immediately`);
+            debugLog(`✨ Injecting ${newItems.length} new items immediately`);
 
             const now = Date.now();
             const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
@@ -557,7 +565,7 @@ export default function ColeInboxScreen() {
               results.forEach(r => { if (r) updates[r.id] = r.meta; });
 
               if (Object.keys(updates).length > 0) {
-                console.log(`✅ Pre-fetched metadata for ${Object.keys(updates).length} new items`);
+                debugLog(`✅ Pre-fetched metadata for ${Object.keys(updates).length} new items`);
                 setEventMetadata(prev => ({ ...prev, ...updates }));
               }
 
@@ -570,14 +578,14 @@ export default function ColeInboxScreen() {
               // Mark new arrivals (shows pill notification) but DO NOT auto-play
               if (newItems.length > 0) {
                 const newIds = newItems.map(item => item.event_id);
-                console.log(`🔔 New arrivals detected: ${newIds.join(', ')} - checking against read state`);
+                debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} - checking against read state`);
 
                 setRecentlyArrivedIds(prev => {
                   // Only add IDs that aren't already in recentlyArrivedIds AND aren't read (using Ref for freshest values)
                   const freshIds = newIds.filter(id => !prev.includes(id) && !readEventIdsRef.current.includes(id));
                   if (freshIds.length === 0) return prev;
 
-                  console.log(`✨ Adding ${freshIds.length} truly fresh arrivals to notify user`);
+                  debugLog(`✨ Adding ${freshIds.length} truly fresh arrivals to notify user`);
                   playArrivalChime();
                   return [...prev, ...freshIds];
                 });
@@ -595,7 +603,7 @@ export default function ColeInboxScreen() {
     );
 
     return () => {
-      console.log('🔌 Firestore listener detached');
+      debugLog('🔌 Firestore listener detached');
       unsubscribe();
     };
   }, [ExplorerIdentity.currentExplorerId]); // Stable dependency
@@ -642,7 +650,7 @@ export default function ColeInboxScreen() {
       // Only refresh if about to expire (e.g. older than 3 hours)
       const STALE_THRESHOLD = 3 * 60 * 60 * 1000;
       if (!neighbor.refreshedAt || Date.now() - neighbor.refreshedAt > STALE_THRESHOLD) {
-        console.log(`📡 Predictive refresh for neighbor: ${neighbor.event_id} (Stale)`);
+        debugLog(`📡 Predictive refresh for neighbor: ${neighbor.event_id} (Stale)`);
         refreshEventUrls(neighbor.event_id).catch(() => { });
       }
     }
@@ -663,7 +671,7 @@ export default function ColeInboxScreen() {
       AsyncStorage.setItem('read_events', JSON.stringify(next)).catch(err => {
         console.error('Failed to save read state:', err);
       });
-      console.log(`✅ Marked event ${eventId} as read. Total read: ${next.length}`);
+      debugLog(`✅ Marked event ${eventId} as read. Total read: ${next.length}`);
       return next;
     });
   }, []);
@@ -673,11 +681,11 @@ export default function ColeInboxScreen() {
     setSelectedEvent(item);
 
     // Remove from "Recent" arrivals once selected
-    console.log(`🖱️ Event ${item.event_id} selected. Removing from recent arrivals.`);
+    debugLog(`🖱️ Event ${item.event_id} selected. Removing from recent arrivals.`);
     setRecentlyArrivedIds(prev => {
       const filtered = prev.filter(id => id !== item.event_id);
       if (filtered.length !== prev.length) {
-        console.log(`   Removed ${item.event_id} from recent arrivals. New count: ${filtered.length}`);
+        debugLog(`   Removed ${item.event_id} from recent arrivals. New count: ${filtered.length}`);
       }
       return filtered;
     });
@@ -703,7 +711,7 @@ export default function ColeInboxScreen() {
     const isStale = !item.refreshedAt || (Date.now() - item.refreshedAt > STALE_THRESHOLD);
 
     if (isStale) {
-      console.log(`🔄 Item ${item.event_id} is stale. Refreshing in background...`);
+      debugLog(`🔄 Item ${item.event_id} is stale. Refreshing in background...`);
       const eventIdToRefresh = item.event_id;
       refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
         if (refreshedEvent) {
@@ -877,7 +885,7 @@ export default function ColeInboxScreen() {
 
     // Add to set IMMEDIATELY to block concurrent calls
     refreshingEventsRef.current.add(event.event_id);
-    console.log(`🔄 Refreshing expired URLs for event ${event.event_id}`);
+    debugLog(`🔄 Refreshing expired URLs for event ${event.event_id}`);
 
     try {
       const refreshedEvent = await refreshEventUrls(event.event_id);
@@ -975,12 +983,19 @@ export default function ColeInboxScreen() {
     createdAt: number;
   }) => {
     try {
-      console.log(`[Queue] Enqueue job for event ${job.originalEventId}`);
+      debugLog(`[Queue] Enqueue job for event ${job.originalEventId}`);
       const existingRaw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
       const existingQueue = existingRaw ? JSON.parse(existingRaw) : [];
+      // De-dupe: prevent accidental double-enqueue for the same response event.
+      if (existingQueue.some((j: any) => j?.responseEventId === job.responseEventId)) {
+        debugLog(`[Queue] Duplicate job ignored for responseEventId ${job.responseEventId}`);
+        return;
+      }
       existingQueue.push(job);
       await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(existingQueue));
-      await processSelfieQueue();
+      // NOTE: We intentionally do NOT process immediately.
+      // We trigger queue processing when MainStage playback ends (or on dismiss),
+      // and also whenever the app becomes active.
     } catch (error) {
       console.error('Failed to enqueue selfie upload:', error);
     }
@@ -1005,7 +1020,7 @@ export default function ColeInboxScreen() {
 
     try {
       // Phase: Capture
-      console.log('[Selfie] Phase: Capture');
+      debugLog('[Selfie] Phase: Capture');
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.3,
         base64: false,
@@ -1021,7 +1036,7 @@ export default function ColeInboxScreen() {
       // Phase: Process (resize/compress) + persist to documentDirectory
       // NOTE: We do this here because doing ImageManipulator work inside the queue
       // was intermittently taking tens of seconds and freezing the UI.
-      console.log('[Selfie] Phase: Process (resize/compress)');
+      debugLog('[Selfie] Phase: Process (resize/compress)');
       const processedPhoto = await ImageManipulator.manipulateAsync(
         photo.uri,
         [{ resize: { width: 1080 } }],
@@ -1045,7 +1060,7 @@ export default function ColeInboxScreen() {
       }
 
       // Phase: Enqueue (processed file is now persistent)
-      console.log('[Selfie] Phase: Enqueue');
+      debugLog('[Selfie] Phase: Enqueue');
       await enqueueSelfieUpload({
         originalEventId: selectedEvent.event_id,
         responseEventId,
@@ -1166,25 +1181,11 @@ export default function ColeInboxScreen() {
     }
   };
 
-  const processedEvents = useMemo(() => {
-    if (!events.length) return [];
-    if (!EXPLORER_CONFIG.loopFeed) return events;
-
-    // Repeat the whole list 10 times.
-    // [A,B,C] -> [A,B,C, A,B,C, A,B,C ...]
-    const loops = 10;
-    let combined: Event[] = [];
-
-    for (let i = 0; i < loops; i++) {
-      const loopChunk = events.map((e, index) => ({
-        ...e,
-        // Mark the start of a loop so you can show the "Replaying" badge
-        isLoopStart: index === 0 && i > 0,
-      }));
-      combined = [...combined, ...loopChunk];
-    }
-    return combined;
-  }, [events, EXPLORER_CONFIG.loopFeed]);
+  const handleMainStagePlaybackIdle = useCallback(() => {
+    // When playback finishes (video/audio/narration) or the user dismisses MainStage,
+    // run any pending selfie upload work.
+    processSelfieQueue();
+  }, [processSelfieQueue]);
 
   if (loading) {
     return (
@@ -1277,6 +1278,9 @@ export default function ColeInboxScreen() {
           )}
         </View>
         <View style={styles.gridHeaderActions}>
+          {isRefreshing && (
+            <ActivityIndicator size="small" color="rgba(255, 255, 255, 0.6)" />
+          )}
           <TouchableOpacity
             onPress={() => router.push('/settings')}
             style={styles.gridHeaderButton}
@@ -1289,9 +1293,10 @@ export default function ColeInboxScreen() {
 
       {/* Layer 1 (Bottom): Always-rendered Grid of Reflections */}
       <FlatList
-        data={processedEvents}
+        data={events}
         renderItem={renderEvent}
-        keyExtractor={(item, index) => `${item.event_id}_grid_${index}`}
+        // Stable keys prevent cell churn/flicker (index-based keys cause "blank then there" on refresh)
+        keyExtractor={(item) => item.event_id}
         numColumns={numColumns}
         key={numColumns} // Force re-render when column count changes
         contentContainerStyle={[
@@ -1300,6 +1305,11 @@ export default function ColeInboxScreen() {
         ]}
         columnWrapperStyle={styles.row}
         showsVerticalScrollIndicator={false}
+        removeClippedSubviews
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        updateCellsBatchingPeriod={50}
+        windowSize={7}
       />
 
       {/* Layer 2 (Top): MainStageView Overlay - Only rendered when event selected */}
@@ -1308,12 +1318,13 @@ export default function ColeInboxScreen() {
           <MainStageView
             visible={true}
             selectedEvent={selectedEvent}
-            events={processedEvents}
+            events={events}
             eventMetadata={eventMetadata}
             onClose={closeFullScreen}
             onEventSelect={handleEventPress}
             onDelete={deleteEvent}
             onCaptureSelfie={captureSelfieResponse}
+            onPlaybackIdle={handleMainStagePlaybackIdle}
             onMediaError={handleMediaError}
             cameraRef={cameraRef}
             cameraPermission={cameraPermission}

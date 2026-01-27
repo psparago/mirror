@@ -21,6 +21,12 @@ interface ReplayModalProps {
 export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+
+  // Keep debug logging opt-in.
+  const DEBUG_LOGS = __DEV__ && false;
+  const debugLog = (...args: any[]) => {
+    if (DEBUG_LOGS) console.log(...args);
+  };
   
   // 1. Audio Player Refs
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -51,7 +57,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   useEffect(() => {
     const configureAudioSession = async () => {
       try {
-        console.log('🔊 Configuring Audio Session for Playback...');
+        debugLog('🔊 Configuring Audio Session for Playback...');
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false, // Critical: Turn off recording mode
           playsInSilentModeIOS: true, // Critical: Play even if mute switch is on
@@ -119,7 +125,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
            audioUrl.startsWith('file://'));
         
         if (isValidUrl) {
-          console.log('🔊 [speakCaption] Playing caption audio file:', audioUrl);
+          debugLog('🔊 [speakCaption] Playing caption audio file:', audioUrl);
           
           // FIX: Await logic inside the async creator isn't available in sync action, 
           // so we use the promise chain, but ensure we set volume immediately.
@@ -130,7 +136,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
             captionSoundRef.current = sound;
             sound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
-                console.log('✅ [speakCaption] Caption audio finished');
+                debugLog('✅ [speakCaption] Caption audio finished');
                 sound.unloadAsync();
                 captionSoundRef.current = null;
                 sendRef.current({ type: 'NARRATION_FINISHED' });
@@ -171,7 +177,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
            audioUrl.startsWith('file://'));
         
         if (isValidUrl) {
-          console.log('🔊 [playAudio] Playing main audio. Raw:', eventRef.current?.audio_url, 'Normalized:', audioUrl);
+          debugLog('🔊 [playAudio] Playing main audio. Raw:', eventRef.current?.audio_url, 'Normalized:', audioUrl);
           try {
             const { sound } = await Audio.Sound.createAsync(
               { uri: audioUrl },
@@ -183,7 +189,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
               if (status.isLoaded && status.didJustFinish) {
                 // CRITICAL FIX: Send AUDIO_FINISHED when playback is done.
                 // In Companion mode, we do not wait for the selfie.
-                console.log("✅ Main Audio Finished");
+                debugLog("✅ Main Audio Finished");
                 sendRef.current({ type: 'AUDIO_FINISHED' });
               }
             });
@@ -214,7 +220,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
 
       // --- SELFIE ACTIONS ---
       triggerSelfie: () => {
-        console.log("📸 [Replay] Selfie trigger - marking as taken to allow state machine to progress");
+        debugLog("📸 [Replay] Selfie trigger - marking as taken to allow state machine to progress");
         // In Companion mode, we need to mark selfie as taken so the parallel state can complete
         // The state machine's assign({ selfieTaken: true }) should handle this,
         // but we also send a signal to ensure the state progresses
@@ -233,7 +239,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
         }
 
         if (eventRef.current?.deep_dive_audio_url) {
-          console.log('🧠 Playing deep dive audio');
+          debugLog('🧠 Playing deep dive audio');
           try {
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: eventRef.current.deep_dive_audio_url },
@@ -243,7 +249,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
             
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
-                console.log('✅ Deep dive audio finished');
+                debugLog('✅ Deep dive audio finished');
                 sendRef.current({ type: 'NARRATION_FINISHED' });
                 newSound.unloadAsync();
                 soundRef.current = null;
@@ -372,7 +378,7 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
        audioUrl.startsWith('file://'));
 
     if (isValidUrl) {
-      console.log('🔊 [handlePlayCaption] Playing caption audio:', audioUrl);
+      debugLog('🔊 [handlePlayCaption] Playing caption audio:', audioUrl);
       try {
         // Replay the main audio
         const { sound } = await Audio.Sound.createAsync(

@@ -18,9 +18,15 @@ import { collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
+// Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
+const DEBUG_LOGS = __DEV__ && false;
+const debugLog = (...args: any[]) => {
+  if (DEBUG_LOGS) console.log(...args);
+};
+
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
-  console.log(`📡 safeUploadToS3: Starting upload. Source: ${localUri.substring(0, 50)}... Target: ${presignedUrl.substring(0, 50)}...`);
+  debugLog(`📡 safeUploadToS3: Starting upload. Source: ${localUri.substring(0, 50)}... Target: ${presignedUrl.substring(0, 50)}...`);
   let uriToUpload = localUri;
   let tempUri: string | null = null;
 
@@ -35,14 +41,14 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
       const extractedExt = dotParts.length > 1 ? dotParts.pop()?.toLowerCase() : null;
       const extension = (extractedExt && extractedExt.length <= 4 && !extractedExt.includes('/')) ? extractedExt : 'jpg';
       const filename = `temp_upload_${Date.now()}_${Math.floor(Math.random() * 1000)}.${extension}`;
-      console.log(`📥 safeUploadToS3 [${filename}]: Downloading remote file...`);
+      debugLog(`📥 safeUploadToS3 [${filename}]: Downloading remote file...`);
       const downloadRes = await FileSystem.downloadAsync(
         localUri,
         `${FileSystem.cacheDirectory}${filename}`
       );
       uriToUpload = downloadRes.uri;
       tempUri = downloadRes.uri;
-      console.log(`✅ safeUploadToS3 [${filename}]: Download complete`);
+      debugLog(`✅ safeUploadToS3 [${filename}]: Download complete`);
     } catch (err) {
       console.error(`❌ safeUploadToS3: Download failed:`, err);
       throw err;
@@ -54,7 +60,7 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
     const extension = uriToUpload.split('.').pop()?.toLowerCase();
     const contentType = extension === 'm4a' || extension === 'mp3' ? 'audio/mpeg' : 'image/jpeg';
 
-    console.log(`📤 safeUploadToS3: Uploading ${uriToUpload} (ContentType: ${contentType})...`);
+    debugLog(`📤 safeUploadToS3: Uploading ${uriToUpload} (ContentType: ${contentType})...`);
     const uploadResult = await FileSystem.uploadAsync(presignedUrl, uriToUpload, {
       httpMethod: 'PUT',
       headers: { 'Content-Type': contentType },
@@ -64,7 +70,7 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
       console.error(`❌ safeUploadToS3: Upload failed with status ${uploadResult.status}`);
       throw new Error(`Upload failed with status ${uploadResult.status}`);
     }
-    console.log(`✅ safeUploadToS3: Upload SUCCESS for ${uriToUpload}`);
+    debugLog(`✅ safeUploadToS3: Upload SUCCESS for ${uriToUpload}`);
     return uploadResult;
   } catch (err) {
     console.error(`❌ safeUploadToS3: Upload error:`, err);
@@ -167,7 +173,7 @@ export default function CompanionHomeScreen() {
   // Global AppState listener for Companion
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
-      console.log(`📱 [Companion App] AppState changed to: ${nextAppState}`);
+      debugLog(`📱 [Companion App] AppState changed to: ${nextAppState}`);
     });
     return () => subscription.remove();
   }, []);
@@ -208,25 +214,25 @@ export default function CompanionHomeScreen() {
       if (!permission.granted) {
         console.warn('🎤 Microphone permission denied');
       } else {
-        console.log('✅ Microphone permission granted');
+        debugLog('✅ Microphone permission granted');
       }
 
       // Request camera permission
       if (!permission) {
-        console.log('📸 Requesting camera permission...');
+      debugLog('📸 Requesting camera permission...');
         const cameraResult = await requestPermission();
         if (cameraResult.granted) {
-          console.log('✅ Camera permission granted');
+          debugLog('✅ Camera permission granted');
         } else {
           console.warn('❌ Camera permission denied');
         }
       }
 
       // Request photo library permission
-      console.log('📷 Requesting photo library permission...');
+      debugLog('📷 Requesting photo library permission...');
       const libraryResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (libraryResult.granted) {
-        console.log('✅ Photo library permission granted');
+        debugLog('✅ Photo library permission granted');
       } else {
         console.warn('❌ Photo library permission denied');
       }
@@ -335,7 +341,7 @@ export default function CompanionHomeScreen() {
           if (!description.trim() || isAiGenerated) {
             setDescription(aiResponse.short_caption);
           } else {
-            console.log('📝 User has custom text, keeping it but updating AI metadata in background');
+            debugLog('📝 User has custom text, keeping it but updating AI metadata in background');
           }
           setIsAiGenerated(true);
         }
@@ -516,7 +522,7 @@ export default function CompanionHomeScreen() {
 
   const recordVideoWithNativeCamera = async () => {
     try {
-      console.log('📹 Launching native camera for video recording...');
+      debugLog('📹 Launching native camera for video recording...');
 
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Videos,
@@ -526,11 +532,11 @@ export default function CompanionHomeScreen() {
         cameraType: ImagePicker.CameraType.front, // Open in selfie mode
       });
 
-      console.log('📹 Camera result:', { cancelled: result.canceled, hasAssets: result.assets?.length });
+      debugLog('📹 Camera result:', { cancelled: result.canceled, hasAssets: result.assets?.length });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const video = result.assets[0];
-        console.log('✅ Video recorded:', { uri: video.uri, duration: video.duration });
+        debugLog('✅ Video recorded:', { uri: video.uri, duration: video.duration });
 
         // Check duration (duration is in milliseconds)
         if (video.duration && video.duration > 30000) {
@@ -563,13 +569,13 @@ export default function CompanionHomeScreen() {
   };
 
   const handleCameraShutterPress = () => {
-    console.log('🎬 Shutter button pressed', { cameraMode });
+    debugLog('🎬 Shutter button pressed', { cameraMode });
 
     if (cameraMode === 'photo') {
-      console.log('📸 Taking photo...');
+      debugLog('📸 Taking photo...');
       takePhoto();
     } else {
-      console.log('📹 Launching native camera for video...');
+      debugLog('📹 Launching native camera for video...');
       recordVideoWithNativeCamera();
     }
   };
@@ -679,10 +685,10 @@ export default function CompanionHomeScreen() {
       const needsDeepDive = !finalDeepDive;
       const needsCaptionAudio = !audioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
 
-      console.log(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
+      debugLog(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
 
       if (needsDeepDive || needsCaptionAudio) {
-        console.log("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
+        debugLog("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
 
         // Use our robust background generator which handles staging uploads and thumbnails correctly
         const aiResult = await generateDeepDiveBackground({
@@ -693,7 +699,7 @@ export default function CompanionHomeScreen() {
         });
 
         if (aiResult) {
-          console.log(`✅ AI Enhancement Success: Caption="${aiResult.short_caption?.substring(0, 30)}...", DeepDive="${aiResult.deep_dive?.substring(0, 30)}..."`);
+          debugLog(`✅ AI Enhancement Success: Caption="${aiResult.short_caption?.substring(0, 30)}...", DeepDive="${aiResult.deep_dive?.substring(0, 30)}..."`);
           // PROTECTION: Never overwrite the user's manual caption during this final polish phase
           // if it doesn't match the AI's returned version. We favor what the user sees on screen.
           if (!finalCaption && aiResult.short_caption) {
@@ -703,7 +709,7 @@ export default function CompanionHomeScreen() {
           finalDeepDive = aiResult.deep_dive;
           finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio as absolute priority
           finalDeepDiveAudio = aiResult.deep_dive_audio_url;
-          console.log(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
+          debugLog(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
         } else {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
@@ -711,7 +717,7 @@ export default function CompanionHomeScreen() {
 
       // Generate unique event_id (timestamp-based)
       const eventID = Date.now().toString();
-      console.log(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
+      debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
       // 1. Prepare list of files to upload
@@ -740,10 +746,10 @@ export default function CompanionHomeScreen() {
         hasDeepDiveAudio = true;
       }
 
-      console.log(`📡 uploadEventBundle: Files to sign:`, filesToSign);
+      debugLog(`📡 uploadEventBundle: Files to sign:`, filesToSign);
 
       // 2. Get permissions (Batch Request)
-      console.log('getting batch urls...');
+      debugLog('getting batch urls...');
       const batchRes = await fetch(API_ENDPOINTS.GET_BATCH_S3_UPLOAD_URLS, {
         method: 'POST',
         headers: {
@@ -762,7 +768,7 @@ export default function CompanionHomeScreen() {
       }
 
       const { urls } = await batchRes.json();
-      console.log('📡 uploadEventBundle: Received presigned URLs for:', Object.keys(urls));
+      debugLog('📡 uploadEventBundle: Received presigned URLs for:', Object.keys(urls));
       const uploadPromises: Promise<any>[] = [];
 
       // 3. Prepare Image Source
@@ -788,9 +794,9 @@ export default function CompanionHomeScreen() {
 
       // 4. Queue Image Upload
       if (urls['image.jpg']) {
-        console.log('📤 uploadEventBundle: Queuing image upload...');
+        debugLog('📤 uploadEventBundle: Queuing image upload...');
         uploadPromises.push(safeUploadToS3(imageSource, urls['image.jpg']).then(res => {
-          console.log('✅ uploadEventBundle: Image upload completed');
+          debugLog('✅ uploadEventBundle: Image upload completed');
           return res;
         }));
       } else {
@@ -814,9 +820,9 @@ export default function CompanionHomeScreen() {
       if (hasAudio && urls['audio.m4a']) {
         const audioSource = audioUri || finalCaptionAudio;
         if (audioSource) {
-          console.log('📤 uploadEventBundle: Queuing audio upload...');
+          debugLog('📤 uploadEventBundle: Queuing audio upload...');
           uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']).then(res => {
-            console.log('✅ uploadEventBundle: Audio upload completed');
+            debugLog('✅ uploadEventBundle: Audio upload completed');
             return res;
           }));
         }
@@ -824,9 +830,9 @@ export default function CompanionHomeScreen() {
 
       // 6.5 Queue Deep Dive Audio Upload
       if (hasDeepDiveAudio && finalDeepDiveAudio && urls['deep_dive.m4a']) {
-        console.log('📤 uploadEventBundle: Queuing deep dive audio upload...');
+        debugLog('📤 uploadEventBundle: Queuing deep dive audio upload...');
         uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, urls['deep_dive.m4a']).then(res => {
-          console.log('✅ uploadEventBundle: Deep dive audio upload completed');
+          debugLog('✅ uploadEventBundle: Deep dive audio upload completed');
           return res;
         }));
       }
@@ -843,10 +849,10 @@ export default function CompanionHomeScreen() {
         image_source: imageSourceType,
       };
 
-      console.log('📄 Final Metadata to upload:', JSON.stringify(metadata, null, 2));
+      debugLog('📄 Final Metadata to upload:', JSON.stringify(metadata, null, 2));
 
       if (urls['metadata.json']) {
-        console.log('📤 uploadEventBundle: Queuing metadata upload...');
+        debugLog('📤 uploadEventBundle: Queuing metadata upload...');
         uploadPromises.push(
           fetch(urls['metadata.json'], {
             method: 'PUT',
@@ -854,7 +860,7 @@ export default function CompanionHomeScreen() {
             headers: { 'Content-Type': 'application/json' },
           }).then(async res => {
             if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
-            console.log('✅ uploadEventBundle: Metadata upload SUCCESS');
+            debugLog('✅ uploadEventBundle: Metadata upload SUCCESS');
             return res;
           })
         );
@@ -863,9 +869,9 @@ export default function CompanionHomeScreen() {
       }
 
       // 8. Execute All Uploads Parallelly
-      console.log(`📡 uploadEventBundle: Executing ${uploadPromises.length} uploads in parallel...`);
+      debugLog(`📡 uploadEventBundle: Executing ${uploadPromises.length} uploads in parallel...`);
       await Promise.all(uploadPromises);
-      console.log('✅ uploadEventBundle: All uploads completed successfully');
+      debugLog('✅ uploadEventBundle: All uploads completed successfully');
 
       // 9. Cleanup Staging & Local
       showToast('✅ Reflection sent!');

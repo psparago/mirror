@@ -748,7 +748,6 @@ export default function SentHistoryScreen() {
                   },
                 };
                 
-                console.log("▶️ Opening Replay for:", item.event_id);
                 setSelectedReflection(eventForReplay);
               }}
             >
