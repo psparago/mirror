@@ -17,6 +17,7 @@ interface ReflectionComposerProps {
   mediaType: 'photo' | 'video';
   // State from Parent
   initialCaption?: string;
+  audioUri?: string | null;
   aiArtifacts?: {
     caption?: string;
     deepDive?: string;
@@ -41,6 +42,7 @@ export default function ReflectionComposer({
   mediaUri,
   mediaType,
   initialCaption = '',
+  audioUri,
   aiArtifacts,
   isAiThinking,
   onCancel: onRetake,
@@ -63,6 +65,7 @@ export default function ReflectionComposer({
 
   const [isAiCancelled, setIsAiCancelled] = useState(false);
   const isBlockedByAi = isAiThinking && !isAiCancelled;
+  const hasRecordedAudio = !!audioUri;
 
   // Get screen dimensions
   const { height: screenHeight } = useWindowDimensions();
@@ -155,14 +158,22 @@ export default function ReflectionComposer({
     const previewId = 'preview-temp';
     const now = new Date();
 
+    // Get audio URL - prioritize user voice over AI voice
+    // Pass through if it exists - ReplayModal will handle validation
+    const audioUrl = audioUri || aiArtifacts?.audioUrl || undefined;
+    
+    if (audioUrl) {
+      console.log('🔊 [Preview] Passing audio URL to ReplayModal:', audioUrl);
+    }
+
     // 1. Construct the Mock Event
     const mockEvent: Event = {
       event_id: previewId,
       image_url: mediaUri,
       video_url: mediaType === 'video' ? mediaUri : undefined,
       
-      // PRIORITY: User Voice > AI Voice > None
-      audio_url: audioRecorder?.uri || aiArtifacts?.audioUrl,
+      // PRIORITY: User Voice > AI Voice > None (only if valid URL)
+      audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
       
       metadata: {
         description: caption || "No description yet",
@@ -172,7 +183,7 @@ export default function ReflectionComposer({
         // --- REQUIRED FIELDS ADDED HERE ---
         event_id: previewId,
         timestamp: now.toISOString(), 
-        content_type: mediaType === 'video' ? 'video' : (audioRecorder?.uri ? 'audio' : 'text'),
+        content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
         image_source: 'camera', // Default for preview
         
         // Include Deep Dive data if available
@@ -180,7 +191,7 @@ export default function ReflectionComposer({
       },
       
       // Pass the deep dive audio URL directly if we have it
-      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl
+      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined
     };
 
     setPreviewEvent(mockEvent);
@@ -237,15 +248,15 @@ export default function ReflectionComposer({
 
   const renderMainTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
-      <Text style={styles.helperText}>Add context to this Reflection</Text>
+      <Text style={styles.helperText}>Add context, Preview or Send this Reflection</Text>
       <View style={styles.quickActionsRow}>
         
         {/* VOICE CHIP */}
         <TouchableOpacity style={styles.actionChip} onPress={switchToVoice}>
-          {audioRecorder?.uri ? (
+          {hasRecordedAudio ? (
              <View style={styles.badge} />
           ) : null}
-          <FontAwesome name="microphone" size={20} color={audioRecorder?.uri ? "#27ae60" : "#2e78b7"} />
+          <FontAwesome name="microphone" size={20} color={hasRecordedAudio ? "#27ae60" : "#2e78b7"} />
           <Text style={styles.actionChipText}>Voice</Text>
         </TouchableOpacity>
         
@@ -279,10 +290,10 @@ export default function ReflectionComposer({
               styles.actionChip,
               styles.sendChip,
               isSending && styles.chipDisabled,
-              (!caption && !audioRecorder?.uri) && styles.chipDisabled
+              (!caption && !hasRecordedAudio) && styles.chipDisabled
             ]}
-            onPress={() => onSend({ caption, audioUri: audioRecorder?.uri || null, deepDive: aiArtifacts?.deepDive || null })}
-            disabled={isSending || (!caption && !audioRecorder?.uri)}
+            onPress={() => onSend({ caption, audioUri: audioUri || null, deepDive: aiArtifacts?.deepDive || null })}
+            disabled={isSending || (!caption && !hasRecordedAudio)}
           >
             {isSending ? (
               <ActivityIndicator color="#fff" size="small" />
@@ -310,7 +321,7 @@ export default function ReflectionComposer({
       </View>
 
       <View style={styles.recorderContainer}>
-        {audioRecorder?.uri && !audioRecorder?.isRecording ? (
+        {hasRecordedAudio && !audioRecorder?.isRecording ? (
            <View style={styles.playbackState}>
              <FontAwesome name="check-circle" size={48} color="#27ae60" />
              <Text style={styles.recordingStatus}>Voice Note Recorded</Text>
@@ -331,7 +342,7 @@ export default function ReflectionComposer({
           />
         </TouchableOpacity>
         <Text style={styles.recordingStatus}>
-          {audioRecorder?.isRecording ? "Recording..." : (audioRecorder?.uri ? "Record New" : "Tap to Record")}
+          {audioRecorder?.isRecording ? "Recording..." : (hasRecordedAudio ? "Record New" : "Tap to Record")}
         </Text>
       </View>
     </Animated.View>
@@ -524,7 +535,7 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   previewChip: {
-    backgroundColor: '#3a3a3a', // Muted gray for preview button
+    backgroundColor: '#4a4a4a', // Muted gray for preview button
   },
   sendChip: {
     backgroundColor: '#2e78b7', // Bright blue for send button (dominant)

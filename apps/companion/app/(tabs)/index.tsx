@@ -233,15 +233,16 @@ export default function CompanionHomeScreen() {
     })();
   }, []);
 
-  // Simple: only update audioUri if we have a NEW URI and we're not recording
-  // This prevents stale URIs from being set when selecting new photos
+  // Only update audioUri from recorder when we have a NEW URI and we're not recording.
+  // Skip cache paths so we don't lock onto a transient file that may be deleted.
   useEffect(() => {
     const currentUri = audioRecorder.uri;
     const isNewUri = currentUri && currentUri !== lastProcessedUriRef.current;
+    const isCachePath = currentUri?.startsWith(FileSystem.cacheDirectory || '');
 
     // Only set audioUri if we have a NEW URI, we're not recording, and audioUri is currently null
     // Don't include audioUri in dependencies to prevent infinite loops
-    if (isNewUri && !audioRecorder.isRecording) {
+    if (isNewUri && !audioRecorder.isRecording && !isCachePath) {
       // Double-check audioUri is null before setting (read from state, not dependency)
       setAudioUri(prev => {
         if (prev === null) {
@@ -612,15 +613,22 @@ export default function CompanionHomeScreen() {
         playsInSilentMode: true,
       });
 
-      // Wait a bit for URI to be available, then set it directly
-      // The useEffect will also catch it, but setting it here ensures it happens
-      if (audioUriTimeoutRef.current) clearTimeout(audioUriTimeoutRef.current);
-      audioUriTimeoutRef.current = setTimeout(() => {
-        if (audioRecorder.uri && audioRecorder.uri !== lastProcessedUriRef.current) {
-          setAudioUri(audioRecorder.uri);
-          lastProcessedUriRef.current = audioRecorder.uri;
+      // Persist the recording to a stable location so it won't be cleaned from cache
+      const recordingUri = audioRecorder.uri;
+      if (recordingUri && recordingUri !== lastProcessedUriRef.current) {
+        try {
+          const filename = `caption-${Date.now()}.m4a`;
+          const persistentUri = `${FileSystem.documentDirectory}${filename}`;
+          await FileSystem.copyAsync({ from: recordingUri, to: persistentUri });
+          setAudioUri(persistentUri);
+          lastProcessedUriRef.current = recordingUri;
+        } catch (copyError) {
+          console.error("Failed to persist audio recording:", copyError);
+          // Fallback to the original URI if copy fails
+          setAudioUri(recordingUri);
+          lastProcessedUriRef.current = recordingUri;
         }
-      }, 150);
+      }
     } catch (error: any) {
       console.error("Failed to stop recording:", error);
       Alert.alert("Error", "Failed to stop audio recording");
@@ -1034,6 +1042,7 @@ export default function CompanionHomeScreen() {
         mediaType={mediaType}
         // State Props
         initialCaption={description} // Pass current state if any
+        audioUri={audioUri}
         aiArtifacts={{
           caption: shortCaption,
           deepDive: deepDive,

@@ -89,13 +89,20 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
       },
 
       speakCaption: () => {
-        if (eventRef.current?.audio_url) {
-          console.log('🔊 [speakCaption] Playing caption audio file');
+        const audioUrl = normalizeAudioUrl(eventRef.current?.audio_url);
+        // expo-av accepts http/https URLs and file:// URLs
+        const isValidUrl = audioUrl && 
+          (audioUrl.startsWith('http://') || 
+           audioUrl.startsWith('https://') || 
+           audioUrl.startsWith('file://'));
+        
+        if (isValidUrl) {
+          console.log('🔊 [speakCaption] Playing caption audio file:', audioUrl);
           
           // FIX: Await logic inside the async creator isn't available in sync action, 
           // so we use the promise chain, but ensure we set volume immediately.
           Audio.Sound.createAsync(
-            { uri: eventRef.current.audio_url },
+            { uri: audioUrl },
             { shouldPlay: true, volume: 1.0 }
           ).then(({ sound }) => {
             captionSoundRef.current = sound;
@@ -108,9 +115,13 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
               }
             });
           }).catch((err) => {
-            console.warn('Audio error, using fallback:', err);
+            console.error('❌ [speakCaption] Audio load error:', err);
+            console.warn('Falling back to TTS');
             sendRef.current({ type: 'NARRATION_FINISHED' });
           });
+        } else if (eventRef.current?.audio_url) {
+          console.warn('⚠️ [speakCaption] Invalid audio URL, falling back to TTS. Raw:', eventRef.current.audio_url, 'Normalized:', audioUrl);
+          sendRef.current({ type: 'NARRATION_FINISHED' });
         } else if (eventRef.current?.metadata?.short_caption || eventRef.current?.metadata?.description) {
           const textToSpeak = eventRef.current.metadata.short_caption || eventRef.current.metadata.description;
           Speech.speak(textToSpeak, {
@@ -130,10 +141,18 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
 
       playAudio: async () => {
         // This is the main audio for an "Image + Audio" reflection
-        if (eventRef.current?.audio_url) {
+        const audioUrl = normalizeAudioUrl(eventRef.current?.audio_url);
+        // expo-av accepts http/https URLs and file:// URLs
+        const isValidUrl = audioUrl && 
+          (audioUrl.startsWith('http://') || 
+           audioUrl.startsWith('https://') || 
+           audioUrl.startsWith('file://'));
+        
+        if (isValidUrl) {
+          console.log('🔊 [playAudio] Playing main audio. Raw:', eventRef.current?.audio_url, 'Normalized:', audioUrl);
           try {
             const { sound } = await Audio.Sound.createAsync(
-              { uri: eventRef.current.audio_url },
+              { uri: audioUrl },
               { shouldPlay: true, volume: 1.0 }
             );
             soundRef.current = sound;
@@ -147,9 +166,12 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
               }
             });
           } catch (e) {
-            console.error("Audio Load Error", e);
+            console.error("❌ [playAudio] Audio Load Error:", e);
             sendRef.current({ type: 'AUDIO_FINISHED' });
           }
+        } else if (eventRef.current?.audio_url) {
+          console.warn('⚠️ [playAudio] Invalid audio URL. Raw:', eventRef.current.audio_url, 'Normalized:', audioUrl);
+          sendRef.current({ type: 'AUDIO_FINISHED' });
         } else {
           sendRef.current({ type: 'AUDIO_FINISHED' });
         }
@@ -280,6 +302,27 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   const isPlaying = state.hasTag('playing');
   const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null);
 
+  // Helper to normalize audio URLs
+  // For local file paths, we need to use file:// prefix for expo-av
+  // For remote URLs (http/https), use as-is
+  const normalizeAudioUrl = (url: string | undefined): string | undefined => {
+    if (!url) return undefined;
+    
+    // If it's already a valid URL format, return as-is
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('file://')) {
+      return url;
+    }
+    
+    // If it's an absolute file path (starts with /), add file:// prefix
+    // expo-av needs file:// prefix for local absolute paths
+    if (url.startsWith('/')) {
+      return `file://${url}`;
+    }
+    
+    // Otherwise return as-is (might be a relative path or invalid)
+    return url;
+  };
+
   const handleSwipeClose = () => {
     sendRef.current({ type: 'CLOSE' });
     setTimeout(() => { onClose(); }, 100);
@@ -299,21 +342,42 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
     Speech.stop();
     if (captionSoundRef.current) await captionSoundRef.current.unloadAsync().catch(()=>{});
 
-    if (event?.audio_url) {
-      // Replay the main audio
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: event.audio_url },
-        { shouldPlay: true, volume: 1.0 }
-      );
-      setCaptionSound(sound);
-      captionSoundRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
-          sound.unloadAsync();
-          setCaptionSound(null);
-          captionSoundRef.current = null;
+    const audioUrl = normalizeAudioUrl(event?.audio_url);
+    // expo-av accepts http/https URLs and file:// URLs
+    const isValidUrl = audioUrl && 
+      (audioUrl.startsWith('http://') || 
+       audioUrl.startsWith('https://') || 
+       audioUrl.startsWith('file://'));
+
+    if (isValidUrl) {
+      console.log('🔊 [handlePlayCaption] Playing caption audio:', audioUrl);
+      try {
+        // Replay the main audio
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: audioUrl },
+          { shouldPlay: true, volume: 1.0 }
+        );
+        setCaptionSound(sound);
+        captionSoundRef.current = sound;
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            sound.unloadAsync();
+            setCaptionSound(null);
+            captionSoundRef.current = null;
+          }
+        });
+      } catch (e) {
+        console.error('❌ [handlePlayCaption] Audio load error:', e);
+        // Fall back to TTS
+        if (event?.metadata?.description) {
+          Speech.speak(event.metadata.description, { volume: 1.0 });
         }
-      });
+      }
+    } else if (event?.audio_url) {
+      console.warn('⚠️ [handlePlayCaption] Invalid audio URL, using TTS. Raw:', event.audio_url, 'Normalized:', audioUrl);
+      if (event?.metadata?.description) {
+        Speech.speak(event.metadata.description, { volume: 1.0 });
+      }
     } else if (event?.metadata?.description) {
       Speech.speak(event.metadata.description, { volume: 1.0 });
     }
@@ -323,11 +387,6 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
     <Modal visible={visible} animationType="slide" transparent={false}>
       <GestureDetector gesture={swipeDownGesture}>
         <View style={styles.container}>
-          
-          <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
-             <FontAwesome name="times" size={24} color="#fff" />
-          </TouchableOpacity>
-
           {/* MAIN STAGE */}
           <View style={styles.mediaContainer}>
             <View style={styles.mediaFrame}>
@@ -477,6 +536,14 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
             </Animated.View>
           )}
 
+          {/* TOP CONTROLS - Rendered last to appear on top */}
+          <View style={[styles.topControls, { top: insets.top - 15 }]}>
+            <View style={{ flex: 1 }} />
+            <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
+              <FontAwesome name="times" size={18} color="#fff" />
+            </TouchableOpacity>
+          </View>
+
         </View>
       </GestureDetector>
     </Modal>
@@ -488,21 +555,33 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  closeButton: {
+  topControls: {
     position: 'absolute',
-    top: 50,
+    left: 10,
     right: 20,
-    zIndex: 100,
-    padding: 10,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    zIndex: 1000,
+    elevation: 1000,
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
     borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+    zIndex: 1001,
+    elevation: 1001,
   },
   mediaContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    paddingTop: 80, 
+    paddingTop: 60, 
     paddingBottom: 120, 
   },
   mediaFrame: {
