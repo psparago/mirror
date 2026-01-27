@@ -7,14 +7,14 @@ import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
+import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where, writeBatch } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
-import { Image } from 'expo-image';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, InteractionManager, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -125,6 +125,7 @@ export default function ColeInboxScreen() {
         }
 
         const job = queue[0];
+        const jobStartTime = Date.now();
         console.log(`[Queue] Processing job for event ${job.originalEventId}`);
         try {
           const fileInfo = await FileSystem.getInfoAsync(job.localUri);
@@ -136,8 +137,11 @@ export default function ColeInboxScreen() {
           }
 
           // Phase: Upload
-          console.log('[Queue] Phase: Upload to S3');
+          const uploadStartTime = Date.now();
+          console.log('[Queue] Phase: Upload to S3 (starting)');
+          
           // Get presigned URL for upload
+          const presignedUrlStartTime = Date.now();
           const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
             try {
               const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
@@ -155,22 +159,29 @@ export default function ColeInboxScreen() {
           const imageResponse = await fetchWithRetry();
           const imageData = await imageResponse.json();
           const imageUrl = imageData.url;
+          const presignedUrlTime = Date.now() - presignedUrlStartTime;
+          console.log(`[Queue] Presigned URL obtained in ${presignedUrlTime}ms`);
 
+          const s3UploadStartTime = Date.now();
+          // Yield to main thread before large upload to prevent UI blocking
+          await new Promise(resolve => InteractionManager.runAfterInteractions(() => {
+            // Small additional delay to ensure UI is responsive
+            setTimeout(resolve, 50);
+          }));
+          
           const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
             httpMethod: 'PUT',
             headers: { 'Content-Type': 'image/jpeg' },
           });
+          const s3UploadTime = Date.now() - s3UploadStartTime;
+          console.log(`[Queue] S3 upload completed in ${s3UploadTime}ms`);
 
           if (uploadResult.status !== 200) {
             throw new Error(`Selfie upload failed: ${uploadResult.status}`);
           }
-
-          // Cleanup local file
-          try {
-            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
-          } catch (cleanupError) {
-            console.warn("Failed to delete selfie upload file:", cleanupError);
-          }
+          
+          const totalUploadTime = Date.now() - uploadStartTime;
+          console.log(`[Queue] Total upload phase: ${totalUploadTime}ms`);
 
           // Phase: Firestore commit
           console.log('[Queue] Phase: Firestore commit (atomic batch)');
@@ -194,7 +205,18 @@ export default function ColeInboxScreen() {
           }, { merge: true });
 
           await batch.commit();
-          console.log(`[Queue] Job complete for event ${job.originalEventId}`);
+
+          // Cleanup local file (after commit to preserve file for retry if commit fails)
+          try {
+            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
+          } catch (cleanupError) {
+            console.warn("Failed to delete selfie upload file:", cleanupError);
+          } finally {
+            console.log(`[Queue] Selfie upload file deleted for event ${job.originalEventId}`);
+          }
+          
+          const totalJobTime = Date.now() - jobStartTime;
+          console.log(`[Queue] Job complete for event ${job.originalEventId} (total: ${totalJobTime}ms)`);
 
           queue.shift();
           await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
@@ -947,7 +969,7 @@ export default function ColeInboxScreen() {
   const enqueueSelfieUpload = useCallback(async (job: {
     originalEventId: string;
     responseEventId: string;
-    localUri: string;
+    localUri: string; // Persistent, processed selfie file (documentDirectory)
     senderExplorerId: string;
     viewerExplorerId: string;
     createdAt: number;
@@ -993,7 +1015,12 @@ export default function ColeInboxScreen() {
         throw new Error("Failed to capture photo");
       }
 
-      // Phase: Process
+      // Generate event ID for the response
+      const responseEventId = Date.now().toString();
+
+      // Phase: Process (resize/compress) + persist to documentDirectory
+      // NOTE: We do this here because doing ImageManipulator work inside the queue
+      // was intermittently taking tens of seconds and freezing the UI.
       console.log('[Selfie] Phase: Process (resize/compress)');
       const processedPhoto = await ImageManipulator.manipulateAsync(
         photo.uri,
@@ -1001,24 +1028,28 @@ export default function ColeInboxScreen() {
         { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG }
       );
 
-      // Cleanup original capture early (keep processed photo for deferred upload)
+      const persistentDir = FileSystem.documentDirectory;
+      const persistentPath = `${persistentDir}selfie_${responseEventId}.jpg`;
+      await FileSystem.copyAsync({ from: processedPhoto.uri, to: persistentPath });
+
+      // Cleanup temp files (best-effort). Keep only the persistentPath for queue.
       try {
-        if (photo?.uri && photo.uri !== processedPhoto.uri) {
+        if (photo.uri && photo.uri !== persistentPath && photo.uri !== processedPhoto.uri) {
           await FileSystem.deleteAsync(photo.uri, { idempotent: true });
         }
+        if (processedPhoto.uri && processedPhoto.uri !== persistentPath) {
+          await FileSystem.deleteAsync(processedPhoto.uri, { idempotent: true });
+        }
       } catch (cleanupError) {
-        console.warn("Failed to delete original selfie file:", cleanupError);
+        console.warn('Failed cleaning up selfie temp files:', cleanupError);
       }
 
-      // Generate event ID for the response
-      const responseEventId = Date.now().toString();
-
-      // Phase: Enqueue
+      // Phase: Enqueue (processed file is now persistent)
       console.log('[Selfie] Phase: Enqueue');
       await enqueueSelfieUpload({
         originalEventId: selectedEvent.event_id,
         responseEventId,
-        localUri: processedPhoto.uri,
+        localUri: persistentPath,
         senderExplorerId: ExplorerIdentity.currentExplorerId,
         viewerExplorerId: ExplorerIdentity.currentExplorerId,
         createdAt: Date.now(),

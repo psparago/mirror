@@ -182,11 +182,16 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 5000: 'snap' }
+                            after: { 
+                                5000: 'snap',
+                                10000: 'done' // Fallback: complete after 10s even if selfie hangs
+                            }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
-                            target: 'done'
+                            after: {
+                                5000: 'done' // Complete after 5s even if capture hangs
+                            }
                         },
                         done: { type: 'final' }
                     }
@@ -235,11 +240,19 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 5000: 'snap' }
+                            after: { 
+                                5000: 'snap',
+                                10000: 'done' // Fallback: complete after 10s even if selfie hangs
+                            }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
-                            target: 'done'
+                            after: {
+                                5000: 'done' // Complete after 5s even if capture hangs
+                            },
+                            on: {
+                                // Allow manual completion if selfie is taken
+                            }
                         },
                         done: { type: 'final' }
                     }

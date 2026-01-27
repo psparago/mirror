@@ -591,6 +591,38 @@ export default function MainStageView({
 
   const handleSingleTap = useCallback(() => {
     const currentState = stateRef.current;
+    const isVideo = !!selectedEventRef.current?.video_url;
+    
+    // For videos: no pause/resume - only replay when finished
+    if (isVideo) {
+      if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
+        console.log('🔁 User pressed REPLAY (video)');
+        
+        // For videos, respect instant playback config on replay
+        const useInstantPlayback = config?.instantVideoPlayback;
+        
+        if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
+          // Replay with instant playback (skip narration)
+          console.log('⚡ Replaying with instant video playback (skipping narration)');
+          send({ 
+            type: 'SELECT_EVENT_INSTANT', 
+            event: selectedEventRef.current, 
+            metadata: selectedMetadataRef.current 
+          });
+        } else {
+          // Standard replay (respects narration for videos)
+          send({ type: 'REPLAY' });
+        }
+        
+        if (onReplayRef.current && selectedEventRef.current) {
+          onReplayRef.current(selectedEventRef.current);
+        }
+      }
+      // Videos don't pause - ignore tap during playback
+      return;
+    }
+    
+    // For non-videos (audio/photos): allow pause/resume
     if (currentState && currentState.hasTag('active')) {
       if (currentState.hasTag('paused')) {
         console.log('⏯️ Tapped to Resume');
@@ -606,7 +638,7 @@ export default function MainStageView({
         onReplayRef.current(selectedEventRef.current);
       }
     }
-  }, [send]);
+  }, [send, config?.instantVideoPlayback]);
 
   // Horizontal swipe gesture for next/prev (applied to root container)
   const horizontalSwipeGesture = Gesture.Pan()
@@ -624,12 +656,15 @@ export default function MainStageView({
       }
       
       // Handle horizontal swipe for next/prev
-      if (Math.abs(event.translationX) > 50 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
+      // Increased threshold to 30px to avoid accidental triggers during video playback
+      if (Math.abs(event.translationX) > 30 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
         runOnJS(handleHorizontalSwipe)(event.translationX);
+        return; // Don't process tap if swipe was detected
       }
 
-      // Handle single tap (pause/resume/replay)
-      if (Math.abs(event.translationX) < 10 && Math.abs(event.translationY) < 10) {
+      // Handle single tap (only if no significant movement)
+      // Stricter threshold to avoid accidental taps during video
+      if (Math.abs(event.translationX) < 5 && Math.abs(event.translationY) < 5 && event.velocityX === 0 && event.velocityY === 0) {
         runOnJS(handleSingleTap)();
       }
     });
@@ -793,17 +828,15 @@ export default function MainStageView({
     // Check for both regular and instant video playback states
     const isMachinePlayingVideo = state.matches({ playingVideo: { playback: 'playing' } }) ||
       state.matches({ playingVideoInstant: { playback: 'playing' } });
-    const isMachinePaused = state.hasTag('paused');
-
+    
+    // Videos don't pause - only play or stop
     if (isMachinePlayingVideo) {
       if (!isVideoPlaying) {
         console.log('⚡ Hardware Sync: Playing Video');
         player.play();
       }
-    } else if (isMachinePaused) {
-      console.log('⚡ Hardware Sync: Pausing Video');
-      player.pause();
     }
+    // Removed pause handling for videos - they play through or finish
   }, [state.value, player, isVideoPlaying]);
 
   // --- DEBUG LOGGER (State Transitions) ---
@@ -912,15 +945,20 @@ export default function MainStageView({
   useEffect(() => {
     if (!state) return;
 
+    const isVideo = !!selectedEvent?.video_url;
+    
     if (state.matches('finished')) {
       // Finished: Show controls AND hide bubble
       controlsOpacity.value = withTiming(1, { duration: 200 });
       selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
-    } else if (state.hasTag('paused') || state.matches({ viewingPhoto: 'viewing' })) {
-      // Paused or photo viewing: Show controls
+    } else if (!isVideo && state.hasTag('paused')) {
+      // Paused (non-video only): Show controls
+      controlsOpacity.value = withTiming(1, { duration: 200 });
+    } else if (state.matches({ viewingPhoto: 'viewing' })) {
+      // Photo viewing: Show controls
       controlsOpacity.value = withTiming(1, { duration: 200 });
     } else {
-      // Playing: Hide controls
+      // Playing: Hide controls (videos never show pause controls)
       controlsOpacity.value = withTiming(0, { duration: 200 });
     }
   }, [state, controlsOpacity, selfieMirrorOpacity]);
@@ -967,8 +1005,27 @@ export default function MainStageView({
 
   const handleReplay = () => {
     console.log('🔁 User pressed REPLAY');
-    send({ type: 'REPLAY' });
-    if (onReplayRef.current && selectedEventRef.current) onReplayRef.current(selectedEventRef.current);
+    
+    // For videos, respect instant playback config on replay
+    const isVideo = !!selectedEventRef.current?.video_url;
+    const useInstantPlayback = config?.instantVideoPlayback && isVideo;
+    
+    if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
+      // Replay with instant playback (skip narration)
+      console.log('⚡ Replaying with instant video playback (skipping narration)');
+      send({ 
+        type: 'SELECT_EVENT_INSTANT', 
+        event: selectedEventRef.current, 
+        metadata: selectedMetadataRef.current 
+      });
+    } else {
+      // Standard replay (respects narration for videos)
+      send({ type: 'REPLAY' });
+    }
+    
+    if (onReplayRef.current && selectedEventRef.current) {
+      onReplayRef.current(selectedEventRef.current);
+    }
   };
 
   const handleAdminToggle = () => {
@@ -1284,10 +1341,10 @@ export default function MainStageView({
                     )}
 
 
-                    {/* Replay / Pause Icon Overlay */}
+                    {/* Replay Icon Overlay (videos don't pause, only show replay when finished) */}
                     <Animated.View
                       style={[styles.playOverlay, controlsAnimatedStyle]}
-                      pointerEvents={(state.matches('finished') || state.hasTag('paused')) ? 'auto' : 'none'}
+                      pointerEvents={state.matches('finished') ? 'auto' : 'none'}
                     >
                       {state.matches('finished') ? (
                         <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
@@ -1295,12 +1352,6 @@ export default function MainStageView({
                             <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
                           </BlurView>
                         </TouchableOpacity>
-                      ) : state.hasTag('paused') ? (
-                        <View style={styles.playButton}>
-                          <BlurView intensity={30} style={styles.playOverlayBlur}>
-                            <FontAwesome name="pause" size={64} color="rgba(255, 255, 255, 0.95)" />
-                          </BlurView>
-                        </View>
                       ) : null}
                     </Animated.View>
                   </Animated.View>
