@@ -118,7 +118,7 @@ export default function SettingsScreen() {
                 </TouchableOpacity>
 
                 <View style={styles.footer}>
-                    <Text style={styles.footerText}>Looking Glass</Text>
+                    <Text style={styles.footerText}>Reflection Explorer</Text>
                     <Text style={styles.footerSubtext}>by Angelware</Text>
                 </View>
             </ScrollView>

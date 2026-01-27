@@ -150,7 +150,7 @@ export const playerMachine = setup({
                             tags: ['playing', 'active', 'video', 'loadingVideo'],
                             on: {
                                 PAUSE: 'paused',
-                                VIDEO_FINISHED: '#lookingGlassPlayer.finished'
+                                VIDEO_FINISHED: 'done'
                             }
                         },
                         paused: {
@@ -162,7 +162,8 @@ export const playerMachine = setup({
                                     { target: 'playing', actions: 'resumeMedia' }
                                 ]
                             }
-                        }
+                        },
+                        done: { type: 'final' }
                     }
                 },
                 selfie: {
@@ -190,7 +191,9 @@ export const playerMachine = setup({
                         done: { type: 'final' }
                     }
                 }
-            }
+            },
+            // Only finish after BOTH playback and selfie regions complete
+            onDone: '#lookingGlassPlayer.finished'
         },
 
         // Instant video playback - skips narration, starts video immediately
@@ -206,7 +209,7 @@ export const playerMachine = setup({
                             tags: ['playing', 'active', 'video', 'loadingVideo'],
                             on: {
                                 PAUSE: 'paused',
-                                VIDEO_FINISHED: '#lookingGlassPlayer.finished'
+                                VIDEO_FINISHED: 'done'
                             }
                         },
                         paused: {
@@ -218,7 +221,8 @@ export const playerMachine = setup({
                                     actions: 'resumeMedia'
                                 }
                             }
-                        }
+                        },
+                        done: { type: 'final' }
                     }
                 },
                 selfie: {
@@ -240,7 +244,9 @@ export const playerMachine = setup({
                         done: { type: 'final' }
                     }
                 }
-            }
+            },
+            // Only finish after BOTH playback and selfie regions complete
+            onDone: '#lookingGlassPlayer.finished'
         },
 
         playingAudio: {

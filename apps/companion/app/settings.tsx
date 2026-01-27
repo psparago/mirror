@@ -91,7 +91,7 @@ export default function SettingsScreen() {
                 </View>
 
                 <View style={styles.footer}>
-                    <Text style={styles.footerText}>Looking Glass Companion</Text>
+                    <Text style={styles.footerText}>Reflection Companion</Text>
                     <Text style={styles.footerSubtext}>by Angelware</Text>
                 </View>
             </ScrollView>

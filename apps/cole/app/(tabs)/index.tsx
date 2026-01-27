@@ -7,10 +7,11 @@ import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
-import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where, writeBatch } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -28,6 +29,9 @@ export default function ColeInboxScreen() {
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
+  const selfieUploadInFlightRef = useRef(false);
+
+  const SELFIE_QUEUE_KEY = 'selfie_upload_queue';
   const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const { width, height } = useWindowDimensions();
@@ -113,6 +117,7 @@ export default function ColeInboxScreen() {
 
       if (nextAppState === 'active') {
         console.log('🔄 App came to foreground - resuming network and refreshing data');
+        processSelfieQueue();
         try {
           // 1. Resume Firestore
           await enableNetwork(db);
@@ -162,7 +167,7 @@ export default function ColeInboxScreen() {
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [processSelfieQueue]);
 
   // Request permissions and configure audio on startup
   useEffect(() => {
@@ -843,6 +848,112 @@ export default function ColeInboxScreen() {
     }
   };
 
+  const enqueueSelfieUpload = useCallback(async (job: {
+    originalEventId: string;
+    responseEventId: string;
+    localUri: string;
+    senderExplorerId: string;
+    viewerExplorerId: string;
+    createdAt: number;
+  }) => {
+    try {
+      const existingRaw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
+      const existingQueue = existingRaw ? JSON.parse(existingRaw) : [];
+      existingQueue.push(job);
+      await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(existingQueue));
+      await processSelfieQueue();
+    } catch (error) {
+      console.error('Failed to enqueue selfie upload:', error);
+    }
+  }, []);
+
+  const processSelfieQueue = useCallback(async () => {
+    if (selfieUploadInFlightRef.current) return;
+    selfieUploadInFlightRef.current = true;
+    try {
+      while (true) {
+        const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
+        const queue = raw ? JSON.parse(raw) : [];
+        if (!queue.length) break;
+
+        const job = queue[0];
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(job.localUri);
+          if (!fileInfo.exists) {
+            console.warn('Selfie upload file missing, dropping job:', job.localUri);
+            queue.shift();
+            await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
+            continue;
+          }
+
+          // Get presigned URL for upload
+          const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
+            try {
+              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+              if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+              return res;
+            } catch (e: any) {
+              if (retryCount < 1) {
+                await new Promise(r => setTimeout(r, 1500));
+                return fetchWithRetry(retryCount + 1);
+              }
+              throw e;
+            }
+          };
+
+          const imageResponse = await fetchWithRetry();
+          const imageData = await imageResponse.json();
+          const imageUrl = imageData.url;
+
+          const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
+            httpMethod: 'PUT',
+            headers: { 'Content-Type': 'image/jpeg' },
+          });
+
+          if (uploadResult.status !== 200) {
+            throw new Error(`Selfie upload failed: ${uploadResult.status}`);
+          }
+
+          // Cleanup local file
+          try {
+            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
+          } catch (cleanupError) {
+            console.warn("Failed to delete selfie upload file:", cleanupError);
+          }
+
+          // Atomic Firestore update: response + reflection status in one batch
+          const batch = writeBatch(db);
+          const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
+          const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
+
+          batch.set(responseRef, {
+            explorerId: job.senderExplorerId,
+            viewerExplorerId: job.viewerExplorerId,
+            event_id: job.originalEventId,
+            response_event_id: job.responseEventId,
+            timestamp: serverTimestamp(),
+            type: 'selfie_response',
+          });
+
+          batch.set(reflectionRef, {
+            status: 'responded',
+            responded_at: serverTimestamp(),
+          }, { merge: true });
+
+          await batch.commit();
+
+          queue.shift();
+          await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
+        } catch (uploadError) {
+          console.error('Selfie upload failed (will retry later):', uploadError);
+          break;
+        }
+      }
+    } finally {
+      selfieUploadInFlightRef.current = false;
+    }
+  }, []);
+
   // Capture and upload selfie response
   const captureSelfieResponse = useCallback(async (silent: boolean = false) => {
     if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
@@ -863,7 +974,7 @@ export default function ColeInboxScreen() {
     try {
       // Capture photo
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
+        quality: 0.3,
         base64: false,
       });
 
@@ -871,53 +982,33 @@ export default function ColeInboxScreen() {
         throw new Error("Failed to capture photo");
       }
 
+      const processedPhoto = await ImageManipulator.manipulateAsync(
+        photo.uri,
+        [{ resize: { width: 1080 } }],
+        { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      // Cleanup original capture early (keep processed photo for deferred upload)
+      try {
+        if (photo?.uri && photo.uri !== processedPhoto.uri) {
+          await FileSystem.deleteAsync(photo.uri, { idempotent: true });
+        }
+      } catch (cleanupError) {
+        console.warn("Failed to delete original selfie file:", cleanupError);
+      }
+
       // Generate event ID for the response
       const responseEventId = Date.now().toString();
 
-      // Get presigned URL for upload (path=from for Star to Companion)
-      let imageUrl: string;
-      try {
-        console.log("Getting presigned URL for selfie upload...");
-        const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
-          try {
-            const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-            return res;
-          } catch (e: any) {
-            if (retryCount < 1) {
-              console.log(`🔄 Selfie URL fetch failed, retrying in 1.5s... (${e.message})`);
-              await new Promise(r => setTimeout(r, 1500));
-              return fetchWithRetry(retryCount + 1);
-            }
-            throw e;
-          }
-        };
-
-        const imageResponse = await fetchWithRetry();
-        const imageData = await imageResponse.json();
-        imageUrl = imageData.url;
-
-        console.log("Got presigned URL, uploading image via FileSystem...");
-        const uploadResult = await FileSystem.uploadAsync(imageUrl, photo.uri, {
-          httpMethod: 'PUT',
-          headers: { 'Content-Type': 'image/jpeg' },
-        });
-
-        if (uploadResult.status !== 200) {
-          throw new Error(`Image upload failed: ${uploadResult.status}`);
-        }
-        console.log("Image uploaded successfully");
-      } catch (error: any) {
-        console.error("Error getting presigned URL or uploading image:", error);
-        throw new Error(`Failed to get upload URL or upload image: ${error.message || 'Network request failed'}`);
-      }
-
-      // Cleanup local file
-      try {
-        await FileSystem.deleteAsync(photo.uri, { idempotent: true });
-      } catch (cleanupError) {
-        console.warn("Failed to delete local file:", cleanupError);
-      }
+      // Defer upload via queue so it can complete even if user swipes away
+      await enqueueSelfieUpload({
+        originalEventId: selectedEvent.event_id,
+        responseEventId,
+        localUri: processedPhoto.uri,
+        senderExplorerId: ExplorerIdentity.currentExplorerId,
+        viewerExplorerId: ExplorerIdentity.currentExplorerId,
+        createdAt: Date.now(),
+      });
 
       // Speak confirmation message (only if not silent)
       // DISABLED for now - can be distracting during video playback
@@ -931,39 +1022,7 @@ export default function ColeInboxScreen() {
       //   });
       // }
 
-      // Create reflection_response document in Firestore
-      // Use original event_id as document ID for easy lookup
-      // IMPORTANT: Use the ORIGINAL SENDER's explorerId so they can find the response
-      // In dev, both apps run as 'peter'. In prod, we'd need to look this up from the reflection doc.
-      const senderExplorerId = ExplorerIdentity.currentExplorerId; // Use the current explorer ID (peter in dev, cole in prod)
-      const responseRef = doc(db, ExplorerIdentity.collections.responses, selectedEvent.event_id);
-      try {
-        await setDoc(responseRef, {
-          explorerId: senderExplorerId, // The SENDER's ID, not the viewer's
-          viewerExplorerId: ExplorerIdentity.currentExplorerId, // Also store who viewed it
-          event_id: selectedEvent.event_id, // Link to original Reflection
-          response_event_id: responseEventId,
-          timestamp: serverTimestamp(),
-          type: 'selfie_response',
-        });
-        console.log(`📤 Wrote selfie response to Firestore: ${selectedEvent.event_id} (sender: ${senderExplorerId})`);
-      } catch (firestoreError: any) {
-        console.error("❌ Failed to save reflection response to Firestore:", firestoreError);
-      }
-
-
-      // 4. Update the ORIGINAL reflection status to 'responded'
-      const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, selectedEvent.event_id);
-      setDoc(reflectionRef, {
-        status: 'responded',
-        responded_at: serverTimestamp(),
-      }, { merge: true })
-        .then(() => {
-          console.log(`✅ Updated reflection ${selectedEvent.event_id} status to 'responded'`);
-        })
-        .catch(err => {
-          console.warn(`Failed to update reflection status:`, err);
-        });
+      // Upload + Firestore updates now happen in the deferred queue
 
     } catch (error: any) {
       console.error("❌ Error capturing selfie:", error);

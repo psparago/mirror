@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Looking Glass",
+    "name": "Reflection Explorer",
     "slug": "mirror-cole",
     "version": "1.0.1",
     "orientation": "portrait",
@@ -17,7 +17,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass",
-      "buildNumber": "4",
+      "buildNumber": "5",
       "googleServicesFile": "./GoogleService-Info.plist",
       "icon": "./assets/images/icon-lg.png",
       "infoPlist": {
@@ -52,8 +52,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Looking Glass to see you.",
-          "microphonePermission": "Allow Looking Glass to hear you."
+          "cameraPermission": "Allow Reflection Explorer to see you.",
+          "microphonePermission": "Allow Reflection Explorer to hear you."
         }
       ],
       [

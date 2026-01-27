@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Looking Glass Companion",
+    "name": "Reflection Companion",
     "slug": "mirror-companion",
     "version": "1.0.1",
     "orientation": "portrait",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass.companion",
-      "buildNumber": "4",
+      "buildNumber": "5",
       "icon": "./assets/images/icon-lgc.png",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
@@ -48,14 +48,14 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Looking Glass Companion to access your camera to send video responses.",
-          "microphonePermission": "Allow Looking Glass Companion to access your microphone for video and audio features."
+          "cameraPermission": "Allow Reflection Companion to access your camera to send video responses.",
+          "microphonePermission": "Allow Reflection Companion to access your microphone for video and audio features."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Looking Glass Companion to access your photos."
+          "photosPermission": "Allow Reflection Companion to access your photos."
         }
       ],
       [
