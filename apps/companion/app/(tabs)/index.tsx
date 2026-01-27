@@ -296,7 +296,23 @@ export default function CompanionHomeScreen() {
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
 
-      const response = await fetch(fetchUrl);
+      // Add timeout to prevent 504 errors (60 seconds for AI generation)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      
+      let response;
+      try {
+        response = await fetch(fetchUrl, {
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          throw new Error('AI description request timed out after 60 seconds');
+        }
+        throw fetchError;
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -1055,9 +1071,12 @@ export default function CompanionHomeScreen() {
         
         // Actions
         onCancel={cancelPhoto} 
-        onTriggerMagic={async () => {
-          // Wrap your existing generator
-          const result = await generateDeepDiveBackground({ silent: false });
+        onTriggerMagic={async (targetCaption?: string) => {
+          // Wrap your existing generator, passing edited caption if provided
+          const result = await generateDeepDiveBackground({ 
+            silent: false,
+            targetCaption: targetCaption || description || undefined
+          });
           // If result exists, the composer handles the UI update via props
         }}
         onSend={(data) => {

@@ -110,6 +110,104 @@ export default function ColeInboxScreen() {
   // Fetch events and listen for Firestore updates
   // Fetch events and listen for Firestore updates - Moved below to fix closure staleness
 
+  // Process selfie upload queue (defined before useEffects that use it)
+  const processSelfieQueue = useCallback(async () => {
+    if (selfieUploadInFlightRef.current) return;
+    selfieUploadInFlightRef.current = true;
+    try {
+      console.log('[Queue] Phase: Process start');
+      while (true) {
+        const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
+        const queue = raw ? JSON.parse(raw) : [];
+        if (!queue.length) {
+          console.log('[Queue] Phase: Process complete (queue empty)');
+          break;
+        }
+
+        const job = queue[0];
+        console.log(`[Queue] Processing job for event ${job.originalEventId}`);
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(job.localUri);
+          if (!fileInfo.exists) {
+            console.warn('Selfie upload file missing, dropping job:', job.localUri);
+            queue.shift();
+            await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
+            continue;
+          }
+
+          // Phase: Upload
+          console.log('[Queue] Phase: Upload to S3');
+          // Get presigned URL for upload
+          const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
+            try {
+              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+              if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+              return res;
+            } catch (e: any) {
+              if (retryCount < 1) {
+                await new Promise(r => setTimeout(r, 1500));
+                return fetchWithRetry(retryCount + 1);
+              }
+              throw e;
+            }
+          };
+
+          const imageResponse = await fetchWithRetry();
+          const imageData = await imageResponse.json();
+          const imageUrl = imageData.url;
+
+          const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
+            httpMethod: 'PUT',
+            headers: { 'Content-Type': 'image/jpeg' },
+          });
+
+          if (uploadResult.status !== 200) {
+            throw new Error(`Selfie upload failed: ${uploadResult.status}`);
+          }
+
+          // Cleanup local file
+          try {
+            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
+          } catch (cleanupError) {
+            console.warn("Failed to delete selfie upload file:", cleanupError);
+          }
+
+          // Phase: Firestore commit
+          console.log('[Queue] Phase: Firestore commit (atomic batch)');
+          // Atomic Firestore update: response + reflection status in one batch
+          const batch = writeBatch(db);
+          const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
+          const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
+
+          batch.set(responseRef, {
+            explorerId: job.senderExplorerId,
+            viewerExplorerId: job.viewerExplorerId,
+            event_id: job.originalEventId,
+            response_event_id: job.responseEventId,
+            timestamp: serverTimestamp(),
+            type: 'selfie_response',
+          });
+
+          batch.set(reflectionRef, {
+            status: 'responded',
+            responded_at: serverTimestamp(),
+          }, { merge: true });
+
+          await batch.commit();
+          console.log(`[Queue] Job complete for event ${job.originalEventId}`);
+
+          queue.shift();
+          await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
+        } catch (uploadError) {
+          console.error('Selfie upload failed (will retry later):', uploadError);
+          break;
+        }
+      }
+    } finally {
+      selfieUploadInFlightRef.current = false;
+    }
+  }, []);
+
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
@@ -864,104 +962,7 @@ export default function ColeInboxScreen() {
     } catch (error) {
       console.error('Failed to enqueue selfie upload:', error);
     }
-  }, []);
-
-  const processSelfieQueue = useCallback(async () => {
-    if (selfieUploadInFlightRef.current) return;
-    selfieUploadInFlightRef.current = true;
-    try {
-      console.log('[Queue] Phase: Process start');
-      while (true) {
-        const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
-        const queue = raw ? JSON.parse(raw) : [];
-        if (!queue.length) {
-          console.log('[Queue] Phase: Process complete (queue empty)');
-          break;
-        }
-
-        const job = queue[0];
-        console.log(`[Queue] Processing job for event ${job.originalEventId}`);
-        try {
-          const fileInfo = await FileSystem.getInfoAsync(job.localUri);
-          if (!fileInfo.exists) {
-            console.warn('Selfie upload file missing, dropping job:', job.localUri);
-            queue.shift();
-            await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
-            continue;
-          }
-
-          // Phase: Upload
-          console.log('[Queue] Phase: Upload to S3');
-          // Get presigned URL for upload
-          const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
-            try {
-              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
-              if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-              return res;
-            } catch (e: any) {
-              if (retryCount < 1) {
-                await new Promise(r => setTimeout(r, 1500));
-                return fetchWithRetry(retryCount + 1);
-              }
-              throw e;
-            }
-          };
-
-          const imageResponse = await fetchWithRetry();
-          const imageData = await imageResponse.json();
-          const imageUrl = imageData.url;
-
-          const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
-            httpMethod: 'PUT',
-            headers: { 'Content-Type': 'image/jpeg' },
-          });
-
-          if (uploadResult.status !== 200) {
-            throw new Error(`Selfie upload failed: ${uploadResult.status}`);
-          }
-
-          // Cleanup local file
-          try {
-            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
-          } catch (cleanupError) {
-            console.warn("Failed to delete selfie upload file:", cleanupError);
-          }
-
-          // Phase: Firestore commit
-          console.log('[Queue] Phase: Firestore commit (atomic batch)');
-          // Atomic Firestore update: response + reflection status in one batch
-          const batch = writeBatch(db);
-          const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
-          const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
-
-          batch.set(responseRef, {
-            explorerId: job.senderExplorerId,
-            viewerExplorerId: job.viewerExplorerId,
-            event_id: job.originalEventId,
-            response_event_id: job.responseEventId,
-            timestamp: serverTimestamp(),
-            type: 'selfie_response',
-          });
-
-          batch.set(reflectionRef, {
-            status: 'responded',
-            responded_at: serverTimestamp(),
-          }, { merge: true });
-
-          await batch.commit();
-          console.log(`[Queue] Job complete for event ${job.originalEventId}`);
-
-          queue.shift();
-          await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
-        } catch (uploadError) {
-          console.error('Selfie upload failed (will retry later):', uploadError);
-          break;
-        }
-      }
-    } finally {
-      selfieUploadInFlightRef.current = false;
-    }
-  }, []);
+  }, [processSelfieQueue]);
 
   // Capture and upload selfie response
   const captureSelfieResponse = useCallback(async (silent: boolean = false) => {

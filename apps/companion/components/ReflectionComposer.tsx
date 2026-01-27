@@ -29,7 +29,7 @@ interface ReflectionComposerProps {
   // Actions
   onCancel: () => void;
   onSend: (data: { caption: string; audioUri: string | null; deepDive: string | null }) => void;
-  onTriggerMagic: () => Promise<void>; // The function to call API_ENDPOINTS.AI_DESCRIPTION
+  onTriggerMagic: (targetCaption?: string) => Promise<void>; // The function to call API_ENDPOINTS.AI_DESCRIPTION
   isSending: boolean;
   
   // Audio Recorder (passed from parent or hook)
@@ -67,6 +67,10 @@ export default function ReflectionComposer({
   const isBlockedByAi = isAiThinking && !isAiCancelled;
   const hasRecordedAudio = !!audioUri;
 
+  // Track last AI caption to detect edits
+  const lastAiCaptionRef = useRef<string | null>(null);
+  const hasTriggeredRegenForCurrentEditRef = useRef(false);
+
   // Get screen dimensions
   const { height: screenHeight } = useWindowDimensions();
 
@@ -78,7 +82,7 @@ export default function ReflectionComposer({
     // 3. The user hasn't explicitly cancelled it.
     if (!caption && !isAiThinking && !isAiCancelled) {
       console.log("✨ Auto-triggering AI Magic...");
-      // Fire and forget (errors handled in parent)
+      // Fire and forget (errors handled in parent) - no target caption on initial trigger
       onTriggerMagic().catch(() => console.log("Auto-magic failed"));
     }
   }, []);
@@ -88,7 +92,51 @@ export default function ReflectionComposer({
     if (aiArtifacts?.caption && !caption) {
       setCaption(aiArtifacts.caption);
     }
-  }, [aiArtifacts?.caption]);
+    // Track the AI caption for comparison (always update when AI provides a caption)
+    // This ensures that after regeneration, we don't trigger again for the same text
+    if (aiArtifacts?.caption) {
+      lastAiCaptionRef.current = aiArtifacts.caption;
+      // If the current caption matches the AI caption (regeneration completed), reset the flag
+      if (caption && caption.trim() === aiArtifacts.caption.trim()) {
+        hasTriggeredRegenForCurrentEditRef.current = false;
+      }
+    }
+  }, [aiArtifacts?.caption, caption]);
+
+  // Function to check and trigger AI audio regeneration when editing is "done"
+  const checkAndRegenerateAudio = useCallback(() => {
+    // Only regenerate if:
+    // 1. Caption exists and is different from AI-generated caption
+    // 2. User hasn't recorded their own audio (voice takes priority)
+    // 3. Not currently thinking
+    // 4. Caption has actually changed from the AI version
+    // 5. We haven't already triggered regeneration for this edit
+    if (
+      caption &&
+      caption.trim() &&
+      lastAiCaptionRef.current &&
+      caption.trim() !== lastAiCaptionRef.current.trim() &&
+      !hasRecordedAudio &&
+      !isAiThinking &&
+      !isAiCancelled &&
+      !hasTriggeredRegenForCurrentEditRef.current
+    ) {
+      console.log("📝 Caption edited, regenerating AI audio...");
+      hasTriggeredRegenForCurrentEditRef.current = true;
+      // Trigger AI with the edited caption as target
+      onTriggerMagic(caption.trim()).catch((err) => {
+        console.error("Failed to regenerate AI audio:", err);
+        hasTriggeredRegenForCurrentEditRef.current = false; // Allow retry on error
+      });
+    }
+  }, [caption, hasRecordedAudio, isAiThinking, isAiCancelled, onTriggerMagic]);
+
+  // Reset regeneration flag when caption changes (new edit started)
+  useEffect(() => {
+    if (caption && lastAiCaptionRef.current && caption.trim() !== lastAiCaptionRef.current.trim()) {
+      hasTriggeredRegenForCurrentEditRef.current = false;
+    }
+  }, [caption]);
 
   // Track keyboard height
   useEffect(() => {
@@ -102,6 +150,8 @@ export default function ReflectionComposer({
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
       () => {
         setKeyboardHeight(0);
+        // Trigger regeneration when keyboard is dismissed (user is "done" editing)
+        checkAndRegenerateAudio();
       }
     );
 
@@ -109,7 +159,7 @@ export default function ReflectionComposer({
       showSubscription.remove();
       hideSubscription.remove();
     };
-  }, []);
+  }, [checkAndRegenerateAudio]);
 
   // Calculate snap points dynamically based on screen height and keyboard
   const snapPoints = useMemo(() => {
@@ -151,8 +201,14 @@ export default function ReflectionComposer({
   // --- HANDLERS ---
 
   const handleSheetChange = useCallback((index: number) => {
-    if (index < 2) Keyboard.dismiss();
-  }, []);
+    if (index < 2) {
+      Keyboard.dismiss();
+      // Trigger regeneration when sheet changes away from text tab
+      if (activeTab === 'text' && index !== 2) {
+        checkAndRegenerateAudio();
+      }
+    }
+  }, [activeTab, checkAndRegenerateAudio]);
 
   const handlePreview = () => {
     const previewId = 'preview-temp';
@@ -212,6 +268,8 @@ export default function ReflectionComposer({
     });
   };
   const resetToMain = () => { 
+    // Trigger regeneration before dismissing (user is "done" editing)
+    checkAndRegenerateAudio();
     setActiveTab('main'); 
     requestAnimationFrame(() => {
       sheetRef.current?.snapToIndex(0);
@@ -374,6 +432,10 @@ export default function ReflectionComposer({
         onFocus={() => {
           // Snap to highest point when text input is focused
           sheetRef.current?.snapToIndex(2);
+        }}
+        onBlur={() => {
+          // Trigger regeneration when text input loses focus (user is "done" editing)
+          checkAndRegenerateAudio();
         }}
       />
     </Animated.View>
