@@ -10,7 +10,7 @@ import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
-import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -816,6 +816,7 @@ export default function ColeInboxScreen() {
         status: 'engaged',
         timestamp: serverTimestamp(),
         type: 'engagement_heartbeat',
+        engagement_count: increment(1),
       }, { merge: true });
       hasEngagedRef.current[eventId] = true;
     } catch (error) {
@@ -834,6 +835,7 @@ export default function ColeInboxScreen() {
         status: 'replayed',
         timestamp: serverTimestamp(),
         type: 'engagement_heartbeat',
+        engagement_count: increment(1),
       }, { merge: true });
       hasReplayedRef.current[eventId] = true;
     } catch (error) {

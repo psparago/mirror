@@ -885,6 +885,7 @@ export default function CompanionHomeScreen() {
         status: "ready",
         timestamp: serverTimestamp(),
         type: "mirror_event",
+        engagement_count: 0,
         // Explicitly include paths so Mirror knows exactly what files are available
         audio_url: hasAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/audio.m4a` : null,
         deep_dive_audio_url: hasDeepDiveAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,

@@ -20,6 +20,7 @@ interface SentReflection {
   sentTimestamp?: any; // Original "sent" timestamp (preserved from 'ready' status)
   status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
   engagementTimestamp?: any;
+  engagementCount?: number;
   deletedAt?: any;
   hasResponse?: boolean;
   responseImageUrl?: string;
@@ -230,6 +231,7 @@ export default function SentHistoryScreen() {
               sentTimestamp: currentStatus === 'ready' ? data.timestamp : undefined, // Preserve original sent time
               status: currentStatus,
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
+              engagementCount: typeof data.engagement_count === 'number' ? data.engagement_count : 0,
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
               sender: data.sender,
             });
@@ -238,9 +240,19 @@ export default function SentHistoryScreen() {
             const existingTime = getTimestampValue(existing.timestamp);
             const existingEngTime = getTimestampValue(existing.engagementTimestamp);
 
-            // Preserve original sent timestamp if we see a 'ready' status and don't have one yet
-            if (currentStatus === 'ready' && !existing.sentTimestamp) {
-              existing.sentTimestamp = data.timestamp;
+            // ALWAYS preserve original sent timestamp from 'ready' status
+            // This ensures we capture it even if we see 'engaged'/'replayed' first
+            if (currentStatus === 'ready') {
+              // If we don't have sentTimestamp yet, or this 'ready' timestamp is earlier, use it
+              if (!existing.sentTimestamp) {
+                existing.sentTimestamp = data.timestamp;
+              } else {
+                const existingSentTime = getTimestampValue(existing.sentTimestamp);
+                if (currentTime < existingSentTime) {
+                  // This 'ready' signal is earlier, use it as the sent time
+                  existing.sentTimestamp = data.timestamp;
+                }
+              }
             }
 
             // Always update status if this signal has higher priority
@@ -255,6 +267,10 @@ export default function SentHistoryScreen() {
               if (currentStatus === 'engaged' || currentStatus === 'replayed') {
                 existing.engagementTimestamp = data.timestamp;
               }
+              // Update engagement count if provided
+              if (typeof data.engagement_count === 'number') {
+                existing.engagementCount = Math.max(existing.engagementCount || 0, data.engagement_count);
+              }
               // Update deleted_at for deleted status
               if (currentStatus === 'deleted') {
                 existing.deletedAt = data.deleted_at;
@@ -267,6 +283,10 @@ export default function SentHistoryScreen() {
                 if ((currentStatus === 'engaged' || currentStatus === 'replayed')) {
                   existing.engagementTimestamp = data.timestamp;
                 }
+              }
+              // Update engagement count if provided (even if timestamp isn't newer)
+              if (typeof data.engagement_count === 'number') {
+                existing.engagementCount = Math.max(existing.engagementCount || 0, data.engagement_count);
               }
               // Update sender if available (even if timestamp isn't newer)
               if (data.sender) {
@@ -281,6 +301,10 @@ export default function SentHistoryScreen() {
                 if (!existing.engagementTimestamp || currentTime > existingEngTime) {
                   existing.engagementTimestamp = data.timestamp;
                 }
+              }
+              // Update engagement count if provided
+              if (typeof data.engagement_count === 'number') {
+                existing.engagementCount = Math.max(existing.engagementCount || 0, data.engagement_count);
               }
             }
           }
@@ -411,30 +435,20 @@ export default function SentHistoryScreen() {
     // Trigger refresh when app comes to foreground
   }, [refreshTrigger]);
 
-  const getStatusText = (status?: string) => {
-    switch (status) {
-      case 'engaged':
-        return 'Engaged';
-      case 'replayed':
-        return 'Replayed';
-      case 'deleted':
-        return 'Deleted';
-      default:
-        return 'Viewed';
-    }
+  const getStatusText = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
+    if (status === 'deleted') return 'Deleted';
+    if (status === 'replayed') return 'Replayed';
+    if (hasSelfie) return 'Engaged';
+    if (hasEngagementTimestamp) return 'Viewed';
+    return 'Sent';
   };
 
-  const getStatusColor = (status?: string) => {
-    switch (status) {
-      case 'engaged':
-        return '#4a9eff';
-      case 'replayed':
-        return '#2ecc71';
-      case 'deleted':
-        return '#e74c3c';
-      default:
-        return '#999';
-    }
+  const getStatusColor = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
+    if (status === 'deleted') return '#e74c3c';
+    if (status === 'replayed') return '#2ecc71';
+    if (hasSelfie) return '#4a9eff';
+    if (hasEngagementTimestamp) return '#999';
+    return '#f39c12'; // Sent
   };
 
   const formatEngagementDate = (timestamp: any) => {
@@ -656,8 +670,15 @@ export default function SentHistoryScreen() {
         <FlatList
           data={displayReflections}
           keyExtractor={(item) => item.event_id}
-          renderItem={({ item }) => (
-            <TouchableOpacity 
+        renderItem={({ item }) => {
+          const hasSelfie = !!item.hasResponse;
+          const rawEngagementCount = item.engagementCount ?? 0;
+          const engagementCount = rawEngagementCount > 0 ? rawEngagementCount : (hasSelfie ? 1 : 0);
+          const engagementTimestamp = hasSelfie
+            ? responseTimestampMap.get(item.event_id)
+            : item.engagementTimestamp;
+          return (
+          <TouchableOpacity 
               style={styles.reflectionItem}
               activeOpacity={0.7}
               onPress={async () => {
@@ -755,15 +776,17 @@ export default function SentHistoryScreen() {
               <View style={styles.reflectionInfo}>
                 <View style={styles.reflectionContent}>
                   <View style={styles.statusBadge}>
-                    <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status) }]} />
-                    <Text style={styles.statusText}>{getStatusText(item.status)}</Text>
+                    <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
+                    <Text style={styles.statusText}>
+                      {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                    </Text>
                     {item.status === 'deleted' && item.deletedAt ? (
                       <Text style={styles.engagementDate}>
                         {formatEngagementDate(item.deletedAt)}
                       </Text>
-                    ) : item.engagementTimestamp ? (
+                    ) : engagementTimestamp && item.status !== 'ready' ? (
                       <Text style={styles.engagementDate}>
-                        {formatEngagementDate(item.engagementTimestamp)}
+                        {formatEngagementDate(engagementTimestamp)}
                       </Text>
                     ) : null}
                   </View>
@@ -823,9 +846,14 @@ export default function SentHistoryScreen() {
                   </View>
                 )}
                 {/* Viewed date on its own line */}
-                {item.hasResponse && responseTimestampMap.get(item.event_id) && (
+                {hasSelfie && engagementTimestamp && (
                   <Text style={styles.viewedDate}>
-                    Viewed: {formatEngagementDate(responseTimestampMap.get(item.event_id))}
+                    Viewed: {formatEngagementDate(engagementTimestamp)}
+                  </Text>
+                )}
+                {engagementCount > 0 && (
+                  <Text style={styles.engagementCount}>
+                    Engagements: {engagementCount}
                   </Text>
                 )}
                 {/* Sent date */}
@@ -852,7 +880,8 @@ export default function SentHistoryScreen() {
               </View>
             </View>
           </TouchableOpacity>
-        )}
+          );
+        }}
           contentContainerStyle={styles.listContainer}
         />
       )}
@@ -1093,6 +1122,11 @@ const styles = StyleSheet.create({
   viewedDate: {
     fontSize: 12,
     color: '#60a5fa', // Blue to differentiate from green Selfie button
+    marginTop: 4,
+  },
+  engagementCount: {
+    fontSize: 12,
+    color: '#f59e0b', // Amber for engagement count
     marginTop: 4,
   },
   tabContainer: {
