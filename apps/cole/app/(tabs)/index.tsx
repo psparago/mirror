@@ -1070,6 +1070,15 @@ export default function ColeInboxScreen() {
         createdAt: Date.now(),
       });
 
+      // For non-videos (photos/images/audio-only), flush the queue immediately after selfie.
+      // For videos, we still prefer flushing on "idle" (finish/dismiss/next) to avoid mid-playback updates.
+      const isVideo =
+        !!selectedEvent.video_url || eventMetadata[selectedEvent.event_id]?.content_type === 'video';
+      if (!isVideo) {
+        debugLog('[Queue] Flushing after selfie (non-video)');
+        processSelfieQueue();
+      }
+
       // Speak confirmation message (only if not silent)
       // DISABLED for now - can be distracting during video playback
       // if (!silent) {

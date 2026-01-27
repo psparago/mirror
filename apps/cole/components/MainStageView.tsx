@@ -144,6 +144,7 @@ export default function MainStageView({
 
   // Track previous event to prevent restart loops
   const prevEventIdRef = useRef<string | null>(null);
+  const lastVideoFinishedEventIdRef = useRef<string | null>(null);
 
   // Track active caption session to prevent ghost TTS callbacks
   const captionSessionRef = useRef(0);
@@ -978,6 +979,11 @@ export default function MainStageView({
       if (player.duration > 0 && player.currentTime >= player.duration - 0.2) {
         debugLog(`🎬 Video finished at ${player.currentTime}/${player.duration}`);
         send({ type: 'VIDEO_FINISHED' });
+        const currentEventId = selectedEventRef.current?.event_id || null;
+        if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
+          lastVideoFinishedEventIdRef.current = currentEventId;
+          onPlaybackIdleRef.current?.();
+        }
       }
     }, 200);
     return () => clearInterval(interval);
