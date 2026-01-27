@@ -47,6 +47,28 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
     }
   }, [event?.metadata?.deep_dive]);
 
+  // FORCE AUDIO TO SPEAKER
+  useEffect(() => {
+    const configureAudioSession = async () => {
+      try {
+        console.log('🔊 Configuring Audio Session for Playback...');
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false, // Critical: Turn off recording mode
+          playsInSilentModeIOS: true, // Critical: Play even if mute switch is on
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false, // Critical: Force speaker on Android
+        });
+      } catch (error) {
+        console.error('Failed to configure audio session:', error);
+      }
+    };
+
+    if (visible) {
+      configureAudioSession();
+    }
+  }, [visible]);
+
   const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: tellMeMorePulse.value }],
   }));
