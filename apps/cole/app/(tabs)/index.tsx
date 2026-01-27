@@ -812,8 +812,6 @@ export default function ColeInboxScreen() {
 
   // Send engagement signal to Firestore
   const sendEngagementSignal = async (eventId: string) => {
-    if (hasEngagedRef.current[eventId]) return; // Already sent
-
     try {
       const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
       await setDoc(signalRef, {
@@ -857,6 +855,7 @@ export default function ColeInboxScreen() {
     createdAt: number;
   }) => {
     try {
+      console.log(`[Queue] Enqueue job for event ${job.originalEventId}`);
       const existingRaw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
       const existingQueue = existingRaw ? JSON.parse(existingRaw) : [];
       existingQueue.push(job);
@@ -871,12 +870,17 @@ export default function ColeInboxScreen() {
     if (selfieUploadInFlightRef.current) return;
     selfieUploadInFlightRef.current = true;
     try {
+      console.log('[Queue] Phase: Process start');
       while (true) {
         const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
         const queue = raw ? JSON.parse(raw) : [];
-        if (!queue.length) break;
+        if (!queue.length) {
+          console.log('[Queue] Phase: Process complete (queue empty)');
+          break;
+        }
 
         const job = queue[0];
+        console.log(`[Queue] Processing job for event ${job.originalEventId}`);
         try {
           const fileInfo = await FileSystem.getInfoAsync(job.localUri);
           if (!fileInfo.exists) {
@@ -886,6 +890,8 @@ export default function ColeInboxScreen() {
             continue;
           }
 
+          // Phase: Upload
+          console.log('[Queue] Phase: Upload to S3');
           // Get presigned URL for upload
           const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
             try {
@@ -921,6 +927,8 @@ export default function ColeInboxScreen() {
             console.warn("Failed to delete selfie upload file:", cleanupError);
           }
 
+          // Phase: Firestore commit
+          console.log('[Queue] Phase: Firestore commit (atomic batch)');
           // Atomic Firestore update: response + reflection status in one batch
           const batch = writeBatch(db);
           const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
@@ -941,6 +949,7 @@ export default function ColeInboxScreen() {
           }, { merge: true });
 
           await batch.commit();
+          console.log(`[Queue] Job complete for event ${job.originalEventId}`);
 
           queue.shift();
           await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
@@ -972,7 +981,8 @@ export default function ColeInboxScreen() {
     setIsCapturingSelfie(true);
 
     try {
-      // Capture photo
+      // Phase: Capture
+      console.log('[Selfie] Phase: Capture');
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.3,
         base64: false,
@@ -982,6 +992,8 @@ export default function ColeInboxScreen() {
         throw new Error("Failed to capture photo");
       }
 
+      // Phase: Process
+      console.log('[Selfie] Phase: Process (resize/compress)');
       const processedPhoto = await ImageManipulator.manipulateAsync(
         photo.uri,
         [{ resize: { width: 1080 } }],
@@ -1000,7 +1012,8 @@ export default function ColeInboxScreen() {
       // Generate event ID for the response
       const responseEventId = Date.now().toString();
 
-      // Defer upload via queue so it can complete even if user swipes away
+      // Phase: Enqueue
+      console.log('[Selfie] Phase: Enqueue');
       await enqueueSelfieUpload({
         originalEventId: selectedEvent.event_id,
         responseEventId,
