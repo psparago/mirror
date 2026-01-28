@@ -13,6 +13,11 @@
     "build:companion": "cd apps/companion && eas build --profile development --platform ios"
   },
   "devDependencies": {
+    "aws-sdk": "^2.1693.0",
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "firebase-admin": "^13.6.0",
+    "sharp": "^0.34.5",
     "typescript": "~5.3.3"
   },
   "dependencies": {

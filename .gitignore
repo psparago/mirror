@@ -31,9 +31,11 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 .env.deploy
 scripts/gcloud/.env.deploy
+scripts/utilities/serviceAccountKey.json
 
 # typescript
 *.tsbuildinfo
