@@ -14,25 +14,25 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Image } from 'expo-image';
 import {
-  Alert,
-  FlatList,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  useWindowDimensions,
-  View
+    Alert,
+    FlatList,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    useWindowDimensions,
+    View
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-  withSpring,
-  withTiming
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withSpring,
+    withTiming
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -761,16 +761,21 @@ export default function MainStageView({
   // Show toast notification
   const showToast = (message: string) => {
     setToastMessage(message);
-    toastOpacityShared.value = withTiming(1, { duration: 300 }, () => {
-      if (toastTimeoutRef.current) {
-        clearTimeout(toastTimeoutRef.current);
-      }
-      toastTimeoutRef.current = setTimeout(() => {
-        toastOpacityShared.value = withTiming(0, { duration: 300 }, () => {
+    // IMPORTANT: do not call setTimeout inside a Reanimated worklet callback.
+    toastOpacityShared.value = withTiming(1, { duration: 300 });
+
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+      toastTimeoutRef.current = null;
+    }
+
+    toastTimeoutRef.current = setTimeout(() => {
+      toastOpacityShared.value = withTiming(0, { duration: 300 }, (finished) => {
+        if (finished) {
           runOnJS(setToastMessage)('');
-        });
-      }, 2000);
-    });
+        }
+      });
+    }, 2000);
   };
 
   // --- AUDIO/VIDEO REFS ---
