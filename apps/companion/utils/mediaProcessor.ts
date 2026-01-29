@@ -1,8 +1,12 @@
 import * as FileSystem from 'expo-file-system';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { Image as RNImage } from 'react-native';
+import { Video } from 'react-native-compressor';
 
 const MAX_UPLOAD_WIDTH_PX = 1080;
+const MAX_IMAGE_WIDTH = 1080;
+const VIDEO_BITRATE = 5 * 1000 * 1000; // 5 Mbps
+const MAX_VIDEO_RESOLUTION = 1080; // 1080p
 
 function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
@@ -72,3 +76,44 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
   }
 }
 
+/**
+ * Gatekeeper for Videos
+ * - Compresses to H.264
+ * - Downscales to 1080p
+ * - Caps bitrate at 5Mbps
+ */
+export async function prepareVideoForUpload(uri: string): Promise<string> {
+  try {
+    console.log(`🎬 Compressing video: ${uri}`);
+    
+    // Check if it's already a compressed/local file to avoid loops if needed
+    // But usually we want to re-compress to ensure bitrate enforcement
+    
+    const result = await Video.compress(
+      uri,
+      {
+        compressionMethod: 'manual',
+        maxSize: MAX_VIDEO_RESOLUTION, // Resizes largest dimension to 1080
+        bitrate: VIDEO_BITRATE,
+        minimumFileSizeForCompress: 2, // Skip files smaller than 2MB
+      },
+      (progress) => {
+        // Optional: You can hook this up to a UI progress bar later
+        // console.log('Compression: ', progress);
+      }
+    );
+
+    // The result is the path to the compressed file
+    // Note: react-native-compressor returns a 'file://' URI
+    const finalUri = result.startsWith('file://') ? result : `file://${result}`;
+    
+    console.log(`✅ Video compressed: ${finalUri}`);
+    return finalUri;
+
+  } catch (error) {
+    console.error('[prepareVideoForUpload] failed:', error);
+    // Fallback: If compression fails, return original (or throw, depending on strictness)
+    // For now, let's return original so the user isn't blocked, but log the error.
+    return uri; 
+  }
+}

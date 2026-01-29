@@ -1,7 +1,8 @@
 {
   "expo": {
     "plugins": [
-      "expo-build-properties"
+      "expo-build-properties",
+      "react-native-compressor"
     ],
     "extra": {
       "eas": {

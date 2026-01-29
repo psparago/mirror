@@ -1,6 +1,6 @@
 import CameraModal from '@/components/CameraModal';
 import ReflectionComposer from '@/components/ReflectionComposer';
-import { prepareImageForUpload } from '@/utils/mediaProcessor';
+import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
@@ -462,6 +462,9 @@ export default function CompanionHomeScreen() {
             return;
           }
 
+          setIsLoadingImage(true); // Show spinner
+          const compressedUri = await prepareVideoForUpload(asset.uri);
+
           setMediaType('video');
           setVideoUri(asset.uri);
           setPhoto({ uri: asset.uri });
@@ -471,6 +474,7 @@ export default function CompanionHomeScreen() {
           setVideoUri(null);
           setPhoto({ uri: optimizedUri });
           setImageSourceType('camera');
+          setIsLoadingImage(false); // Hide spinner
         }
 
         setIsLoadingImage(true);
@@ -560,9 +564,12 @@ export default function CompanionHomeScreen() {
           );
           return;
         }
+        
+        setIsLoadingImage(true); // Show spinner
+        const compressedUri = await prepareVideoForUpload(video.uri);
 
-        setVideoUri(video.uri);
-        setPhoto({ uri: video.uri });
+        setVideoUri(compressedUri);
+        setPhoto({ uri: compressedUri });
         setMediaType('video');
         setShowDescriptionInput(true);
         closeCameraModal();
@@ -574,6 +581,7 @@ export default function CompanionHomeScreen() {
         setIntent('none');
         setStagingEventId(null);
         lastProcessedUriRef.current = null;
+        setIsLoadingImage(false); // Hide spinner
       }
     } catch (error: any) {
       console.error("❌ Video recording error:", error);
