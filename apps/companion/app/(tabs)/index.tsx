@@ -151,6 +151,23 @@ export default function CompanionHomeScreen() {
   const loadingImageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioUriTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Cache cleanup helpers (best-effort). We only delete files inside cacheDirectory.
+  const isCacheUri = useCallback((uri?: string | null) => {
+    if (!uri) return false;
+    const cacheDir = FileSystem.cacheDirectory;
+    return !!cacheDir && uri.startsWith(cacheDir);
+  }, []);
+
+  const safeDeleteCacheFile = useCallback(async (uri?: string | null) => {
+    if (!uri) return;
+    if (!isCacheUri(uri)) return;
+    try {
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+    } catch {
+      // ignore
+    }
+  }, [isCacheUri]);
+
   // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
@@ -466,8 +483,9 @@ export default function CompanionHomeScreen() {
           const compressedUri = await prepareVideoForUpload(asset.uri);
 
           setMediaType('video');
-          setVideoUri(asset.uri);
-          setPhoto({ uri: asset.uri });
+          setVideoUri(compressedUri);
+          setPhoto({ uri: compressedUri });
+          setIsLoadingImage(false); // Hide spinner
         } else {
           const optimizedUri = await prepareImageForUpload(asset.uri);
           setMediaType('photo');
@@ -512,6 +530,10 @@ export default function CompanionHomeScreen() {
     try {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
       const optimizedUri = await prepareImageForUpload(picture.uri);
+      // Best-effort cleanup of original capture if it lives in cache
+      if (picture.uri !== optimizedUri) {
+        await safeDeleteCacheFile(picture.uri);
+      }
       setPhoto({ uri: optimizedUri });
       setMediaType('photo');
       setImageSourceType('camera');
@@ -567,6 +589,11 @@ export default function CompanionHomeScreen() {
         
         setIsLoadingImage(true); // Show spinner
         const compressedUri = await prepareVideoForUpload(video.uri);
+
+        // Best-effort cleanup of original recording if it lives in cache
+        if (video.uri !== compressedUri) {
+          await safeDeleteCacheFile(video.uri);
+        }
 
         setVideoUri(compressedUri);
         setPhoto({ uri: compressedUri });
@@ -693,6 +720,7 @@ export default function CompanionHomeScreen() {
     }
 
     let tempThumbnail: string | null = null;
+    let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
     
@@ -816,7 +844,19 @@ export default function CompanionHomeScreen() {
       // 4. Queue Image Upload
       if (urls['image.jpg']) {
         debugLog('📤 uploadEventBundle: Queuing image upload...');
-        const gatekeptImageUri = await prepareImageForUpload(imageSource);
+        // Only gatekeep here when needed:
+        // - remote (staging GET URL) needs download + resize
+        // - video thumbnails may be >1080 and must be resized
+        // All photo flows already go through Gatekeeper on selection/capture.
+        const gatekeptImageUri =
+          imageSource.startsWith('http') || mediaType === 'video'
+            ? await prepareImageForUpload(imageSource)
+            : imageSource;
+
+        if (gatekeptImageUri !== imageSource) {
+          tempGatekeptImage = gatekeptImageUri;
+        }
+
         uploadPromises.push(safeUploadToS3(gatekeptImageUri, urls['image.jpg']).then(res => {
           debugLog('✅ uploadEventBundle: Image upload completed');
           return res;
@@ -903,7 +943,10 @@ export default function CompanionHomeScreen() {
       }
 
       if (photo.uri && !photo.uri.startsWith('http')) {
-        FileSystem.deleteAsync(photo.uri, { idempotent: true }).catch(() => { });
+        safeDeleteCacheFile(photo.uri).catch(() => { });
+      }
+      if (mediaType === 'video' && videoUri) {
+        safeDeleteCacheFile(videoUri).catch(() => { });
       }
 
       // 10. Reset State
@@ -942,11 +985,16 @@ export default function CompanionHomeScreen() {
       if (tempThumbnail) {
         FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
       }
+      if (tempGatekeptImage) {
+        safeDeleteCacheFile(tempGatekeptImage).catch(() => { });
+      }
       setUploading(false);
     }
   };
 
   const cancelPhoto = async () => {
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
     // Clean up staging image if it exists
     if (stagingEventId) {
       try {
@@ -956,6 +1004,10 @@ export default function CompanionHomeScreen() {
         // Continue with cleanup anyway
       }
     }
+
+    // Best-effort cleanup of any cache-based temp media
+    await safeDeleteCacheFile(photoUriToClean);
+    await safeDeleteCacheFile(videoUriToClean);
 
     setPhoto(null);
     setVideoUri(null);
@@ -972,6 +1024,8 @@ export default function CompanionHomeScreen() {
   };
 
   const retakePhoto = async () => {
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
     // Clean up staging image
     if (stagingEventId) {
       try {
@@ -980,6 +1034,10 @@ export default function CompanionHomeScreen() {
         console.error("Error deleting staging image:", error);
       }
     }
+
+    // Best-effort cleanup of any cache-based temp media
+    await safeDeleteCacheFile(photoUriToClean);
+    await safeDeleteCacheFile(videoUriToClean);
 
     // Clear all state and return to camera
     setPhoto(null);
@@ -1031,8 +1089,14 @@ export default function CompanionHomeScreen() {
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
         const { url: stagingUrl } = await stagingResponse.json();
-        const gatekeptStagingUri = await prepareImageForUpload(uriToUpload);
-        await safeUploadToS3(gatekeptStagingUri, stagingUrl);
+        // Only gatekeep here when needed: video thumbnail may exceed 1080px.
+        const stagingImageUri =
+          mediaType === 'video' ? await prepareImageForUpload(uriToUpload) : uriToUpload;
+        const tempGatekeptStagingUri = stagingImageUri !== uriToUpload ? stagingImageUri : null;
+        await safeUploadToS3(stagingImageUri, stagingUrl);
+        if (tempGatekeptStagingUri) {
+          safeDeleteCacheFile(tempGatekeptStagingUri).catch(() => { });
+        }
 
         // Cleanup temp thumbnail
         if (isTempThumbnail) {

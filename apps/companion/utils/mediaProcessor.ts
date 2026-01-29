@@ -45,6 +45,7 @@ async function getImageSizeAsync(uri: string): Promise<{ width: number; height: 
 export async function prepareImageForUpload(uri: string): Promise<string> {
   try {
     let localUri = uri;
+    let downloadedUri: string | null = null;
 
     if (isRemoteUri(uri)) {
       if (!FileSystem.cacheDirectory) {
@@ -57,6 +58,7 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
 
       const downloadRes = await FileSystem.downloadAsync(uri, downloadTarget);
       localUri = downloadRes.uri;
+      downloadedUri = downloadRes.uri;
     }
 
     const size = await getImageSizeAsync(localUri);
@@ -68,6 +70,11 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
       compress: 0.8,
       format: ImageManipulator.SaveFormat.JPEG,
     });
+
+    // Best-effort cleanup of intermediate downloaded file (cache only).
+    if (downloadedUri && downloadedUri !== result.uri) {
+      FileSystem.deleteAsync(downloadedUri, { idempotent: true }).catch(() => {});
+    }
 
     return result.uri;
   } catch (error) {
