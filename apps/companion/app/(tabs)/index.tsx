@@ -85,6 +85,8 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
 };
 
 export default function CompanionHomeScreen() {
+  const MAX_VIDEO_DURATION_SECONDS = 60;
+  const MAX_VIDEO_DURATION_MS = MAX_VIDEO_DURATION_SECONDS * 1000;
   const [permission, requestPermission] = useCameraPermissions();
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
@@ -460,7 +462,7 @@ export default function CompanionHomeScreen() {
         allowsEditing: true,
         aspect: [4, 3],
         quality: 0.5,
-        videoMaxDuration: 30, // Allow up to 30 seconds for selection (we'll warn if too long)
+        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS, // Allow up to 60 seconds for selection (we'll warn if too long)
       });
 
       if (!result.canceled && result.assets[0]) {
@@ -469,10 +471,10 @@ export default function CompanionHomeScreen() {
         // Check if it's a video
         if (asset.type === 'video') {
           // Check duration
-          if (asset.duration && asset.duration > 30000) { // duration is in milliseconds
+          if (asset.duration && asset.duration > MAX_VIDEO_DURATION_MS) { // duration is in milliseconds
             Alert.alert(
               'Video Too Long',
-              `The selected video is ${Math.round(asset.duration / 1000)} seconds. Please select a video shorter than 30 seconds.`,
+              `The selected video is ${Math.round(asset.duration / 1000)} seconds. Please select a video shorter than ${MAX_VIDEO_DURATION_SECONDS} seconds.`,
               [{ text: 'OK' }]
             );
             setIsLoadingGallery(false);
@@ -567,7 +569,7 @@ export default function CompanionHomeScreen() {
         mediaTypes: ImagePicker.MediaTypeOptions.Videos,
         allowsEditing: false,
         quality: 0.8,
-        videoMaxDuration: 30, // 30 second limit
+        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS, // 60 second limit
         cameraType: ImagePicker.CameraType.front, // Open in selfie mode
       });
 
@@ -578,10 +580,10 @@ export default function CompanionHomeScreen() {
         debugLog('✅ Video recorded:', { uri: video.uri, duration: video.duration });
 
         // Check duration (duration is in milliseconds)
-        if (video.duration && video.duration > 30000) {
+        if (video.duration && video.duration > MAX_VIDEO_DURATION_MS) {
           Alert.alert(
             "Video Too Long",
-            "Please record a video that's 30 seconds or less.",
+            `Please record a video that's ${MAX_VIDEO_DURATION_SECONDS} seconds or less.`,
             [{ text: "OK" }]
           );
           return;
