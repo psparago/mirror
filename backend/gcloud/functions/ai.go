@@ -18,6 +18,48 @@ import (
 	"google.golang.org/api/option"
 )
 
+// extractFirstJSONObject tries to find the first balanced {...} JSON object in s.
+// This is a defensive fallback for when the model returns extra prose around JSON.
+func extractFirstJSONObject(s string) (string, bool) {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return "", false
+	}
+	depth := 0
+	inString := false
+	escape := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
 func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	// 1. CORS Headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -134,8 +176,26 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 		jsonText = strings.TrimSpace(jsonText)
 
 		if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
-			http.Error(w, "JSON Parse Error", 500)
-			return
+			// Defensive fallback: sometimes the model includes extra text around JSON.
+			// Log the parse error + a small snippet for debugging.
+			snippet := jsonText
+			if len(snippet) > 500 {
+				snippet = snippet[:500] + "..."
+			}
+			log.Printf("JSON Parse Error: %v. Raw snippet: %q", err, snippet)
+
+			if extracted, ok := extractFirstJSONObject(jsonText); ok {
+				if err2 := json.Unmarshal([]byte(extracted), &result); err2 == nil {
+					// Successfully recovered.
+				} else {
+					log.Printf("JSON Parse Error (recovery failed): %v. Extracted snippet: %q", err2, extracted)
+					http.Error(w, "JSON Parse Error", 500)
+					return
+				}
+			} else {
+				http.Error(w, "JSON Parse Error", 500)
+				return
+			}
 		}
 
 		// Preference: If user provided one but not both, use their text

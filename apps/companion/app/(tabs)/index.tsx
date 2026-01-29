@@ -1,5 +1,6 @@
 import CameraModal from '@/components/CameraModal';
 import ReflectionComposer from '@/components/ReflectionComposer';
+import { prepareImageForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
@@ -400,19 +401,29 @@ export default function CompanionHomeScreen() {
   };
 
   const handleImageSelect = async (imageUrl: string) => {
-    setPhoto({ uri: imageUrl });
-    setImageSourceType('search');
-    setIsSearchModalVisible(false);
-    setShowDescriptionInput(true);
-    setSearchQuery('');
-    setDescription(''); // Clear previous description
-    setIsAiGenerated(false);
-    setShortCaption('');
-    setDeepDive('');
-    setIntent('none'); // Reset intent - show action buttons
-    setAudioUri(null); // Clear any previous audio
-    setStagingEventId(null); // Don't upload to staging until user chooses intent
-    setSearchResults([]);
+    try {
+      setIsLoadingImage(true);
+      const optimizedUri = await prepareImageForUpload(imageUrl);
+
+      setPhoto({ uri: optimizedUri });
+      setImageSourceType('search');
+      setIsSearchModalVisible(false);
+      setShowDescriptionInput(true);
+      setSearchQuery('');
+      setDescription(''); // Clear previous description
+      setIsAiGenerated(false);
+      setShortCaption('');
+      setDeepDive('');
+      setIntent('none'); // Reset intent - show action buttons
+      setAudioUri(null); // Clear any previous audio
+      setStagingEventId(null); // Don't upload to staging until user chooses intent
+      setSearchResults([]);
+    } catch (error: any) {
+      console.error('handleImageSelect error:', error);
+      Alert.alert('Error', 'Failed to prepare selected image for upload.');
+    } finally {
+      setIsLoadingImage(false);
+    }
   };
 
   const pickImageFromGallery = async () => {
@@ -455,9 +466,10 @@ export default function CompanionHomeScreen() {
           setVideoUri(asset.uri);
           setPhoto({ uri: asset.uri });
         } else {
+          const optimizedUri = await prepareImageForUpload(asset.uri);
           setMediaType('photo');
           setVideoUri(null);
-          setPhoto({ uri: asset.uri });
+          setPhoto({ uri: optimizedUri });
           setImageSourceType('camera');
         }
 
@@ -495,7 +507,8 @@ export default function CompanionHomeScreen() {
 
     try {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
-      setPhoto(picture);
+      const optimizedUri = await prepareImageForUpload(picture.uri);
+      setPhoto({ uri: optimizedUri });
       setMediaType('photo');
       setImageSourceType('camera');
       setShowDescriptionInput(true);
@@ -795,7 +808,8 @@ export default function CompanionHomeScreen() {
       // 4. Queue Image Upload
       if (urls['image.jpg']) {
         debugLog('📤 uploadEventBundle: Queuing image upload...');
-        uploadPromises.push(safeUploadToS3(imageSource, urls['image.jpg']).then(res => {
+        const gatekeptImageUri = await prepareImageForUpload(imageSource);
+        uploadPromises.push(safeUploadToS3(gatekeptImageUri, urls['image.jpg']).then(res => {
           debugLog('✅ uploadEventBundle: Image upload completed');
           return res;
         }));
@@ -1009,7 +1023,8 @@ export default function CompanionHomeScreen() {
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
         const { url: stagingUrl } = await stagingResponse.json();
-        await safeUploadToS3(uriToUpload, stagingUrl);
+        const gatekeptStagingUri = await prepareImageForUpload(uriToUpload);
+        await safeUploadToS3(gatekeptStagingUri, stagingUrl);
 
         // Cleanup temp thumbnail
         if (isTempThumbnail) {
