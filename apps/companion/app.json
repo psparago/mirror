@@ -2,7 +2,7 @@
   "expo": {
     "name": "Reflection Companion",
     "slug": "mirror-companion",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "mirror-companion",
@@ -16,7 +16,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass.companion",
-      "buildNumber": "8",
+      "buildNumber": "9",
       "icon": "./assets/images/icon-lgc.png",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {

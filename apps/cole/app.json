@@ -2,7 +2,7 @@
   "expo": {
     "name": "Reflection Explorer",
     "slug": "mirror-cole",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "mirror-cole",
@@ -17,7 +17,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass",
-      "buildNumber": "8",
+      "buildNumber": "9",
       "googleServicesFile": "./GoogleService-Info.plist",
       "icon": "./assets/images/icon-lg.png",
       "infoPlist": {
