@@ -66,6 +66,7 @@
           }
         }
       ],
+      "react-native-compressor",
       "expo-video",
       "expo-av",
       "expo-audio",
