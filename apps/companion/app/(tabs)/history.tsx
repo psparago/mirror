@@ -83,8 +83,11 @@ export default function SentHistoryScreen() {
   const displayReflections = useMemo(() => {
     let result = reflections.map(r => ({
       ...r,
-      hasResponse: r.status !== 'deleted' && responseEventIds.has(r.event_id),
+      hasResponse: !r.deletedAt && r.status !== 'deleted' && responseEventIds.has(r.event_id),
     }));
+
+    // Do not include soft-deleted items in the history list
+    result = result.filter(r => !r.deletedAt && r.status !== 'deleted');
 
     // Filter by sender if filterMode is 'mine'
     if (filterMode === 'mine' && currentIdentity) {
@@ -112,6 +115,13 @@ export default function SentHistoryScreen() {
 
     return result;
   }, [reflections, responseEventIds, responseTimestampMap, filterMode, currentIdentity]);
+
+  const reflectionCounts = useMemo(() => {
+    const all = reflections.length; // already excludes soft-deleted items (filtered at source)
+    const mine =
+      currentIdentity ? reflections.filter(r => r.sender === currentIdentity).length : 0;
+    return { all, mine };
+  }, [reflections, currentIdentity]);
 
 
 
@@ -327,7 +337,10 @@ export default function SentHistoryScreen() {
         }
 
         // Convert map to array and fetch additional data
-        const reflectionPromises = Array.from(reflectionMap.values()).map(async (reflection) => {
+        const reflectionPromises = Array.from(reflectionMap.values())
+          // Do not include soft-deleted items in the history list
+          .filter((reflection) => !reflection.deletedAt && reflection.status !== 'deleted')
+          .map(async (reflection) => {
           // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
           const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
           if (matchingEvent?.image_url) {
@@ -375,7 +388,7 @@ export default function SentHistoryScreen() {
 
           // Check for selfie response - use responseEventIds state (updated by listener)
           // Don't show selfie if reflection is deleted
-          reflection.hasResponse = reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
+          reflection.hasResponse = !reflection.deletedAt && reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
 
           return reflection;
         });
@@ -633,7 +646,7 @@ export default function SentHistoryScreen() {
             filterMode === 'mine' && styles.tabTextActive,
             !currentIdentity && styles.tabTextDisabled
           ]}>
-            My Reflections
+            My Reflections ({reflectionCounts.mine})
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -642,7 +655,7 @@ export default function SentHistoryScreen() {
           activeOpacity={0.7}
         >
           <Text style={[styles.tabText, filterMode === 'all' && styles.tabTextActive]}>
-            All Reflections
+            All Reflections ({reflectionCounts.all})
           </Text>
         </TouchableOpacity>
       </View>
