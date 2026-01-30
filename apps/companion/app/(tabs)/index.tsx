@@ -460,7 +460,6 @@ export default function CompanionHomeScreen() {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'], // Support both images and videos
         allowsEditing: true,
-        aspect: [4, 3],
         quality: 0.5,
         videoMaxDuration: MAX_VIDEO_DURATION_SECONDS, // Allow up to 60 seconds for selection (we'll warn if too long)
       });
