@@ -29,7 +29,7 @@ interface SentReflection {
   sender?: string;
 }
 
-export default function SentHistoryScreen() {
+export default function SentTimelineScreen() {
   const [reflections, setReflections] = useState<SentReflection[]>([]);
   const [loading, setLoading] = useState(true);
   const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
@@ -86,7 +86,7 @@ export default function SentHistoryScreen() {
       hasResponse: !r.deletedAt && r.status !== 'deleted' && responseEventIds.has(r.event_id),
     }));
 
-    // Do not include soft-deleted items in the history list
+    // Do not include soft-deleted items in the timeline list
     result = result.filter(r => !r.deletedAt && r.status !== 'deleted');
 
     // Filter by sender if filterMode is 'mine'
@@ -130,8 +130,6 @@ export default function SentHistoryScreen() {
       currentIdentity ? reflections.filter(r => r.sender === currentIdentity).length : 0;
     return { all, mine };
   }, [reflections, currentIdentity]);
-
-
 
   // Toast state
   const [toastMessage, setToastMessage] = useState('');
@@ -178,7 +176,6 @@ export default function SentHistoryScreen() {
       console.error('Error listening to reflection_responses:', error);
     });
 
-
     return () => unsubscribeResponses();
   }, []);
 
@@ -197,7 +194,6 @@ export default function SentHistoryScreen() {
       async (snapshot: QuerySnapshot) => {
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
-
 
         // Status priority: replayed > engaged > ready > deleted
         const statusPriority: { [key: string]: number } = {
@@ -328,8 +324,6 @@ export default function SentHistoryScreen() {
           }
         }
 
-        // Debug: log deduplication results
-
         // Fetch Mirror Events List ONCE for all reflections
         let allMirrorEventsMap = new Map<string, any>();
         try {
@@ -346,7 +340,7 @@ export default function SentHistoryScreen() {
 
         // Convert map to array and fetch additional data
         const reflectionPromises = Array.from(reflectionMap.values())
-          // Do not include soft-deleted items in the history list
+          // Do not include soft-deleted items in the timeline list
           .filter((reflection) => !reflection.deletedAt && reflection.status !== 'deleted')
           .map(async (reflection) => {
             // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
@@ -518,13 +512,11 @@ export default function SentHistoryScreen() {
     }
   };
 
-
-
   if (loading) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#2e78b7" />
-        <Text style={styles.loadingText}>Loading sent history...</Text>
+        <Text style={styles.loadingText}>Loading timeline...</Text>
       </View>
     );
   }
@@ -719,6 +711,9 @@ export default function SentHistoryScreen() {
               ? responseTimestampMap.get(item.event_id)
               : item.engagementTimestamp;
 
+            // Impact score (used for Impact sorting): engagement count + selfie bonus
+            const impactScore = rawEngagementCount + (hasSelfie ? 1 : 0);
+
             const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
             const rankColor = isTopRanked ? '#f1c40f' : '#bdc3c7';
 
@@ -833,12 +828,6 @@ export default function SentHistoryScreen() {
                             {formatEngagementDate(engagementTimestamp)}
                           </Text>
                         ) : null}
-                        {engagementCount > 0 && (
-                          <View style={styles.scoreContainer}>
-                            <FontAwesome name="fire" size={12} color={rankColor} />
-                            <Text style={styles.scoreText}>{engagementCount}</Text>
-                          </View>
-                        )}
                       </View>
                       {item.hasResponse && (
                         <TouchableOpacity
@@ -884,7 +873,6 @@ export default function SentHistoryScreen() {
                       )}
                     </View>
 
-
                     {item.description && (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                         {item.description === 'Voice message' && (
@@ -901,10 +889,19 @@ export default function SentHistoryScreen() {
                         Viewed: {formatEngagementDate(engagementTimestamp)}
                       </Text>
                     )}
-                    {engagementCount > 0 && (
-                      <Text style={styles.engagementCount}>
-                        Engagements: {engagementCount}
-                      </Text>
+                    {(engagementCount > 0 || impactScore > 0) && (
+                      <View style={styles.engagementMetaRow}>
+                        {engagementCount > 0 && (
+                          <Text style={styles.engagementMetaText}>
+                            Engagements: {engagementCount}
+                          </Text>
+                        )}
+                        {impactScore > 0 && (
+                          <Text style={styles.engagementMetaText}>
+                            Score: {impactScore}
+                          </Text>
+                        )}
+                      </View>
                     )}
                     {/* Sent date */}
                     <View style={styles.timestampRow}>
@@ -925,8 +922,6 @@ export default function SentHistoryScreen() {
                       </Text>
                     </View>
                     <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
-
-
                   </View>
                 </View>
               </TouchableOpacity>
@@ -1179,6 +1174,16 @@ const styles = StyleSheet.create({
     color: '#f59e0b', // Amber for engagement count
     marginTop: 4,
   },
+  engagementMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 4,
+  },
+  engagementMetaText: {
+    fontSize: 12,
+    color: '#f59e0b', // Amber, matches old engagementCount style
+  },
   tabContainer: {
     flexDirection: 'row',
     backgroundColor: '#1a1a1a',
@@ -1256,21 +1261,6 @@ const styles = StyleSheet.create({
   sortTextActive: {
     color: '#2e78b7',
   },
-  scoreContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(231, 76, 60, 0.1)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 4,
-  },
-  scoreText: {
-    color: '#e74c3c',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
   rankBadge: {
     position: 'absolute',
     top: -6,
@@ -1288,6 +1278,4 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 });
-
-
 

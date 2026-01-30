@@ -1,7 +1,7 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { Link, Tabs } from 'expo-router';
+import { Tabs } from 'expo-router';
 import React, { useEffect } from 'react';
-import { AppState, AppStateStatus, Pressable } from 'react-native';
+import { AppState, AppStateStatus } from 'react-native';
 
 
 
@@ -57,30 +57,23 @@ export default function TabLayout() {
         name="index"
         options={{
           title: 'Reflections',
-          tabBarIcon: ({ color }) => <TabBarIcon name="camera" color={color} />,
-          headerRight: () => (
-            <Link href="/settings" asChild>
-              <Pressable>
-                {({ pressed }: { pressed: boolean }) => (
-
-                  <FontAwesome
-                    name="cog"
-                    size={25}
-                    color={Colors[colorScheme ?? 'light'].text}
-                    style={{ marginRight: 15, opacity: pressed ? 0.5 : 1 }}
-                  />
-                )}
-              </Pressable>
-            </Link>
-          ),
+          tabBarIcon: ({ color }) => <TabBarIcon name="clone" color={color} />,
         }}
       />
 
       <Tabs.Screen
-        name="history"
+        name="timeline"
         options={{
-          title: 'History',
-          tabBarIcon: ({ color }) => <TabBarIcon name="history" color={color} />,
+          title: 'Timeline',
+          tabBarIcon: ({ color }) => <TabBarIcon name="clock-o" color={color} />,
+        }}
+      />
+
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: 'Settings',
+          tabBarIcon: ({ color }) => <TabBarIcon name="cog" color={color} />,
         }}
       />
     </Tabs>
