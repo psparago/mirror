@@ -41,12 +41,12 @@ export default function SentHistoryScreen() {
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
   const [currentIdentity, setCurrentIdentity] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<'mine' | 'all'>('mine');
+  const [sortBy, setSortBy] = useState<'recent' | 'impact'>('recent');
   const metadataCache = useRef<Map<string, any>>(new Map());
-  const isRefreshingRef = useRef(false);
   const METADATA_CACHE_MAX = 50;
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
-  
+
   const setMetadataCache = (key: string, value: any) => {
     const cache = metadataCache.current;
     if (cache.has(key)) {
@@ -106,6 +106,14 @@ export default function SentHistoryScreen() {
     // Sort by RESPONSE timestamp (viewed time) - most recent first
     // If no response, use sent timestamp (original sent time, not engagement time)
     result.sort((a, b) => {
+      if (sortBy === 'impact') {
+        // Calculate score: Engagement count + 1 bonus point if there is a selfie response
+        const scoreA = (a.engagementCount || 0) + (responseEventIds.has(a.event_id) ? 1 : 0);
+        const scoreB = (b.engagementCount || 0) + (responseEventIds.has(b.event_id) ? 1 : 0);
+
+        const diff = scoreB - scoreA;
+        if (diff !== 0) return diff;
+      }
       const aResponseTs = responseTimestampMap.get(a.event_id);
       const bResponseTs = responseTimestampMap.get(b.event_id);
       const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.sentTimestamp || a.timestamp);
@@ -114,7 +122,7 @@ export default function SentHistoryScreen() {
     });
 
     return result;
-  }, [reflections, responseEventIds, responseTimestampMap, filterMode, currentIdentity]);
+  }, [reflections, responseEventIds, responseTimestampMap, filterMode, currentIdentity, sortBy]);
 
   const reflectionCounts = useMemo(() => {
     const all = reflections.length; // already excludes soft-deleted items (filtered at source)
@@ -341,57 +349,57 @@ export default function SentHistoryScreen() {
           // Do not include soft-deleted items in the history list
           .filter((reflection) => !reflection.deletedAt && reflection.status !== 'deleted')
           .map(async (reflection) => {
-          // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
-          const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
-          if (matchingEvent?.image_url) {
-            reflection.reflectionImageUrl = matchingEvent.image_url;
+            // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
+            const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
+            if (matchingEvent?.image_url) {
+              reflection.reflectionImageUrl = matchingEvent.image_url;
 
-            // Also fetch metadata for description and timestamp (only for non-deleted)
-            if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
-              // Check cache first
-              if (metadataCache.current.has(matchingEvent.metadata_url)) {
-                const cachedMetadata = metadataCache.current.get(matchingEvent.metadata_url);
-                if (cachedMetadata) {
-                  setMetadataCache(matchingEvent.metadata_url, cachedMetadata);
-                  reflection.description = cachedMetadata.description;
-                  // Use metadata timestamp as sentTimestamp if we don't have one
-                  if (!reflection.sentTimestamp && cachedMetadata.timestamp) {
-                    try {
-                      reflection.sentTimestamp = new Date(cachedMetadata.timestamp);
-                    } catch (e) {
-                      // Invalid timestamp in metadata, ignore
-                    }
-                  }
-                }
-              } else {
-                try {
-                  const metaResponse = await fetch(matchingEvent.metadata_url);
-                  if (metaResponse.ok) {
-                    const metadata = await metaResponse.json();
-                    setMetadataCache(matchingEvent.metadata_url, metadata);
-                    reflection.description = metadata.description;
+              // Also fetch metadata for description and timestamp (only for non-deleted)
+              if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
+                // Check cache first
+                if (metadataCache.current.has(matchingEvent.metadata_url)) {
+                  const cachedMetadata = metadataCache.current.get(matchingEvent.metadata_url);
+                  if (cachedMetadata) {
+                    setMetadataCache(matchingEvent.metadata_url, cachedMetadata);
+                    reflection.description = cachedMetadata.description;
                     // Use metadata timestamp as sentTimestamp if we don't have one
-                    if (!reflection.sentTimestamp && metadata.timestamp) {
+                    if (!reflection.sentTimestamp && cachedMetadata.timestamp) {
                       try {
-                        reflection.sentTimestamp = new Date(metadata.timestamp);
+                        reflection.sentTimestamp = new Date(cachedMetadata.timestamp);
                       } catch (e) {
                         // Invalid timestamp in metadata, ignore
                       }
                     }
                   }
-                } catch (err) {
-                  console.error('Error fetching metadata:', err);
+                } else {
+                  try {
+                    const metaResponse = await fetch(matchingEvent.metadata_url);
+                    if (metaResponse.ok) {
+                      const metadata = await metaResponse.json();
+                      setMetadataCache(matchingEvent.metadata_url, metadata);
+                      reflection.description = metadata.description;
+                      // Use metadata timestamp as sentTimestamp if we don't have one
+                      if (!reflection.sentTimestamp && metadata.timestamp) {
+                        try {
+                          reflection.sentTimestamp = new Date(metadata.timestamp);
+                        } catch (e) {
+                          // Invalid timestamp in metadata, ignore
+                        }
+                      }
+                    }
+                  } catch (err) {
+                    console.error('Error fetching metadata:', err);
+                  }
                 }
               }
             }
-          }
 
-          // Check for selfie response - use responseEventIds state (updated by listener)
-          // Don't show selfie if reflection is deleted
-          reflection.hasResponse = !reflection.deletedAt && reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
+            // Check for selfie response - use responseEventIds state (updated by listener)
+            // Don't show selfie if reflection is deleted
+            reflection.hasResponse = !reflection.deletedAt && reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
 
-          return reflection;
-        });
+            return reflection;
+          });
 
         const reflectionsList = await Promise.all(reflectionPromises);
 
@@ -633,31 +641,51 @@ export default function SentHistoryScreen() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Filter Tabs */}
-      <View style={styles.tabContainer}>
-        <TouchableOpacity
-          style={[styles.tab, filterMode === 'mine' && styles.tabActive]}
-          onPress={() => setFilterMode('mine')}
-          activeOpacity={0.7}
-          disabled={!currentIdentity}
-        >
-          <Text style={[
-            styles.tabText,
-            filterMode === 'mine' && styles.tabTextActive,
-            !currentIdentity && styles.tabTextDisabled
-          ]}>
-            My Reflections ({reflectionCounts.mine})
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, filterMode === 'all' && styles.tabActive]}
-          onPress={() => setFilterMode('all')}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.tabText, filterMode === 'all' && styles.tabTextActive]}>
-            All Reflections ({reflectionCounts.all})
-          </Text>
-        </TouchableOpacity>
+      {/* Filter Tabs and Sort Toggle */}
+      {/* Header Section */}
+      <View style={styles.headerContainer}>
+        {/* Existing Tabs */}
+        <View style={styles.tabContainer}>
+          <TouchableOpacity
+            style={[styles.tab, filterMode === 'mine' && styles.tabActive]}
+            onPress={() => setFilterMode('mine')}
+            disabled={!currentIdentity}
+          >
+            <Text style={[styles.tabText, filterMode === 'mine' && styles.tabTextActive, !currentIdentity && styles.tabTextDisabled]}>
+              My Reflections ({reflectionCounts.mine})
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, filterMode === 'all' && styles.tabActive]}
+            onPress={() => setFilterMode('all')}
+          >
+            <Text style={[styles.tabText, filterMode === 'all' && styles.tabTextActive]}>
+              All ({reflectionCounts.all})
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Sort Toggle */}
+        <View style={styles.sortContainer}>
+          <Text style={styles.sortLabel}>Sort Order</Text>
+          <View style={styles.sortButtonGroup}>
+            <TouchableOpacity
+              style={[styles.sortButton, sortBy === 'recent' && styles.sortButtonActive]}
+              onPress={() => setSortBy('recent')}
+            >
+              <FontAwesome name="clock-o" size={12} color={sortBy === 'recent' ? '#fff' : '#666'} style={{ marginRight: 4 }} />
+              <Text style={[styles.sortText, sortBy === 'recent' && styles.sortTextActive]}>Recent</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sortButton, sortBy === 'impact' && styles.sortButtonActive]}
+              onPress={() => setSortBy('impact')}
+            >
+              <FontAwesome name="fire" size={12} color={sortBy === 'impact' ? '#fff' : '#666'} style={{ marginRight: 4 }} />
+              <Text style={[styles.sortText, sortBy === 'impact' && styles.sortTextActive]}>Impact</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
 
       {/* Empty State */}
@@ -683,222 +711,232 @@ export default function SentHistoryScreen() {
         <FlatList
           data={displayReflections}
           keyExtractor={(item) => item.event_id}
-        renderItem={({ item }) => {
-          const hasSelfie = !!item.hasResponse;
-          const rawEngagementCount = item.engagementCount ?? 0;
-          const engagementCount = rawEngagementCount > 0 ? rawEngagementCount : (hasSelfie ? 1 : 0);
-          const engagementTimestamp = hasSelfie
-            ? responseTimestampMap.get(item.event_id)
-            : item.engagementTimestamp;
-          return (
-          <TouchableOpacity 
-              style={styles.reflectionItem}
-              activeOpacity={0.7}
-              onPress={async () => {
-                // Get the full Event object if available
-                let fullEvent = eventObjectsMap.get(item.event_id);
-                
-                // If we don't have the Event object, fetch it from the API
-                if (!fullEvent) {
-                  try {
-                    const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
-                    if (eventsResponse.ok) {
-                      const eventsData = await eventsResponse.json();
-                      const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
-                      if (matchingEvent) {
-                        fullEvent = matchingEvent;
-                        // Update the map for future use
-                        setEventObjectsMap(prev => new Map(prev).set(item.event_id, matchingEvent));
-                      }
-                    }
-                  } catch (err) {
-                    console.error('Error fetching event for replay:', err);
-                  }
-                }
-                
-                // Fetch metadata if not already cached or in Event object
-                let metadata = fullEvent?.metadata as EventMetadata | undefined;
-                if (!metadata && fullEvent?.metadata_url) {
-                  if (metadataCache.current.has(fullEvent.metadata_url)) {
-                    metadata = metadataCache.current.get(fullEvent.metadata_url);
-                  } else {
+          renderItem={({ item, index }) => {
+            const hasSelfie = !!item.hasResponse;
+            const rawEngagementCount = item.engagementCount ?? 0;
+            const engagementCount = rawEngagementCount > 0 ? rawEngagementCount : (hasSelfie ? 1 : 0);
+            const engagementTimestamp = hasSelfie
+              ? responseTimestampMap.get(item.event_id)
+              : item.engagementTimestamp;
+
+            const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
+            const rankColor = isTopRanked ? '#f1c40f' : '#bdc3c7';
+
+            return (
+              <TouchableOpacity
+                style={styles.reflectionItem}
+                activeOpacity={0.7}
+                onPress={async () => {
+                  // Get the full Event object if available
+                  let fullEvent = eventObjectsMap.get(item.event_id);
+
+                  // If we don't have the Event object, fetch it from the API
+                  if (!fullEvent) {
                     try {
-                      const metaResponse = await fetch(fullEvent.metadata_url);
-                      if (metaResponse.ok) {
-                        metadata = await metaResponse.json();
-                        setMetadataCache(fullEvent.metadata_url, metadata);
+                      const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+                      if (eventsResponse.ok) {
+                        const eventsData = await eventsResponse.json();
+                        const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
+                        if (matchingEvent) {
+                          fullEvent = matchingEvent;
+                          // Update the map for future use
+                          setEventObjectsMap(prev => new Map(prev).set(item.event_id, matchingEvent));
+                        }
                       }
                     } catch (err) {
-                      console.error('Error fetching metadata for replay:', err);
+                      console.error('Error fetching event for replay:', err);
                     }
                   }
-                }
 
-                // Helper to convert timestamp to ISO string
-                const timestampToISO = (ts: any): string => {
-                  if (!ts) return new Date().toISOString();
-                  if (ts.toDate) return ts.toDate().toISOString();
-                  if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
-                  if (typeof ts === 'number') return new Date(ts).toISOString();
-                  if (typeof ts === 'string') return ts;
-                  return new Date(ts).toISOString();
-                };
+                  // Fetch metadata if not already cached or in Event object
+                  let metadata = fullEvent?.metadata as EventMetadata | undefined;
+                  if (!metadata && fullEvent?.metadata_url) {
+                    if (metadataCache.current.has(fullEvent.metadata_url)) {
+                      metadata = metadataCache.current.get(fullEvent.metadata_url);
+                    } else {
+                      try {
+                        const metaResponse = await fetch(fullEvent.metadata_url);
+                        if (metaResponse.ok) {
+                          metadata = await metaResponse.json();
+                          setMetadataCache(fullEvent.metadata_url, metadata);
+                        }
+                      } catch (err) {
+                        console.error('Error fetching metadata for replay:', err);
+                      }
+                    }
+                  }
 
-                // Construct Event object with all required fields
-                const eventForReplay: Event = {
-                  event_id: item.event_id,
-                  image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
-                  metadata_url: fullEvent?.metadata_url, // Optional - preserve undefined if not present
-                  audio_url: fullEvent?.audio_url,
-                  video_url: fullEvent?.video_url,
-                  deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
-                  metadata: metadata || {
-                    description: item.description || 'Reflection',
-                    sender: item.sender || 'Companion',
-                    timestamp: timestampToISO(item.sentTimestamp || item.timestamp),
+                  // Helper to convert timestamp to ISO string
+                  const timestampToISO = (ts: any): string => {
+                    if (!ts) return new Date().toISOString();
+                    if (ts.toDate) return ts.toDate().toISOString();
+                    if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
+                    if (typeof ts === 'number') return new Date(ts).toISOString();
+                    if (typeof ts === 'string') return ts;
+                    return new Date(ts).toISOString();
+                  };
+
+                  // Construct Event object with all required fields
+                  const eventForReplay: Event = {
                     event_id: item.event_id,
-                    short_caption: item.description || 'Reflection',
-                  },
-                };
-                
-                setSelectedReflection(eventForReplay);
-              }}
-            >
-            <View style={styles.reflectionRow}>
-              {item.reflectionImageUrl ? (
-                <View style={styles.reflectionImageContainer}>
-                  <Image
-                    source={{ uri: item.reflectionImageUrl }}
-                    style={styles.reflectionImage}
-                    contentFit="cover"
-                    recyclingKey={item.event_id}
-                    cachePolicy="memory-disk"
-                  />
-                  {item.status === 'deleted' && (
-                    <View style={styles.deletedOverlay}>
-                      <FontAwesome name="trash" size={24} color="#fff" />
+                    image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
+                    metadata_url: fullEvent?.metadata_url, // Optional - preserve undefined if not present
+                    audio_url: fullEvent?.audio_url,
+                    video_url: fullEvent?.video_url,
+                    deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
+                    metadata: metadata || {
+                      description: item.description || 'Reflection',
+                      sender: item.sender || 'Companion',
+                      timestamp: timestampToISO(item.sentTimestamp || item.timestamp),
+                      event_id: item.event_id,
+                      short_caption: item.description || 'Reflection',
+                    },
+                  };
+
+                  setSelectedReflection(eventForReplay);
+                }}
+              >
+                <View style={styles.reflectionRow}>
+                  {item.reflectionImageUrl ? (
+                    <View style={styles.reflectionImageContainer}>
+                      <Image
+                        source={{ uri: item.reflectionImageUrl }}
+                        style={styles.reflectionImage}
+                        contentFit="cover"
+                        recyclingKey={item.event_id}
+                        cachePolicy="memory-disk"
+                      />
+                      {item.status === 'deleted' && (
+                        <View style={styles.deletedOverlay}>
+                          <FontAwesome name="trash" size={24} color="#fff" />
+                        </View>
+                      )}
                     </View>
-                  )}
-                </View>
-              ) : item.status === 'deleted' ? (
-                <View style={[styles.reflectionImage, styles.deletedImagePlaceholder]}>
-                  <FontAwesome name="trash" size={32} color="#e74c3c" />
-                </View>
-              ) : null}
-              <View style={styles.reflectionInfo}>
-                <View style={styles.reflectionContent}>
-                  <View style={styles.statusBadge}>
-                    <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
-                    <Text style={styles.statusText}>
-                      {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
-                    </Text>
-                    {item.status === 'deleted' && item.deletedAt ? (
-                      <Text style={styles.engagementDate}>
-                        {formatEngagementDate(item.deletedAt)}
-                      </Text>
-                    ) : engagementTimestamp && item.status !== 'ready' ? (
-                      <Text style={styles.engagementDate}>
-                        {formatEngagementDate(engagementTimestamp)}
-                      </Text>
-                    ) : null}
-                  </View>
-                  {item.hasResponse && (
-                    <TouchableOpacity
-                      style={styles.responseBadge}
-                      onPress={async () => {
-                        const responseEventId = responseEventIdMap.get(item.event_id);
-                        if (!responseEventId) {
-                          console.warn(`No responseEventId found for event ${item.event_id}`);
-                          return;
-                        }
-
-                        setSelectedSelfieEventId(item.event_id);
-                        setLoadingSelfie(true);
-                        setSelfieImageUrl(null);
-
-                        try {
-                          // Get presigned GET URL for the selfie image (method=GET for viewing)
-                          const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`;
-                          const imageResponse = await fetch(url);
-                          if (imageResponse.ok) {
-                            const data = await imageResponse.json();
-                            const imageUrl = data.url;
-                            if (imageUrl) {
-                              setSelfieImageUrl(imageUrl);
-                            } else {
-                              console.error('No URL in response:', data);
-                            }
-                          } else {
-                            const errorText = await imageResponse.text();
-                            console.error(`Failed to get selfie image URL: ${imageResponse.status}`, errorText);
-                          }
-                        } catch (error) {
-                          console.error('Error fetching selfie image URL:', error);
-                        } finally {
-                          setLoadingSelfie(false);
-                        }
-                      }}
-                      activeOpacity={0.7}
-                    >
-                      <FontAwesome name="camera" size={16} color="#2ecc71" />
-                      <Text style={styles.responseText}>Selfie</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-
-                {item.description && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    {item.description === 'Voice message' && (
-                      <FontAwesome name="microphone" size={14} color="#e0e0e0" />
-                    )}
-                    <Text style={styles.description} numberOfLines={2}>
-                      {item.description}
-                    </Text>
-                  </View>
-                )}
-                {/* Viewed date on its own line */}
-                {hasSelfie && engagementTimestamp && (
-                  <Text style={styles.viewedDate}>
-                    Viewed: {formatEngagementDate(engagementTimestamp)}
-                  </Text>
-                )}
-                {engagementCount > 0 && (
-                  <Text style={styles.engagementCount}>
-                    Engagements: {engagementCount}
-                  </Text>
-                )}
-                {/* Sent date */}
-                <View style={styles.timestampRow}>
-                  <Text style={styles.sentDate}>
-                    {item.sender ? (
-                      <>
-                        Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(
-                          item.sentTimestamp || 
-                          (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
+                  ) : item.status === 'deleted' ? (
+                    <View style={[styles.reflectionImage, styles.deletedImagePlaceholder]}>
+                      <FontAwesome name="trash" size={32} color="#e74c3c" />
+                    </View>
+                  ) : null}
+                  <View style={styles.reflectionInfo}>
+                    <View style={styles.reflectionContent}>
+                      <View style={styles.statusBadge}>
+                        <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
+                        <Text style={styles.statusText}>
+                          {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                        </Text>
+                        {item.status === 'deleted' && item.deletedAt ? (
+                          <Text style={styles.engagementDate}>
+                            {formatEngagementDate(item.deletedAt)}
+                          </Text>
+                        ) : engagementTimestamp && item.status !== 'ready' ? (
+                          <Text style={styles.engagementDate}>
+                            {formatEngagementDate(engagementTimestamp)}
+                          </Text>
+                        ) : null}
+                        {engagementCount > 0 && (
+                          <View style={styles.scoreContainer}>
+                            <FontAwesome name="fire" size={12} color={rankColor} />
+                            <Text style={styles.scoreText}>{engagementCount}</Text>
+                          </View>
                         )}
-                      </>
-                    ) : (
-                      <>Sent • {formatEngagementDate(
-                        item.sentTimestamp || 
-                        (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
-                      )}</>
+                      </View>
+                      {item.hasResponse && (
+                        <TouchableOpacity
+                          style={styles.responseBadge}
+                          onPress={async () => {
+                            const responseEventId = responseEventIdMap.get(item.event_id);
+                            if (!responseEventId) {
+                              console.warn(`No responseEventId found for event ${item.event_id}`);
+                              return;
+                            }
+
+                            setSelectedSelfieEventId(item.event_id);
+                            setLoadingSelfie(true);
+                            setSelfieImageUrl(null);
+
+                            try {
+                              // Get presigned GET URL for the selfie image (method=GET for viewing)
+                              const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`;
+                              const imageResponse = await fetch(url);
+                              if (imageResponse.ok) {
+                                const data = await imageResponse.json();
+                                const imageUrl = data.url;
+                                if (imageUrl) {
+                                  setSelfieImageUrl(imageUrl);
+                                } else {
+                                  console.error('No URL in response:', data);
+                                }
+                              } else {
+                                const errorText = await imageResponse.text();
+                                console.error(`Failed to get selfie image URL: ${imageResponse.status}`, errorText);
+                              }
+                            } catch (error) {
+                              console.error('Error fetching selfie image URL:', error);
+                            } finally {
+                              setLoadingSelfie(false);
+                            }
+                          }}
+                          activeOpacity={0.7}
+                        >
+                          <FontAwesome name="camera" size={16} color="#2ecc71" />
+                          <Text style={styles.responseText}>Selfie</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+
+                    {item.description && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        {item.description === 'Voice message' && (
+                          <FontAwesome name="microphone" size={14} color="#e0e0e0" />
+                        )}
+                        <Text style={styles.description} numberOfLines={2}>
+                          {item.description}
+                        </Text>
+                      </View>
                     )}
-                  </Text>
+                    {/* Viewed date on its own line */}
+                    {hasSelfie && engagementTimestamp && (
+                      <Text style={styles.viewedDate}>
+                        Viewed: {formatEngagementDate(engagementTimestamp)}
+                      </Text>
+                    )}
+                    {engagementCount > 0 && (
+                      <Text style={styles.engagementCount}>
+                        Engagements: {engagementCount}
+                      </Text>
+                    )}
+                    {/* Sent date */}
+                    <View style={styles.timestampRow}>
+                      <Text style={styles.sentDate}>
+                        {item.sender ? (
+                          <>
+                            Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(
+                              item.sentTimestamp ||
+                              (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
+                            )}
+                          </>
+                        ) : (
+                          <>Sent • {formatEngagementDate(
+                            item.sentTimestamp ||
+                            (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
+                          )}</>
+                        )}
+                      </Text>
+                    </View>
+                    <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
+
+
+                  </View>
                 </View>
-                <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
-
-
-              </View>
-            </View>
-          </TouchableOpacity>
-          );
-        }}
+              </TouchableOpacity>
+            );
+          }}
           contentContainerStyle={styles.listContainer}
         />
       )}
 
-      <ReplayModal 
+      <ReplayModal
         visible={!!selectedReflection}
         event={selectedReflection}
         onClose={() => setSelectedReflection(null)}
@@ -1171,6 +1209,83 @@ const styles = StyleSheet.create({
   tabTextDisabled: {
     color: '#444',
     opacity: 0.5,
+  },
+  headerContainer: {
+    backgroundColor: '#1a1a1a',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  sortContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between', // <--- This is the magic alignment fix
+    alignItems: 'center',
+    paddingHorizontal: 20, // Match your screen margins
+    paddingVertical: 14,   // Give it vertical breathing room so it's not "squashed"
+    borderBottomWidth: 1,  // Optional: adds a subtle line below sort to separate from list
+    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  sortLabel: {
+    color: '#666',
+    fontSize: 13,
+    fontWeight: '600',
+    textTransform: 'uppercase', // Makes it look like a proper header
+    letterSpacing: 0.5,
+  },
+  sortButtonGroup: {
+    flexDirection: 'row',
+    gap: 8, // Tighter gap between the two buttons
+  },
+  sortButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  sortButtonActive: {
+    backgroundColor: 'rgba(46, 120, 183, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(46, 120, 183, 0.5)',
+  },
+  sortText: {
+    fontSize: 12,
+    color: '#666',
+    fontWeight: '600',
+  },
+  sortTextActive: {
+    color: '#2e78b7',
+  },
+  scoreContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(231, 76, 60, 0.1)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 4,
+  },
+  scoreText: {
+    color: '#e74c3c',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  rankBadge: {
+    position: 'absolute',
+    top: -6,
+    left: -6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    zIndex: 10,
+    borderWidth: 1,
+    borderColor: '#fff',
+  },
+  rankText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
 });
 

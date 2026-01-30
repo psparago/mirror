@@ -4,7 +4,7 @@
     "slug": "mirror-cole",
     "version": "1.0.2",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-explorer.png",
     "scheme": "mirror-cole",
     "newArchEnabled": false,
     "backgroundColor": "#ffffff",
@@ -19,7 +19,7 @@
       "bundleIdentifier": "com.psparago.lookingglass",
       "buildNumber": "9",
       "googleServicesFile": "./GoogleService-Info.plist",
-      "icon": "./assets/images/icon-lg.png",
+      "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }

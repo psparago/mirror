@@ -4,7 +4,7 @@
     "slug": "mirror-companion",
     "version": "1.0.2",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-companion.png",
     "scheme": "mirror-companion",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": false,
@@ -17,7 +17,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.lookingglass.companion",
       "buildNumber": "9",
-      "icon": "./assets/images/icon-lgc.png",
+      "icon": "./assets/images/icon-companion.png",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
