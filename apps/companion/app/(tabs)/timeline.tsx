@@ -1,8 +1,9 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 
+import { useAuth } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore from '@react-native-firebase/firestore';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
@@ -61,20 +62,26 @@ export default function SentTimelineScreen() {
     }
   };
 
-  // Load current identity from AsyncStorage
+  // Get the user from the Auth Hook
+  const { user } = useAuth();
+
+  // Load current identity from Firestore
   useFocusEffect(
     useCallback(() => {
       const loadIdentity = async () => {
+        if (!user?.uid) return;
+
         try {
-          const storedName = await AsyncStorage.getItem('companion_name');
-          setCurrentIdentity(storedName || null);
+          const userDoc = await firestore().collection('users').doc(user.uid).get();
+          const userData = userDoc.data();
+          setCurrentIdentity(userData?.companionName || null);
         } catch (error) {
-          console.error('Error loading companion name:', error);
+          console.error('Error loading companion identity:', error);
           setCurrentIdentity(null);
         }
       };
       loadIdentity();
-    }, [])
+    }, [user?.uid]) // Re-run if user changes
   );
 
   // Derive display reflections with fresh hasResponse values

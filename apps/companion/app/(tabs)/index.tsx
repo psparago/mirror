@@ -2,9 +2,9 @@ import CameraModal from '@/components/CameraModal';
 import ReflectionComposer from '@/components/ReflectionComposer';
 import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
+import { API_ENDPOINTS, ExplorerIdentity, useAuth } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore from '@react-native-firebase/firestore';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
@@ -147,7 +147,7 @@ export default function CompanionHomeScreen() {
 
   const cameraRef = useRef<any>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
-  
+
   // Timeout refs for cleanup
   const cameraModalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingImageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -198,21 +198,32 @@ export default function CompanionHomeScreen() {
     return () => subscription.remove();
   }, []);
 
+  // Get the user from the Auth Hook
+  const { user } = useAuth();
+
   // Check for companion name on mount and when screen comes into focus
+  // 2. Check for companion name on mount and when screen comes into focus
   const loadCompanionName = useCallback(async () => {
+    if (!user?.uid) return;
+
     try {
-      const storedName = await AsyncStorage.getItem('companion_name');
-      if (storedName) {
-        setCompanionName(storedName);
+      const userDoc = await firestore().collection('users').doc(user.uid).get();
+      const userData = userDoc.data();
+      const cloudName = userData?.companionName;
+
+      if (cloudName) {
+        setCompanionName(cloudName);
         setShowNameModal(false);
       } else {
+        // No name found in cloud -> Show Setup Modal
         setShowNameModal(true);
       }
     } catch (error) {
       console.error('Error reading companion name:', error);
+      // Fail safe: show modal so they can try setting it again
       setShowNameModal(true);
     }
-  }, []);
+  }, [user?.uid]);
 
   // Load name on mount
   useEffect(() => {
@@ -239,7 +250,7 @@ export default function CompanionHomeScreen() {
 
       // Request camera permission
       if (!permission) {
-      debugLog('📸 Requesting camera permission...');
+        debugLog('📸 Requesting camera permission...');
         const cameraResult = await requestPermission();
         if (cameraResult.granted) {
           debugLog('✅ Camera permission granted');
@@ -325,7 +336,7 @@ export default function CompanionHomeScreen() {
       // Add timeout to prevent 504 errors (60 seconds for AI generation)
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000);
-      
+
       let response;
       try {
         response = await fetch(fetchUrl, {
@@ -587,7 +598,7 @@ export default function CompanionHomeScreen() {
           );
           return;
         }
-        
+
         setIsLoadingImage(true); // Show spinner
         const compressedUri = await prepareVideoForUpload(video.uri);
 
@@ -724,7 +735,7 @@ export default function CompanionHomeScreen() {
     let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
-    
+
     try {
       setUploading(true);
 
@@ -1162,12 +1173,12 @@ export default function CompanionHomeScreen() {
         }}
         isAiThinking={isAiThinking}
         isSending={uploading}
-        
+
         // Actions
-        onCancel={cancelPhoto} 
+        onCancel={cancelPhoto}
         onTriggerMagic={async (targetCaption?: string) => {
           // Wrap your existing generator, passing edited caption if provided
-          const result = await generateDeepDiveBackground({ 
+          const result = await generateDeepDiveBackground({
             silent: false,
             targetCaption: targetCaption || description || undefined
           });
@@ -1181,7 +1192,7 @@ export default function CompanionHomeScreen() {
             deepDive: data.deepDive
           });
         }}
-        
+
         // Audio Props
         audioRecorder={audioRecorder}
         onStartRecording={startRecording}
@@ -1198,7 +1209,7 @@ export default function CompanionHomeScreen() {
     >
       <View style={styles.dashboardContent}>
         <Text style={styles.dashboardTitle}>Create a Reflection</Text>
-        
+
         {/* Companion Name Display */}
         {companionName && (
           <View style={styles.companionNameContainer}>
