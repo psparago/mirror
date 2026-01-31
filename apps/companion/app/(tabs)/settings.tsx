@@ -36,14 +36,9 @@ export default function SettingsScreen() {
 
         try {
           const userDoc = await firestore().collection('users').doc(user.uid).get();
-          
-          // Check existence safely
-          if ((userDoc as any).exists == true) {
-            const data = userDoc.data();
-            
-            // 🔍 THE FIX: Check 'companionName' first, fall back to 'name' (from Explorer code)
+          if (userDoc.exists()) {
+            const data = userDoc.data();        
             const cloudName = data?.companionName || data?.name || '';
-            
             setNameInput(cloudName);
           }
         } catch (error) {
