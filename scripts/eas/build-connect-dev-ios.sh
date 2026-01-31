@@ -8,7 +8,7 @@ if ! command -v npx &> /dev/null; then
   nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
 fi
 
-echo "🔨 Building Looking Glass Companion (LG Companion) - Development Build for iOS"
+echo "🔨 Building Reflections Connect - Development Build for iOS"
 echo "This build includes the dev client for hot reload and debugging"
 echo ""
 

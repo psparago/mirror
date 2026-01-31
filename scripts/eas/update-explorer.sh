@@ -11,7 +11,7 @@ fi
 # Default branch is prod, can override with first argument
 BRANCH="${1:-prod}"
 
-echo "📡 Publishing OTA Update for Looking Glass Explorer"
+echo "📡 Publishing OTA Update for Reflections Explorer"
 echo "   Branch: $BRANCH"
 echo ""
 

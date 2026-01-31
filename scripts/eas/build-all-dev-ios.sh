@@ -8,8 +8,8 @@ if ! command -v npx &> /dev/null; then
   nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
 fi
 
-echo "🔨 Building ALL Looking Glass Apps - Development Builds for iOS"
-echo "Building both Looking Glass (LG) and Looking Glass Companion (LG Companion)"
+echo "🔨 Building ALL Reflections Apps - Development Builds for iOS"
+echo "Building both Reflections Explorer and Reflections Connect"
 echo "These builds include the dev client for hot reload and debugging"
 echo ""
 
@@ -17,13 +17,13 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# Build LG
-echo "🔨 Building Looking Glass (LG) Development..."
+# Build Reflections Explorer
+echo "🔨 Building Reflections Explorer Development..."
 cd "$PROJECT_ROOT/apps/cole"
 npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
-echo "🔨 Building Looking Glass Companion (LG Companion) Development..."
+echo "🔨 Building Reflections Connect Development..."
 cd "$PROJECT_ROOT/apps/companion"
 npx eas-cli build --profile development --platform ios --non-interactive
 

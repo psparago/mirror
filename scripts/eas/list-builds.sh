@@ -7,14 +7,14 @@ if ! command -v npx &> /dev/null; then
   nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
 fi
 
-echo "📋 Looking Glass (LG) - Recent Builds"
+echo "📋 Reflections Explorer - Recent Builds"
 echo "======================================"
 cd "$(dirname "$0")/../../apps/cole"
 npx eas-cli build:list --limit 5
 
 echo ""
 echo ""
-echo "📋 Looking Glass Companion (LG Companion) - Recent Builds"
+echo "📋 Reflections Connect - Recent Builds"
 echo "=========================================================="
 cd "$(dirname "$0")/../../apps/companion"
 npx eas-cli build:list --limit 5

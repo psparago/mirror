@@ -16,9 +16,7 @@ echo ""
 echo "1. [ ] VERSION BUMP? (app.json 'version')"
 echo "       Marketing number (e.g., 1.0.2 -> 1.0.3) if releasing new features."
 echo ""
-echo "2. [ ] BUILD NUMBER BUMP? (app.json 'ios.buildNumber')"
-echo "       CRITICAL: Must be unique! (e.g., '1' -> '2')."
-echo "       Apple WILL reject the build if this is a duplicate."
+echo "2. [ ] BUILD NUMBER is remote?
 echo ""
 echo "3. [ ] GIT COMMITTED?"
 echo "       EAS builds from git. Uncommitted changes in app.json are IGNORED."
@@ -38,7 +36,7 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# --- BUILD EXPLORER (COLE) ---
+# --- BUILD Explorer (COLE) ---
 echo "🔨 Building Reflections Explorer..."
 cd "$PROJECT_ROOT/apps/cole"
 # FIX: Use 'npx eas-cli' explicitly to avoid ambiguous binary errors
@@ -50,8 +48,8 @@ npx eas-cli build \
 
 echo ""
 
-# --- BUILD COMPANION ---
-echo "🔨 Building Reflections Companion..."
+# --- BUILD Connect ---
+echo "🔨 Building Reflections Connect..."
 cd "$PROJECT_ROOT/apps/companion"
 
 # FIX: Replaced undefined $EAS_CMD with explicit 'npx eas-cli'

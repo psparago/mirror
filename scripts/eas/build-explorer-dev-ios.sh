@@ -8,15 +8,15 @@ if ! command -v npx &> /dev/null; then
   nvm use default 2>/dev/null || nvm use 20 2>/dev/null || true
 fi
 
-echo "📦 Building Looking Glass (LG) - Preview Build for iOS"
-echo "This build is optimized for internal distribution to family devices"
+echo "🔨 Building Reflections Explorer - Development Build for iOS"
+echo "This build includes the dev client for hot reload and debugging"
 echo ""
 
 cd "$(dirname "$0")/../../apps/cole"
 
-npx eas-cli build --profile preview --platform ios --non-interactive
+npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
 echo "✅ Build submitted! Check status at: https://expo.dev/accounts/psparago/projects/mirror-cole/builds"
-echo "📱 Once complete, share the URL with your family to install on their devices"
+echo "📱 Once complete, share the URL with testers to install"
 
