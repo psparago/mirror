@@ -4,7 +4,7 @@ const IS_DEV = process.env.APP_VARIANT === 'development';
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
     ...config,
-    name: IS_DEV ? 'Reflection Explorer Dev' : (config.name ?? 'Reflection Explorer'),
+    name: IS_DEV ? 'Explorer Dev' : (config.name ?? 'Explorer'),
     slug: config.slug ?? 'reflection-explorer', // TypeScript might want this too
     ios: {
         ...config.ios,
