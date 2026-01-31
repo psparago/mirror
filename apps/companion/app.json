@@ -67,7 +67,8 @@
         "expo-build-properties",
         {
           "ios": {
-            "buildReactNativeFromSource": true
+            "buildReactNativeFromSource": true,
+            "useFrameworks": "static"
           }
         }
       ],
