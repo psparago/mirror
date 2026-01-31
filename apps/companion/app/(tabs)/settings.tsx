@@ -1,9 +1,9 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { useAuth, VersionDisplay } from '@projectmirror/shared';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Stack, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import firestore from '@react-native-firebase/firestore';
+import { Stack } from 'expo-router';
+import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 export default function SettingsScreen() {
@@ -11,28 +11,33 @@ export default function SettingsScreen() {
   const tintColor = Colors[colorScheme ?? 'light'].tint;
   const [companionName, setCompanionName] = useState<string>('');
   const [nameInput, setNameInput] = useState<string>('');
+  const [loading, setLoading] = useState(false);
   const { user, signOut } = useAuth();
 
-  // Load companion name when screen is focused
-  useFocusEffect(
-    useCallback(() => {
-      const loadName = async () => {
-        try {
-          const storedName = await AsyncStorage.getItem('companion_name');
-          if (storedName) {
-            setCompanionName(storedName);
-            setNameInput(storedName);
-          } else {
-            setCompanionName('');
-            setNameInput('');
-          }
-        } catch (error) {
-          console.error('Error loading companion name:', error);
+  // FETCH FROM FIRESTORE
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    const fetchProfile = async () => {
+      try {
+        const userDoc = await firestore().collection('users').doc(user.uid).get();
+        if ((userDoc as any).exists == true) {
+          const data = userDoc.data();
+          const name = data?.companionName || '';
+          setCompanionName(name);
+          setNameInput(name);
+        } else {
+          // New user, no data yet
+          setCompanionName('');
+          setNameInput('');
         }
-      };
-      loadName();
-    }, [])
-  );
+      } catch (error) {
+        console.error('Error fetching profile:', error);
+      }
+    };
+
+    fetchProfile();
+  }, [user?.uid]);
 
   const saveCompanionName = async () => {
     const trimmedName = nameInput.trim();
@@ -40,16 +45,30 @@ export default function SettingsScreen() {
       Alert.alert('Name Required', 'Please enter a name');
       return;
     }
+    setLoading(true);
+    if (!user?.uid) {
+      Alert.alert('Error', 'You must be logged in to save settings.');
+      return;
+    }
+
     try {
-      await AsyncStorage.setItem('companion_name', trimmedName);
+      // MERGE: Create if missing, update if exists
+      await firestore().collection('users').doc(user.uid).set({
+        companionName: trimmedName,
+        email: user.email,
+        updatedAt: firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
       setCompanionName(trimmedName);
-      Alert.alert('Success', 'Companion name saved');
+      Alert.alert('Success', 'Companion name saved to the cloud');
     } catch (error) {
       console.error('Error saving companion name:', error);
       Alert.alert('Error', 'Failed to save name');
+    } finally {
+      setLoading(false);
     }
   };
-  
+
   // LOGOUT HANDLER
   const handleLogout = async () => {
     try {
@@ -101,7 +120,7 @@ export default function SettingsScreen() {
             <Text style={[styles.description, { marginBottom: 16 }]}>
               {user?.email || 'Unknown User'}
             </Text>
-            
+
             <TouchableOpacity
               style={styles.logoutButton}
               onPress={handleLogout}
@@ -203,7 +222,7 @@ const styles = StyleSheet.create({
     color: '#e74c3c', // Bright Red
     fontSize: 16,
     fontWeight: '600',
-  },  
+  },
   footer: {
     marginTop: 40,
     alignItems: 'center',
