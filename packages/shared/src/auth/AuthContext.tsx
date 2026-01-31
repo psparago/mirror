@@ -2,14 +2,20 @@ import firebase from '@react-native-firebase/app';
 import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Application from 'expo-application';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 const GOOGLE_WEB_CLIENT_ID = '870445864294-0iogp0pvi3gqsobdq1ht4pkid9h1nnv0.apps.googleusercontent.com';
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
+const PROD_APP_ID = '1:870445864294:ios:e9d73abd72299974a664a7';
+const DEV_APP_ID = '1:870445864294:ios:33fdfb7052891d50a664a7';
+
+const isDevApp = Application.applicationId === 'com.psparago.lookingglass.companion.dev';
+
 const firebaseConfig = {
   apiKey: "AIzaSyDB4Px0_YfAl29MLB_LByrd_6v1jFh1VHk",
-  appId: "1:870445864294:ios:e9d73abd72299974a664a7",
+  appId: isDevApp ? DEV_APP_ID : PROD_APP_ID,
   projectId: "project-mirror-23168",
   storageBucket: "project-mirror-23168.firebasestorage.app",
   messagingSenderId: "870445864294",

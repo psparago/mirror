@@ -1,6 +1,6 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { VersionDisplay } from '@projectmirror/shared';
+import { useAuth, VersionDisplay } from '@projectmirror/shared';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
@@ -11,6 +11,7 @@ export default function SettingsScreen() {
   const tintColor = Colors[colorScheme ?? 'light'].tint;
   const [companionName, setCompanionName] = useState<string>('');
   const [nameInput, setNameInput] = useState<string>('');
+  const { user, signOut } = useAuth();
 
   // Load companion name when screen is focused
   useFocusEffect(
@@ -48,6 +49,15 @@ export default function SettingsScreen() {
       Alert.alert('Error', 'Failed to save name');
     }
   };
+  
+  // LOGOUT HANDLER
+  const handleLogout = async () => {
+    try {
+      await signOut();
+    } catch (error) {
+      Alert.alert('Error', 'Failed to log out');
+    }
+  };
 
   return (
     <View style={styles.container}>
@@ -79,6 +89,24 @@ export default function SettingsScreen() {
               disabled={!nameInput.trim()}
             >
               <Text style={styles.saveButtonText}>Save</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* SECTION: ACCOUNT */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
+          <View style={styles.card}>
+            <Text style={styles.label}>Signed in as</Text>
+            <Text style={[styles.description, { marginBottom: 16 }]}>
+              {user?.email || 'Unknown User'}
+            </Text>
+            
+            <TouchableOpacity
+              style={styles.logoutButton}
+              onPress={handleLogout}
+            >
+              <Text style={styles.logoutText}>Log Out</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -163,6 +191,19 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
+  logoutButton: {
+    backgroundColor: 'rgba(231, 76, 60, 0.15)', // Semi-transparent Red
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(231, 76, 60, 0.3)',
+  },
+  logoutText: {
+    color: '#e74c3c', // Bright Red
+    fontSize: 16,
+    fontWeight: '600',
+  },  
   footer: {
     marginTop: 40,
     alignItems: 'center',
