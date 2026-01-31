@@ -1,9 +1,21 @@
+import firebase from '@react-native-firebase/app';
 import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-const GOOGLE_WEB_CLIENT_ID = '870445864294-0iogp0pvi3gqsobdq1ht4pkid9h1nnv0.apps.googleusercontent.com'; 
+const GOOGLE_WEB_CLIENT_ID = '870445864294-0iogp0pvi3gqsobdq1ht4pkid9h1nnv0.apps.googleusercontent.com';
+const AuthContext = createContext<AuthContextType>({} as AuthContextType);
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDB4Px0_YfAl29MLB_LByrd_6v1jFh1VHk",
+  appId: "1:870445864294:ios:e9d73abd72299974a664a7",
+  projectId: "project-mirror-23168",
+  storageBucket: "project-mirror-23168.firebasestorage.app",
+  messagingSenderId: "870445864294",
+  authDomain: "project-mirror-23168.firebaseapp.com",
+  databaseURL: "https://project-mirror-23168.firebaseio.com"
+};
 
 interface AuthContextType {
   user: FirebaseAuthTypes.User | null;
@@ -13,7 +25,14 @@ interface AuthContextType {
   signOut: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType>({} as AuthContextType);
+if (firebase.apps.length === 0) {
+  try {
+    firebase.initializeApp(firebaseConfig);
+    console.log("Firebase initialized manually via JS");
+  } catch (e) {
+    console.error("Firebase init failed", e);
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<FirebaseAuthTypes.User | null>(null);
@@ -22,7 +41,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 1. Initialize Google SDK
   useEffect(() => {
     GoogleSignin.configure({
-      webClientId: GOOGLE_WEB_CLIENT_ID, 
+      webClientId: GOOGLE_WEB_CLIENT_ID,
     });
   }, []);
 
@@ -36,19 +55,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // --- GOOGLE SIGN IN ---
+  // --- GOOGLE SIGN IN (Universal Fix) ---
   const signInWithGoogle = async () => {
     try {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
       
-      // Get the users ID token
-      const signInResult = await GoogleSignin.signIn();
-      // Try to get the ID token from the result, handling different library versions
-      let idToken = signInResult.data?.idToken;
-      if (!idToken) {
-          // If using older version of library where response is the object itself
-          idToken = (signInResult as any).idToken; 
-      }
+      // CAST AS ANY: Tells TypeScript "I know what I'm doing, relax."
+      const response = await GoogleSignin.signIn() as any;
       
+      // FALLBACK EXTRACTION:
+      // Checks both places: 
+      // 1. response.idToken (v13 style)
+      // 2. response.data.idToken (v16 style)
+      const idToken = response.idToken || response.data?.idToken;
+
       if (!idToken) throw new Error('No ID token found');
 
       // Create a Google credential with the token
@@ -61,7 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw error;
     }
   };
-
+  
   // --- APPLE SIGN IN ---
   const signInWithApple = async () => {
     try {
@@ -75,7 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Extract the token (Remove 'nonce' from here)
       const { identityToken, authorizationCode } = appleCredential;
-      
+
       if (!identityToken) {
         throw new Error('Apple Sign-In failed - no identity token');
       }
@@ -87,21 +107,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // 4. Sign in to Firebase
       await auth().signInWithCredential(credential);
-      
+
     } catch (error: any) {
-       // Ignore "User canceled" error (ERR_CANCELED is the standard code)
-       if (error.code !== 'ERR_CANCELED') {
-         console.error('Apple Sign-In Error:', error);
-         throw error;
-       }
+      // Ignore "User canceled" error (ERR_CANCELED is the standard code)
+      if (error.code !== 'ERR_CANCELED') {
+        console.error('Apple Sign-In Error:', error);
+        throw error;
+      }
     }
   };
-  
+
   const signOut = async () => {
     try {
-        await GoogleSignin.signOut(); // Clean up Google session
+      await GoogleSignin.signOut(); // Clean up Google session
     } catch (e) { /* Ignore if not signed in to Google */ }
-    
+
     await auth().signOut();
   };
 
