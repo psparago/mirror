@@ -15,6 +15,8 @@ export * from './types';
 
 export * from './firebase';
 
+export * from './auth/AuthContext';
+
 export * from './ExplorerIdentity';
 
 // Components

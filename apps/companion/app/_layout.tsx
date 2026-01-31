@@ -1,13 +1,16 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import * as Sentry from '@sentry/react-native';
-
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import * as Sentry from '@sentry/react-native';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router'; // Removed Slot, kept Stack
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
-import 'react-native-reanimated';
+import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import 'react-native-reanimated';
+
+// Import your Shared Auth (Adjust the package name if needed)
+import { AuthProvider, useAuth } from '@projectmirror/shared';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { useOTAUpdate } from '../hooks/useOTAUpdate';
@@ -21,7 +24,6 @@ export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
 
-// Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
 
 Sentry.init({
@@ -29,9 +31,51 @@ Sentry.init({
   debug: false,
 });
 
+// --- COMPONENT 1: The "Inside" Layout (Nav + Auth Logic) ---
+// This handles the protection and the navigation, assuming Fonts are already loaded.
+function AppLayout() {
+  const { user, loading } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
+  const colorScheme = useColorScheme();
 
+  useEffect(() => {
+    if (loading) return;
+
+    const inAuthGroup = segments[0] === '(auth)';
+
+    if (!user && !inAuthGroup) {
+      // Redirect to login if not authenticated
+      router.replace('/login');
+    } else if (user && inAuthGroup) {
+      // Redirect to home if already authenticated
+      router.replace('/');
+    }
+  }, [user, loading, segments]);
+
+  if (loading) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color="#000" />
+      </View>
+    );
+  }
+
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="login" options={{ headerShown: false }} /> 
+        </Stack>
+      </ThemeProvider>
+    </GestureHandlerRootView>
+  );
+}
+
+// --- COMPONENT 2: The Root Entry (Providers + Assets) ---
+// This handles the "Global" stuff: Sentry, Fonts, OTA, and the AuthProvider wrapper.
 function RootLayout() {
-
   useOTAUpdate();
 
   const [loaded, error] = useFonts({
@@ -39,7 +83,6 @@ function RootLayout() {
     ...FontAwesome.font,
   });
 
-  // Expo Router uses Error Boundaries to catch errors in the navigation tree.
   useEffect(() => {
     if (error) throw error;
   }, [error]);
@@ -54,22 +97,11 @@ function RootLayout() {
     return null;
   }
 
-  return <RootLayoutNav />;
-}
-
-function RootLayoutNav() {
-  const colorScheme = useColorScheme();
-
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        </Stack>
-      </ThemeProvider>
-    </GestureHandlerRootView>
+    <AuthProvider>
+      <AppLayout />
+    </AuthProvider>
   );
 }
 
 export default Sentry.wrap(RootLayout);
-

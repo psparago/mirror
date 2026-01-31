@@ -9,6 +9,16 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ios: {
         ...config.ios,
         bundleIdentifier: IS_DEV ? 'com.psparago.lookingglass.companion.dev' : 'com.psparago.lookingglass.companion',
+        googleServicesFile: './GoogleService-Info.plist', 
+        infoPlist: {
+            CFBundleURLTypes: [
+                {
+                    CFBundleURLSchemes: [
+                        "com.googleusercontent.apps.870445864294-uhg44qcpbq8f8fav27nbahtesd994rfr"
+                    ]
+                }
+            ]
+        }
     },
     android: {
         ...config.android,
