@@ -1,75 +1,88 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { useAuth, VersionDisplay } from '@projectmirror/shared';
+import { VersionDisplay, useAuth } from '@projectmirror/shared';
 import firestore from '@react-native-firebase/firestore';
-import { Stack } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Stack, useFocusEffect } from 'expo-router';
+import React, { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
+} from 'react-native';
 
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
-  const [companionName, setCompanionName] = useState<string>('');
+  
+  // 1. AUTH HOOK (For User ID & Logout)
+  const { user, signOut } = useAuth(); 
+  
   const [nameInput, setNameInput] = useState<string>('');
   const [loading, setLoading] = useState(false);
-  const { user, signOut } = useAuth();
+  const [initialLoad, setInitialLoad] = useState(true);
 
-  // FETCH FROM FIRESTORE
-  useEffect(() => {
-    if (!user?.uid) return;
+  // 2. LOAD FROM FIRESTORE (Robust Version)
+  useFocusEffect(
+    useCallback(() => {
+      const loadProfile = async () => {
+        if (!user?.uid) return;
 
-    const fetchProfile = async () => {
-      try {
-        const userDoc = await firestore().collection('users').doc(user.uid).get();
-        if ((userDoc as any).exists == true) {
-          const data = userDoc.data();
-          const name = data?.companionName || '';
-          setCompanionName(name);
-          setNameInput(name);
-        } else {
-          // New user, no data yet
-          setCompanionName('');
-          setNameInput('');
+        try {
+          const userDoc = await firestore().collection('users').doc(user.uid).get();
+          
+          // Check existence safely
+          if ((userDoc as any).exists == true) {
+            const data = userDoc.data();
+            
+            // 🔍 THE FIX: Check 'companionName' first, fall back to 'name' (from Explorer code)
+            const cloudName = data?.companionName || data?.name || '';
+            
+            setNameInput(cloudName);
+          }
+        } catch (error) {
+          console.error('Error loading profile:', error);
+        } finally {
+          setInitialLoad(false);
         }
-      } catch (error) {
-        console.error('Error fetching profile:', error);
-      }
-    };
+      };
 
-    fetchProfile();
-  }, [user?.uid]);
+      loadProfile();
+    }, [user?.uid])
+  );
 
+  // 3. SAVE TO FIRESTORE
   const saveCompanionName = async () => {
     const trimmedName = nameInput.trim();
     if (!trimmedName) {
       Alert.alert('Name Required', 'Please enter a name');
       return;
     }
-    setLoading(true);
-    if (!user?.uid) {
-      Alert.alert('Error', 'You must be logged in to save settings.');
-      return;
-    }
+    if (!user?.uid) return;
 
+    setLoading(true);
     try {
-      // MERGE: Create if missing, update if exists
       await firestore().collection('users').doc(user.uid).set({
         companionName: trimmedName,
-        email: user.email,
         updatedAt: firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      setCompanionName(trimmedName);
-      Alert.alert('Success', 'Companion name saved to the cloud');
+      Alert.alert('Success', 'Companion name saved');
     } catch (error) {
-      console.error('Error saving companion name:', error);
+      console.error('Error saving:', error);
       Alert.alert('Error', 'Failed to save name');
     } finally {
       setLoading(false);
     }
   };
 
-  // LOGOUT HANDLER
+  // 4. LOGOUT
   const handleLogout = async () => {
     try {
       await signOut();
@@ -86,62 +99,89 @@ export default function SettingsScreen() {
           headerBackTitle: 'Back',
         }}
       />
-      <ScrollView contentContainerStyle={styles.scrollContent}>
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
-          <View style={styles.card}>
-            <Text style={styles.label}>Companion Name</Text>
-            <Text style={styles.description}>
-              This name will appear as the sender of your Reflections.
-            </Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter your name (e.g., Emily, Auntie Tah, Nona, Granddad)"
-              placeholderTextColor="#666"
-              value={nameInput}
-              onChangeText={setNameInput}
-              autoCapitalize="words"
-            />
-            <TouchableOpacity
-              style={[styles.saveButton, !nameInput.trim() && styles.saveButtonDisabled]}
-              onPress={saveCompanionName}
-              disabled={!nameInput.trim()}
-            >
-              <Text style={styles.saveButtonText}>Save</Text>
-            </TouchableOpacity>
+      
+      <KeyboardAvoidingView 
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1 }}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          
+          {/* SECTION: IDENTITY */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
+            <View style={styles.card}>
+              <Text style={styles.label}>Companion Name</Text>
+              <Text style={styles.description}>
+                This name will appear as the sender of your Reflections.
+              </Text>
+              
+              {initialLoad ? (
+                <ActivityIndicator style={{ padding: 20 }} />
+              ) : (
+                <>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter your name (e.g., Emily, Auntie Tah)"
+                    placeholderTextColor="#666"
+                    value={nameInput}
+                    onChangeText={setNameInput}
+                    autoCapitalize="words"
+                    editable={!loading}
+                  />
+                  <TouchableOpacity
+                    style={[
+                      styles.saveButton, 
+                      (!nameInput.trim() || loading) && styles.saveButtonDisabled
+                    ]}
+                    onPress={saveCompanionName}
+                    disabled={!nameInput.trim() || loading}
+                  >
+                    {loading ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.saveButtonText}>Save Name</Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
           </View>
-        </View>
 
-        {/* SECTION: ACCOUNT */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
-          <View style={styles.card}>
-            <Text style={styles.label}>Signed in as</Text>
-            <Text style={[styles.description, { marginBottom: 16 }]}>
-              {user?.email || 'Unknown User'}
-            </Text>
-
-            <TouchableOpacity
-              style={styles.logoutButton}
-              onPress={handleLogout}
-            >
-              <Text style={styles.logoutText}>Log Out</Text>
-            </TouchableOpacity>
+          {/* SECTION: ACCOUNT */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
+            <View style={styles.card}>
+              <View style={styles.row}>
+                <Text style={styles.rowLabel}>Signed in as</Text>
+                <Text style={styles.rowValue}>{user?.email || 'Unknown'}</Text>
+              </View>
+              
+              <View style={styles.divider} />
+              
+              <TouchableOpacity
+                style={styles.logoutButton}
+                onPress={handleLogout}
+              >
+                <Text style={styles.logoutText}>Log Out</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
 
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
-          <View style={styles.card}>
-            <VersionDisplay />
+          {/* SECTION: INFO */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
+            <View style={styles.card}>
+              <VersionDisplay />
+            </View>
           </View>
-        </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>Reflections Companion</Text>
-          <Text style={styles.footerSubtext}>by Angelware</Text>
-        </View>
-      </ScrollView>
+          <View style={styles.footer}>
+            <Text style={styles.footerText}>Reflections Companion</Text>
+            <Text style={styles.footerSubtext}>by Angelware</Text>
+          </View>
+
+        </ScrollView>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -149,87 +189,104 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: '#121212', // Dark background for Companion
   },
   scrollContent: {
     padding: 16,
+    paddingBottom: 40,
   },
   section: {
     marginBottom: 24,
   },
   sectionTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
+    fontSize: 13,
+    fontWeight: '600',
     marginBottom: 8,
     marginLeft: 4,
     textTransform: 'uppercase',
-    opacity: 0.8,
+    opacity: 0.7,
+    letterSpacing: 0.5,
   },
   card: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 16,
+    backgroundColor: '#1e1e1e', // Slightly lighter than background
+    borderRadius: 12,
     padding: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: '#333',
   },
   label: {
     fontSize: 16,
     fontWeight: '600',
     color: '#fff',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   description: {
     fontSize: 14,
-    color: '#999',
+    color: '#aaa',
     marginBottom: 16,
     lineHeight: 20,
   },
   input: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
+    backgroundColor: '#2c2c2c',
+    borderRadius: 8,
+    padding: 14,
     fontSize: 16,
     color: '#fff',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#333',
   },
   saveButton: {
-    backgroundColor: '#2e78b7',
-    borderRadius: 12,
+    backgroundColor: '#2e78b7', // Nice Blue
+    borderRadius: 8,
     paddingVertical: 14,
-    paddingHorizontal: 24,
     alignItems: 'center',
   },
   saveButtonDisabled: {
-    backgroundColor: '#444',
-    opacity: 0.5,
+    backgroundColor: '#333',
+    opacity: 0.7,
   },
   saveButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
   },
-  logoutButton: {
-    backgroundColor: 'rgba(231, 76, 60, 0.15)', // Semi-transparent Red
-    borderRadius: 12,
-    paddingVertical: 14,
+  // Account Styles
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(231, 76, 60, 0.3)',
+    marginBottom: 16,
+  },
+  rowLabel: {
+    fontSize: 16,
+    color: '#fff',
+  },
+  rowValue: {
+    fontSize: 16,
+    color: '#aaa',
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#333',
+    marginBottom: 16,
+  },
+  logoutButton: {
+    alignItems: 'center',
+    paddingVertical: 4,
   },
   logoutText: {
-    color: '#e74c3c', // Bright Red
+    color: '#ff4d4d', // Red
     fontSize: 16,
     fontWeight: '600',
   },
   footer: {
-    marginTop: 40,
+    marginTop: 20,
     alignItems: 'center',
-    opacity: 0.3,
+    opacity: 0.4,
   },
   footerText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: '#fff',
   },
@@ -239,4 +296,3 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 });
-
