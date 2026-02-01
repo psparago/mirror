@@ -22,6 +22,9 @@
       "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
+      },
+      "config": {
+        "usesNonExemptEncryption": false
       }
     },
     "android": {

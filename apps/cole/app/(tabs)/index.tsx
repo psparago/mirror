@@ -19,7 +19,7 @@ import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanRespon
 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-export default function ColeInboxScreen() {
+export default function HomeScreen() {
   const router = useRouter();
 
   // Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
