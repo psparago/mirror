@@ -158,7 +158,7 @@ onPress={() => {
 ```
 
 ## Files to Edit
-- `/Users/petersparago/code/ProjectMirror/apps/cole/components/ReflectedWatchView.tsx` (ALL changes)
+- `/Users/petersparago/code/ProjectMirror/apps/explorer/components/ReflectedWatchView.tsx` (ALL changes)
 
 ## Testing Checklist
 - [ ] Camera bubble in top-right

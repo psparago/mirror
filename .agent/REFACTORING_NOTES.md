@@ -26,7 +26,7 @@ The video now:
 ## 📦 Components Created
 
 ### 1. `CameraModal.tsx` ✅
-**Location**: `/apps/companion/components/CameraModal.tsx`
+**Location**: `/apps/connect/components/CameraModal.tsx`
 
 **Purpose**: Extracted the entire camera capture UI into a reusable component.
 
@@ -51,7 +51,7 @@ The video now:
 ---
 
 ### 2. `MediaPreview.tsx` ✅
-**Location**: `/apps/companion/components/MediaPreview.tsx`
+**Location**: `/apps/connect/components/MediaPreview.tsx`
 
 **Purpose**: Handles the entire photo/video preview and intent selection flow.
 
@@ -252,9 +252,9 @@ CompanionHomeScreen (index.tsx)
 ## 📚 Resources
 
 ### Related Files:
-- Main UI: `/apps/companion/app/(tabs)/index.tsx`
-- History: `/apps/companion/app/(tabs)/history.tsx`
-- Components: `/apps/companion/components/`
+- Main UI: `/apps/connect/app/(tabs)/index.tsx`
+- History: `/apps/connect/app/(tabs)/history.tsx`
+- Components: `/apps/connect/components/`
 - Shared Types: `/packages/shared/src/types/index.ts`
 
 ### Key Dependencies:
@@ -434,9 +434,9 @@ CompanionHomeScreen (index.tsx)
 ✅ **No warnings**: Removes deprecation warnings from console  
 
 ### Files Updated:
-1. `apps/cole/components/ReflectedWatchView.tsx` (~71 video-related lines updated)
-2. `apps/companion/app/(tabs)/index.tsx` (~15 lines updated)
-3. `apps/companion/components/MediaPreview.tsx` (~15 lines updated)
+1. `apps/explorer/components/ReflectedWatchView.tsx` (~71 video-related lines updated)
+2. `apps/connect/app/(tabs)/index.tsx` (~15 lines updated)
+3. `apps/connect/components/MediaPreview.tsx` (~15 lines updated)
 
 ---
 
@@ -509,7 +509,7 @@ if (player && videoSource) {
    }
    ```
 
-**Frontend Fix** (`apps/cole/components/ReflectedWatchView.tsx`):
+**Frontend Fix** (`apps/explorer/components/ReflectedWatchView.tsx`):
 ```typescript
 // Changed from using image_url (thumbnail) to video_url (actual video)
 const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?.video_url

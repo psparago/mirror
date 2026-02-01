@@ -8,13 +8,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     slug: config.slug ?? 'reflection-explorer', // TypeScript might want this too
     ios: {
         ...config.ios,
-        bundleIdentifier: IS_DEV ? 'com.psparago.lookingglass.dev' : 'com.psparago.lookingglass',
+        bundleIdentifier: IS_DEV ? 'com.psparago.reflections.explorer.dev' : 'com.psparago.reflections.explorer',
         googleServicesFile: './GoogleService-Info.plist',
         infoPlist: {
             CFBundleURLTypes: [
                 {
                     CFBundleURLSchemes: [
-                        "com.googleusercontent.apps.870445864294-is9qgfe9venn0g01bg8ou9q40vaog7eb"
+                        "com.googleusercontent.apps.759023712124-k4u8d605g32n41f6483d9u22cta28j3s"
                     ]
                 }
             ]
@@ -22,6 +22,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     },
     android: {
         ...config.android,
-        package: IS_DEV ? 'com.psparago.lookingglass.dev' : 'com.psparago.lookingglass',
+        package: IS_DEV ? 'com.psparago.reflections.explorer.dev' : 'com.psparago.reflections.explorer',
     },
 });

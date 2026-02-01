@@ -5,16 +5,16 @@ const IS_DEV = process.env.APP_VARIANT === 'development';
 export default ({ config }: ConfigContext): ExpoConfig => ({
     ...config,
     name: IS_DEV ? 'Connect Dev' : (config.name ?? 'Connect'),
-    slug: config.slug ?? 'reflection-companion',
+    slug: config.slug ?? 'reflections-connect',
     ios: {
         ...config.ios,
-        bundleIdentifier: IS_DEV ? 'com.psparago.lookingglass.companion.dev' : 'com.psparago.lookingglass.companion',
+        bundleIdentifier: IS_DEV ? 'com.psparago.reflections.connect.dev' : 'com.psparago.reflections.connect',
         googleServicesFile: './GoogleService-Info.plist', 
         infoPlist: {
             CFBundleURLTypes: [
                 {
                     CFBundleURLSchemes: [
-                        "com.googleusercontent.apps.870445864294-uhg44qcpbq8f8fav27nbahtesd994rfr"
+                        "com.googleusercontent.apps.759023712124-k4u8d605g32n41f6483d9u22cta28j3s"
                     ]
                 }
             ]
@@ -22,6 +22,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     },
     android: {
         ...config.android,
-        package: IS_DEV ? 'com.psparago.lookingglass.companion.dev' : 'com.psparago.lookingglass.companion',
+        package: IS_DEV ? 'com.psparago.reflections.connect.dev' : 'com.psparago.reflections.connect',
     },
 });

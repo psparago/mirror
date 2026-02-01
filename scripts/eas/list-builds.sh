@@ -9,13 +9,13 @@ fi
 
 echo "📋 Reflections Explorer - Recent Builds"
 echo "======================================"
-cd "$(dirname "$0")/../../apps/cole"
+cd "$(dirname "$0")/../../apps/explorer"
 npx eas-cli build:list --limit 5
 
 echo ""
 echo ""
 echo "📋 Reflections Connect - Recent Builds"
 echo "=========================================================="
-cd "$(dirname "$0")/../../apps/companion"
+cd "$(dirname "$0")/../../apps/connect"
 npx eas-cli build:list --limit 5
 

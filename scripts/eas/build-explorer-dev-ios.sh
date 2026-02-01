@@ -12,11 +12,11 @@ echo "🔨 Building Reflections Explorer - Development Build for iOS"
 echo "This build includes the dev client for hot reload and debugging"
 echo ""
 
-cd "$(dirname "$0")/../../apps/cole"
+cd "$(dirname "$0")/../../apps/explorer"
 
 npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
-echo "✅ Build submitted! Check status at: https://expo.dev/accounts/psparago/projects/mirror-cole/builds"
+echo "✅ Build submitted! Check status at: https://expo.dev/accounts/psparago/projects/reflections-explorer/builds"
 echo "📱 Once complete, share the URL with testers to install"
 

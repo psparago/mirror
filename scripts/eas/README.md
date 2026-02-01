@@ -1,11 +1,11 @@
-# EAS Build Scripts for Looking Glass
+# EAS Build Scripts for Reflections
 
-This directory contains scripts for building and distributing the Looking Glass (LG) and Looking Glass Companion (LG Companion) iOS apps using Expo Application Services (EAS).
+This directory contains scripts for building and distributing the Reflections  and Reflections Companion (Reflections Companion) iOS apps using Expo Application Services (EAS).
 
 ## 📱 Apps Overview
 
-- **Looking Glass (LG)**: The primary app for Cole to view reflections sent by family
-- **Looking Glass Companion (LG Companion)**: The companion app for family members to create and send reflections
+- **Reflections **: The primary app for Cole to view reflections sent by family
+- **Reflections Companion (Reflections Companion)**: The companion app for family members to create and send reflections
 
 ## 🏗️ Build Profiles
 
@@ -33,37 +33,37 @@ This directory contains scripts for building and distributing the Looking Glass 
 
 ### Preview Builds (For Family)
 
-#### Build LG Only
+#### Build Reflections Only
 ```bash
-./scripts/eas/build-lg-preview-ios.sh
+./scripts/eas/build-Reflections-preview-ios.sh
 ```
-Builds Looking Glass (LG) in preview mode for internal distribution.
+Builds Reflections  in preview mode for internal distribution.
 
-#### Build LG Companion Only
+#### Build Reflections Companion Only
 ```bash
-./scripts/eas/build-lg-companion-preview-ios.sh
+./scripts/eas/build-Reflections-companion-preview-ios.sh
 ```
-Builds Looking Glass Companion in preview mode for internal distribution.
+Builds Reflections Companion in preview mode for internal distribution.
 
 #### Build Both Apps
 ```bash
 ./scripts/eas/build-all-preview-ios.sh
 ```
-Builds both LG and LG Companion in preview mode. **Recommended for family distribution.**
+Builds both Reflections and Reflections Companion in preview mode. **Recommended for family distribution.**
 
 ### Development Builds (For Testing)
 
-#### Build LG Development
+#### Build Reflections Development
 ```bash
-./scripts/eas/build-lg-dev-ios.sh
+./scripts/eas/build-Reflections-dev-ios.sh
 ```
-Builds Looking Glass (LG) with development client for hot reload and debugging.
+Builds Reflections  with development client for hot reload and debugging.
 
-#### Build LG Companion Development
+#### Build Reflections Companion Development
 ```bash
-./scripts/eas/build-lg-companion-dev-ios.sh
+./scripts/eas/build-Reflections-companion-dev-ios.sh
 ```
-Builds Looking Glass Companion with development client for hot reload and debugging.
+Builds Reflections Companion with development client for hot reload and debugging.
 
 ### Check Build Status
 
@@ -98,8 +98,8 @@ Shows the 5 most recent builds for both apps.
 
 1. **Via Email**: EAS sends you an email with the install link
 2. **Via Web**: Visit the Expo dashboard:
-   - LG: https://expo.dev/accounts/psparago/projects/mirror-cole/builds
-   - LG Companion: https://expo.dev/accounts/psparago/projects/mirror-companion/builds
+   - Reflections: https://expo.dev/accounts/psparago/projects/reflections-explorer/builds
+   - Reflections Companion: https://expo.dev/accounts/psparago/projects/reflections-companion/builds
 3. **Via CLI**: Run `./scripts/eas/list-builds.sh`
 
 ### Sharing with Family
@@ -108,7 +108,7 @@ Shows the 5 most recent builds for both apps.
 2. Send the URL via text/email to family members
 3. They open the URL on their iOS device
 4. They tap "Install" and follow the prompts
-5. The app appears on their home screen as "Looking Glass" or "Looking Glass Companion"
+5. The app appears on their home screen as "Reflections" or "Reflections Companion"
 
 ### Installing on Your Own Device
 
@@ -126,17 +126,17 @@ You don't need to manually create or manage these in the Apple Developer Portal.
 
 ## 📋 App Configuration
 
-### Looking Glass (LG)
-- **Display Name**: Looking Glass
+### Reflections 
+- **Display Name**: Reflections
 - **Bundle ID**: com.psparago.lookingglass
-- **Expo Slug**: mirror-cole (internal only)
+- **Expo Slug**: reflections-explorer (internal only)
 - **EAS Project ID**: c68c385b-fb1c-4beb-b226-5750b49b20d2
 - **Native Plugins**: expo-camera, expo-audio, expo-blur, expo-speech
 
-### Looking Glass Companion (LG Companion)
-- **Display Name**: Looking Glass Companion
+### Reflections Companion (Reflections Companion)
+- **Display Name**: Reflections Companion
 - **Bundle ID**: com.psparago.lookingglass.companion
-- **Expo Slug**: mirror-companion (internal only)
+- **Expo Slug**: reflections-companion (internal only)
 - **EAS Project ID**: a21eb601-52c9-4d66-97d9-0891967bedee
 - **Native Plugins**: expo-camera, expo-image-picker, expo-audio, expo-blur
 
@@ -196,8 +196,8 @@ If using development builds, you can:
 - **Owner**: psparago
 - **Organization**: Personal account
 - **Projects**:
-  - mirror-cole (Looking Glass / LG)
-  - mirror-companion (Looking Glass Companion / LG Companion)
+  - reflections-cole (Reflections / Reflections)
+  - reflections-companion (Reflections Companion / Reflections Companion)
 
 ## 📚 Additional Resources
 
@@ -299,5 +299,5 @@ EAS automatically increments build numbers for each build.
 
 **Last Updated**: January 2026  
 **Maintainer**: psparago  
-**Apps**: Looking Glass (LG) & Looking Glass Companion (LG Companion)
+**Apps**: Reflections & Reflections Companion (Reflections Companion)
 

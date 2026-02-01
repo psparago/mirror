@@ -7,10 +7,10 @@
     "packages/*"
   ],
   "scripts": {
-    "cole": "cd apps/cole && npx expo start -c --dev-client",
-    "companion": "cd apps/companion && npx expo start -c --dev-client --port 8082",
-    "build:cole": "cd apps/cole && eas build --profile development --platform ios",
-    "build:companion": "cd apps/companion && eas build --profile development --platform ios"
+    "explorer": "cd apps/explorer && npx expo start -c --dev-client",
+    "connect": "cd apps/connect && npx expo start -c --dev-client --port 8082",
+    "build:explorer": "cd apps/explorer && eas build --profile development --platform ios",
+    "build:connect": "cd apps/connect && eas build --profile development --platform ios"
   },
   "devDependencies": {
     "aws-sdk": "^2.1693.0",

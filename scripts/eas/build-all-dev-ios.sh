@@ -19,18 +19,18 @@ PROJECT_ROOT="$SCRIPT_DIR/../.."
 
 # Build Reflections Explorer
 echo "🔨 Building Reflections Explorer Development..."
-cd "$PROJECT_ROOT/apps/cole"
+cd "$PROJECT_ROOT/apps/explorer"
 npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
 echo "🔨 Building Reflections Connect Development..."
-cd "$PROJECT_ROOT/apps/companion"
+cd "$PROJECT_ROOT/apps/connect"
 npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
 echo "✅ Both development builds submitted!"
-echo "📱 LG: https://expo.dev/accounts/psparago/projects/mirror-cole/builds"
-echo "📱 LG Companion: https://expo.dev/accounts/psparago/projects/mirror-companion/builds"
+echo "📱 LG: https://expo.dev/accounts/psparago/projects/reflections-explorer/builds"
+echo "📱 LG Companion: https://expo.dev/accounts/psparago/projects/reflections-connect/builds"
 echo ""
 echo "💡 Once installed, you can use Fast Refresh for instant updates without rebuilding!"
 

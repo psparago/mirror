@@ -205,7 +205,7 @@ objectsToDelete = []string{
 
 ### Issue #4: Cole Tries to Play Thumbnail as Video
 
-**Location**: `apps/cole/components/ReflectedWatchView.tsx`
+**Location**: `apps/explorer/components/ReflectedWatchView.tsx`
 
 **Problem**:
 - Cole uses `selectedEvent.image_url` as video source
@@ -319,7 +319,7 @@ The following tests confirm video support is working:
 
 ## 🎯 Frontend Changes (After Backend Fix)
 
-### File: `apps/cole/components/ReflectedWatchView.tsx`
+### File: `apps/explorer/components/ReflectedWatchView.tsx`
 
 **Change videoSource logic** (line 76):
 ```typescript

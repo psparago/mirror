@@ -13,7 +13,7 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
 ### Step-by-Step Process
 
 #### 1. **Selfie Capture** (`captureSelfieResponse`)
-- **Location**: `apps/cole/app/(tabs)/index.tsx:958-1026`
+- **Location**: `apps/explorer/app/(tabs)/index.tsx:958-1026`
 - **Trigger**: Called from `MainStageView` when selfie timer expires (5 seconds into video, or after image idle)
 - **Actions**:
   - Captures photo with quality `0.3` (line 976)
@@ -22,7 +22,7 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
   - Generates response event ID (line 1001)
 
 #### 2. **Job Enqueuing** (`enqueueSelfieUpload`)
-- **Location**: `apps/cole/app/(tabs)/index.tsx:851-868`
+- **Location**: `apps/explorer/app/(tabs)/index.tsx:851-868`
 - **Trigger**: Called immediately after image processing (line 1004)
 - **Actions**:
   - Reads existing queue from AsyncStorage (line 860)
@@ -43,7 +43,7 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
 ```
 
 #### 3. **Queue Processing** (`processSelfieQueue`)
-- **Location**: `apps/cole/app/(tabs)/index.tsx:870-955`
+- **Location**: `apps/explorer/app/(tabs)/index.tsx:870-955`
 - **Trigger**: 
   - Immediately after enqueue (line 864)
   - When app becomes active (AppState listener, line 120)
@@ -63,7 +63,7 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
   9. Continues to next job or exits if queue empty
 
 #### 4. **AppState Integration**
-- **Location**: `apps/cole/app/(tabs)/index.tsx:114-170`
+- **Location**: `apps/explorer/app/(tabs)/index.tsx:114-170`
 - **Purpose**: Processes queue when app returns to foreground
 - **Implementation**: 
   - Listens for `AppState` changes (line 115)
@@ -83,7 +83,7 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
 - **Pattern**: Check flag → set flag → process → clear flag
 
 ### Atomic Updates
-- **Location**: `apps/cole/app/(tabs)/index.tsx:924-943`
+- **Location**: `apps/explorer/app/(tabs)/index.tsx:924-943`
 - **Method**: Firestore `writeBatch` (line 925)
 - **Documents Updated**:
   1. Response document: `reflection_responses/{originalEventId}` (lines 926-936)

@@ -11,8 +11,8 @@ Project Mirror is the project codename, but the apps are branded as **Reflection
 * **Intellectual Property:** Proprietary patterns for directed social interaction and cognitive-load-optimized interfaces.
 
 ## 🏗️ The Monorepo
-* **`apps/cole` (Reflections Explorer):** The consumer app (iPad) for the **Explorer**.
-* **`apps/companion` (Reflections Companion):** The app (iPhone) for family, friends, and caregivers.
+* **`apps/explorer` (Reflections Explorer):** The consumer app (iPad) for the **Explorer**.
+* **`apps/connect` (Reflections Connect):** The app (iPhone) for family, friends, and caregivers.
 * **`backend`:** Go (Cloud Functions), Firestore, S3 (Storage).
 * **`packages/shared`:** Shared TypeScript types and Firebase config.
 

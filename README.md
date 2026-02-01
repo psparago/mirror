@@ -7,8 +7,8 @@ Angelshare Companion: A "Directed Social Media" app connecting Cole with his fam
 ```
 ProjectMirror/
 ├── apps/
-│   ├── cole/          # Cole's app (iPad - recipient)
-│   └── companion/     # Companion app (iPhone - sender)
+│   ├── explorer/      # Reflections Explorer (iPad - recipient)
+│   └── connect/       # Reflections Connect (iPhone - sender)
 ├── packages/
 │   └── shared/        # Shared code (API endpoints, S3 utilities, types)
 ├── backend/           # Go Cloud Functions
@@ -28,28 +28,28 @@ This will install dependencies for all workspaces (both apps and shared package)
 
 ### Running the Apps
 
-**Cole App (iPad):**
+**Reflections Explorer (iPad):**
 ```bash
-npm run cole
+npm run explorer
 # or
-cd apps/cole && npm start
+cd apps/explorer && npm start
 ```
 - Runs on default Expo port (8081)
 - Scan QR code with Expo Go on iPad
 
-**Companion App (iPhone):**
+**Reflections Connect (iPhone):**
 ```bash
-npm run companion
+npm run connect
 # or
-cd apps/companion && npm start
+cd apps/connect && npm start
 ```
 - Runs on port 8082 (to avoid conflicts)
 - Scan QR code with Expo Go on iPhone
 
 **Run Both Simultaneously:**
 - Open two terminal windows
-- Run `npm run cole` in one
-- Run `npm run companion` in the other
+- Run `npm run explorer` in one
+- Run `npm run connect` in the other
 - Each generates its own QR code
 
 ## Development

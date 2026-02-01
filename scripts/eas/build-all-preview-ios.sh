@@ -18,16 +18,16 @@ PROJECT_ROOT="$SCRIPT_DIR/../.."
 
 # Build LG
 echo "🔨 Building Looking Glass (LG)..."
-cd "$PROJECT_ROOT/apps/cole"
+cd "$PROJECT_ROOT/apps/explorer"
 npx eas-cli build --profile preview --platform ios --non-interactive
 
 echo ""
 echo "🔨 Building Looking Glass Companion (LG Companion)..."
-cd "$PROJECT_ROOT/apps/companion"
+cd "$PROJECT_ROOT/apps/connect"
 npx eas-cli build --profile preview --platform ios --non-interactive
 
 echo ""
 echo "✅ Both builds submitted!"
-echo "📱 LG: https://expo.dev/accounts/psparago/projects/mirror-cole/builds"
-echo "📱 LG Companion: https://expo.dev/accounts/psparago/projects/mirror-companion/builds"
+echo "📱 LG: https://expo.dev/accounts/psparago/projects/reflections-explorer/builds"
+echo "📱 LG Companion: https://expo.dev/accounts/psparago/projects/reflections-connect/builds"
 

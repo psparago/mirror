@@ -6,7 +6,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "76b4c297-74fd-4954-9716-d51461bdd7cf"
+        "projectId": "b31ff8bd-3c85-4fc4-a7a7-9da9453ac9ec"
       }
     },
     "ios": {
@@ -21,6 +21,8 @@
     "updates": {
       "url": "https://u.expo.dev/76b4c297-74fd-4954-9716-d51461bdd7cf"
     },
-    "android": {}
+    "android": {},
+    "owner": "psparago",
+    "slug": "reflections"
   }
 }

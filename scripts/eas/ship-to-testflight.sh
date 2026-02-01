@@ -38,7 +38,7 @@ PROJECT_ROOT="$SCRIPT_DIR/../.."
 
 # --- BUILD Explorer (COLE) ---
 echo "🔨 Building Reflections Explorer..."
-cd "$PROJECT_ROOT/apps/cole"
+cd "$PROJECT_ROOT/apps/explorer"
 # FIX: Use 'npx eas-cli' explicitly to avoid ambiguous binary errors
 npx eas-cli build \
   --profile production \
@@ -50,7 +50,7 @@ echo ""
 
 # --- BUILD Connect ---
 echo "🔨 Building Reflections Connect..."
-cd "$PROJECT_ROOT/apps/companion"
+cd "$PROJECT_ROOT/apps/connect"
 
 # FIX: Replaced undefined $EAS_CMD with explicit 'npx eas-cli'
 npx eas-cli build \

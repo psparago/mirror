@@ -5,23 +5,45 @@ import * as AppleAuthentication from 'expo-apple-authentication';
 import * as Application from 'expo-application';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-const GOOGLE_WEB_CLIENT_ID = '870445864294-0iogp0pvi3gqsobdq1ht4pkid9h1nnv0.apps.googleusercontent.com';
-const AuthContext = createContext<AuthContextType>({} as AuthContextType);
+// From GoogleService-Info.plist (Connect) and Google Cloud OAuth 2.0 Web client for reflections-1200b
+const GOOGLE_WEB_CLIENT_ID = '759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com';
 
-const PROD_APP_ID = '1:870445864294:ios:e9d73abd72299974a664a7';
-const DEV_APP_ID = '1:870445864294:ios:33fdfb7052891d50a664a7';
+// Connect app iOS app IDs from GoogleService-Info.plist (Connect = prod; dev uses same unless you add a separate Firebase iOS app for connect.dev)
+const CONNECT_PROD_APP_ID = '1:759023712124:ios:c241b3a0612ad51a0a96f9';
+const CONNECT_DEV_APP_ID = '1:759023712124:ios:1c591950a74fc3ff0a96f9';
 
-const isDevApp = Application.applicationId === 'com.psparago.lookingglass.companion.dev';
+const EXPLORER_PROD_APP_ID = '1:759023712124:ios:88fa846cef16f7c20a96f9';
+const EXPLORER_DEV_APP_ID = '1:759023712124:ios:b3622cc10ef04d4f0a96f9';
+
+const bundleId = Application.applicationId;
+let activeAppId = CONNECT_PROD_APP_ID; // Default safety net
+
+if (bundleId === 'com.psparago.reflections.connect.dev') {
+  activeAppId = CONNECT_DEV_APP_ID;
+} else if (bundleId === 'com.psparago.reflections.explorer') {
+  activeAppId = EXPLORER_PROD_APP_ID;
+} else if (bundleId === 'com.psparago.reflections.explorer.dev') {
+  activeAppId = EXPLORER_DEV_APP_ID;
+}
 
 const firebaseConfig = {
-  apiKey: "AIzaSyDB4Px0_YfAl29MLB_LByrd_6v1jFh1VHk",
-  appId: isDevApp ? DEV_APP_ID : PROD_APP_ID,
-  projectId: "project-mirror-23168",
-  storageBucket: "project-mirror-23168.firebasestorage.app",
-  messagingSenderId: "870445864294",
-  authDomain: "project-mirror-23168.firebaseapp.com",
-  databaseURL: "https://project-mirror-23168.firebaseio.com"
+  apiKey: "AIzaSyBDaniN4IpEu1frspmR0U5MeU-H0DB1wPM",
+  appId: activeAppId,
+  projectId: "reflections-1200b",
+  storageBucket: "reflections-1200b.firebasestorage.app",
+  messagingSenderId: "759023712124",
+  authDomain: "reflections-1200b.firebaseapp.com",
+  databaseURL: "https://reflections-1200b.firebaseio.com"
 };
+
+if (firebase.apps.length === 0) {
+  try {
+    firebase.initializeApp(firebaseConfig);
+    console.log(`[AuthContext] Initialized Firebase for: ${bundleId}`);
+  } catch (e) {
+    console.error("[AuthContext] Firebase init failed", e);
+  }
+}
 
 interface AuthContextType {
   user: FirebaseAuthTypes.User | null;
@@ -31,14 +53,7 @@ interface AuthContextType {
   signOut: () => Promise<void>;
 }
 
-if (firebase.apps.length === 0) {
-  try {
-    firebase.initializeApp(firebaseConfig);
-    console.log("Firebase initialized manually via JS");
-  } catch (e) {
-    console.error("Firebase init failed", e);
-  }
-}
+const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<FirebaseAuthTypes.User | null>(null);

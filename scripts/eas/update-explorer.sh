@@ -19,7 +19,7 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-cd "$PROJECT_ROOT/apps/cole"
+cd "$PROJECT_ROOT/apps/explorer"
 
 # Prompt for update message
 read -p "📝 Enter update message (or press Enter for default): " MESSAGE

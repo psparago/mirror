@@ -3,21 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>870445864294-uhg44qcpbq8f8fav27nbahtesd994rfr.apps.googleusercontent.com</string>
+	<string>759023712124-vgj678pa21lss5aqfcp0orke6gkpls3j.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.870445864294-uhg44qcpbq8f8fav27nbahtesd994rfr</string>
+	<string>com.googleusercontent.apps.759023712124-vgj678pa21lss5aqfcp0orke6gkpls3j</string>
 	<key>API_KEY</key>
-	<string>AIzaSyDB4Px0_YfAl29MLB_LByrd_6v1jFh1VHk</string>
+	<string>AIzaSyBDaniN4IpEu1frspmR0U5MeU-H0DB1wPM</string>
 	<key>GCM_SENDER_ID</key>
-	<string>870445864294</string>
+	<string>759023712124</string>
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.psparago.lookingglass.companion</string>
+	<string>com.psparago.reflections.connect</string>
 	<key>PROJECT_ID</key>
-	<string>project-mirror-23168</string>
+	<string>reflections-1200b</string>
 	<key>STORAGE_BUCKET</key>
-	<string>project-mirror-23168.firebasestorage.app</string>
+	<string>reflections-1200b.firebasestorage.app</string>
 	<key>IS_ADS_ENABLED</key>
 	<false></false>
 	<key>IS_ANALYTICS_ENABLED</key>
@@ -29,6 +29,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:870445864294:ios:e9d73abd72299974a664a7</string>
+	<string>1:759023712124:ios:c241b3a0612ad51a0a96f9</string>
 </dict>
 </plist>

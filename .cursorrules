@@ -25,13 +25,13 @@
 You must adhere to the following naming conventions in all code, comments, and discussions.
 
 1. **Reflections Explorer:**
-   - **Path:** `apps/cole`
+   - **Path:** `apps/explorer`
    - **Identity:** The iPad app used by the primary user (The Explorer).
    - **Formerly known as:** "Looking Glass Explorer", "Cole's App", "LG".
    - **User Role:** "Explorer".
 
 2. **Reflections Connect:**
-   - **Path:** `apps/companion`
+   - **Path:** `apps/connect`
    - **Identity:** The iPhone/iPad app used by family and caregivers.
    - **Formerly known as:** "Looking Glass Companion", "Remote", "LGC".
    - **User Role:** "Companion" or "Caregiver".
@@ -55,8 +55,8 @@ Project Mirror is the internal codename. The public apps are **Reflections Explo
 * **The "No Doom Scrolling" Rule:** Content never auto-advances. It stops and waits for the Explorer to choose.
 
 ## 🏗️ The Monorepo Structure
-* **`apps/cole` (Reflections Explorer):** The consumer iPad app.
-* **`apps/companion` (Reflections Companion):** The creator/manager iPhone app.
+* **`apps/explorer` (Reflections Explorer):** The consumer iPad app.
+* **`apps/connect` (Reflections Connect):** The creator/manager iPhone app.
 * **`backend`:** Go (Cloud Functions), Firestore, S3 (Storage).
 * **`packages/shared`:** Shared TypeScript types and Firebase config.
 

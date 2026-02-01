@@ -24,7 +24,7 @@
 ## Solutions Needed
 
 ### Fix 1: Ensure Controls Start Hidden
-**File**: `/Users/petersparago/code/ProjectMirror/apps/cole/components/ReflectedWatchView.tsx`
+**File**: `/Users/petersparago/code/ProjectMirror/apps/explorer/components/ReflectedWatchView.tsx`
 **Line**: ~118
 
 Change:
@@ -51,7 +51,7 @@ const showControls = useCallback(() => {
 ```
 
 ### Fix 3: Fix Video Replay - Update Player Callback
-**File**: `/Users/petersparago/code/ProjectMirror/apps/cole/components/ReflectedWatchView.tsx`
+**File**: `/Users/petersparago/code/ProjectMirror/apps/explorer/components/ReflectedWatchView.tsx`
 **Line**: ~87-101
 
 Current callback updates `isVideoPlaying` immediately on every status change. Need to add logic:
@@ -81,7 +81,7 @@ const player = useVideoPlayer(videoSource || '', (player) => {
 ```
 
 ### Fix 4: Remove Pause Functionality from Main Touch Area
-**File**: `/Users/petersparago/code/ProjectMirror/apps/cole/components/ReflectedWatchView.tsx`
+**File**: `/Users/petersparago/code/ProjectMirror/apps/explorer/components/ReflectedWatchView.tsx`
 **Line**: ~920-964
 
 Change the main `TouchableOpacity` (Media Container) to only handle replay, not pause:
@@ -105,7 +105,7 @@ Change the main `TouchableOpacity` (Media Container) to only handle replay, not 
 ```
 
 ### Fix 5: Simplify toggleVideo - Remove Pause Logic
-**File**: `/Users/petersparago/code/ProjectMirror/apps/cole/components/ReflectedWatchView.tsx`
+**File**: `/Users/petersparago/code/ProjectMirror/apps/explorer/components/ReflectedWatchView.tsx`
 **Line**: ~648-673
 
 ```typescript
@@ -133,7 +133,7 @@ const toggleVideo = useCallback(async () => {
 ### Fix 6: Debug Excessive Re-renders
 The logs show constant `🚀 ReflectedWatchView MOUNTED` messages. This suggests the component is unmounting/remounting repeatedly, which would reset all state including `controlsOpacity`.
 
-Check the parent component (`apps/cole/app/(tabs)/index.tsx`) for:
+Check the parent component (`apps/explorer/app/(tabs)/index.tsx`) for:
 - Conditional rendering of `ReflectedWatchView`
 - Props that change too frequently
 - Missing `useMemo` or `useCallback` on passed functions

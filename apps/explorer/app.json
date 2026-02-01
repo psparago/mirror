@@ -1,24 +1,25 @@
 {
   "expo": {
-    "name": "Connect",
-    "slug": "mirror-companion",
-    "version": "1.0.2",
+    "name": "Explorer",
+    "slug": "reflections-explorer",
+    "version": "1.0.3",
     "orientation": "portrait",
-    "icon": "./assets/images/icon-companion.png",
-    "scheme": "mirror-companion",
-    "userInterfaceStyle": "automatic",
+    "icon": "./assets/images/icon-explorer.png",
+    "scheme": "reflections-explorer",
     "newArchEnabled": false,
+    "backgroundColor": "#ffffff",
+    "userInterfaceStyle": "automatic",
     "splash": {
-      "image": "./assets/images/splash-lgc.png",
+      "image": "./assets/images/splash-lg.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.psparago.lookingglass.companion",
+      "bundleIdentifier": "com.psparago.reflections.explorer",
       "buildNumber": "9",
-      "icon": "./assets/images/icon-companion.png",
       "googleServicesFile": "./GoogleService-Info.plist",
+      "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       },
@@ -31,10 +32,13 @@
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.psparago.lookingglass.companion",
+      "package": "com.psparago.reflections.explorer",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
@@ -49,18 +53,13 @@
       "@react-native-google-signin/google-signin",
       "expo-apple-authentication",
       "expo-router",
+      "expo-notifications",
       "expo-dev-client",
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Reflection Companion to access your camera to send video responses.",
-          "microphonePermission": "Allow Reflection Companion to access your microphone for video and audio features."
-        }
-      ],
-      [
-        "expo-image-picker",
-        {
-          "photosPermission": "Allow Reflection Companion to access your photos."
+          "cameraPermission": "Allow Reflection Explorer to see you.",
+          "microphonePermission": "Allow Reflection Explorer to hear you."
         }
       ],
       [
@@ -72,7 +71,6 @@
           }
         }
       ],
-      "react-native-compressor",
       "expo-video",
       "expo-av",
       "expo-audio",
@@ -80,25 +78,24 @@
         "@sentry/react-native",
         {
           "organization": "angelwareorg",
-          "project": "looking-glass-companion"
+          "project": "reflections-explorer"
         }
       ]
     ],
-    "experiments": {
-      "typedRoutes": true
-    },
     "extra": {
-      "router": {},
+      "router": {
+        "origin": false
+      },
       "eas": {
-        "projectId": "a21eb601-52c9-4d66-97d9-0891967bedee"
+        "projectId": "a88d567c-d40a-44ab-9957-fd529f0b8a29"
       }
     },
-    "owner": "psparago",
     "runtimeVersion": {
       "policy": "appVersion"
     },
-    "updates": {
-      "url": "https://u.expo.dev/a21eb601-52c9-4d66-97d9-0891967bedee"
-    }
+    "updates": {      
+      "url": "https://u.expo.dev/a88d567c-d40a-44ab-9957-fd529f0b8a29"
+    },
+    "owner": "psparago"
   }
 }

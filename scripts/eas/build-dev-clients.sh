@@ -18,13 +18,13 @@ PROJECT_ROOT="$SCRIPT_DIR/../.."
 
 # Build LG Dev
 echo "🔨 Building LG Dev..."
-cd "$PROJECT_ROOT/apps/cole"
+cd "$PROJECT_ROOT/apps/explorer"
 npx eas-cli build --profile development --platform ios --non-interactive
 
 # Build Companion Dev
 echo ""
 echo "🔨 Building Companion Dev..."
-cd "$PROJECT_ROOT/apps/companion"
+cd "$PROJECT_ROOT/apps/connect"
 npx eas-cli build --profile development --platform ios --non-interactive
 
 echo ""
