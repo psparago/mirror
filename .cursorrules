@@ -30,7 +30,7 @@ You must adhere to the following naming conventions in all code, comments, and d
    - **Formerly known as:** "Looking Glass Explorer", "Cole's App", "LG".
    - **User Role:** "Explorer".
 
-2. **Reflections Companion:**
+2. **Reflections Connect:**
    - **Path:** `apps/companion`
    - **Identity:** The iPhone/iPad app used by family and caregivers.
    - **Formerly known as:** "Looking Glass Companion", "Remote", "LGC".
@@ -39,6 +39,7 @@ You must adhere to the following naming conventions in all code, comments, and d
 3. **Strict Terminology:**
    - **DO NOT USE:** "Patient", "Subject", "Star", "Looking Glass".
    - **ALWAYS USE:** "Explorer" (for the user) and "Reflections" (for the app/content).
+   - **ALWAYS USE:** "Companion" (or "Caregiver") for the user of the Reflections Connect app.
 
 ---
 

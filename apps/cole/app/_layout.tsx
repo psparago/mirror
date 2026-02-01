@@ -1,6 +1,9 @@
 import * as Sentry from '@sentry/react-native';
+import auth from '@react-native-firebase/auth';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useOTAUpdate } from '../hooks/useOTAUpdate';
 
@@ -13,8 +16,40 @@ Sentry.init({
 SplashScreen.hideAsync().catch(() => { });
 
 function RootLayout() {
+  const [authReady, setAuthReady] = useState(false);
 
   useOTAUpdate();
+
+  // Explorer must always be authenticated (anonymous) so Firestore rules using request.auth work.
+  useEffect(() => {
+    let attemptedAnonymousSignIn = false;
+    const unsubscribe = auth().onAuthStateChanged((user) => {
+      if (user) {
+        setAuthReady(true);
+        return;
+      }
+
+      if (!attemptedAnonymousSignIn) {
+        attemptedAnonymousSignIn = true;
+        auth()
+          .signInAnonymously()
+          .catch((e) => {
+            console.warn('Anonymous Firebase sign-in failed:', e);
+          });
+      }
+    });
+
+    return unsubscribe;
+  }, []);
+
+  if (!authReady) {
+    return (
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator size="large" color="#000" />
+      </View>
+    );
+  }
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <Stack>

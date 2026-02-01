@@ -1,8 +1,8 @@
 import MainStageView from '@/components/MainStageView';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
-import { db } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import firestore, { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -12,7 +12,6 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
-import { collection, disableNetwork, doc, DocumentData, enableNetwork, getDoc, increment, limit, onSnapshot, orderBy, query, QuerySnapshot, serverTimestamp, setDoc, where, writeBatch } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
@@ -190,22 +189,26 @@ export default function HomeScreen() {
           // Phase: Firestore commit
           debugLog('[Queue] Phase: Firestore commit (atomic batch)');
           // Atomic Firestore update: response + reflection status in one batch
-          const batch = writeBatch(db);
-          const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
-          const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
+          const batch = firestore().batch();
+          const responseRef = firestore()
+            .collection(ExplorerIdentity.collections.responses)
+            .doc(job.originalEventId);
+          const reflectionRef = firestore()
+            .collection(ExplorerIdentity.collections.reflections)
+            .doc(job.originalEventId);
 
           batch.set(responseRef, {
             explorerId: job.senderExplorerId,
             viewerExplorerId: job.viewerExplorerId,
             event_id: job.originalEventId,
             response_event_id: job.responseEventId,
-            timestamp: serverTimestamp(),
+            timestamp: firestore.FieldValue.serverTimestamp(),
             type: 'selfie_response',
           });
 
           batch.set(reflectionRef, {
             status: 'responded',
-            responded_at: serverTimestamp(),
+            responded_at: firestore.FieldValue.serverTimestamp(),
           }, { merge: true });
 
           await batch.commit();
@@ -244,7 +247,7 @@ export default function HomeScreen() {
         processSelfieQueue();
         try {
           // 1. Resume Firestore
-          await enableNetwork(db);
+          await firestore().enableNetwork();
           debugLog('✅ Firestore network resumed');
         } catch (e) {
           console.warn('Error resuming Firestore network:', e);
@@ -280,7 +283,7 @@ export default function HomeScreen() {
         }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
         try {
-          await disableNetwork(db);
+          await firestore().disableNetwork();
           debugLog(`⏸️ Firestore network paused (${nextAppState})`);
         } catch (e) {
           console.warn('Error pausing Firestore network:', e);
@@ -494,18 +497,15 @@ export default function HomeScreen() {
     fetchEventsRef.current();
 
     // 1. Set up Firestore listener (The "Doorbell")
-    const reflectionsRef = collection(db, ExplorerIdentity.collections.reflections);
-    const q = query(
-      reflectionsRef,
-      where('explorerId', '==', ExplorerIdentity.currentExplorerId),
-      orderBy('timestamp', 'desc'),
-      limit(10)
-    );
+    const q = firestore()
+      .collection(ExplorerIdentity.collections.reflections)
+      .where('explorerId', '==', ExplorerIdentity.currentExplorerId)
+      .orderBy('timestamp', 'desc')
+      .limit(10);
     let isInitialLoad = true;
 
-    const unsubscribe = onSnapshot(
-      q,
-      async (snapshot: QuerySnapshot<DocumentData>) => {
+    const unsubscribe = q.onSnapshot(
+      async (snapshot: FirebaseFirestoreTypes.QuerySnapshot) => {
         // Skip initial load to prevent double-fetching on mount
         if (isInitialLoad) {
           isInitialLoad = false;
@@ -941,13 +941,15 @@ export default function HomeScreen() {
   // Send engagement signal to Firestore
   const sendEngagementSignal = async (eventId: string) => {
     try {
-      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
-      await setDoc(signalRef, {
+      const signalRef = firestore()
+        .collection(ExplorerIdentity.collections.reflections)
+        .doc(eventId);
+      await signalRef.set({
         event_id: eventId,
         status: 'engaged',
-        timestamp: serverTimestamp(),
+        timestamp: firestore.FieldValue.serverTimestamp(),
         type: 'engagement_heartbeat',
-        engagement_count: increment(1),
+        engagement_count: firestore.FieldValue.increment(1),
       }, { merge: true });
       hasEngagedRef.current[eventId] = true;
     } catch (error) {
@@ -960,13 +962,15 @@ export default function HomeScreen() {
     // REPLAY SIGNAL: Always send to update timestamp (bubbling up list)
 
     try {
-      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
-      await setDoc(signalRef, {
+      const signalRef = firestore()
+        .collection(ExplorerIdentity.collections.reflections)
+        .doc(eventId);
+      await signalRef.set({
         event_id: eventId,
         status: 'replayed',
-        timestamp: serverTimestamp(),
+        timestamp: firestore.FieldValue.serverTimestamp(),
         type: 'engagement_heartbeat',
-        engagement_count: increment(1),
+        engagement_count: firestore.FieldValue.increment(1),
       }, { merge: true });
       hasReplayedRef.current[eventId] = true;
     } catch (error) {
@@ -1133,12 +1137,14 @@ export default function HomeScreen() {
 
       // 2. Delete selfie response image from S3 if it exists (keep the document)
       try {
-        const responseRef = doc(db, ExplorerIdentity.collections.responses, event.event_id);
-        const responseDoc = await getDoc(responseRef);
+        const responseRef = firestore()
+          .collection(ExplorerIdentity.collections.responses)
+          .doc(event.event_id);
+        const responseDoc = await responseRef.get();
 
         if (responseDoc.exists()) {
           const responseData = responseDoc.data();
-          const responseEventId = responseData.response_event_id;
+          const responseEventId = responseData?.response_event_id;
 
           if (responseEventId) {
             // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
@@ -1159,10 +1165,12 @@ export default function HomeScreen() {
 
       // 3. Mark Firestore signal document as deleted (instead of deleting it)
       try {
-        const signalRef = doc(db, ExplorerIdentity.collections.reflections, event.event_id);
-        await setDoc(signalRef, {
+        const signalRef = firestore()
+          .collection(ExplorerIdentity.collections.reflections)
+          .doc(event.event_id);
+        await signalRef.set({
           status: 'deleted',
-          deleted_at: serverTimestamp(),
+          deleted_at: firestore.FieldValue.serverTimestamp(),
         }, { merge: true });
       } catch (firestoreError: any) {
         console.warn("Failed to mark Firestore signal as deleted:", firestoreError);
