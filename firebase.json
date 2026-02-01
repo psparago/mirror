@@ -1,0 +1,13 @@
+{
+    "functions": [
+      {
+        "source": "backend/gcloud/functions",
+        "codebase": "default",
+        "ignore": [
+          "firebase.json",
+          "**/.*",
+          "**/node_modules/**"
+        ]
+      }
+    ]
+  }
