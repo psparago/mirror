@@ -19,8 +19,16 @@ import {
   serverTimestamp,
   increment,
   writeBatch,
+  enableNetwork,
+  disableNetwork,
 } from 'firebase/firestore';
-import { getAuth, initializeAuth, browserLocalPersistence } from 'firebase/auth';
+import {
+  getAuth,
+  initializeAuth,
+  browserLocalPersistence,
+  onAuthStateChanged,
+  signInAnonymously,
+} from 'firebase/auth';
 import { Platform } from 'react-native';
 
 // From GoogleService-Info.plist (reflections-1200b). appId/measurementId: not in plist — add a Web app in Firebase (reflections-1200b) and paste its appId and measurementId here if the web SDK is used (e.g. db in Connect).
@@ -72,6 +80,10 @@ export {
   serverTimestamp,
   increment,
   writeBatch,
+  enableNetwork,
+  disableNetwork,
 };
+
+export { onAuthStateChanged, signInAnonymously };
 
 export default app;

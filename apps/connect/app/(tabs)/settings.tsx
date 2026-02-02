@@ -1,7 +1,7 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth } from '@projectmirror/shared';
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from '@react-native-firebase/firestore';
+import { db, doc, getDoc, setDoc, serverTimestamp } from '@projectmirror/shared/firebase';
 import { Stack, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
@@ -35,7 +35,6 @@ export default function SettingsScreen() {
         if (!user?.uid) return;
 
         try {
-          const db = getFirestore();
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
             const data = userDoc.data();
@@ -64,7 +63,6 @@ export default function SettingsScreen() {
 
     setLoading(true);
     try {
-      const db = getFirestore();
       await setDoc(doc(db, 'users', user.uid), {
         companionName: trimmedName,
         updatedAt: serverTimestamp(),

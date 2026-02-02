@@ -2,13 +2,12 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 
 import { useAuth } from '@projectmirror/shared';
-import { db } from '@projectmirror/shared/firebase';
-import { getFirestore, doc, getDoc } from '@react-native-firebase/firestore';
+import { db, doc, getDoc, collection, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
 import { useFocusEffect } from 'expo-router';
-import { collection, limit, onSnapshot, orderBy, query, QuerySnapshot, where } from 'firebase/firestore';
+import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
@@ -72,7 +71,6 @@ export default function SentTimelineScreen() {
         if (!user?.uid) return;
 
         try {
-          const db = getFirestore();
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           const userData = userDoc.data();
           setCurrentIdentity(userData?.companionName || null);

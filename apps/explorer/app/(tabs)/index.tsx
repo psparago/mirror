@@ -3,7 +3,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  getFirestore,
+  db,
   collection,
   doc,
   writeBatch,
@@ -18,8 +18,8 @@ import {
   increment,
   enableNetwork,
   disableNetwork,
-  FirebaseFirestoreTypes,
-} from '@react-native-firebase/firestore';
+} from '@projectmirror/shared/firebase';
+import type { QuerySnapshot } from 'firebase/firestore';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -205,7 +205,7 @@ export default function HomeScreen() {
 
           // Phase: Firestore commit
           debugLog('[Queue] Phase: Firestore commit (atomic batch)');
-          const db = getFirestore();
+          // db from shared
           const batch = writeBatch(db);
           const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
           const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
@@ -260,7 +260,7 @@ export default function HomeScreen() {
         processSelfieQueue();
         try {
           // 1. Resume Firestore
-          await enableNetwork(getFirestore());
+          await enableNetwork(db);
           debugLog('✅ Firestore network resumed');
         } catch (e) {
           console.warn('Error resuming Firestore network:', e);
@@ -296,7 +296,7 @@ export default function HomeScreen() {
         }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
         try {
-          await disableNetwork(getFirestore());
+          await disableNetwork(db);
           debugLog(`⏸️ Firestore network paused (${nextAppState})`);
         } catch (e) {
           console.warn('Error pausing Firestore network:', e);
@@ -510,7 +510,7 @@ export default function HomeScreen() {
     fetchEventsRef.current();
 
     // 1. Set up Firestore listener (The "Doorbell")
-    const db = getFirestore();
+    // db from shared
     const q = query(
       collection(db, ExplorerIdentity.collections.reflections),
       where('explorerId', '==', ExplorerIdentity.currentExplorerId),
@@ -520,7 +520,7 @@ export default function HomeScreen() {
     let isInitialLoad = true;
 
     const unsubscribe = onSnapshot(q,
-      async (snapshot: FirebaseFirestoreTypes.QuerySnapshot) => {
+      async (snapshot: QuerySnapshot) => {
         // Skip initial load to prevent double-fetching on mount
         if (isInitialLoad) {
           isInitialLoad = false;
@@ -956,7 +956,7 @@ export default function HomeScreen() {
   // Send engagement signal to Firestore
   const sendEngagementSignal = async (eventId: string) => {
     try {
-      const db = getFirestore();
+      // db from shared
       const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
@@ -974,7 +974,7 @@ export default function HomeScreen() {
   // Send replay signal to Firestore
   const sendReplaySignal = async (eventId: string) => {
     try {
-      const db = getFirestore();
+      // db from shared
       const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
@@ -1148,7 +1148,7 @@ export default function HomeScreen() {
 
       // 2. Delete selfie response image from S3 if it exists (keep the document)
       try {
-        const db = getFirestore();
+        // db from shared
         const responseRef = doc(db, ExplorerIdentity.collections.responses, event.event_id);
         const responseDoc = await getDoc(responseRef);
 
@@ -1175,7 +1175,7 @@ export default function HomeScreen() {
 
       // 3. Mark Firestore signal document as deleted (instead of deleting it)
       try {
-        const db = getFirestore();
+        // db from shared
         const signalRef = doc(db, ExplorerIdentity.collections.reflections, event.event_id);
         await setDoc(signalRef, {
           status: 'deleted',

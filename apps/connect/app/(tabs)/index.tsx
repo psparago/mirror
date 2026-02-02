@@ -3,8 +3,7 @@ import ReflectionComposer from '@/components/ReflectionComposer';
 import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity, useAuth } from '@projectmirror/shared';
-import { db } from '@projectmirror/shared/firebase';
-import { getFirestore, doc as rnDoc, getDoc as rnGetDoc } from '@react-native-firebase/firestore';
+import { db, doc, getDoc, serverTimestamp, setDoc, collection } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
@@ -15,7 +14,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useVideoPlayer } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import { collection, doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
@@ -207,8 +205,7 @@ export default function CompanionHomeScreen() {
     if (!user?.uid) return;
 
     try {
-      // Use native Firestore so the request uses the same auth token as native Auth (web db would get "Missing or insufficient permissions")
-      const userDoc = await rnGetDoc(rnDoc(getFirestore(), 'users', user.uid));
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
       const userData = userDoc.data();
       const cloudName = userData?.companionName;
 
