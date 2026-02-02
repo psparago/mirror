@@ -3,7 +3,7 @@
 
 set -e
 
-BUCKET="mirror-uploads-sparago-2026"
+BUCKET="reflections-1200b-storage"
 LIFECYCLE_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/s3-lifecycle-staging.json"
 
 echo "Applying lifecycle rule to bucket: $BUCKET"

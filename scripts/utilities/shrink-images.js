@@ -3,7 +3,7 @@ const AWS = require('aws-sdk');
 const sharp = require('sharp');
 
 // --- CONFIG ---
-const BUCKET_NAME = 'mirror-uploads-sparago-2026'; 
+const BUCKET_NAME = 'reflections-1200b-storage'; 
 const TARGET_WIDTH = 1080;
 const QUALITY = 80;
 const SIZE_THRESHOLD_KB = 600; // Only shrink if bigger than this

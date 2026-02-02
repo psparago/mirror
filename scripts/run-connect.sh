@@ -11,5 +11,5 @@ nvm use 20 2>/dev/null || true
 echo "🚀 Starting Reflections Connect Development Server..."
 echo "📱 Open the app on your iOS device or simulator to connect"
 cd "$(dirname "$0")/../apps/connect" || exit 1
-npx expo start -c --dev-client --port 8082
+npx expo start -c --dev-client --port 8084
 

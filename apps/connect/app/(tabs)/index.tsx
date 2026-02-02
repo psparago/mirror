@@ -3,7 +3,7 @@ import ReflectionComposer from '@/components/ReflectionComposer';
 import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerIdentity, useAuth } from '@projectmirror/shared';
-import { db, doc, getDoc, serverTimestamp, setDoc, collection } from '@projectmirror/shared/firebase';
+import { collection, db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
@@ -984,8 +984,8 @@ export default function CompanionHomeScreen() {
         type: "mirror_event",
         engagement_count: 0,
         // Explicitly include paths so Mirror knows exactly what files are available
-        audio_url: hasAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/audio.m4a` : null,
-        deep_dive_audio_url: hasDeepDiveAudio ? `https://mirror-uploads-sparago-2026.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
+        audio_url: hasAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/audio.m4a` : null,
+        deep_dive_audio_url: hasDeepDiveAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {

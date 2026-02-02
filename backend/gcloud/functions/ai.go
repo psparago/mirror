@@ -227,7 +227,7 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 			err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
 			if err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String("mirror-uploads-sparago-2026"),
+					Bucket: aws.String("reflections-1200b-storage"),
 					Key:    aws.String(audioKey),
 				})
 				result.AudioURL = presignedRes.URL
@@ -246,7 +246,7 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 			err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
 			if err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String("mirror-uploads-sparago-2026"),
+					Bucket: aws.String("reflections-1200b-storage"),
 					Key:    aws.String(deepDiveAudioKey),
 				})
 				result.DeepDiveAudioURL = presignedRes.URL

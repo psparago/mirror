@@ -4,7 +4,7 @@ import { ExplorerIdentity } from '../ExplorerIdentity';
  * S3 bucket and path constants
  */
 export const S3_CONFIG = {
-  BUCKET: 'mirror-uploads-sparago-2026',
+  BUCKET: 'reflections-1200b-storage',
   REGION: 'us-east-1',
   USER_ID: ExplorerIdentity.currentExplorerId,
 } as const;

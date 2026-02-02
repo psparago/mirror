@@ -351,7 +351,7 @@ const videoSource = selectedMetadata?.content_type === 'video' && selectedEvent?
 **Test #2: Cole Receives Video URL** ✅
 - ✅ Open Cole app
 - ✅ Console shows: Event object with `video_url` field
-- ✅ Example: `video_url: "https://mirror-uploads-sparago-2026.s3.amazonaws.com/...video.mp4?..."`
+- ✅ Example: `video_url: "https://reflections-1200b-storage.s3.amazonaws.com/...video.mp4?..."`
 
 **Test #3: Video Playback** ✅
 - ✅ Tap video reflection in Cole

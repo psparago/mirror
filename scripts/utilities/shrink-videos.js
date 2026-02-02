@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 // --- CONFIG ---
-const BUCKET_NAME = 'mirror-uploads-sparago-2026';
+const BUCKET_NAME = 'reflections-1200b-storage';
 const MAX_DIMENSION = 1080; // Downscale to 1080p if larger
 const TEMP_DIR = './temp_video_processing'; // Local scratch space
 

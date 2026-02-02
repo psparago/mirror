@@ -92,7 +92,7 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	if method == "GET" {
 		// Generate GET presigned URL for downloading/viewing (Expiry: 4 hours)
 		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Bucket: aws.String("reflections-1200b-storage"),
 			Key:    aws.String(s3Key),
 		}, s3.WithPresignExpires(4*time.Hour))
 		if err != nil {
@@ -103,7 +103,7 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// Generate PUT presigned URL for uploading (default)
 		presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Bucket: aws.String("reflections-1200b-storage"),
 			Key:    aws.String(s3Key),
 		})
 		if err != nil {
@@ -132,7 +132,7 @@ func UploadToS3(ctx context.Context, key string, data []byte, contentType string
 
 	s3Client := s3.NewFromConfig(cfg)
 	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String("mirror-uploads-sparago-2026"),
+		Bucket:      aws.String("reflections-1200b-storage"),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String(contentType),
@@ -209,7 +209,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	// 5. List objects in the "{explorerID}/to/" prefix (Cole's inbox)
 	// Don't use delimiter - we need to see all nested objects
 	input := &s3.ListObjectsV2Input{
-		Bucket: aws.String("mirror-uploads-sparago-2026"),
+		Bucket: aws.String("reflections-1200b-storage"),
 		Prefix: aws.String(fmt.Sprintf("%s/to/", explorerID)),
 	}
 
@@ -250,7 +250,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 
 			// Generate presigned GET URL (Expiry: 4 hours)
 			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String("mirror-uploads-sparago-2026"),
+				Bucket: aws.String("reflections-1200b-storage"),
 				Key:    aws.String(key),
 			}, s3.WithPresignExpires(4*time.Hour))
 			if err != nil {
@@ -340,7 +340,7 @@ func GetEventBundle(w http.ResponseWriter, r *http.Request) {
 	prefix := fmt.Sprintf("%s/to/%s/", explorerID, eventID)
 
 	input := &s3.ListObjectsV2Input{
-		Bucket: aws.String("mirror-uploads-sparago-2026"),
+		Bucket: aws.String("reflections-1200b-storage"),
 		Prefix: aws.String(prefix),
 	}
 
@@ -358,7 +358,7 @@ func GetEventBundle(w http.ResponseWriter, r *http.Request) {
 		filename := key[len(prefix):]
 
 		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Bucket: aws.String("reflections-1200b-storage"),
 			Key:    aws.String(key),
 		}, s3.WithPresignExpires(4*time.Hour))
 
@@ -430,7 +430,7 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 		path = "to" // Default to "to" for backward compatibility
 	}
 
-	bucket := "mirror-uploads-sparago-2026"
+	bucket := "reflections-1200b-storage"
 
 	var objectsToDelete []string
 	if path == "from" {
@@ -555,7 +555,7 @@ func GetBatchS3UploadURLs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		presignedRes, err := presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String("mirror-uploads-sparago-2026"),
+			Bucket: aws.String("reflections-1200b-storage"),
 			Key:    aws.String(s3Key),
 		})
 		if err != nil {

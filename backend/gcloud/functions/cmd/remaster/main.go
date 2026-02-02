@@ -19,7 +19,7 @@ import (
 )
 
 var (
-	BucketName = "mirror-uploads-sparago-2026"
+	BucketName = "reflections-1200b-storage"
 	UserID     = getEnv("EXPLORER_ID", "cole")
 	Region     = "us-east-1"
 )
