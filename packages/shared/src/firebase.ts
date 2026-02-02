@@ -1,6 +1,26 @@
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import {
+  getFirestore,
+  doc,
+  collection,
+  getDoc,
+  getDocs,
+  setDoc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  where,
+  orderBy,
+  limit,
+  limitToLast,
+  serverTimestamp,
+  increment,
+  writeBatch,
+} from 'firebase/firestore';
+import { getAuth, initializeAuth, browserLocalPersistence } from 'firebase/auth';
 import { Platform } from 'react-native';
 
 // From GoogleService-Info.plist (reflections-1200b). appId/measurementId: not in plist — add a Web app in Firebase (reflections-1200b) and paste its appId and measurementId here if the web SDK is used (e.g. db in Connect).
@@ -16,15 +36,42 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
-// Safe import for React Native environment
-import { browserPersistence, getReactNativePersistence, initializeAuth } from 'firebase/auth';
-
-export const auth = initializeAuth(app, {
-  persistence: Platform.OS === 'web'
-    ? browserPersistence
-    : getReactNativePersistence(ReactNativeAsyncStorage)
-});
-
+// Auth: use initializeAuth with browserLocalPersistence on web; on React Native use getAuth (default persistence) unless getReactNativePersistence is available
+export const auth = (() => {
+  if (Platform.OS === 'web') {
+    return initializeAuth(app, { persistence: browserLocalPersistence });
+  }
+  try {
+    const { getReactNativePersistence } = require('firebase/auth');
+    return initializeAuth(app, {
+      persistence: getReactNativePersistence(ReactNativeAsyncStorage)
+    });
+  } catch {
+    return getAuth(app);
+  }
+})();
 
 export const db = getFirestore(app);
+
+// Re-export modular Firestore functions so consumers use functional syntax: doc(db, 'col', id), getDoc(ref), etc.
+export {
+  doc,
+  collection,
+  getDoc,
+  getDocs,
+  setDoc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  where,
+  orderBy,
+  limit,
+  limitToLast,
+  serverTimestamp,
+  increment,
+  writeBatch,
+};
+
 export default app;
