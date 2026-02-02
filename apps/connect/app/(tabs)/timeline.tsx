@@ -3,7 +3,7 @@ import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
 
 import { useAuth } from '@projectmirror/shared';
 import { db } from '@projectmirror/shared/firebase';
-import firestore from '@react-native-firebase/firestore';
+import { getFirestore, doc, getDoc } from '@react-native-firebase/firestore';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
@@ -72,7 +72,8 @@ export default function SentTimelineScreen() {
         if (!user?.uid) return;
 
         try {
-          const userDoc = await firestore().collection('users').doc(user.uid).get();
+          const db = getFirestore();
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
           const userData = userDoc.data();
           setCurrentIdentity(userData?.companionName || null);
         } catch (error) {

@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/react-native';
-import auth from '@react-native-firebase/auth';
+import { getApp } from '@react-native-firebase/app';
+import { getAuth, onAuthStateChanged, signInAnonymously } from '@react-native-firebase/auth';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect, useState } from 'react';
@@ -22,8 +23,9 @@ function RootLayout() {
 
   // Explorer must always be authenticated (anonymous) so Firestore rules using request.auth work.
   useEffect(() => {
+    const auth = getAuth(getApp());
     let attemptedAnonymousSignIn = false;
-    const unsubscribe = auth().onAuthStateChanged((user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
         setAuthReady(true);
         return;
@@ -31,11 +33,9 @@ function RootLayout() {
 
       if (!attemptedAnonymousSignIn) {
         attemptedAnonymousSignIn = true;
-        auth()
-          .signInAnonymously()
-          .catch((e) => {
-            console.warn('Anonymous Firebase sign-in failed:', e);
-          });
+        signInAnonymously(auth).catch((e) => {
+          console.warn('Anonymous Firebase sign-in failed:', e);
+        });
       }
     });
 

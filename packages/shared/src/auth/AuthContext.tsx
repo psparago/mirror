@@ -1,5 +1,13 @@
-import firebase from '@react-native-firebase/app';
-import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
+import { getApp, getApps, initializeApp } from '@react-native-firebase/app';
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithCredential,
+  signOut as firebaseSignOut,
+  GoogleAuthProvider,
+  AppleAuthProvider,
+  FirebaseAuthTypes,
+} from '@react-native-firebase/auth';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as Application from 'expo-application';
@@ -36,14 +44,17 @@ const firebaseConfig = {
   databaseURL: "https://reflections-1200b.firebaseio.com"
 };
 
-if (firebase.apps.length === 0) {
+if (getApps().length === 0) {
   try {
-    firebase.initializeApp(firebaseConfig);
+    initializeApp(firebaseConfig);
     console.log(`[AuthContext] Initialized Firebase for: ${bundleId}`);
   } catch (e) {
     console.error("[AuthContext] Firebase init failed", e);
   }
 }
+
+const app = getApp();
+const auth = getAuth(app);
 
 interface AuthContextType {
   user: FirebaseAuthTypes.User | null;
@@ -68,11 +79,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // 2. Listen for Firebase Auth State Changes
   useEffect(() => {
-    const subscriber = auth().onAuthStateChanged((currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       if (loading) setLoading(false);
     });
-    return subscriber; // unsubscribe on unmount
+    return unsubscribe;
   }, []);
 
   // --- GOOGLE SIGN IN ---
@@ -92,11 +103,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (!idToken) throw new Error('No ID token found');
 
-      // Create a Google credential with the token
-      const googleCredential = auth.GoogleAuthProvider.credential(idToken);
-
-      // Sign-in the user with the credential
-      await auth().signInWithCredential(googleCredential);
+      const googleCredential = GoogleAuthProvider.credential(idToken);
+      await signInWithCredential(auth, googleCredential);
     } catch (error) {
       console.error('Google Sign-In Error:', error);
       throw error;
@@ -121,13 +129,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Apple Sign-In failed - no identity token');
       }
 
-      // 3. Create the Credential (FIXED: Use static method, not 'new')
-      // Note: We pass 'rawNonce' as the second argument. 
-      // Since we didn't send a nonce to Apple, we pass null or empty string.
-      const credential = auth.AppleAuthProvider.credential(identityToken, '');
+      const credential = AppleAuthProvider.credential(identityToken, '');
 
-      // 4. Sign in to Firebase
-      await auth().signInWithCredential(credential);
+      await signInWithCredential(auth, credential);
 
     } catch (error: any) {
       // Ignore "User canceled" error (ERR_CANCELED is the standard code)
@@ -143,7 +147,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await GoogleSignin.signOut(); // Clean up Google session
     } catch (e) { /* Ignore if not signed in to Google */ }
 
-    await auth().signOut();
+    await firebaseSignOut(auth);
   };
 
   return (

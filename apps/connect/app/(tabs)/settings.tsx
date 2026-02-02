@@ -1,7 +1,7 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth } from '@projectmirror/shared';
-import firestore from '@react-native-firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from '@react-native-firebase/firestore';
 import { Stack, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
@@ -35,9 +35,10 @@ export default function SettingsScreen() {
         if (!user?.uid) return;
 
         try {
-          const userDoc = await firestore().collection('users').doc(user.uid).get();
+          const db = getFirestore();
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
-            const data = userDoc.data();        
+            const data = userDoc.data();
             const cloudName = data?.companionName || data?.name || '';
             setNameInput(cloudName);
           }
@@ -63,9 +64,10 @@ export default function SettingsScreen() {
 
     setLoading(true);
     try {
-      await firestore().collection('users').doc(user.uid).set({
+      const db = getFirestore();
+      await setDoc(doc(db, 'users', user.uid), {
         companionName: trimmedName,
-        updatedAt: firestore.FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
       }, { merge: true });
 
       Alert.alert('Success', 'Companion name saved');
