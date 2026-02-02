@@ -49,17 +49,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signInWithGoogle = async () => {
     try {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
-      
-      // CAST AS ANY: Tells TypeScript "I know what I'm doing, relax."
-      const response = await GoogleSignin.signIn() as any;
-      
-      // FALLBACK EXTRACTION:
-      // Checks both places: 
-      // 1. response.idToken (v13 style)
-      // 2. response.data.idToken (v16 style)
-      const idToken = response.idToken || response.data?.idToken;
 
-      if (!idToken) throw new Error('No ID token found');
+      const response = await GoogleSignin.signIn() as any;
+      const idToken = response?.idToken ?? response?.data?.idToken;
+
+      // User cancelled or dismissed sign-in — no token, no error
+      if (!idToken) return;
 
       const googleCredential = GoogleAuthProvider.credential(idToken);
       await signInWithCredential(auth, googleCredential);
