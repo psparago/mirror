@@ -1,7 +1,7 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth } from '@projectmirror/shared';
-import { db, doc, getDoc, setDoc, serverTimestamp } from '@projectmirror/shared/firebase';
+import { db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { Stack, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
@@ -66,6 +66,8 @@ export default function SettingsScreen() {
       await setDoc(doc(db, 'users', user.uid), {
         companionName: trimmedName,
         updatedAt: serverTimestamp(),
+        email: user.email,
+        provider: user.providerData[0]?.providerId || 'anonymous',
       }, { merge: true });
 
       Alert.alert('Success', 'Companion name saved');
@@ -146,11 +148,33 @@ export default function SettingsScreen() {
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
             <View style={styles.card}>
-              <View style={styles.row}>
+            <View style={styles.row}>
                 <Text style={styles.rowLabel}>Signed in as</Text>
-                <Text style={styles.rowValue}>{user?.email || 'Unknown'}</Text>
+                <Text 
+                  style={[styles.rowValue, { flex: 1, textAlign: 'right', marginLeft: 16 }]}
+                  numberOfLines={1} 
+                  ellipsizeMode="middle"
+                >
+                  {user?.email || 'Unknown'}
+                </Text>
               </View>
-              
+
+              {/* NEW: Provider Display */}
+              <View style={styles.row}>
+                <Text style={styles.rowLabel}>Provider</Text>
+                <Text style={styles.rowValue}>
+                  {user?.providerData[0]?.providerId || 'Unknown'}
+                </Text>
+              </View>
+
+              {/* NEW: User ID Display (Small font) */}
+              <View style={styles.row}>
+                <Text style={styles.rowLabel}>User ID</Text>
+                <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]}>
+                  {user?.uid}
+                </Text>
+              </View>
+                            
               <View style={styles.divider} />
               
               <TouchableOpacity

@@ -1,6 +1,6 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { VersionDisplay } from '@projectmirror/shared';
+import { VersionDisplay, useAuth } from '@projectmirror/shared';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
@@ -10,6 +10,7 @@ export default function SettingsScreen() {
     const colorScheme = useColorScheme();
     const tintColor = Colors[colorScheme ?? 'light'].tint;
     const router = useRouter();
+    const { user } = useAuth();
 
     // Infinite scroll setting
     const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
@@ -72,6 +73,14 @@ export default function SettingsScreen() {
                     <Text style={[styles.sectionTitle, { color: tintColor }]}>Device & Build</Text>
                     <View style={styles.card}>
                         <VersionDisplay />
+                        <View style={[styles.settingRow, { marginTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', paddingTop: 16 }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={styles.settingLabel}>Device ID</Text>
+                                <Text style={[styles.settingDescription, { fontFamily: 'monospace', fontSize: 11 }]}>
+                                    {user?.uid || 'Not Connected'}
+                                </Text>
+                            </View>
+                        </View>
                     </View>
                 </View>
 
