@@ -72,7 +72,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const userRef = doc(db, 'users', u.uid);
       const userSnap = await getDoc(userRef);
       const userData: any = {
-        email: u.email,
+        email: u.email || 'no email',
         provider: 'google.com',
         lastLogin: serverTimestamp(),
       };
@@ -134,7 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Prepare User Data
       const userData: any = {
-        email: u.email,
+        email: u.email || 'no email',
         provider: 'apple.com',
         lastLogin: serverTimestamp(),
       };
