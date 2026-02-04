@@ -1,15 +1,21 @@
+import { GoogleSignin } from '@react-native-google-signin/google-signin';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import {
-  onAuthStateChanged,
-  signInWithCredential,
   signOut as firebaseSignOut,
   GoogleAuthProvider,
   OAuthProvider,
+  onAuthStateChanged,
+  signInWithCredential,
   User,
 } from 'firebase/auth';
-import { GoogleSignin } from '@react-native-google-signin/google-signin';
-import * as AppleAuthentication from 'expo-apple-authentication';
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { auth } from '../firebase';
+import {
+  auth,
+  db,
+  doc,
+  serverTimestamp,
+  setDoc
+} from '../firebase';
 
 // From Google Cloud OAuth 2.0 Web client for reflections-1200b (used by Google Sign-In native SDK)
 const GOOGLE_WEB_CLIENT_ID = '759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com';
@@ -57,7 +63,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!idToken) return;
 
       const googleCredential = GoogleAuthProvider.credential(idToken);
-      await signInWithCredential(auth, googleCredential);
+      const userCredential = await signInWithCredential(auth, googleCredential);
+      
+      // Sync User Data to Firestore immediately
+      // We use the fresh user object from the credential
+      const u = userCredential.user;
+      await setDoc(doc(db, 'users', u.uid), {
+        email: u.email,
+        provider: 'google.com',
+        lastLogin: serverTimestamp(),
+      });
+
     } catch (error) {
       console.error('Google Sign-In Error:', error);
       throw error;
@@ -67,7 +83,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // --- APPLE SIGN IN ---
   const signInWithApple = async () => {
     try {
-      // 1. Start the native Apple Sign-In flow
+      // Start the native Apple Sign-In flow
       const appleCredential = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -75,7 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ],
       });
 
-      // 2. Extract the token (Remove 'nonce' from here)
+      // Extract the token (Remove 'nonce' from here)
       const { identityToken, authorizationCode } = appleCredential;
 
       if (!identityToken) {
@@ -88,7 +104,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         rawNonce: undefined,
       });
 
-      await signInWithCredential(auth, credential);
+      const userCredential = await signInWithCredential(auth, credential);
+      const u = userCredential.user;
+
+      // Prepare User Data
+      const userData: any = {
+        email: u.email,
+        provider: 'apple.com',
+        lastLogin: serverTimestamp(),
+      };
+
+      if (appleCredential.fullName) {
+        const given = appleCredential.fullName.givenName || '';
+        const family = appleCredential.fullName.familyName || '';
+        const combinedName = `${given} ${family}`.trim();  
+        if (combinedName) {
+            userData.companionName = combinedName;
+        }
+      }
+
+      // Sync to Firestore
+      await setDoc(doc(db, 'users', u.uid), userData, { merge: true });
 
     } catch (error: any) {
       // Ignore "User canceled" error (ERR_CANCELED is the standard code)

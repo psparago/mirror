@@ -66,8 +66,6 @@ export default function SettingsScreen() {
       await setDoc(doc(db, 'users', user.uid), {
         companionName: trimmedName,
         updatedAt: serverTimestamp(),
-        email: user.email,
-        provider: user.providerData[0]?.providerId || 'anonymous',
       }, { merge: true });
 
       Alert.alert('Success', 'Companion name saved');
@@ -174,7 +172,7 @@ export default function SettingsScreen() {
                   {user?.uid}
                 </Text>
               </View>
-                            
+
               <View style={styles.divider} />
               
               <TouchableOpacity
