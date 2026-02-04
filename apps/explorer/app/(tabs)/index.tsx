@@ -1,25 +1,22 @@
 import MainStageView from '@/components/MainStageView';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  db,
   collection,
+  db,
   doc,
-  writeBatch,
   getDoc,
-  setDoc,
-  onSnapshot,
-  query,
-  where,
-  orderBy,
-  limit,
-  serverTimestamp,
   increment,
-  enableNetwork,
-  disableNetwork,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+  writeBatch
 } from '@projectmirror/shared/firebase';
-import type { QuerySnapshot } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -29,6 +26,7 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
+import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 
@@ -253,25 +251,27 @@ export default function HomeScreen() {
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
-      debugLog(`📱 AppState changed to: ${nextAppState}`);
+      console.log('🔄 AppState changed to: ${nextAppState}');
 
       if (nextAppState === 'active') {
         debugLog('🔄 App came to foreground - resuming network and refreshing data');
         processSelfieQueue();
-        try {
-          // 1. Resume Firestore
-          await enableNetwork(db);
-          debugLog('✅ Firestore network resumed');
-        } catch (e) {
-          console.warn('Error resuming Firestore network:', e);
-        }
 
-        // 2. Refresh the overall list
+        // Commented out. Firebase should automatically resume network.
+        // try {
+        //   // 1. Resume Firestore
+        //   await enableNetwork(db);
+        //   debugLog('✅ Firestore network resumed');
+        // } catch (e) {
+        //   console.warn('Error resuming Firestore network:', e);
+        // }
+
+        // Refresh the overall list
         if (fetchEventsRef.current) {
           fetchEventsRef.current();
         }
 
-        // 3. CRITICAL: Refresh the currently selected event's URLs
+        // CRITICAL: Refresh the currently selected event's URLs
         // (URLs likely expired if app was backgrounded for ~1 hour)
         if (selectedEventRef.current) {
           const eventId = selectedEventRef.current.event_id;
@@ -295,12 +295,14 @@ export default function HomeScreen() {
           });
         }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        try {
-          await disableNetwork(db);
-          debugLog(`⏸️ Firestore network paused (${nextAppState})`);
-        } catch (e) {
-          console.warn('Error pausing Firestore network:', e);
-        }
+        console.log(`🔄 App went to background or inactive: ${nextAppState}`);
+        // Commented out. Firebase should automatically pause network.
+        // try {
+        //   await disableNetwork(db);
+        //   debugLog(`⏸️ Firestore network paused (${nextAppState})`);
+        // } catch (e) {
+        //   console.warn('Error pausing Firestore network:', e);
+        // }
       }
     });
 
