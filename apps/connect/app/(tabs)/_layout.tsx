@@ -2,11 +2,8 @@ import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { db } from '@projectmirror/shared/firebase';
 import { Tabs } from 'expo-router';
-import { disableNetwork, enableNetwork } from 'firebase/firestore';
-import React, { useEffect } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
+import React from 'react';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -18,6 +15,7 @@ function TabBarIcon(props: {
 export default function TabLayout() {
   const colorScheme = useColorScheme();
 
+  /*
   // Global AppState listener for Firestore network
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
@@ -43,6 +41,7 @@ export default function TabLayout() {
       subscription.remove();
     };
   }, []);
+*/
 
   return (
     <Tabs
