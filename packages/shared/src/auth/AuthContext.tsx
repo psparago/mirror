@@ -13,6 +13,7 @@ import {
   auth,
   db,
   doc,
+  getDoc,
   serverTimestamp,
   setDoc
 } from '../firebase';
@@ -64,22 +65,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const googleCredential = GoogleAuthProvider.credential(idToken);
       const userCredential = await signInWithCredential(auth, googleCredential);
-      
+      const u = userCredential.user;
+
       // Sync User Data to Firestore immediately
       // We use the fresh user object from the credential
-      const u = userCredential.user;
-      await setDoc(doc(db, 'users', u.uid), {
+      const userRef = doc(db, 'users', u.uid);
+      const userSnap = await getDoc(userRef);
+      const userData: any = {
         email: u.email,
         provider: 'google.com',
         lastLogin: serverTimestamp(),
-      });
+      };
 
+      // Only set Name if missing in DB
+      if (!userSnap.exists() || !userSnap.data()?.companionName) {
+        if (u.displayName) {
+          userData.companionName = u.displayName;
+        }
+      }
+
+      // Safe Write
+      await setDoc(userRef, userData, { merge: true });
     } catch (error) {
       console.error('Google Sign-In Error:', error);
       throw error;
     }
   };
-  
+
   // --- APPLE SIGN IN ---
   const signInWithApple = async () => {
     try {
@@ -107,6 +119,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const userCredential = await signInWithCredential(auth, credential);
       const u = userCredential.user;
 
+      // Check existing profile
+      const userRef = doc(db, 'users', u.uid);
+      const userSnap = await getDoc(userRef);
+      
       // Prepare User Data
       const userData: any = {
         email: u.email,
@@ -114,18 +130,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         lastLogin: serverTimestamp(),
       };
 
+      let candidateName = '';
       if (appleCredential.fullName) {
         const given = appleCredential.fullName.givenName || '';
         const family = appleCredential.fullName.familyName || '';
-        const combinedName = `${given} ${family}`.trim();  
-        if (combinedName) {
-            userData.companionName = combinedName;
-        }
+        candidateName = `${given} ${family}`.trim();  
       }
 
-      // Sync to Firestore
-      await setDoc(doc(db, 'users', u.uid), userData, { merge: true });
+      // Only set Name if we have one AND it's missing in DB
+      if (candidateName && (!userSnap.exists() || !userSnap.data()?.companionName)) {
+         userData.companionName = candidateName;
+      }
 
+      // Safe Write
+      await setDoc(userRef, userData, { merge: true });
+      
     } catch (error: any) {
       // Ignore "User canceled" error (ERR_CANCELED is the standard code)
       if (error.code !== 'ERR_CANCELED') {
