@@ -1,13 +1,9 @@
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
-<<<<<<< Updated upstream
 import * as Crypto from 'expo-crypto';
-=======
->>>>>>> Stashed changes
 import {
   signOut as firebaseSignOut,
-  GoogleAuthProvider,
-  OAuthProvider,
+  GoogleAuthProvider, OAuthProvider,
   onAuthStateChanged,
   signInWithCredential,
   User,
