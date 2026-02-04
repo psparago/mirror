@@ -17,6 +17,7 @@ import {
   View
 } from 'react-native';
 
+
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;

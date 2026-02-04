@@ -1,5 +1,6 @@
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Crypto from 'expo-crypto';
 import {
   signOut as firebaseSignOut,
   GoogleAuthProvider,
@@ -80,7 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Only set Name if missing in DB
       if (!userSnap.exists() || !userSnap.data()?.companionName) {
         if (u.displayName) {
-          userData.companionName = u.displayName;
+          userData.legalName = u.displayName;
         }
       }
 
@@ -95,16 +96,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // --- APPLE SIGN IN ---
   const signInWithApple = async () => {
     try {
+      // Generate a "Nonce" (A random string for security)
+      const rawNonce = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+
+      // Hash the nonce (Apple needs the SHA256 version)
+      const hashedNonce = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        rawNonce
+      );
       // Start the native Apple Sign-In flow
       const appleCredential = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
           AppleAuthentication.AppleAuthenticationScope.EMAIL,
         ],
-      });
+        nonce: hashedNonce,
+      }); 
 
-      // Extract the token (Remove 'nonce' from here)
-      const { identityToken, authorizationCode } = appleCredential;
+      // Extract the token
+      const { identityToken } = appleCredential;
 
       if (!identityToken) {
         throw new Error('Apple Sign-In failed - no identity token');
@@ -113,7 +123,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const provider = new OAuthProvider('apple.com');
       const credential = provider.credential({
         idToken: identityToken,
-        rawNonce: undefined,
+        rawNonce: rawNonce,
       });
 
       const userCredential = await signInWithCredential(auth, credential);
@@ -122,7 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Check existing profile
       const userRef = doc(db, 'users', u.uid);
       const userSnap = await getDoc(userRef);
-      
+
       // Prepare User Data
       const userData: any = {
         email: u.email,
@@ -134,17 +144,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (appleCredential.fullName) {
         const given = appleCredential.fullName.givenName || '';
         const family = appleCredential.fullName.familyName || '';
-        candidateName = `${given} ${family}`.trim();  
+        candidateName = `${given} ${family}`.trim();
       }
 
       // Only set Name if we have one AND it's missing in DB
       if (candidateName && (!userSnap.exists() || !userSnap.data()?.companionName)) {
-         userData.companionName = candidateName;
+        userData.legalName = candidateName;
       }
 
       // Safe Write
       await setDoc(userRef, userData, { merge: true });
-      
+
     } catch (error: any) {
       // Ignore "User canceled" error (ERR_CANCELED is the standard code)
       if (error.code !== 'ERR_CANCELED') {
