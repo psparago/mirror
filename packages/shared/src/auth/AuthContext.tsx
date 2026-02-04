@@ -1,6 +1,9 @@
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import * as AppleAuthentication from 'expo-apple-authentication';
+<<<<<<< Updated upstream
 import * as Crypto from 'expo-crypto';
+=======
+>>>>>>> Stashed changes
 import {
   signOut as firebaseSignOut,
   GoogleAuthProvider,
@@ -36,14 +39,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // 1. Initialize Google SDK
+  // Initialize Google SDK
   useEffect(() => {
     GoogleSignin.configure({
       webClientId: GOOGLE_WEB_CLIENT_ID,
     });
   }, []);
 
-  // 2. Listen for Firebase Auth State Changes
+  // Listen for Firebase Auth State Changes
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
