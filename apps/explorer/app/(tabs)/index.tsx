@@ -251,7 +251,7 @@ export default function HomeScreen() {
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
-      console.log('🔄 AppState changed to: ${nextAppState}');
+      console.log(`📱 [Explorer] AppState: ${nextAppState}`);
 
       if (nextAppState === 'active') {
         debugLog('🔄 App came to foreground - resuming network and refreshing data');
@@ -295,7 +295,6 @@ export default function HomeScreen() {
           });
         }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        console.log(`🔄 App went to background or inactive: ${nextAppState}`);
         // Commented out. Firebase should automatically pause network.
         // try {
         //   await disableNetwork(db);

@@ -3,7 +3,8 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { Tabs } from 'expo-router';
-import React from 'react';
+import React, { useEffect } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -15,25 +16,25 @@ function TabBarIcon(props: {
 export default function TabLayout() {
   const colorScheme = useColorScheme();
 
-  /*
+  
   // Global AppState listener for Firestore network
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
-      console.log(`📱 [Companion] AppState: ${nextAppState}`);
+      console.log(`📱 [Connect] AppState: ${nextAppState}`);
       if (nextAppState === 'active') {
-        try {
-          await enableNetwork(db);
-          console.log('✅ [Companion] Firestore network resumed');
-        } catch (e) {
-          console.warn('Error resuming Firestore network:', e);
-        }
+        // try {
+        //   await enableNetwork(db);
+        //   console.log('✅ [Companion] Firestore network resumed');
+        // } catch (e) {
+        //   console.warn('Error resuming Firestore network:', e);
+        // }
       } else if (nextAppState === 'background' || nextAppState === 'inactive') {
-        try {
-          await disableNetwork(db);
-          console.log(`⏸️ [Companion] Firestore network paused (${nextAppState})`);
-        } catch (e) {
-          console.warn('Error pausing Firestore network:', e);
-        }
+        // try {
+        //   await disableNetwork(db);
+        //   console.log(`⏸️ [Companion] Firestore network paused (${nextAppState})`);
+        // } catch (e) {
+        //   console.warn('Error pausing Firestore network:', e);
+        // }
       }
     });
 
@@ -41,7 +42,7 @@ export default function TabLayout() {
       subscription.remove();
     };
   }, []);
-*/
+
 
   return (
     <Tabs
