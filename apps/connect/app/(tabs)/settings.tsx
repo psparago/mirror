@@ -16,15 +16,18 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
-
+import { useRelationships } from '../../hooks/useRelationships';
 
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
-  
-  // 1. AUTH HOOK (For User ID & Logout)
-  const { user, signOut } = useAuth(); 
-  
+
+  // AUTH HOOK (For User ID & Logout)
+  const { user, signOut } = useAuth();
+
+  // RELATIONSHIPS HOOK
+  const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
+
   const [nameInput, setNameInput] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
@@ -95,13 +98,13 @@ export default function SettingsScreen() {
           headerBackTitle: 'Back',
         }}
       />
-      
-      <KeyboardAvoidingView 
+
+      <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
-          
+
           {/* SECTION: IDENTITY */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
@@ -110,7 +113,7 @@ export default function SettingsScreen() {
               <Text style={styles.description}>
                 This name will appear as the sender of your Reflections.
               </Text>
-              
+
               {initialLoad ? (
                 <ActivityIndicator style={{ padding: 20 }} />
               ) : (
@@ -126,7 +129,7 @@ export default function SettingsScreen() {
                   />
                   <TouchableOpacity
                     style={[
-                      styles.saveButton, 
+                      styles.saveButton,
                       (!nameInput.trim() || loading) && styles.saveButtonDisabled
                     ]}
                     onPress={saveCompanionName}
@@ -143,15 +146,43 @@ export default function SettingsScreen() {
             </View>
           </View>
 
+          {/* --- My Explorers --- */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>My Explorers</Text>
+
+            {relationshipsLoading ? (
+              <ActivityIndicator />
+            ) : relationships.length === 0 ? (
+              <Text style={styles.helperText}>No explorers linked yet.</Text>
+            ) : (
+              relationships.map((rel) => (
+                <View key={rel.id} style={styles.explorerCard}>
+                  <View style={styles.explorerCardRow}>
+                    <Text style={styles.explorerCardLabel}>ID:</Text>
+                    <Text style={styles.explorerCardValue}>{rel.explorerId}</Text>
+                  </View>
+                  <View style={styles.explorerCardRow}>
+                    <Text style={styles.explorerCardLabel}>My Name:</Text>
+                    <Text style={styles.explorerCardValue}>{rel.companionName}</Text>
+                  </View>
+                  <View style={styles.explorerCardRow}>
+                    <Text style={styles.explorerCardLabel}>Role:</Text>
+                    <Text style={styles.explorerCardValue}>{rel.role}</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+
           {/* SECTION: ACCOUNT */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
             <View style={styles.card}>
-            <View style={styles.row}>
+              <View style={styles.row}>
                 <Text style={styles.rowLabel}>Signed in as</Text>
-                <Text 
+                <Text
                   style={[styles.rowValue, { flex: 1, textAlign: 'right', marginLeft: 16 }]}
-                  numberOfLines={1} 
+                  numberOfLines={1}
                   ellipsizeMode="middle"
                 >
                   {user?.email || 'Unknown'}
@@ -175,7 +206,7 @@ export default function SettingsScreen() {
               </View>
 
               <View style={styles.divider} />
-              
+
               <TouchableOpacity
                 style={styles.logoutButton}
                 onPress={handleLogout}
@@ -313,4 +344,29 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginTop: 4,
   },
+  explorerCard: {
+    backgroundColor: '#1e1e1e',
+    padding: 16,
+    borderRadius: 12,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  explorerCardRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  explorerCardLabel: {
+    color: '#fff',
+    fontWeight: '500',
+  },
+  explorerCardValue: {
+    fontWeight: '600',
+    color: '#aaa',
+  },
+  helperText: {
+    color: '#888',
+    fontStyle: 'italic',
+  }
 });
