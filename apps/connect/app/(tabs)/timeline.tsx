@@ -1,8 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerIdentity } from '@projectmirror/shared';
-
-import { useAuth } from '@projectmirror/shared';
-import { db, doc, getDoc, collection, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
+import { collection, db, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
@@ -63,6 +61,7 @@ export default function SentTimelineScreen() {
 
   // Get the user from the Auth Hook
   const { user } = useAuth();
+  const { currentExplorerId, loading: explorerLoading } = useExplorer();
 
   // Load current identity from Firestore
   useFocusEffect(
@@ -153,8 +152,8 @@ export default function SentTimelineScreen() {
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
-    const responsesRef = collection(db, ExplorerIdentity.collections.responses);
-    const q = query(responsesRef, where('explorerId', '==', ExplorerIdentity.currentExplorerId));
+    const responsesRef = collection(db, ExplorerConfig.collections.responses);
+    const q = query(responsesRef, where('explorerId', '==', currentExplorerId));
     const unsubscribeResponses = onSnapshot(q, (snapshot) => {
       const eventIds = new Set<string>();
       const eventIdMap = new Map<string, string>();
@@ -187,10 +186,10 @@ export default function SentTimelineScreen() {
 
   useEffect(() => {
     // Listen to reflections collection for sent Reflections
-    const reflectionsRef = collection(db, ExplorerIdentity.collections.reflections);
+    const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
     const q = query(
       reflectionsRef,
-      where('explorerId', '==', ExplorerIdentity.currentExplorerId),
+      where('explorerId', '==', currentExplorerId),
       orderBy('timestamp', 'desc'),
       limit(100)
     );
@@ -333,7 +332,7 @@ export default function SentTimelineScreen() {
         // Fetch Mirror Events List ONCE for all reflections
         let allMirrorEventsMap = new Map<string, any>();
         try {
-          const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+          const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
           if (eventsResponse.ok) {
             const eventsData = await eventsResponse.json();
             (eventsData.events || []).forEach((e: any) => {
@@ -734,7 +733,7 @@ export default function SentTimelineScreen() {
                   // If we don't have the Event object, fetch it from the API
                   if (!fullEvent) {
                     try {
-                      const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+                      const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
                       if (eventsResponse.ok) {
                         const eventsData = await eventsResponse.json();
                         const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
@@ -851,7 +850,7 @@ export default function SentTimelineScreen() {
 
                             try {
                               // Get presigned GET URL for the selfie image (method=GET for viewing)
-                              const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`;
+                              const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`;
                               const imageResponse = await fetch(url);
                               if (imageResponse.ok) {
                                 const data = await imageResponse.json();

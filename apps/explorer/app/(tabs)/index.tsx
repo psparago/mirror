@@ -1,6 +1,6 @@
 import MainStageView from '@/components/MainStageView';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, Event, EventMetadata, ExplorerIdentity, ListEventsResponse } from '@projectmirror/shared';
+import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useExplorer } from '@projectmirror/shared';
 import {
   collection,
   db,
@@ -73,6 +73,8 @@ export default function HomeScreen() {
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
+
+  const { currentExplorerId, loading: explorerLoading } = useExplorer();
 
   // Load settings from storage
   useEffect(() => {
@@ -165,7 +167,7 @@ export default function HomeScreen() {
           const presignedUrlStartTime = Date.now();
           const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
             try {
-              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
               if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
               return res;
             } catch (e: any) {
@@ -205,8 +207,8 @@ export default function HomeScreen() {
           debugLog('[Queue] Phase: Firestore commit (atomic batch)');
           // db from shared
           const batch = writeBatch(db);
-          const responseRef = doc(db, ExplorerIdentity.collections.responses, job.originalEventId);
-          const reflectionRef = doc(db, ExplorerIdentity.collections.reflections, job.originalEventId);
+          const responseRef = doc(db, ExplorerConfig.collections.responses, job.originalEventId);
+          const reflectionRef = doc(db, ExplorerConfig.collections.reflections, job.originalEventId);
 
           batch.set(responseRef, {
             explorerId: job.senderExplorerId,
@@ -427,7 +429,7 @@ export default function HomeScreen() {
       if (isInitialLoad) setLoading(true);
       else setIsRefreshing(true);
       setError(null);
-      const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+      const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
 
       if (!response.ok) {
         throw new Error(`Failed to fetch events: ${response.status}`);
@@ -513,8 +515,8 @@ export default function HomeScreen() {
     // 1. Set up Firestore listener (The "Doorbell")
     // db from shared
     const q = query(
-      collection(db, ExplorerIdentity.collections.reflections),
-      where('explorerId', '==', ExplorerIdentity.currentExplorerId),
+      collection(db, ExplorerConfig.collections.reflections),
+      where('explorerId', '==', currentExplorerId),
       orderBy('timestamp', 'desc'),
       limit(10)
     );
@@ -543,7 +545,7 @@ export default function HomeScreen() {
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
         try {
-          const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${ExplorerIdentity.currentExplorerId}`);
+          const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
           if (!response.ok) throw new Error('Failed to fetch fresh events');
 
           const data: ListEventsResponse = await response.json();
@@ -622,13 +624,13 @@ export default function HomeScreen() {
       debugLog('🔌 Firestore listener detached');
       unsubscribe();
     };
-  }, [ExplorerIdentity.currentExplorerId]); // Stable dependency
+  }, [currentExplorerId]); // Stable dependency
 
 
   const refreshEventUrls = useCallback(async (eventId: string): Promise<Event | null> => {
     try {
       // Fetch fresh URLs for a single event bundle (Expiry: 4 hours)
-      const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+      const response = await fetch(`${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${eventId}&explorer_id=${currentExplorerId}`);
       if (!response.ok) {
         console.warn(`Failed to refresh URLs for event ${eventId}`);
         return null;
@@ -958,7 +960,7 @@ export default function HomeScreen() {
   const sendEngagementSignal = async (eventId: string) => {
     try {
       // db from shared
-      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
+      const signalRef = doc(db, ExplorerConfig.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
         status: 'engaged',
@@ -976,7 +978,7 @@ export default function HomeScreen() {
   const sendReplaySignal = async (eventId: string) => {
     try {
       // db from shared
-      const signalRef = doc(db, ExplorerIdentity.collections.reflections, eventId);
+      const signalRef = doc(db, ExplorerConfig.collections.reflections, eventId);
       await setDoc(signalRef, {
         event_id: eventId,
         status: 'replayed',
@@ -994,8 +996,8 @@ export default function HomeScreen() {
     originalEventId: string;
     responseEventId: string;
     localUri: string; // Persistent, processed selfie file (documentDirectory)
-    senderExplorerId: string;
-    viewerExplorerId: string;
+    senderExplorerId: string | null;
+    viewerExplorerId: string | null;
     createdAt: number;
   }) => {
     try {
@@ -1081,8 +1083,8 @@ export default function HomeScreen() {
         originalEventId: selectedEvent.event_id,
         responseEventId,
         localUri: persistentPath,
-        senderExplorerId: ExplorerIdentity.currentExplorerId,
-        viewerExplorerId: ExplorerIdentity.currentExplorerId,
+        senderExplorerId: currentExplorerId,
+        viewerExplorerId: currentExplorerId,
         createdAt: Date.now(),
       });
 
@@ -1123,7 +1125,7 @@ export default function HomeScreen() {
 
       let errorMessage = "Failed to capture selfie. Please try again.";
       if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
-        errorMessage = `Permission error. Please check Firestore security rules for '${ExplorerIdentity.collections.responses}' collection.`;
+        errorMessage = `Permission error. Please check Firestore security rules for '${ExplorerConfig.collections.responses}' collection.`;
       }
 
       if (!silent) {
@@ -1139,7 +1141,7 @@ export default function HomeScreen() {
     try {
       // 1. Delete S3 objects
       const deleteResponse = await fetch(
-        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}&explorer_id=${ExplorerIdentity.currentExplorerId}`
+        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${event.event_id}&explorer_id=${currentExplorerId}`
       );
 
       if (!deleteResponse.ok) {
@@ -1150,7 +1152,7 @@ export default function HomeScreen() {
       // 2. Delete selfie response image from S3 if it exists (keep the document)
       try {
         // db from shared
-        const responseRef = doc(db, ExplorerIdentity.collections.responses, event.event_id);
+        const responseRef = doc(db, ExplorerConfig.collections.responses, event.event_id);
         const responseDoc = await getDoc(responseRef);
 
         if (responseDoc.exists()) {
@@ -1161,7 +1163,7 @@ export default function HomeScreen() {
             // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
             // Keep the reflection_response document in Firestore for history
             const deleteSelfieResponse = await fetch(
-              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${ExplorerIdentity.currentExplorerId}`
+              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`
             );
 
             if (!deleteSelfieResponse.ok) {
@@ -1177,7 +1179,7 @@ export default function HomeScreen() {
       // 3. Mark Firestore signal document as deleted (instead of deleting it)
       try {
         // db from shared
-        const signalRef = doc(db, ExplorerIdentity.collections.reflections, event.event_id);
+        const signalRef = doc(db, ExplorerConfig.collections.reflections, event.event_id);
         await setDoc(signalRef, {
           status: 'deleted',
           deleted_at: serverTimestamp(),

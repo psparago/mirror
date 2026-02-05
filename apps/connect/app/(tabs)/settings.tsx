@@ -1,7 +1,8 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { VersionDisplay, useAuth } from '@projectmirror/shared';
+import { VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import { Stack, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import {
@@ -16,7 +17,6 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
-import { useRelationships } from '../../hooks/useRelationships';
 
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
@@ -27,6 +27,7 @@ export default function SettingsScreen() {
 
   // RELATIONSHIPS HOOK
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
+  const { currentExplorerId, loading: explorerLoading } = useExplorer();
 
   const [nameInput, setNameInput] = useState<string>('');
   const [loading, setLoading] = useState(false);

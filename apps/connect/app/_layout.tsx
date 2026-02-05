@@ -10,7 +10,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 // Import your Shared Auth (Adjust the package name if needed)
-import { AuthProvider, useAuth } from '@projectmirror/shared';
+import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { useOTAUpdate } from '../hooks/useOTAUpdate';
@@ -99,7 +99,9 @@ function RootLayout() {
 
   return (
     <AuthProvider>
-      <AppLayout />
+      <ExplorerProvider>
+        <AppLayout />
+      </ExplorerProvider>
     </AuthProvider>
   );
 }

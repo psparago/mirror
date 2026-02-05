@@ -17,7 +17,8 @@ export * from './firebase';
 
 export * from './auth/AuthContext';
 
-export * from './ExplorerIdentity';
+export * from './explorer/ExplorerConfig';
+export * from './explorer/ExplorerContext';
 
 // Components
 export { default as VersionDisplay } from './components/VersionDisplay';

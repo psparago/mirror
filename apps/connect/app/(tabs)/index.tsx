@@ -2,7 +2,7 @@ import CameraModal from '@/components/CameraModal';
 import ReflectionComposer from '@/components/ReflectionComposer';
 import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerIdentity, useAuth } from '@projectmirror/shared';
+import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
 import { collection, db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
@@ -110,6 +110,7 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
+  const { currentExplorerId, loading } = useExplorer();
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -326,7 +327,7 @@ export default function CompanionHomeScreen() {
         setIsAiGenerated(false);
       }
 
-      let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${ExplorerIdentity.currentExplorerId}`;
+      let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${currentExplorerId}`;
       if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
@@ -815,7 +816,7 @@ export default function CompanionHomeScreen() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          explorer_id: ExplorerIdentity.currentExplorerId,
+          explorer_id: currentExplorerId,
           event_id: eventID,
           path: 'to',
           files: filesToSign
@@ -844,7 +845,7 @@ export default function CompanionHomeScreen() {
       } else if (stagingEventId) {
         // If Staging exists, fetch the READ URL for the staging image
         // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
-        const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+        const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
         if (stagingRes.ok) {
           const { url } = await stagingRes.json();
           imageSource = url;
@@ -949,7 +950,7 @@ export default function CompanionHomeScreen() {
       showToast('✅ Reflection sent!');
 
       if (stagingEventId) {
-        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`).catch(() => { });
+        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`).catch(() => { });
       }
 
       if (photo.uri && !photo.uri.startsWith('http')) {
@@ -975,8 +976,8 @@ export default function CompanionHomeScreen() {
       }
 
       // 11. Write Signal to Firestore
-      setDoc(doc(collection(db, ExplorerIdentity.collections.reflections), eventID), {
-        explorerId: ExplorerIdentity.currentExplorerId,
+      setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), {
+        explorerId: currentExplorerId,
         event_id: eventID,
         sender: companionName || "Companion",
         status: "ready",
@@ -984,8 +985,8 @@ export default function CompanionHomeScreen() {
         type: "mirror_event",
         engagement_count: 0,
         // Explicitly include paths so Mirror knows exactly what files are available
-        audio_url: hasAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/audio.m4a` : null,
-        deep_dive_audio_url: hasDeepDiveAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${ExplorerIdentity.currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
+        audio_url: hasAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${currentExplorerId}/to/${eventID}/audio.m4a` : null,
+        deep_dive_audio_url: hasDeepDiveAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {
@@ -1008,7 +1009,7 @@ export default function CompanionHomeScreen() {
     // Clean up staging image if it exists
     if (stagingEventId) {
       try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`);
       } catch (error: any) {
         console.error("Error deleting staging image:", error);
         // Continue with cleanup anyway
@@ -1039,7 +1040,7 @@ export default function CompanionHomeScreen() {
     // Clean up staging image
     if (stagingEventId) {
       try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`);
       } catch (error: any) {
         console.error("Error deleting staging image:", error);
       }
@@ -1097,7 +1098,7 @@ export default function CompanionHomeScreen() {
         }
 
         // Upload to staging first
-        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
         const { url: stagingUrl } = await stagingResponse.json();
         // Only gatekeep here when needed: video thumbnail may exceed 1080px.
         const stagingImageUri =
@@ -1117,7 +1118,7 @@ export default function CompanionHomeScreen() {
       }
 
       // Get presigned GET URL for staging image
-      const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${ExplorerIdentity.currentExplorerId}`);
+      const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
       if (getStagingUrlResponse.ok) {
         const { url: getStagingUrl } = await getStagingUrlResponse.json();
         return await getAIDescription(getStagingUrl, options);

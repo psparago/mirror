@@ -1,4 +1,4 @@
-import { ExplorerIdentity } from '../ExplorerIdentity';
+import { ExplorerConfig } from '../explorer/ExplorerConfig';
 
 /**
  * S3 bucket and path constants
@@ -6,7 +6,7 @@ import { ExplorerIdentity } from '../ExplorerIdentity';
 export const S3_CONFIG = {
   BUCKET: 'reflections-1200b-storage',
   REGION: 'us-east-1',
-  USER_ID: ExplorerIdentity.currentExplorerId,
+  USER_ID: ExplorerConfig.currentExplorerId,
 } as const;
 
 /**

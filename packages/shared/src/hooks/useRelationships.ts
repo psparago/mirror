@@ -1,13 +1,13 @@
-import { db } from '@projectmirror/shared/firebase';
 import {
-    collection,
-    DocumentData,
-    onSnapshot,
-    query,
-    QuerySnapshot,
-    where
+  collection,
+  DocumentData,
+  onSnapshot,
+  query,
+  QuerySnapshot,
+  where
 } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
+import { db } from '../firebase';
 
 export interface Relationship {
   id: string;            // The document ID (auto-generated)
