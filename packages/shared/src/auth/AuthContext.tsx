@@ -52,7 +52,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // --- GOOGLE SIGN IN ---
-  // --- GOOGLE SIGN IN (Universal Fix) ---
   const signInWithGoogle = async () => {
     try {
       await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
@@ -68,17 +67,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const u = userCredential.user;
 
       // Sync User Data to Firestore immediately
-      // We use the fresh user object from the credential
       const userRef = doc(db, 'users', u.uid);
       const userSnap = await getDoc(userRef);
       const userData: any = {
-        email: u.email || 'no email',
+        email: u.email,
         provider: 'google.com',
         lastLogin: serverTimestamp(),
       };
 
-      // Only set Name if missing in DB
-      if (!userSnap.exists() || !userSnap.data()?.companionName) {
+      // ✅ FIX: Check legalName, not companionName
+      if (!userSnap.exists() || !userSnap.data()?.legalName) {
         if (u.displayName) {
           userData.legalName = u.displayName;
         }
@@ -134,7 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // Prepare User Data
       const userData: any = {
-        email: u.email || 'no email',
+        email: u.email,
         provider: 'apple.com',
         lastLogin: serverTimestamp(),
       };
@@ -146,8 +144,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         candidateName = `${given} ${family}`.trim();
       }
 
-      // Only set Name if we have one AND it's missing in DB
-      if (candidateName && (!userSnap.exists() || !userSnap.data()?.companionName)) {
+      // ✅ FIX: Check legalName, not companionName
+      if (candidateName && (!userSnap.exists() || !userSnap.data()?.legalName)) {
         userData.legalName = candidateName;
       }
 

@@ -121,7 +121,6 @@ export default function CompanionHomeScreen() {
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
-  const [companionName] = useState<string>(activeRelationship?.companionName || '');
   const [showNameModal, setShowNameModal] = useState(false);
   const router = useRouter();
 
@@ -129,7 +128,9 @@ export default function CompanionHomeScreen() {
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
     // Optional: handle status updates
   });
-
+  
+  const companionName = activeRelationship?.companionName || '';
+  
   // Cleanup video player on unmount
   useEffect(() => {
     return () => {
