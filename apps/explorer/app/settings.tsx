@@ -12,34 +12,18 @@ export default function SettingsScreen() {
     const tintColor = Colors[colorScheme ?? 'light'].tint;
     const router = useRouter();
 
-    // Infinite scroll setting
-    const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
     // Instant video playback setting
     const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
 
-    useEffect(() => {
-        AsyncStorage.getItem('enableInfiniteScroll').then(value => {
-            if (value !== null) {
-                setEnableInfiniteScroll(value === 'true');
-            }
-        }).catch(err => console.warn('Failed to load setting:', err));
+    console.log('auth.currentUser.uid', auth.currentUser?.uid);
 
+    useEffect(() => {
         AsyncStorage.getItem('instantVideoPlayback').then(value => {
             if (value !== null) {
                 setInstantVideoPlayback(value === 'true');
             }
         }).catch(err => console.warn('Failed to load setting:', err));
     }, []);
-
-    const toggleInfiniteScroll = async (value: boolean) => {
-        setEnableInfiniteScroll(value);
-        try {
-            await AsyncStorage.setItem('enableInfiniteScroll', value.toString());
-            console.log('✅ Infinite scroll setting saved:', value);
-        } catch (err) {
-            console.warn('Failed to save setting:', err);
-        }
-    };
 
     const toggleInstantVideoPlayback = async (value: boolean) => {
         setInstantVideoPlayback(value);
@@ -99,21 +83,6 @@ export default function SettingsScreen() {
                                 onValueChange={toggleInstantVideoPlayback}
                                 trackColor={{ false: '#767577', true: '#4FC3F7' }}
                                 thumbColor={instantVideoPlayback ? '#fff' : '#f4f3f4'}
-                            />
-                        </View>
-
-                        <View style={[styles.settingRow, { marginTop: 20 }]}>
-                            <View style={styles.settingInfo}>
-                                <Text style={styles.settingLabel}>Infinite Scroll</Text>
-                                <Text style={styles.settingDescription}>
-                                    Loop reflections when reaching the end
-                                </Text>
-                            </View>
-                            <Switch
-                                value={enableInfiniteScroll}
-                                onValueChange={toggleInfiniteScroll}
-                                trackColor={{ false: '#767577', true: '#4FC3F7' }}
-                                thumbColor={enableInfiniteScroll ? '#fff' : '#f4f3f4'}
                             />
                         </View>
                     </View>

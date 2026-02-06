@@ -1,6 +1,6 @@
 import MainStageView from '@/components/MainStageView';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse } from '@projectmirror/shared';
 import {
   collection,
   db,
@@ -29,9 +29,8 @@ import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
-
-
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -74,7 +73,8 @@ export default function HomeScreen() {
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
 
-  const { currentExplorerId, loading: explorerLoading } = useExplorer();
+  //const { currentExplorerId, loading: explorerLoading } = useExplorer();
+  const { explorerId: currentExplorerId } = useExplorerSelf();
 
   // Load settings from storage
   useEffect(() => {
