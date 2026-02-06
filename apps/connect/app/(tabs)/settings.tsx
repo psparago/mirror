@@ -1,10 +1,10 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
-import { db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
-import { Stack, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import { Stack } from 'expo-router';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,67 +22,59 @@ export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
 
-  // AUTH HOOK (For User ID & Logout)
+  // AUTH
   const { user, signOut } = useAuth();
 
-  // RELATIONSHIPS HOOK
+  // CONTEXT (The new Source of Truth)
+  // We grab activeRelationship to know WHO we are naming ourselves for (e.g. Peter)
+  const { activeRelationship, loading: explorerLoading } = useExplorer();
+  
+  // We still fetch the full list for the "My Explorers" card at the bottom
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
-  const { currentExplorerId, loading: explorerLoading } = useExplorer();
 
   const [nameInput, setNameInput] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-  const [initialLoad, setInitialLoad] = useState(true);
+  const [saving, setSaving] = useState(false);
 
-  // 2. LOAD FROM FIRESTORE (Robust Version)
-  useFocusEffect(
-    useCallback(() => {
-      const loadProfile = async () => {
-        if (!user?.uid) return;
+  // 1. SYNC: Update the input box whenever the Active Relationship changes
+  useEffect(() => {
+    if (activeRelationship) {
+      setNameInput(activeRelationship.companionName || '');
+    } else {
+      setNameInput(''); // Clear if no explorer selected
+    }
+  }, [activeRelationship?.id, activeRelationship?.companionName]);
 
-        try {
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
-          if (userDoc.exists()) {
-            const data = userDoc.data();
-            const cloudName = data?.companionName || data?.name || '';
-            setNameInput(cloudName);
-          }
-        } catch (error) {
-          console.error('Error loading profile:', error);
-        } finally {
-          setInitialLoad(false);
-        }
-      };
-
-      loadProfile();
-    }, [user?.uid])
-  );
-
-  // 3. SAVE TO FIRESTORE
+  // 2. SAVE: Write to the Relationship Document (Not the User)
   const saveCompanionName = async () => {
     const trimmedName = nameInput.trim();
     if (!trimmedName) {
       Alert.alert('Name Required', 'Please enter a name');
       return;
     }
-    if (!user?.uid) return;
+    
+    // Safety check: Can't save a name if we don't have a relationship link
+    if (!activeRelationship?.id) {
+      Alert.alert('Error', 'No active explorer relationship found.');
+      return;
+    }
 
-    setLoading(true);
+    setSaving(true);
     try {
-      await setDoc(doc(db, 'users', user.uid), {
+      // ✅ Update the RELATIONSHIP record
+      await setDoc(doc(db, 'relationships', activeRelationship.id), {
         companionName: trimmedName,
         updatedAt: serverTimestamp(),
       }, { merge: true });
 
-      Alert.alert('Success', 'Companion name saved');
+      Alert.alert('Success', `Name updated for ${activeRelationship.explorerId}`);
     } catch (error) {
       console.error('Error saving:', error);
       Alert.alert('Error', 'Failed to save name');
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
 
-  // 4. LOGOUT
   const handleLogout = async () => {
     try {
       await signOut();
@@ -109,45 +101,52 @@ export default function SettingsScreen() {
           {/* SECTION: IDENTITY */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
+            
             <View style={styles.card}>
-              <Text style={styles.label}>Companion Name</Text>
-              <Text style={styles.description}>
-                This name will appear as the sender of your Reflections.
-              </Text>
-
-              {initialLoad ? (
-                <ActivityIndicator style={{ padding: 20 }} />
-              ) : (
+              {activeRelationship ? (
                 <>
+                  <Text style={styles.label}>
+                    My Name for <Text style={{color: '#2e78b7'}}>{activeRelationship.explorerId}</Text>
+                  </Text>
+                  <Text style={styles.description}>
+                    This is how you will appear to this specific Explorer.
+                  </Text>
+
                   <TextInput
                     style={styles.input}
-                    placeholder="Enter your name (e.g., Emily, Auntie Tah)"
+                    placeholder="Enter your name (e.g., Dad, Uncle Mike)"
                     placeholderTextColor="#666"
                     value={nameInput}
                     onChangeText={setNameInput}
                     autoCapitalize="words"
-                    editable={!loading}
+                    editable={!saving}
                   />
                   <TouchableOpacity
                     style={[
                       styles.saveButton,
-                      (!nameInput.trim() || loading) && styles.saveButtonDisabled
+                      (!nameInput.trim() || saving) && styles.saveButtonDisabled
                     ]}
                     onPress={saveCompanionName}
-                    disabled={!nameInput.trim() || loading}
+                    disabled={!nameInput.trim() || saving}
                   >
-                    {loading ? (
+                    {saving ? (
                       <ActivityIndicator color="#fff" />
                     ) : (
                       <Text style={styles.saveButtonText}>Save Name</Text>
                     )}
                   </TouchableOpacity>
                 </>
+              ) : (
+                <View style={{ padding: 10, alignItems: 'center' }}>
+                  <Text style={{ color: '#888', fontStyle: 'italic' }}>
+                    {explorerLoading ? "Loading explorer..." : "Link an Explorer to set your identity."}
+                  </Text>
+                </View>
               )}
             </View>
           </View>
 
-          {/* --- My Explorers --- */}
+          {/* SECTION: MY EXPLORERS */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>My Explorers</Text>
 
@@ -170,6 +169,11 @@ export default function SettingsScreen() {
                     <Text style={styles.explorerCardLabel}>Role:</Text>
                     <Text style={styles.explorerCardValue}>{rel.role}</Text>
                   </View>
+                  {activeRelationship?.id === rel.id && (
+                     <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
+                        <Text style={{ color: '#2e78b7', fontSize: 12, fontWeight: 'bold' }}>CURRENTLY SELECTED</Text>
+                     </View>
+                  )}
                 </View>
               ))
             )}
@@ -190,7 +194,6 @@ export default function SettingsScreen() {
                 </Text>
               </View>
 
-              {/* NEW: Provider Display */}
               <View style={styles.row}>
                 <Text style={styles.rowLabel}>Provider</Text>
                 <Text style={styles.rowValue}>
@@ -198,7 +201,6 @@ export default function SettingsScreen() {
                 </Text>
               </View>
 
-              {/* NEW: User ID Display (Small font) */}
               <View style={styles.row}>
                 <Text style={styles.rowLabel}>User ID</Text>
                 <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]}>
@@ -239,7 +241,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#121212', // Dark background for Companion
+    backgroundColor: '#121212',
   },
   scrollContent: {
     padding: 16,
@@ -258,7 +260,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   card: {
-    backgroundColor: '#1e1e1e', // Slightly lighter than background
+    backgroundColor: '#1e1e1e',
     borderRadius: 12,
     padding: 16,
     borderWidth: 1,
@@ -287,7 +289,7 @@ const styles = StyleSheet.create({
     borderColor: '#333',
   },
   saveButton: {
-    backgroundColor: '#2e78b7', // Nice Blue
+    backgroundColor: '#2e78b7',
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
@@ -301,7 +303,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  // Account Styles
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -326,7 +327,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   logoutText: {
-    color: '#ff4d4d', // Red
+    color: '#ff4d4d',
     fontSize: 16,
     fontWeight: '600',
   },

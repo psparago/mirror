@@ -3,7 +3,7 @@ import ReflectionComposer from '@/components/ReflectionComposer';
 import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
-import { collection, db, doc, getDoc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { collection, db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
 import { CameraType, useCameraPermissions } from 'expo-camera';
@@ -11,7 +11,7 @@ import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useVideoPlayer } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -110,7 +110,7 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
-  const { currentExplorerId, loading } = useExplorer();
+  const { currentExplorerId, activeRelationship } = useExplorer();
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -121,7 +121,7 @@ export default function CompanionHomeScreen() {
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
-  const [companionName, setCompanionName] = useState<string>('');
+  const [companionName] = useState<string>(activeRelationship?.companionName || '');
   const [showNameModal, setShowNameModal] = useState(false);
   const router = useRouter();
 
@@ -199,43 +199,7 @@ export default function CompanionHomeScreen() {
 
   // Get the user from the Auth Hook
   const { user } = useAuth();
-
-  // Check for companion name on mount and when screen comes into focus
-  // 2. Check for companion name on mount and when screen comes into focus
-  const loadCompanionName = useCallback(async () => {
-    if (!user?.uid) return;
-
-    try {
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-      const userData = userDoc.data();
-      const cloudName = userData?.companionName;
-
-      if (cloudName) {
-        setCompanionName(cloudName);
-        setShowNameModal(false);
-      } else {
-        // No name found in cloud -> Show Setup Modal
-        setShowNameModal(true);
-      }
-    } catch (error) {
-      console.error('Error reading companion name:', error);
-      // Fail safe: show modal so they can try setting it again
-      setShowNameModal(true);
-    }
-  }, [user?.uid]);
-
-  // Load name on mount
-  useEffect(() => {
-    loadCompanionName();
-  }, [loadCompanionName]);
-
-  // Reload name when screen comes into focus (e.g., returning from settings)
-  useFocusEffect(
-    useCallback(() => {
-      loadCompanionName();
-    }, [loadCompanionName])
-  );
-
+  
   // Request audio permissions on mount
   useEffect(() => {
     (async () => {
