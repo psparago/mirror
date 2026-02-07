@@ -152,6 +152,9 @@ export default function SentTimelineScreen() {
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
+    // GUARD: If no Explorer ID is set yet, do not query
+    if (!currentExplorerId) return;
+
     const responsesRef = collection(db, ExplorerConfig.collections.responses);
     const q = query(responsesRef, where('explorerId', '==', currentExplorerId));
     const unsubscribeResponses = onSnapshot(q, (snapshot) => {
@@ -182,9 +185,17 @@ export default function SentTimelineScreen() {
     });
 
     return () => unsubscribeResponses();
-  }, []);
+  }, [currentExplorerId]); // ADDED DEPENDENCY: Only re-run when ID changes
 
   useEffect(() => {
+    // GUARD: If no Explorer ID is set yet, stop loading and do not query
+    if (!currentExplorerId) {
+      setLoading(false);
+      return;
+    }
+    
+    setLoading(true);
+
     // Listen to reflections collection for sent Reflections
     const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
     const q = query(
@@ -437,7 +448,7 @@ export default function SentTimelineScreen() {
     );
 
     return () => unsubscribe();
-  }, [responseEventIds]); // Removed refreshTrigger from dependency list to prevent unnecessary resubscriptions
+  }, [currentExplorerId, responseEventIds]); // ADDED DEPENDENCY: currentExplorerId
 
   // Refresh local data when app comes to foreground
   useEffect(() => {
@@ -517,7 +528,7 @@ export default function SentTimelineScreen() {
     }
   };
 
-  if (loading) {
+  if (loading || explorerLoading || !currentExplorerId) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#2e78b7" />
@@ -1283,4 +1294,3 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 });
-

@@ -2,21 +2,24 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import { useFonts } from 'expo-font';
-import { Stack, useRouter, useSegments } from 'expo-router'; // Removed Slot, kept Stack
+import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
-// Import your Shared Auth (Adjust the package name if needed)
+// Import your Shared Auth
 import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { useOTAUpdate } from '../hooks/useOTAUpdate';
 
+// ✅ NEW IMPORTS: For the Onboarding Flow
+import { useRelationships } from '@projectmirror/shared/hooks/useRelationships';
+import { JoinExplorerScreen } from '../components/JoinExplorerScreen';
+
 export {
-  // Catch any errors thrown by the Layout component.
   ErrorBoundary
 } from 'expo-router';
 
@@ -32,35 +35,48 @@ Sentry.init({
 });
 
 // --- COMPONENT 1: The "Inside" Layout (Nav + Auth Logic) ---
-// This handles the protection and the navigation, assuming Fonts are already loaded.
 function AppLayout() {
-  const { user, loading } = useAuth();
+  const { user, loading: authLoading } = useAuth(); 
+  
+  // Fetch Relationships to check if we are "new"
+  const { relationships, loading: relLoading } = useRelationships(user?.uid);
+
   const segments = useSegments();
   const router = useRouter();
   const colorScheme = useColorScheme();
 
   useEffect(() => {
-    if (loading) return;
+    if (authLoading) return;
 
     const inAuthGroup = segments[0] === '(auth)';
 
     if (!user && !inAuthGroup) {
-      // Redirect to login if not authenticated
-      router.replace('/login');
+      router.replace('/(auth)/login'); 
     } else if (user && inAuthGroup) {
-      // Redirect to home if already authenticated
       router.replace('/');
     }
-  }, [user, loading, segments]);
+  }, [user, authLoading, segments]);
 
-  if (loading) {
+  // We wait for BOTH Auth and Relationships to load before showing anything.
+  // This prevents the Join Screen from flashing before we know if you have relationships.
+  if (authLoading || (user && relLoading)) {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#000" />
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#121212' }}>
+        <ActivityIndicator size="large" color="#fff" />
       </View>
     );
   }
 
+  // If logged in, but NO relationships, force the Join Screen.
+  if (user && relationships.length === 0) {
+     return (
+        <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+           <JoinExplorerScreen />
+        </ThemeProvider>
+     );
+  }
+
+  // Standard App Flow
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -73,8 +89,22 @@ function AppLayout() {
   );
 }
 
-// --- COMPONENT 2: The Root Entry (Providers + Assets) ---
-// This handles the "Global" stuff: Sentry, Fonts, OTA, and the AuthProvider wrapper.
+// --- COMPONENT 2: The "Hard Reset" Wrapper ---
+// This component listens to Auth. When the User ID changes (or login happens),
+// it forces ExplorerProvider and AppLayout to completely destroy and recreate via the `key`.
+function AuthenticatedLayout() {
+  const { user } = useAuth();
+
+  return (
+    // ✅ THE FIX: The 'key' prop forces a full remount when user changes.
+    // This ensures useRelationships inside AppLayout starts as { loading: true } immediately.
+    <ExplorerProvider key={user?.uid || 'guest'}>
+      <AppLayout />
+    </ExplorerProvider>
+  );
+}
+
+// --- COMPONENT 3: The Root Entry (Providers + Assets) ---
 function RootLayout() {
   useOTAUpdate();
 
@@ -99,9 +129,7 @@ function RootLayout() {
 
   return (
     <AuthProvider>
-      <ExplorerProvider>
-        <AppLayout />
-      </ExplorerProvider>
+      <AuthenticatedLayout />
     </AuthProvider>
   );
 }
