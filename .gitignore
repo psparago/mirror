@@ -36,6 +36,7 @@ yarn-error.*
 .env.deploy
 scripts/gcloud/.env.deploy
 scripts/utilities/serviceAccountKey.json
+scripts/utilities/serviceAccountKeyV2.json
 firebase-debug.log*
 
 # typescript
