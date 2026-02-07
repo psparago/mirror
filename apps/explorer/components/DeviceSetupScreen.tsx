@@ -10,7 +10,7 @@ import {
     TouchableOpacity,
     View
 } from 'react-native';
-// ✅ OPTION 1: Importing arrayUnion from your updated shared library
+
 import { ExplorerConfig } from '@projectmirror/shared';
 import { arrayUnion, auth, db, doc, getDoc, updateDoc } from '@projectmirror/shared/firebase';
 
@@ -65,7 +65,7 @@ export function DeviceSetupScreen() {
           <Text style={styles.label}>Explorer ID</Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g. PETER-08271957"
+            placeholder="e.g. COLE-01052010"
             placeholderTextColor="#666"
             value={explorerIdInput}
             onChangeText={setExplorerIdInput}
