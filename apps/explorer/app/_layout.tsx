@@ -3,8 +3,9 @@ import * as Sentry from '@sentry/react-native';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Text, View } from 'react-native';
+import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { DeviceSetupScreen } from '../components/DeviceSetupScreen';
 import { ExplorerSelfProvider, useExplorerSelf } from '../context/ExplorerSelfContext';
 import { useOTAUpdate } from '../hooks/useOTAUpdate';
 
@@ -29,15 +30,8 @@ function ExplorerAppContent() {
   }
 
   if (!explorerId) {
-    // Ideally, show a nice "Device Setup" screen here displaying the UID
-    return (
-      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20 }}>
-        <Text style={{ fontSize: 18, textAlign: 'center' }}>Device Not Linked</Text>
-        <Text style={{ marginTop: 10, color: '#666' }}>
-           Please add authUserId: {auth.currentUser?.uid} to the Explorer record.
-        </Text>
-      </View>
-    );
+    // 2. REPLACE THE PLACEHOLDER VIEW WITH THE NEW SCREEN
+    return <DeviceSetupScreen />;
   }
 
   return (

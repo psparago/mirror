@@ -9,6 +9,8 @@ import {
 } from 'firebase/auth';
 import {
   addDoc,
+  arrayRemove,
+  arrayUnion,
   collection,
   deleteDoc,
   disableNetwork,
@@ -62,9 +64,8 @@ export const db = getFirestore(app);
 
 // Re-export modular Firestore functions so consumers use functional syntax: doc(db, 'col', id), getDoc(ref), etc.
 export {
-  addDoc, collection, deleteDoc, disableNetwork, doc, enableNetwork, getDoc,
-  getDocs, increment, limit,
-  limitToLast, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch
+  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, disableNetwork, doc, enableNetwork, getDoc,
+  getDocs, increment, limit, limitToLast, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch
 };
 
   export { onAuthStateChanged, signInAnonymously };
