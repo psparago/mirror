@@ -100,10 +100,12 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	targetDeepDive := r.URL.Query().Get("target_deep_dive")
 
 	var result struct {
-		ShortCaption     string `json:"short_caption"`
-		DeepDive         string `json:"deep_dive"`
-		AudioURL         string `json:"audio_url,omitempty"`
-		DeepDiveAudioURL string `json:"deep_dive_audio_url,omitempty"`
+		ShortCaption       string `json:"short_caption"`
+		DeepDive           string `json:"deep_dive"`
+		AudioURL           string `json:"audio_url,omitempty"`
+		DeepDiveAudioURL   string `json:"deep_dive_audio_url,omitempty"`
+		AudioS3Key         string `json:"audio_s3_key,omitempty"`
+		DeepDiveAudioS3Key string `json:"deep_dive_audio_s3_key,omitempty"`
 	}
 
 	// 3. Logic: If we have both target texts, just do TTS. If missing either, call Gemini for image analysis.
@@ -231,6 +233,7 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 					Key:    aws.String(audioKey),
 				})
 				result.AudioURL = presignedRes.URL
+				result.AudioS3Key = audioKey
 				log.Printf("Generated TTS for caption at: %s", audioKey)
 			}
 		}
@@ -250,6 +253,7 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 					Key:    aws.String(deepDiveAudioKey),
 				})
 				result.DeepDiveAudioURL = presignedRes.URL
+				result.DeepDiveAudioS3Key = deepDiveAudioKey
 				log.Printf("Generated Deep Dive TTS at: %s", deepDiveAudioKey)
 			}
 		}

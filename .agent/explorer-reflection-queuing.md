@@ -22,19 +22,20 @@ The Explorer app uses a **deferred FIFO queue system** for selfie uploads. This 
   - Generates response event ID (line 1001)
 
 #### 2. **Job Enqueuing** (`enqueueSelfieUpload`)
-- **Location**: `apps/explorer/app/(tabs)/index.tsx:851-868`
-- **Trigger**: Called immediately after image processing (line 1004)
+- **Location**: `apps/explorer/app/(tabs)/index.tsx`
+- **Trigger**: Called immediately after image processing
 - **Actions**:
-  - Reads existing queue from AsyncStorage (line 860)
-  - Appends new job to queue (line 862)
-  - Writes queue back to AsyncStorage (line 863)
-  - Immediately triggers queue processing (line 864)
+  - Reads existing queue from AsyncStorage
+  - Replaces any existing job for same reflection (only latest selfie matters; overwrites in S3)
+  - Deletes superseded local file if replaced
+  - Appends new job to queue
+  - Writes queue back to AsyncStorage
 
 **Job Structure**:
 ```typescript
 {
   originalEventId: string;      // The reflection event_id
-  responseEventId: string;       // Generated response event_id
+  responseEventId: string;      // Same as originalEventId - selfie overwrites at S3 path from/{originalEventId}/image.jpg
   localUri: string;             // Processed photo URI (1080px, 0.5 JPEG)
   senderExplorerId: string;     // Explorer who sent
   viewerExplorerId: string;     // Explorer who viewed

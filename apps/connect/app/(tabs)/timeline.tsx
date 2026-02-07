@@ -163,15 +163,13 @@ export default function SentTimelineScreen() {
       const timestampMap = new Map<string, any>();
       snapshot.docs.forEach((doc) => {
         const data = doc.data();
-        // Document ID is the original event_id, data.response_event_id is the selfie's event_id
-        const originalEventId = doc.id; // This is the original reflection's event_id
-        const responseEventId = data.response_event_id;
+        // Document ID = original reflection event_id. S3 path uses response_event_id (or doc.id for new model)
+        const originalEventId = doc.id;
+        const responseEventId = data.response_event_id ?? originalEventId;
 
         if (originalEventId) {
           eventIds.add(originalEventId);
-          if (responseEventId) {
-            eventIdMap.set(originalEventId, responseEventId);
-          }
+          eventIdMap.set(originalEventId, responseEventId);
           if (data.timestamp) {
             timestampMap.set(originalEventId, data.timestamp);
           }

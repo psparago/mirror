@@ -107,6 +107,8 @@ export default function CompanionHomeScreen() {
   const [stagingEventId, setStagingEventId] = useState<string | null>(null);
   const [aiAudioUrl, setAiAudioUrl] = useState<string | null>(null);
   const [aiDeepDiveAudioUrl, setAiDeepDiveAudioUrl] = useState<string | null>(null);
+  const [aiAudioS3Key, setAiAudioS3Key] = useState<string | null>(null);
+  const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
@@ -329,6 +331,8 @@ export default function CompanionHomeScreen() {
         setDeepDive(aiResponse.deep_dive);
         setAiAudioUrl(aiResponse.audio_url || null);
         setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
+        setAiAudioS3Key(aiResponse.audio_s3_key || null);
+        setAiDeepDiveS3Key(aiResponse.deep_dive_audio_s3_key || null);
 
         if (!options.silent) {
           // PROTECTION: Only update the description if the current one is empty
@@ -699,6 +703,7 @@ export default function CompanionHomeScreen() {
     let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
+    const stagingTtsKeysToDelete: string[] = [];
 
     try {
       setUploading(true);
@@ -734,10 +739,16 @@ export default function CompanionHomeScreen() {
           finalDeepDive = aiResult.deep_dive;
           finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio as absolute priority
           finalDeepDiveAudio = aiResult.deep_dive_audio_url;
+          if (aiResult.audio_s3_key) stagingTtsKeysToDelete.push(aiResult.audio_s3_key);
+          if (aiResult.deep_dive_audio_s3_key) stagingTtsKeysToDelete.push(aiResult.deep_dive_audio_s3_key);
           debugLog(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
         } else {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
+      } else {
+        // Capture TTS keys from state for cleanup (no inline AI call)
+        if (aiAudioS3Key) stagingTtsKeysToDelete.push(aiAudioS3Key);
+        if (aiDeepDiveS3Key) stagingTtsKeysToDelete.push(aiDeepDiveS3Key);
       }
 
       // Generate unique event_id (timestamp-based)
@@ -911,11 +922,23 @@ export default function CompanionHomeScreen() {
       await Promise.all(uploadPromises);
       debugLog('✅ uploadEventBundle: All uploads completed successfully');
 
-      // 9. Cleanup Staging & Local
+      // 9. Cleanup Staging & Local (image + TTS artifacts)
       showToast('✅ Reflection sent!');
 
-      if (stagingEventId) {
-        fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`).catch(() => { });
+      if ((stagingEventId || stagingTtsKeysToDelete.length > 0) && currentExplorerId) {
+        try {
+          const deleteParams = new URLSearchParams({
+            path: 'staging',
+            explorer_id: currentExplorerId,
+          });
+          if (stagingEventId) deleteParams.set('event_id', stagingEventId);
+          if (stagingTtsKeysToDelete.length > 0) {
+            deleteParams.set('extra_keys', JSON.stringify(stagingTtsKeysToDelete));
+          }
+          await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${deleteParams.toString()}`);
+        } catch (err) {
+          console.warn('Staging cleanup failed (non-blocking):', err);
+        }
       }
 
       if (photo.uri && !photo.uri.startsWith('http')) {
@@ -936,6 +959,8 @@ export default function CompanionHomeScreen() {
       setDeepDive('');
       setStagingEventId(null);
       setAudioUri(null);
+      setAiAudioS3Key(null);
+      setAiDeepDiveS3Key(null);
       if (audioRecorder.isRecording) {
         await stopRecording();
       }
@@ -949,9 +974,6 @@ export default function CompanionHomeScreen() {
         timestamp: serverTimestamp(),
         type: "mirror_event",
         engagement_count: 0,
-        // Explicitly include paths so Mirror knows exactly what files are available
-        audio_url: hasAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${currentExplorerId}/to/${eventID}/audio.m4a` : null,
-        deep_dive_audio_url: hasDeepDiveAudio ? `https://reflections-1200b-storage.s3.us-east-1.amazonaws.com/${currentExplorerId}/to/${eventID}/deep_dive.m4a` : null,
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {
@@ -968,18 +990,26 @@ export default function CompanionHomeScreen() {
     }
   };
 
+  const deleteStagingArtifacts = async () => {
+    if (!currentExplorerId) return;
+    const ttsKeys: string[] = [];
+    if (aiAudioS3Key) ttsKeys.push(aiAudioS3Key);
+    if (aiDeepDiveS3Key) ttsKeys.push(aiDeepDiveS3Key);
+    if (!stagingEventId && ttsKeys.length === 0) return;
+    try {
+      const params = new URLSearchParams({ path: 'staging', explorer_id: currentExplorerId });
+      if (stagingEventId) params.set('event_id', stagingEventId);
+      if (ttsKeys.length > 0) params.set('extra_keys', JSON.stringify(ttsKeys));
+      await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${params.toString()}`);
+    } catch (err) {
+      console.warn('Staging cleanup failed:', err);
+    }
+  };
+
   const cancelPhoto = async () => {
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
-    // Clean up staging image if it exists
-    if (stagingEventId) {
-      try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`);
-      } catch (error: any) {
-        console.error("Error deleting staging image:", error);
-        // Continue with cleanup anyway
-      }
-    }
+    await deleteStagingArtifacts();
 
     // Best-effort cleanup of any cache-based temp media
     await safeDeleteCacheFile(photoUriToClean);
@@ -997,19 +1027,14 @@ export default function CompanionHomeScreen() {
     setStagingEventId(null);
     setIntent('none');
     setAudioUri(null);
+    setAiAudioS3Key(null);
+    setAiDeepDiveS3Key(null);
   };
 
   const retakePhoto = async () => {
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
-    // Clean up staging image
-    if (stagingEventId) {
-      try {
-        await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${stagingEventId}&path=staging&explorer_id=${currentExplorerId}`);
-      } catch (error: any) {
-        console.error("Error deleting staging image:", error);
-      }
-    }
+    await deleteStagingArtifacts();
 
     // Best-effort cleanup of any cache-based temp media
     await safeDeleteCacheFile(photoUriToClean);
@@ -1028,6 +1053,8 @@ export default function CompanionHomeScreen() {
     setStagingEventId(null);
     setIntent('none');
     setAudioUri(null);
+    setAiAudioS3Key(null);
+    setAiDeepDiveS3Key(null);
     lastProcessedUriRef.current = null;
   };
 

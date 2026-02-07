@@ -398,10 +398,11 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 
 	ctx := context.TODO()
 
-	// 2. Get event_id from query parameter
+	// 2. Get event_id from query parameter (optional when extra_keys is provided for TTS-only cleanup)
 	eventID := r.URL.Query().Get("event_id")
-	if eventID == "" {
-		http.Error(w, "event_id parameter required", 400)
+	extraKeysParam := r.URL.Query().Get("extra_keys")
+	if eventID == "" && extraKeysParam == "" {
+		http.Error(w, "event_id or extra_keys parameter required", 400)
 		return
 	}
 
@@ -433,27 +434,42 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	bucket := "reflections-1200b-storage"
 
 	var objectsToDelete []string
-	if path == "from" {
-		// For selfie responses, only delete image.jpg
-		objectsToDelete = []string{
-			fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+	if eventID != "" {
+		if path == "from" {
+			// For selfie responses, only delete image.jpg
+			objectsToDelete = []string{
+				fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+			}
+		} else if path == "staging" {
+			// For staging, delete image.jpg (TTS files deleted via extra_keys)
+			objectsToDelete = []string{
+				fmt.Sprintf("staging/%s/image.jpg", eventID),
+			}
+		} else {
+			// For regular reflections, delete all associated media files
+			objectsToDelete = []string{
+				fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/metadata.json", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/audio.m4a", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/deep_dive.m4a", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/video.mp4", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/video.mov", explorerID, path, eventID), // Defensive: just in case a .mov slipped in
+			}
+			fmt.Printf("Attempting to delete objects for event %s: %v\n", eventID, objectsToDelete)
 		}
-	} else if path == "staging" {
-		// For staging, only delete image.jpg (staging is directly under bucket root)
-		objectsToDelete = []string{
-			fmt.Sprintf("staging/%s/image.jpg", eventID),
+	}
+
+	// 6b. Append any extra_keys from query (for staging TTS cleanup: staging/{explorerID}/tts/*.mp3)
+	if extraKeysParam != "" {
+		var extraKeys []string
+		if err := json.Unmarshal([]byte(extraKeysParam), &extraKeys); err == nil {
+			for _, k := range extraKeys {
+				if k != "" {
+					objectsToDelete = append(objectsToDelete, k)
+				}
+			}
+			fmt.Printf("Appended %d extra keys for deletion\n", len(extraKeys))
 		}
-	} else {
-		// For regular reflections, delete all associated media files
-		objectsToDelete = []string{
-			fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/metadata.json", explorerID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/audio.m4a", explorerID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/deep_dive.m4a", explorerID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/video.mp4", explorerID, path, eventID),
-			fmt.Sprintf("%s/%s/%s/video.mov", explorerID, path, eventID), // Defensive: just in case a .mov slipped in
-		}
-		fmt.Printf("Attempting to delete objects for event %s: %v\n", eventID, objectsToDelete)
 	}
 
 	var errors []string

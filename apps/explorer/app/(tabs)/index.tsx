@@ -1004,13 +1004,14 @@ export default function HomeScreen() {
       debugLog(`[Queue] Enqueue job for event ${job.originalEventId}`);
       const existingRaw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
       const existingQueue = existingRaw ? JSON.parse(existingRaw) : [];
-      // De-dupe: prevent accidental double-enqueue for the same response event.
-      if (existingQueue.some((j: any) => j?.responseEventId === job.responseEventId)) {
-        debugLog(`[Queue] Duplicate job ignored for responseEventId ${job.responseEventId}`);
-        return;
+      // Replace any existing job for same reflection - only latest selfie matters (overwrites in S3)
+      const replaced = existingQueue.find((j: any) => j?.originalEventId === job.originalEventId);
+      if (replaced?.localUri && replaced.localUri !== job.localUri) {
+        FileSystem.deleteAsync(replaced.localUri, { idempotent: true }).catch(() => {});
       }
-      existingQueue.push(job);
-      await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(existingQueue));
+      const filtered = existingQueue.filter((j: any) => j?.originalEventId !== job.originalEventId);
+      filtered.push(job);
+      await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(filtered));
       // NOTE: We intentionally do NOT process immediately.
       // We trigger queue processing when MainStage playback ends (or on dismiss),
       // and also whenever the app becomes active.
@@ -1048,8 +1049,9 @@ export default function HomeScreen() {
         throw new Error("Failed to capture photo");
       }
 
-      // Generate event ID for the response
-      const responseEventId = Date.now().toString();
+      // Use reflection's event_id as the response key - selfie overwrites previous one at same path
+      const originalEventId = selectedEvent.event_id;
+      const localUniqueId = Date.now().toString(); // For unique local filename only
 
       // Phase: Process (resize/compress) + persist to documentDirectory
       // NOTE: We do this here because doing ImageManipulator work inside the queue
@@ -1062,7 +1064,7 @@ export default function HomeScreen() {
       );
 
       const persistentDir = FileSystem.documentDirectory;
-      const persistentPath = `${persistentDir}selfie_${responseEventId}.jpg`;
+      const persistentPath = `${persistentDir}selfie_${originalEventId}_${localUniqueId}.jpg`;
       await FileSystem.copyAsync({ from: processedPhoto.uri, to: persistentPath });
 
       // Cleanup temp files (best-effort). Keep only the persistentPath for queue.
@@ -1080,8 +1082,8 @@ export default function HomeScreen() {
       // Phase: Enqueue (processed file is now persistent)
       debugLog('[Selfie] Phase: Enqueue');
       await enqueueSelfieUpload({
-        originalEventId: selectedEvent.event_id,
-        responseEventId,
+        originalEventId,
+        responseEventId: originalEventId, // Same as reflection - overwrites previous selfie in S3
         localUri: persistentPath,
         senderExplorerId: currentExplorerId,
         viewerExplorerId: currentExplorerId,
