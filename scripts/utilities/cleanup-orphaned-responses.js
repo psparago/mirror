@@ -41,7 +41,7 @@ if (!admin.apps.length) {
       admin.initializeApp({ projectId: PROJECT_ID });
     } else {
       const credPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
-        path.join(__dirname, 'serviceAccountKey.json');
+        path.join(__dirname, 'serviceAccountKeyV2.json');
       const serviceAccount = require(credPath);
       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
     }
