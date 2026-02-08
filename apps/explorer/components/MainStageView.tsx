@@ -129,6 +129,13 @@ export default function MainStageView({
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
 
+  // Track when caption OR sparkle (Tell Me More) is playing - disable both buttons to prevent impatient multiple taps
+  const [isCaptionOrSparklePlaying, setIsCaptionOrSparklePlaying] = useState(false);
+  const setIsCaptionOrSparklePlayingRef = useRef<(v: boolean) => void>(() => {});
+  useEffect(() => {
+    setIsCaptionOrSparklePlayingRef.current = setIsCaptionOrSparklePlaying;
+  }, []);
+
   // Get metadata (memoized to prevent unnecessary re-renders)
   const selectedMetadata = useMemo(
     () => selectedEvent ? eventMetadata[selectedEvent.event_id] : null,
@@ -235,6 +242,9 @@ export default function MainStageView({
           }
         }
         controlsOpacity.value = withTiming(0, { duration: 300 });
+
+        // Clear caption/sparkle playing state
+        setIsCaptionOrSparklePlayingRef.current(false);
 
         // Small delay to ensure everything stops
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -418,6 +428,8 @@ export default function MainStageView({
       },
 
       playDeepDive: async () => {
+        setIsCaptionOrSparklePlayingRef.current(true);
+
         // Stop any existing audio before playing deep dive
         Speech.stop();
         if (captionSoundRefForActions.current) {
@@ -449,6 +461,7 @@ export default function MainStageView({
                     safetyTimeoutRef.current = null;
                   }
                   debugLog('✅ Deep dive audio finished - sending NARRATION_FINISHED');
+                  setIsCaptionOrSparklePlayingRef.current(false);
                   sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               });
@@ -463,6 +476,7 @@ export default function MainStageView({
               safetyTimeoutRef.current = setTimeout(() => {
                 console.warn('⚠️ Deep dive safety timeout reached (Smart Fallback)');
                 safetyTimeoutRef.current = null;
+                setIsCaptionOrSparklePlayingRef.current(false);
                 sendRef.current({ type: 'NARRATION_FINISHED' });
               }, safetyTimeout);
 
@@ -473,6 +487,7 @@ export default function MainStageView({
                     clearTimeout(safetyTimeoutRef.current);
                     safetyTimeoutRef.current = null;
                   }
+                  setIsCaptionOrSparklePlayingRef.current(false);
                   sendRef.current({ type: 'NARRATION_FINISHED' });
                 },
                 onError: () => {
@@ -480,6 +495,7 @@ export default function MainStageView({
                     clearTimeout(safetyTimeoutRef.current);
                     safetyTimeoutRef.current = null;
                   }
+                  setIsCaptionOrSparklePlayingRef.current(false);
                   sendRef.current({ type: 'NARRATION_FINISHED' });
                 }
               });
@@ -489,9 +505,11 @@ export default function MainStageView({
               safetyTimeoutRef.current = setTimeout(() => {
                 console.warn('⚠️ Deep dive TTS safety timeout reached');
                 safetyTimeoutRef.current = null;
+                setIsCaptionOrSparklePlayingRef.current(false);
                 sendRef.current({ type: 'NARRATION_FINISHED' });
               }, 60000);
             } else {
+              setIsCaptionOrSparklePlayingRef.current(false);
               sendRef.current({ type: 'NARRATION_FINISHED' });
             }
           } catch (err: any) {
@@ -510,6 +528,7 @@ export default function MainStageView({
                 domain: err.domain
               });
             }
+            setIsCaptionOrSparklePlayingRef.current(false);
             sendRef.current({ type: 'NARRATION_FINISHED' });
           }
         };
@@ -556,6 +575,8 @@ export default function MainStageView({
   }, [send, state, sound, captionSound]);
 
   const lastTapRef = useRef<number>(0);
+  const lastUpNextSelectionRef = useRef<{ id: string; time: number } | null>(null);
+  const replayInProgressRef = useRef(false);
 
   // Helper functions to handle gestures (must be on JS thread, not worklets)
   const handleHorizontalSwipe = useCallback((translationX: number) => {
@@ -1066,6 +1087,11 @@ export default function MainStageView({
   // --- RENDERING HELPERS ---
 
   const handleReplay = () => {
+    // Ignore rapid multiple taps on replay
+    if (replayInProgressRef.current) return;
+    replayInProgressRef.current = true;
+    setTimeout(() => { replayInProgressRef.current = false; }, 600);
+
     debugLog('🔁 User pressed REPLAY');
     
     // For videos, respect instant playback config on replay
@@ -1130,6 +1156,13 @@ export default function MainStageView({
   };
 
   const handleUpNextItemPress = (event: Event) => {
+    // Ignore multiple taps on the already-selected card
+    if (event.event_id === selectedEvent?.event_id) return;
+    // Debounce rapid repeat taps on same card (before parent state propagates)
+    const now = Date.now();
+    const prev = lastUpNextSelectionRef.current;
+    if (prev && prev.id === event.event_id && now - prev.time < 400) return;
+    lastUpNextSelectionRef.current = { id: event.event_id, time: now };
     onEventSelect(event);
   };
 
@@ -1439,13 +1472,15 @@ export default function MainStageView({
                   {/* Play Caption Button - for videos and photos */}
                   {(() => {
                     const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
-                    const isDisabled = isMediaPlaying;
+                    const isDisabled = isMediaPlaying || isCaptionOrSparklePlaying;
 
                     return (selectedEvent?.audio_url || selectedMetadata?.description) && (
                       <TouchableOpacity
                         style={[styles.playCaptionButton, isDisabled && styles.playCaptionButtonDisabled]}
                         onPress={async () => {
                           if (isDisabled) return;
+
+                          setIsCaptionOrSparklePlaying(true);
 
                           // Stop any existing audio first
                           Speech.stop();
@@ -1471,12 +1506,14 @@ export default function MainStageView({
                               newSound.setOnPlaybackStatusUpdate((status) => {
                                 if (status.isLoaded && status.didJustFinish) {
                                   debugLog('✅ Caption audio finished');
+                                  setIsCaptionOrSparklePlaying(false);
                                   newSound.unloadAsync();
                                 }
                               });
                               setCaptionSound(newSound);
                             } catch (err) {
                               console.warn('Audio playback error:', err);
+                              setIsCaptionOrSparklePlaying(false);
                             }
                           } else if (selectedMetadata?.description) {
                             // Only use TTS as a last resort if audio file is missing (despite expectation)
@@ -1484,8 +1521,14 @@ export default function MainStageView({
                             Speech.stop();
                             const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
                             Speech.speak(textToSpeak, {
-                              onDone: () => debugLog('✅ Caption TTS finished'),
-                              onError: (err) => console.warn('TTS error:', err)
+                              onDone: () => {
+                                debugLog('✅ Caption TTS finished');
+                                setIsCaptionOrSparklePlaying(false);
+                              },
+                              onError: (err) => {
+                                console.warn('TTS error:', err);
+                                setIsCaptionOrSparklePlaying(false);
+                              }
                             });
                           }
                         }}
@@ -1510,13 +1553,16 @@ export default function MainStageView({
                   // Check if audio is done but stuck waiting for selfie (for images with audio_url)
                   const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
                   const canShow = isFinished || isAudioDoneButStuck || (isViewingPhoto && !isNarrating);
-                  
-                  return canShow;
-                })() && (
-                  <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
+                  const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
+                  const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
+                  if (!canShow) return null;
+                  return (
+                  <Animated.View key="tellMeMore" style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
                     <TouchableOpacity
                       onPress={async () => {
+                        if (isSparkleDisabled) return;
                         debugLog('✨ User pressed Tell Me More button');
+                        setIsCaptionOrSparklePlaying(true);
                         const currentState = state;
                         
                         // If we're in playingAudio state with audio done, play deep dive directly
@@ -1548,31 +1594,47 @@ export default function MainStageView({
                               soundRef.current = newSound;
                               newSound.setOnPlaybackStatusUpdate((status) => {
                                 if (status.isLoaded && status.didJustFinish) {
+                                  setIsCaptionOrSparklePlaying(false);
                                   newSound.unloadAsync();
                                   soundRef.current = null;
                                 }
                               });
                             } catch (err) {
                               if (metadata?.deep_dive) {
-                                Speech.speak(metadata.deep_dive, { volume: 1.0 });
+                                Speech.speak(metadata.deep_dive, {
+                                  volume: 1.0,
+                                  onDone: () => setIsCaptionOrSparklePlaying(false),
+                                  onError: () => setIsCaptionOrSparklePlaying(false),
+                                });
+                              } else {
+                                setIsCaptionOrSparklePlaying(false);
                               }
                             }
                           } else if (metadata?.deep_dive) {
-                            Speech.speak(metadata.deep_dive, { volume: 1.0 });
+                            Speech.speak(metadata.deep_dive, {
+                              volume: 1.0,
+                              onDone: () => setIsCaptionOrSparklePlaying(false),
+                              onError: () => setIsCaptionOrSparklePlaying(false),
+                            });
+                          } else {
+                            setIsCaptionOrSparklePlaying(false);
                           }
                         } else {
                           // For other states, use the state machine
                           send({ type: 'TELL_ME_MORE' });
                         }
                       }}
-                      style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
+                      style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isSparkleDisabled ? 0.4 : 1 }}
+                      disabled={isSparkleDisabled}
+                      activeOpacity={isSparkleDisabled ? 1 : 0.7}
                     >
                       <BlurView intensity={50} style={styles.tellMeMoreBlur}>
                         <Text style={{ fontSize: 32 }}>✨</Text>
                       </BlurView>
                     </TouchableOpacity>
                   </Animated.View>
-                )}
+                  );
+                })()}
               </View>
             </View>
 

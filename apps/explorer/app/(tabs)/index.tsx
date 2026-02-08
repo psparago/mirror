@@ -60,6 +60,7 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
+  const selectedEventIdRef = useRef<string | null>(null);
   const hasReplayedRef = useRef<{ [eventId: string]: boolean }>({});
   const refreshingEventsRef = useRef<Set<string>>(new Set()); // Track events currently being refreshed
   const [readEventIds, setReadEventIds] = useState<string[]>([]);
@@ -364,6 +365,11 @@ export default function HomeScreen() {
       handleEventPress(events[0]);
     }
   }, [events.length]);
+
+  // Keep selectedEventIdRef in sync for multi-tap guard (e.g. when closing modal or swiping)
+  useEffect(() => {
+    selectedEventIdRef.current = selectedEvent?.event_id ?? null;
+  }, [selectedEvent?.event_id]);
 
   // When events list changes, ensure selectedEvent is still in the list (e.g. deleted by Companion)
   useEffect(() => {
@@ -720,6 +726,9 @@ export default function HomeScreen() {
   }, []);
 
   const handleEventPress = useCallback(async (item: Event) => {
+    // Ignore multiple taps on the already-selected card (use ref for immediate effect before state updates)
+    if (item.event_id === selectedEventIdRef.current) return;
+    selectedEventIdRef.current = item.event_id;
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
 
