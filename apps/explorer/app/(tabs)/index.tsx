@@ -1,4 +1,5 @@
 import MainStageView from '@/components/MainStageView';
+import { DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse } from '@projectmirror/shared';
 import {
@@ -72,7 +73,7 @@ export default function HomeScreen() {
 
   // Explorer config with state for toggleable settings
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
-  const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
+  const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
 
   //const { currentExplorerId, loading: explorerLoading } = useExplorer();

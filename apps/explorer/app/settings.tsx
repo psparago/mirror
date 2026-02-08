@@ -1,5 +1,6 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
+import { DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { VersionDisplay } from '@projectmirror/shared';
 import { auth } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -13,7 +14,7 @@ export default function SettingsScreen() {
     const router = useRouter();
 
     // Instant video playback setting
-    const [instantVideoPlayback, setInstantVideoPlayback] = useState(true);
+    const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
 
     console.log('auth.currentUser.uid', auth.currentUser?.uid);
 
