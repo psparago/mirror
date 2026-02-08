@@ -14,25 +14,25 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Image } from 'expo-image';
 import {
-    Alert,
-    FlatList,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    useWindowDimensions,
-    View
+  Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  View
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
-    runOnJS,
-    useAnimatedStyle,
-    useSharedValue,
-    withSpring,
-    withTiming
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -116,6 +116,9 @@ export default function MainStageView({
 
   const flatListRef = useRef<FlatList>(null);
 
+  // Track if the video has actually buffered and started rendering
+  const [videoReady, setVideoReady] = useState(false);
+
   // Need to track video playing for VU meter
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
 
@@ -131,7 +134,7 @@ export default function MainStageView({
 
   // Track when caption OR sparkle (Tell Me More) is playing - disable both buttons to prevent impatient multiple taps
   const [isCaptionOrSparklePlaying, setIsCaptionOrSparklePlaying] = useState(false);
-  const setIsCaptionOrSparklePlayingRef = useRef<(v: boolean) => void>(() => {});
+  const setIsCaptionOrSparklePlayingRef = useRef<(v: boolean) => void>(() => { });
   useEffect(() => {
     setIsCaptionOrSparklePlayingRef.current = setIsCaptionOrSparklePlaying;
   }, []);
@@ -173,9 +176,9 @@ export default function MainStageView({
   const selectedMetadataRef = useRef(selectedMetadata);
   const onPlaybackIdleRef = useRef(onPlaybackIdle);
   const configRef = useRef(config);
-  
+
   // Bridge pattern refs for machine actions
-  const sendRef = useRef<any>(() => {});
+  const sendRef = useRef<any>(() => { });
   const soundRef = useRef<Audio.Sound | null>(null);
   const playerRef = useRef<any>(null);
   const captionSoundRefForActions = useRef<Audio.Sound | null>(null);
@@ -183,7 +186,7 @@ export default function MainStageView({
 
   // --- THE XSTATE MACHINE ---
   const machine = useMemo(() => playerMachine.provide({
-  actions: {
+    actions: {
       stopAllMedia: async () => {
         // Increment session IMMEDIATELY and SYNCHRONOUSLY to invalidate any pending Narration/TTS
         captionSessionRef.current += 1;
@@ -443,7 +446,7 @@ export default function MainStageView({
           captionSoundRef.current = null;
           captionSoundRefForActions.current = null;
         }
-        
+
         const playDeepDiveWithRetry = async (retryCount = 0) => {
           try {
             if (soundRef.current) await soundRef.current.unloadAsync();
@@ -647,28 +650,28 @@ export default function MainStageView({
     const currentState = stateRef.current;
     const isVideo =
       !!selectedEventRef.current?.video_url || selectedMetadataRef.current?.content_type === 'video';
-    
+
     // For videos: no pause/resume - only replay when finished
     if (isVideo) {
       if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
         debugLog('🔁 User pressed REPLAY (video)');
-        
+
         // For videos, respect instant playback config on replay
         const useInstantPlayback = config?.instantVideoPlayback;
-        
+
         if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
           // Replay with instant playback (skip narration)
           debugLog('⚡ Replaying with instant video playback (skipping narration)');
-          send({ 
-            type: 'SELECT_EVENT_INSTANT', 
-            event: selectedEventRef.current, 
-            metadata: selectedMetadataRef.current 
+          send({
+            type: 'SELECT_EVENT_INSTANT',
+            event: selectedEventRef.current,
+            metadata: selectedMetadataRef.current
           });
         } else {
           // Standard replay (respects narration for videos)
           send({ type: 'REPLAY' });
         }
-        
+
         if (onReplayRef.current && selectedEventRef.current) {
           onReplayRef.current(selectedEventRef.current);
         }
@@ -676,7 +679,7 @@ export default function MainStageView({
       // Videos don't pause - ignore tap during playback
       return;
     }
-    
+
     // For non-videos (audio/photos): allow pause/resume
     if (currentState && currentState.hasTag('active')) {
       if (currentState.hasTag('paused')) {
@@ -705,11 +708,11 @@ export default function MainStageView({
       const isInBottomGrid = !isLandscape && event.y > height * 0.55;
       const isHeader = event.y < 120;
       const isSidebar = isLandscape && event.x > width * 0.65;
-      
+
       if (isHeader || isSidebar || isInBottomGrid) {
         return;
       }
-      
+
       // Handle horizontal swipe for next/prev
       // Increased threshold to 30px to avoid accidental triggers during video playback
       if (Math.abs(event.translationX) > 30 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
@@ -802,22 +805,78 @@ export default function MainStageView({
   // --- AUDIO/VIDEO REFS ---
   const videoSource = selectedEvent?.video_url || null;
 
+  // Reset readiness when source changes
+  useEffect(() => {
+    setVideoReady(false);
+  }, [videoSource]);
+
   const player = useVideoPlayer(videoSource || '', (player) => {
-    setIsVideoPlaying(player.playing);
+    player.timeUpdateEventInterval = 0.25;
   });
 
-  // Update player ref when player changes
+  // Keep playerRef in sync so machine actions (stopAllMedia, playVideo, etc.) work
   useEffect(() => {
     playerRef.current = player;
   }, [player]);
 
-  // Cleanup video player on unmount
+  // Listen for "playing" status to lift the thumbnail shield & track isVideoPlaying
+  useEffect(() => {
+    if (!player) return;
+
+    const playingSub = player.addListener('playingChange', ({ isPlaying }: { isPlaying: boolean }) => {
+      setIsVideoPlaying(isPlaying);
+      // Once the video actually reports it is playing, we know the first frame is ready.
+      // We can now safely hide the thumbnail image.
+      if (isPlaying) {
+        setVideoReady(true);
+      } else {
+        // When the video stops playing, check if it reached the end.
+        // playingChange fires immediately when the player stops, which is faster
+        // than the native playToEnd event (which can lag seconds behind on streamed content).
+        // This keeps detection event-driven (no polling) while being responsive.
+        const currentState = stateRef.current;
+        const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+          currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+        if (isInPlayingState && player.duration > 0 && player.currentTime >= player.duration - 0.5) {
+          debugLog('🏁 Video finished (detected via playingChange near end)');
+          sendRef.current({ type: 'VIDEO_FINISHED' });
+
+          const currentEventId = selectedEventRef.current?.event_id || null;
+          if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
+            lastVideoFinishedEventIdRef.current = currentEventId;
+            onPlaybackIdleRef.current?.();
+          }
+        }
+      }
+    });
+
+    // When the player finishes loading a new source, retry play() if the machine
+    // expects the video to be playing. This handles the race condition where
+    // Hardware Sync called player.play() before the source was ready.
+    const statusSub = player.addListener('statusChange', ({ status }: { status: string }) => {
+      if (status === 'readyToPlay') {
+        const currentState = stateRef.current;
+        const shouldBePlaying = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+          currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+        if (shouldBePlaying && !player.playing) {
+          debugLog('⚡ Player became ready while machine expects playback - starting play');
+          player.play();
+        }
+      }
+    });
+
+    return () => {
+      playingSub.remove();
+      statusSub.remove();
+    };
+  }, [player]);
+
+  // Cleanup video player on unmount to prevent stale playback
   useEffect(() => {
     return () => {
       if (player) {
         try {
           player.pause();
-          player.replace(''); // Clear source to release resources
         } catch (e) {
           // Player may already be released
         }
@@ -888,9 +947,12 @@ export default function MainStageView({
     // Check for both regular and instant video playback states
     const isMachinePlayingVideo = state.matches({ playingVideo: { playback: 'playing' } }) ||
       state.matches({ playingVideoInstant: { playback: 'playing' } });
-    
+
+    // Ensure we aren't finished
+    const isFinished = state.matches('finished');
+
     // Videos don't pause - only play or stop
-    if (isMachinePlayingVideo) {
+    if (isMachinePlayingVideo && !isFinished) {
       if (!isVideoPlaying) {
         debugLog('⚡ Hardware Sync: Playing Video');
         player.play();
@@ -953,7 +1015,7 @@ export default function MainStageView({
         onPlaybackIdleRef.current?.();
       }
       prevEventIdRef.current = currentEventId;
-        debugLog(`📩 User selected reflection: ${currentEventId}`);
+      debugLog(`📩 User selected reflection: ${currentEventId}`);
 
       // Use instant video playback if configured and this is a video
       const isVideo = !!selectedEvent?.video_url;
@@ -990,30 +1052,41 @@ export default function MainStageView({
     }
   }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events, translateY, scale, opacity, config?.instantVideoPlayback]);
 
-  // 2. Video Player Finished
+  // 2. Video Player Finished (Event Listener)
   useEffect(() => {
     if (!player) return;
-    const interval = setInterval(() => {
-      // ONLY check for finish if we are in the 'playing' state (regular or instant)
-      const isPlaying = state.matches({ playingVideo: { playback: 'playing' } }) ||
-        state.matches({ playingVideoInstant: { playback: 'playing' } });
-      if (!isPlaying) {
+
+    // Listen for the specific "End of Stream" event from the native player
+    const subscription = player.addListener('playToEnd', () => {
+      // Guard: Only process if the machine is actually in a video-playing state.
+      // This prevents spurious VIDEO_FINISHED signals during source replacement
+      // or when the player emits stale events from a previous video.
+      const currentState = stateRef.current;
+      const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+        currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+
+      if (!isInPlayingState) {
+        debugLog('🏁 playToEnd received but not in playing state - ignoring');
         return;
       }
 
-      // Use 0.2s threshold to ensure we catch it before it actually stops
-      if (player.duration > 0 && player.currentTime >= player.duration - 0.2) {
-        debugLog(`🎬 Video finished at ${player.currentTime}/${player.duration}`);
-        send({ type: 'VIDEO_FINISHED' });
-        const currentEventId = selectedEventRef.current?.event_id || null;
-        if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
-          lastVideoFinishedEventIdRef.current = currentEventId;
-          onPlaybackIdleRef.current?.();
-        }
+      debugLog('🏁 Video playToEnd event received');
+
+      // Tell the machine we are done
+      send({ type: 'VIDEO_FINISHED' });
+
+      // Notify parent if needed (legacy logic)
+      const currentEventId = selectedEventRef.current?.event_id || null;
+      if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
+        lastVideoFinishedEventIdRef.current = currentEventId;
+        onPlaybackIdleRef.current?.();
       }
-    }, 200);
-    return () => clearInterval(interval);
-  }, [player, send, state.value]); // Use state.value to minimize re-renders but still update on transition
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [player, send]);
 
   // 3. Rewind video on completion for deep dive context
   useEffect(() => {
@@ -1029,7 +1102,7 @@ export default function MainStageView({
     if (!state) return;
 
     const isVideo = !!selectedEvent?.video_url;
-    
+
     if (state.matches('finished')) {
       // Finished: Show controls AND hide bubble
       controlsOpacity.value = withTiming(1, { duration: 200 });
@@ -1093,24 +1166,24 @@ export default function MainStageView({
     setTimeout(() => { replayInProgressRef.current = false; }, 600);
 
     debugLog('🔁 User pressed REPLAY');
-    
+
     // For videos, respect instant playback config on replay
     const isVideo = !!selectedEventRef.current?.video_url;
     const useInstantPlayback = config?.instantVideoPlayback && isVideo;
-    
+
     if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
       // Replay with instant playback (skip narration)
       debugLog('⚡ Replaying with instant video playback (skipping narration)');
-      send({ 
-        type: 'SELECT_EVENT_INSTANT', 
-        event: selectedEventRef.current, 
-        metadata: selectedMetadataRef.current 
+      send({
+        type: 'SELECT_EVENT_INSTANT',
+        event: selectedEventRef.current,
+        metadata: selectedMetadataRef.current
       });
     } else {
       // Standard replay (respects narration for videos)
       send({ type: 'REPLAY' });
     }
-    
+
     if (onReplayRef.current && selectedEventRef.current) {
       onReplayRef.current(selectedEventRef.current);
     }
@@ -1255,9 +1328,9 @@ export default function MainStageView({
               position: 'absolute', left: -6, top: '50%', marginTop: -5, zIndex: 10
             }} />
           )}
-          <Image 
-            source={{ uri: item.image_url }} 
-            style={styles.upNextThumbnail} 
+          <Image
+            source={{ uri: item.image_url }}
+            style={styles.upNextThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
             cachePolicy="memory-disk"
@@ -1412,13 +1485,28 @@ export default function MainStageView({
               <View style={styles.mediaContainer}>
                 <GestureDetector gesture={verticalSwipeGesture}>
                   <Animated.View style={styles.mediaFrame}>
-                    {videoSource ? (
-                      <VideoView player={player} style={styles.mediaImage} nativeControls={false} contentFit="contain" />
-                    ) : (
-                      <Image source={{ uri: selectedEvent.image_url }} style={styles.mediaImage} contentFit="contain" cachePolicy="memory-disk" />
+                    {/* Layer 1: Video Player (Always rendered if source exists, sits at the bottom) */}
+                    {videoSource && (
+                      <VideoView
+                        player={player}
+                        style={StyleSheet.absoluteFill}
+                        nativeControls={false}
+                        contentFit="contain"
+                        allowsFullscreen={false}
+                        allowsPictureInPicture={false}
+                      />
                     )}
 
-
+                    {/* Layer 2: Thumbnail Shield (Rendered ON TOP until video is ready) */}
+                    {/* We keep this visible if: (1) It's a photo OR (2) It's a video that hasn't started playing yet */}
+                    {(!videoSource || !videoReady) && (
+                      <Image
+                        source={{ uri: selectedEvent.image_url }}
+                        style={[styles.mediaImage, { position: 'absolute', zIndex: 10 }]}
+                        contentFit="contain"
+                        cachePolicy="memory-disk"
+                      />
+                    )}
                     {/* Replay Icon Overlay (videos don't pause, only show replay when finished) */}
                     <Animated.View
                       style={[styles.playOverlay, controlsAnimatedStyle]}
@@ -1557,82 +1645,82 @@ export default function MainStageView({
                   const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
                   if (!canShow) return null;
                   return (
-                  <Animated.View key="tellMeMore" style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
-                    <TouchableOpacity
-                      onPress={async () => {
-                        if (isSparkleDisabled) return;
-                        debugLog('✨ User pressed Tell Me More button');
-                        setIsCaptionOrSparklePlaying(true);
-                        const currentState = state;
-                        
-                        // If we're in playingAudio state with audio done, play deep dive directly
-                        // (the state machine doesn't handle TELL_ME_MORE in playingAudio)
-                        if (currentState.matches({ playingAudio: { playback: 'done' } })) {
-                          debugLog('🔄 In playingAudio state - directly playing deep dive');
-                          
-                          // Stop any existing audio/speech
-                          Speech.stop();
-                          if (captionSoundRefForActions.current) {
-                            try {
-                              await captionSoundRefForActions.current.stopAsync();
-                              await captionSoundRefForActions.current.unloadAsync();
-                            } catch (e) {}
-                            captionSoundRefForActions.current = null;
-                          }
-                          
-                          // Play deep dive directly
-                          const event = selectedEventRef.current;
-                          const metadata = selectedMetadataRef.current;
-                          
-                          if (event?.deep_dive_audio_url) {
-                            try {
-                              if (soundRef.current) await soundRef.current.unloadAsync();
-                              const { sound: newSound } = await Audio.Sound.createAsync(
-                                { uri: event.deep_dive_audio_url },
-                                { shouldPlay: true, volume: 1.0 }
-                              );
-                              soundRef.current = newSound;
-                              newSound.setOnPlaybackStatusUpdate((status) => {
-                                if (status.isLoaded && status.didJustFinish) {
-                                  setIsCaptionOrSparklePlaying(false);
-                                  newSound.unloadAsync();
-                                  soundRef.current = null;
-                                }
-                              });
-                            } catch (err) {
-                              if (metadata?.deep_dive) {
-                                Speech.speak(metadata.deep_dive, {
-                                  volume: 1.0,
-                                  onDone: () => setIsCaptionOrSparklePlaying(false),
-                                  onError: () => setIsCaptionOrSparklePlaying(false),
-                                });
-                              } else {
-                                setIsCaptionOrSparklePlaying(false);
-                              }
+                    <Animated.View key="tellMeMore" style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
+                      <TouchableOpacity
+                        onPress={async () => {
+                          if (isSparkleDisabled) return;
+                          debugLog('✨ User pressed Tell Me More button');
+                          setIsCaptionOrSparklePlaying(true);
+                          const currentState = state;
+
+                          // If we're in playingAudio state with audio done, play deep dive directly
+                          // (the state machine doesn't handle TELL_ME_MORE in playingAudio)
+                          if (currentState.matches({ playingAudio: { playback: 'done' } })) {
+                            debugLog('🔄 In playingAudio state - directly playing deep dive');
+
+                            // Stop any existing audio/speech
+                            Speech.stop();
+                            if (captionSoundRefForActions.current) {
+                              try {
+                                await captionSoundRefForActions.current.stopAsync();
+                                await captionSoundRefForActions.current.unloadAsync();
+                              } catch (e) { }
+                              captionSoundRefForActions.current = null;
                             }
-                          } else if (metadata?.deep_dive) {
-                            Speech.speak(metadata.deep_dive, {
-                              volume: 1.0,
-                              onDone: () => setIsCaptionOrSparklePlaying(false),
-                              onError: () => setIsCaptionOrSparklePlaying(false),
-                            });
+
+                            // Play deep dive directly
+                            const event = selectedEventRef.current;
+                            const metadata = selectedMetadataRef.current;
+
+                            if (event?.deep_dive_audio_url) {
+                              try {
+                                if (soundRef.current) await soundRef.current.unloadAsync();
+                                const { sound: newSound } = await Audio.Sound.createAsync(
+                                  { uri: event.deep_dive_audio_url },
+                                  { shouldPlay: true, volume: 1.0 }
+                                );
+                                soundRef.current = newSound;
+                                newSound.setOnPlaybackStatusUpdate((status) => {
+                                  if (status.isLoaded && status.didJustFinish) {
+                                    setIsCaptionOrSparklePlaying(false);
+                                    newSound.unloadAsync();
+                                    soundRef.current = null;
+                                  }
+                                });
+                              } catch (err) {
+                                if (metadata?.deep_dive) {
+                                  Speech.speak(metadata.deep_dive, {
+                                    volume: 1.0,
+                                    onDone: () => setIsCaptionOrSparklePlaying(false),
+                                    onError: () => setIsCaptionOrSparklePlaying(false),
+                                  });
+                                } else {
+                                  setIsCaptionOrSparklePlaying(false);
+                                }
+                              }
+                            } else if (metadata?.deep_dive) {
+                              Speech.speak(metadata.deep_dive, {
+                                volume: 1.0,
+                                onDone: () => setIsCaptionOrSparklePlaying(false),
+                                onError: () => setIsCaptionOrSparklePlaying(false),
+                              });
+                            } else {
+                              setIsCaptionOrSparklePlaying(false);
+                            }
                           } else {
-                            setIsCaptionOrSparklePlaying(false);
+                            // For other states, use the state machine
+                            send({ type: 'TELL_ME_MORE' });
                           }
-                        } else {
-                          // For other states, use the state machine
-                          send({ type: 'TELL_ME_MORE' });
-                        }
-                      }}
-                      style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isSparkleDisabled ? 0.4 : 1 }}
-                      disabled={isSparkleDisabled}
-                      activeOpacity={isSparkleDisabled ? 1 : 0.7}
-                    >
-                      <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                        <Text style={{ fontSize: 32 }}>✨</Text>
-                      </BlurView>
-                    </TouchableOpacity>
-                  </Animated.View>
+                        }}
+                        style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isSparkleDisabled ? 0.4 : 1 }}
+                        disabled={isSparkleDisabled}
+                        activeOpacity={isSparkleDisabled ? 1 : 0.7}
+                      >
+                        <BlurView intensity={50} style={styles.tellMeMoreBlur}>
+                          <Text style={{ fontSize: 32 }}>✨</Text>
+                        </BlurView>
+                      </TouchableOpacity>
+                    </Animated.View>
                   );
                 })()}
               </View>
