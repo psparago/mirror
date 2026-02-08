@@ -2,9 +2,10 @@
 /**
  * Cleanup orphaned response documents in Firestore and unreferenced selfie images in S3.
  *
- * Unreferenced Firestore responses: response docs whose reflection no longer exists or is deleted.
+ * Unreferenced Firestore responses: response docs whose reflection no longer exists.
  * Orphaned S3 images: from/{eventId}/image.jpg where eventId is not a valid response_event_id
- * in any response doc that references an existing (non-deleted) reflection.
+ * in any response doc that references an existing reflection.
+ * image_original.jpg: redundant backups created by shrink-images.js before resizing; safe to delete.
  *
  * Usage:
  *   node scripts/utilities/cleanup-orphaned-responses.js           # Dry run (preview only)
@@ -86,12 +87,23 @@ async function getAllResponses() {
 }
 
 async function discoverExplorerPrefixes() {
-  const data = await s3.listObjectsV2({
-    Bucket: BUCKET_NAME,
-    Delimiter: '/',
-    MaxKeys: 1000,
-  }).promise();
-  return (data.CommonPrefixes || []).map((p) => p.Prefix.replace(/\/$/, '')).filter((p) => p && p !== 'staging');
+  const prefixes = new Set();
+  let token = null;
+  do {
+    const params = {
+      Bucket: BUCKET_NAME,
+      Delimiter: '/',
+      MaxKeys: 1000,
+      ContinuationToken: token,
+    };
+    const data = await s3.listObjectsV2(params).promise();
+    token = data.NextContinuationToken;
+    (data.CommonPrefixes || []).forEach((p) => {
+      const prefix = p.Prefix.replace(/\/$/, '');
+      if (prefix && prefix !== 'staging') prefixes.add(prefix);
+    });
+  } while (token);
+  return [...prefixes];
 }
 
 async function listAllFromImages(explorerIds) {
@@ -109,16 +121,56 @@ async function listAllFromImages(explorerIds) {
       const params = {
         Bucket: BUCKET_NAME,
         Prefix: `${explorerId}/from/`,
+        MaxKeys: 1000,
         ContinuationToken: token,
       };
       const data = await s3.listObjectsV2(params).promise();
       token = data.NextContinuationToken;
       (data.Contents || []).forEach((obj) => {
-        if (obj.Key.endsWith('/image.jpg')) keys.push(obj.Key);
+        if (obj.Key && /\/image\.jpg$/i.test(obj.Key) && !obj.Key.includes('_original')) keys.push(obj.Key);
       });
     } while (token);
   }
   return keys;
+}
+
+/** Lists image_original.jpg files (redundant backups from shrink-images.js; safe to delete) */
+async function listAllImageOriginals(explorerIds) {
+  const keys = [];
+  let prefixes = [...new Set(explorerIds)].filter(Boolean);
+  if (prefixes.length === 0) {
+    prefixes = await discoverExplorerPrefixes();
+  }
+  if (prefixes.length === 0) {
+    prefixes = ['cole', 'peter'];
+  }
+  for (const explorerId of prefixes) {
+    let token = null;
+    do {
+      const params = {
+        Bucket: BUCKET_NAME,
+        Prefix: `${explorerId}/from/`,
+        MaxKeys: 1000,
+        ContinuationToken: token,
+      };
+      const data = await s3.listObjectsV2(params).promise();
+      token = data.NextContinuationToken;
+      (data.Contents || []).forEach((obj) => {
+        if (obj.Key && /\/image_original\.jpg$/i.test(obj.Key)) keys.push(obj.Key);
+      });
+    } while (token);
+  }
+  return keys;
+}
+
+// Map explorer id (cole, COLE-01052010, etc.) to actual V2 S3 prefix
+function resolveS3Prefix(explorerId, discoveredPrefixes) {
+  const eid = (explorerId || 'cole').toString();
+  const exact = discoveredPrefixes.find((p) => p === eid);
+  if (exact) return exact;
+  const byPrefix = discoveredPrefixes.find((p) => p.toLowerCase().startsWith(eid.toLowerCase()));
+  if (byPrefix) return byPrefix;
+  return eid;
 }
 
 async function run() {
@@ -126,6 +178,7 @@ async function run() {
 
   const reflections = await getAllReflections();
   const responses = await getAllResponses();
+  const s3Explorers = await discoverExplorerPrefixes();
 
   const validReflectionIds = new Set(
     Object.entries(reflections)
@@ -138,30 +191,36 @@ async function run() {
   responses.forEach((r) => {
     if (r.explorerId) explorerIds.add(r.explorerId);
     if (!validReflectionIds.has(r.id)) return;
-    const rid = r.response_event_id || r.id;
+    const rid = (r.response_event_id || r.id).toString();
     if (!rid) return;
-    const explorerId = r.explorerId || 'cole';
-    validS3Keys.add(`${explorerId}/from/${rid}/image.jpg`);
+    const s3Prefix = resolveS3Prefix(r.explorerId, s3Explorers);
+    validS3Keys.add(`${s3Prefix}/from/${rid}/image.jpg`);
+    const eid = (r.explorerId || 'cole').toString().toLowerCase();
+    if (eid === 'cole') validS3Keys.add(`cole/from/${rid}/image.jpg`);
+    if (eid === 'peter') validS3Keys.add(`peter/from/${rid}/image.jpg`);
   });
   Object.values(reflections).forEach((r) => {
     if (r.explorerId) explorerIds.add(r.explorerId);
   });
 
   const unreferencedResponses = responses.filter((r) => !validReflectionIds.has(r.id));
-  console.log(`📋 Responses pointing to missing/deleted reflections: ${unreferencedResponses.length}`);
+  console.log(`📋 Reflections: ${Object.keys(reflections).length} total, ${validReflectionIds.size} non-deleted`);
+  console.log(`📋 Responses: ${responses.length} total, ${responses.length - unreferencedResponses.length} valid (reflection exists), ${unreferencedResponses.length} orphan (will delete)`);
 
   const reflectionsToStripAudio = Object.values(reflections).filter(
     (r) => r.hasAudioUrl || r.hasDeepDiveAudioUrl
   );
   console.log(`📋 Reflections with audio_url/deep_dive_audio_url to strip: ${reflectionsToStripAudio.length}`);
 
-  const s3Explorers = await discoverExplorerPrefixes();
-  const allExplorerIds = [...new Set([...explorerIds, ...s3Explorers])];
+  const allExplorerIds = [...new Set([...explorerIds, ...s3Explorers, 'cole', 'peter'])]; // include legacy
   const allFromImages = await listAllFromImages(allExplorerIds);
   const orphanedS3 = allFromImages.filter((k) => !validS3Keys.has(k));
-  console.log(`📋 Orphaned selfie images in S3 (from/): ${orphanedS3.length}`);
+  console.log(`📋 S3 from/ images: ${allFromImages.length} total, ${allFromImages.length - orphanedS3.length} valid, ${orphanedS3.length} orphan (will delete)`);
 
-  if (unreferencedResponses.length === 0 && orphanedS3.length === 0 && reflectionsToStripAudio.length === 0) {
+  const imageOriginals = await listAllImageOriginals(allExplorerIds);
+  console.log(`📋 S3 image_original.jpg (redundant backups): ${imageOriginals.length} (will delete)`);
+
+  if (unreferencedResponses.length === 0 && orphanedS3.length === 0 && reflectionsToStripAudio.length === 0 && imageOriginals.length === 0) {
     console.log('\n✅ Nothing to clean up.');
     return;
   }
@@ -221,6 +280,25 @@ async function run() {
         }
       }
       console.log(`   ✅ Deleted ${deleted} S3 object(s)`);
+    }
+  }
+
+  if (imageOriginals.length > 0) {
+    console.log('\n🗑️  S3 image_original.jpg (redundant backups from shrink-images.js):');
+    imageOriginals.slice(0, 10).forEach((k) => console.log(`   - ${k}`));
+    if (imageOriginals.length > 10) console.log(`   ... and ${imageOriginals.length - 10} more`);
+    if (!DRY_RUN) {
+      let deleted = 0;
+      for (const key of imageOriginals) {
+        try {
+          await s3.deleteObject({ Bucket: BUCKET_NAME, Key: key }).promise();
+          deleted++;
+          if (deleted % 10 === 0) process.stdout.write(`   Deleted ${deleted}/${imageOriginals.length}...\r`);
+        } catch (e) {
+          console.error(`\n   ❌ Failed to delete ${key}: ${e.message}`);
+        }
+      }
+      console.log(`   ✅ Deleted ${deleted} image_original.jpg backup(s)`);
     }
   }
 

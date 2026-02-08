@@ -171,24 +171,78 @@ async function run() {
 
   // --- S3 ---
   const toKeys = await listS3Objects(V1_S3_BUCKET, `${V1_S3_PREFIX}/to/`);
-  const fromKeys = await listS3Objects(V1_S3_BUCKET, `${V1_S3_PREFIX}/from/`);
+  const fromKeysRaw = await listS3Objects(V1_S3_BUCKET, `${V1_S3_PREFIX}/from/`);
+  // Only migrate from/ objects that correspond to migrated responses (exclude orphan selfies)
+  const validFromEventIds = new Set(
+    responsesToMigrate.map((r) => (r.data?.response_event_id || r.id).toString())
+  );
+  const fromKeys = fromKeysRaw.filter((key) => {
+    const parts = key.split('/'); // cole/from/{eventId}/filename
+    if (parts.length < 4) return false;
+    const eventId = parts[2];
+    return validFromEventIds.has(eventId);
+  });
+  const fromKeysExcluded = fromKeysRaw.length - fromKeys.length;
   const s3KeysToCopy = [...toKeys, ...fromKeys];
-  console.log(`📋 V1 S3: ${toKeys.length} objects in cole/to/, ${fromKeys.length} in cole/from/`);
+  console.log(`📋 V1 S3: ${toKeys.length} objects in cole/to/, ${fromKeys.length} in cole/from/ (${fromKeysExcluded} orphan selfies excluded)`);
 
-  if (reflectionsToMigrate.length === 0 && responsesToMigrate.length === 0 && s3KeysToCopy.length === 0) {
-    console.log('\n✅ Nothing to migrate.');
+  if (DRY_RUN) {
+    // Dry run: check V2 for existence to report accurate would-migrate vs would-skip
+    let wouldMigrateReflections = 0;
+    let wouldSkipReflections = 0;
+    let wouldMigrateResponses = 0;
+    let wouldSkipResponses = 0;
+    let wouldMigrateS3 = 0;
+    let wouldSkipS3 = 0;
+
+    for (const r of reflectionsToMigrate) {
+      const existing = await dbV2.collection(V2_REFLECTIONS_COLLECTION).doc(r.id).get();
+      if (existing.exists) wouldSkipReflections++;
+      else wouldMigrateReflections++;
+    }
+    for (const r of responsesToMigrate) {
+      const existing = await dbV2.collection(V2_RESPONSES_COLLECTION).doc(r.id).get();
+      if (existing.exists) wouldSkipResponses++;
+      else wouldMigrateResponses++;
+    }
+    for (let j = 0; j < s3KeysToCopy.length; j++) {
+      const destKey = s3KeysToCopy[j].replace(V1_S3_PREFIX, V2_EXPLORER_ID);
+      try {
+        await s3.headObject({ Bucket: V2_S3_BUCKET, Key: destKey }).promise();
+        wouldSkipS3++;
+      } catch (e) {
+        if (e.code === 'NotFound') wouldMigrateS3++;
+      }
+      if ((j + 1) % 200 === 0) process.stdout.write(`   Checking V2 S3: ${j + 1}/${s3KeysToCopy.length}...\r`);
+    }
+    if (s3KeysToCopy.length > 0) process.stdout.write('\n');
+
+    console.log('\n--- Would migrate (not yet in V2) ---');
+    console.log(`   Reflections: ${wouldMigrateReflections} to migrate, ${wouldSkipReflections} would skip (exists)`);
+    console.log(`   Responses: ${wouldMigrateResponses} to migrate, ${wouldSkipResponses} would skip (exists)`);
+    console.log(`   S3: ${wouldMigrateS3} to copy, ${wouldSkipS3} would skip (exists)`);
+    if (wouldMigrateReflections > 0 || wouldMigrateResponses > 0 || wouldMigrateS3 > 0) {
+      if (wouldMigrateReflections > 0) {
+        reflectionsToMigrate.slice(0, 3).forEach((r) => console.log(`     reflection: ${r.id}`));
+        if (wouldMigrateReflections > 3) console.log(`     ... and ${wouldMigrateReflections - 3} more`);
+      }
+      if (wouldMigrateResponses > 0) {
+        responsesToMigrate.slice(0, 3).forEach((r) => console.log(`     response: ${r.id}`));
+        if (wouldMigrateResponses > 3) console.log(`     ... and ${wouldMigrateResponses - 3} more`);
+      }
+      if (wouldMigrateS3 > 0) {
+        s3KeysToCopy.slice(0, 3).forEach((k) => console.log(`     S3: ${k} -> ${k.replace(V1_S3_PREFIX, V2_EXPLORER_ID)}`));
+        if (wouldMigrateS3 > 3) console.log(`     ... and ${wouldMigrateS3 - 3} more`);
+      }
+    } else {
+      console.log('\n✅ Nothing to migrate - all items already exist in V2.');
+    }
+    console.log('\n🎉 Dry run complete. Use --execute to perform migration.');
     return;
   }
 
-  if (DRY_RUN) {
-    console.log('\n--- Would migrate ---');
-    reflectionsToMigrate.slice(0, 5).forEach((r) => console.log(`   reflection: ${r.id}`));
-    if (reflectionsToMigrate.length > 5) console.log(`   ... and ${reflectionsToMigrate.length - 5} more`);
-    responsesToMigrate.slice(0, 5).forEach((r) => console.log(`   response: ${r.id}`));
-    if (responsesToMigrate.length > 5) console.log(`   ... and ${responsesToMigrate.length - 5} more`);
-    s3KeysToCopy.slice(0, 10).forEach((k) => console.log(`   S3: ${k} -> ${k.replace(V1_S3_PREFIX, V2_EXPLORER_ID)}`));
-    if (s3KeysToCopy.length > 10) console.log(`   ... and ${s3KeysToCopy.length - 10} more`);
-    console.log('\n🎉 Dry run complete. Use --execute to perform migration.');
+  if (reflectionsToMigrate.length === 0 && responsesToMigrate.length === 0 && s3KeysToCopy.length === 0) {
+    console.log('\n✅ Nothing to migrate.');
     return;
   }
 
@@ -199,6 +253,7 @@ async function run() {
   let responsesSkipped = 0;
   let responsesErrors = 0;
   let s3Migrated = 0;
+  let s3Skipped = 0;
   let s3Errors = 0;
 
   // Firestore: reflections
@@ -275,24 +330,30 @@ async function run() {
   }
   console.log(`✅ Responses: migrated ${responsesMigrated}, skipped (exists) ${responsesSkipped}, errors ${responsesErrors}`);
 
-  // S3: copy objects
+  // S3: copy objects (skip if already exists in V2)
   for (let j = 0; j < s3KeysToCopy.length; j++) {
     const srcKey = s3KeysToCopy[j];
     const destKey = srcKey.replace(V1_S3_PREFIX, V2_EXPLORER_ID);
     try {
-      await s3.copyObject({
-        Bucket: V2_S3_BUCKET,
-        CopySource: `${V1_S3_BUCKET}/${srcKey}`,
-        Key: destKey,
-      }).promise();
-      s3Migrated++;
-      if (s3Migrated % 20 === 0) process.stdout.write(`   S3: ${s3Migrated}/${s3KeysToCopy.length}...\r`);
-    } catch (e) {
-      console.error(`\n   ❌ S3 ${srcKey}: ${e.message}`);
-      s3Errors++;
+      await s3.headObject({ Bucket: V2_S3_BUCKET, Key: destKey }).promise();
+      s3Skipped++;
+      if ((s3Migrated + s3Skipped) % 50 === 0) process.stdout.write(`   S3: ${s3Migrated} copied, ${s3Skipped} skipped...\r`);
+    } catch (headErr) {
+      if (headErr.code === 'NotFound') {
+        await s3.copyObject({
+          Bucket: V2_S3_BUCKET,
+          CopySource: `${V1_S3_BUCKET}/${srcKey}`,
+          Key: destKey,
+        }).promise();
+        s3Migrated++;
+        if ((s3Migrated + s3Skipped) % 50 === 0) process.stdout.write(`   S3: ${s3Migrated} copied, ${s3Skipped} skipped...\r`);
+      } else {
+        console.error(`\n   ❌ S3 ${srcKey}: ${headErr.message}`);
+        s3Errors++;
+      }
     }
   }
-  console.log(`\n✅ S3: migrated ${s3Migrated}, errors ${s3Errors}`);
+  console.log(`\n✅ S3: migrated ${s3Migrated}, skipped (exists) ${s3Skipped}, errors ${s3Errors}`);
 
   console.log('\n🎉 Migration complete.');
 }

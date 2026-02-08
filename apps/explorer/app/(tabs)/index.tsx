@@ -4,6 +4,7 @@ import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse
 import {
   collection,
   db,
+  deleteDoc,
   doc,
   getDoc,
   increment,
@@ -1151,45 +1152,28 @@ export default function HomeScreen() {
         throw new Error(errorData.errors?.join(', ') || 'Failed to delete S3 objects');
       }
 
-      // 2. Delete selfie response image from S3 if it exists (keep the document)
+      // 2. Delete selfie response image from S3 and response doc if it exists
+      const responseRef = doc(db, ExplorerConfig.collections.responses, event.event_id);
       try {
-        // db from shared
-        const responseRef = doc(db, ExplorerConfig.collections.responses, event.event_id);
         const responseDoc = await getDoc(responseRef);
-
         if (responseDoc.exists()) {
           const responseData = responseDoc.data();
           const responseEventId = responseData?.response_event_id;
-
           if (responseEventId) {
-            // Delete selfie image from S3 (path: from/{response_event_id}/image.jpg)
-            // Keep the reflection_response document in Firestore for history
-            const deleteSelfieResponse = await fetch(
-              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`
-            );
-
-            if (!deleteSelfieResponse.ok) {
-              console.warn("Failed to delete selfie image from S3, continuing with deletion");
-            }
+            await fetch(
+              `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`,
+              { method: 'DELETE' }
+            ).catch(() => {});
           }
+          await deleteDoc(responseRef);
         }
       } catch (selfieError: any) {
         console.warn("Failed to delete selfie response:", selfieError);
-        // Continue even if selfie deletion fails
       }
 
-      // 3. Mark Firestore signal document as deleted (instead of deleting it)
-      try {
-        // db from shared
-        const signalRef = doc(db, ExplorerConfig.collections.reflections, event.event_id);
-        await setDoc(signalRef, {
-          status: 'deleted',
-          deleted_at: serverTimestamp(),
-        }, { merge: true });
-      } catch (firestoreError: any) {
-        console.warn("Failed to mark Firestore signal as deleted:", firestoreError);
-        // Continue even if Firestore update fails
-      }
+      // 3. Hard delete reflection document
+      const reflectionRef = doc(db, ExplorerConfig.collections.reflections, event.event_id);
+      await deleteDoc(reflectionRef);
 
       // 4. Stop any ongoing speech (defensive cleanup)
       Speech.stop();

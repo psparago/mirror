@@ -1,6 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
-import { collection, db, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import { collection, db, deleteDoc, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
@@ -568,6 +568,49 @@ export default function SentTimelineScreen() {
     }
   };
 
+  const deleteReflection = useCallback(async (item: SentReflection) => {
+    if (!currentExplorerId) return;
+
+    try {
+      // 1. Delete S3 objects (to/ path - reflection content)
+      const deleteRes = await fetch(
+        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${item.event_id}&explorer_id=${currentExplorerId}&path=to`,
+        { method: 'DELETE' }
+      );
+      if (!deleteRes.ok) {
+        const errData = await deleteRes.json().catch(() => ({}));
+        throw new Error(errData.errors?.join(', ') || 'Failed to delete reflection');
+      }
+
+      // 2. Delete selfie response image from S3 if it exists
+      const responseEventId = responseEventIdMap.get(item.event_id);
+      if (responseEventId) {
+        await fetch(
+          `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`,
+          { method: 'DELETE' }
+        ).catch(() => {});
+      }
+
+      // 3. Delete response doc if it exists
+      const responseRef = doc(db, ExplorerConfig.collections.responses, item.event_id);
+      try {
+        const responseDoc = await getDoc(responseRef);
+        if (responseDoc.exists()) {
+          await deleteDoc(responseRef);
+        }
+      } catch {}
+
+      // 4. Hard delete reflection document
+      const reflectionRef = doc(db, ExplorerConfig.collections.reflections, item.event_id);
+      await deleteDoc(reflectionRef);
+
+      showToast('🗑️ Reflection deleted');
+    } catch (error: any) {
+      console.error('Delete reflection error:', error);
+      Alert.alert('Delete Failed', error.message || 'Failed to delete reflection');
+    }
+  }, [currentExplorerId, responseEventIdMap]);
+
   return (
     <SafeAreaView style={styles.container}>
       {/* Selfie Image Modal */}
@@ -828,20 +871,44 @@ export default function SentTimelineScreen() {
                   ) : null}
                   <View style={styles.reflectionInfo}>
                     <View style={styles.reflectionContent}>
-                      <View style={styles.statusBadge}>
-                        <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
-                        <Text style={styles.statusText}>
-                          {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
-                        </Text>
-                        {item.status === 'deleted' && item.deletedAt ? (
-                          <Text style={styles.engagementDate}>
-                            {formatEngagementDate(item.deletedAt)}
+                      <View style={styles.statusRow}>
+                        <View style={styles.statusBadge}>
+                          <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
+                          <Text style={styles.statusText}>
+                            {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
                           </Text>
-                        ) : engagementTimestamp && item.status !== 'ready' ? (
-                          <Text style={styles.engagementDate}>
-                            {formatEngagementDate(engagementTimestamp)}
-                          </Text>
-                        ) : null}
+                          {item.status === 'deleted' && item.deletedAt ? (
+                            <Text style={styles.engagementDate}>
+                              {formatEngagementDate(item.deletedAt)}
+                            </Text>
+                          ) : engagementTimestamp && item.status !== 'ready' ? (
+                            <Text style={styles.engagementDate}>
+                              {formatEngagementDate(engagementTimestamp)}
+                            </Text>
+                          ) : null}
+                        </View>
+                        {item.sender === currentIdentity && (
+                          <TouchableOpacity
+                            style={styles.deleteReflectionButton}
+                            onPress={() => {
+                              Alert.alert(
+                                'Delete Reflection',
+                                'Are you sure you want to permanently delete this reflection?',
+                                [
+                                  { text: 'Cancel', style: 'cancel' },
+                                  {
+                                    text: 'Delete',
+                                    style: 'destructive',
+                                    onPress: () => deleteReflection(item),
+                                  },
+                                ]
+                              );
+                            }}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          >
+                            <FontAwesome name="trash-o" size={18} color="#e74c3c" />
+                          </TouchableOpacity>
+                        )}
                       </View>
                       {item.hasResponse && (
                         <TouchableOpacity
@@ -1031,10 +1098,20 @@ const styles = StyleSheet.create({
     color: '#e0e0e0', // Light text on dark background
     marginBottom: 4,
   },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    flex: 1,
+  },
+  deleteReflectionButton: {
+    padding: 4,
   },
   statusDot: {
     width: 8,

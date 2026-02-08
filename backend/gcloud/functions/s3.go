@@ -436,9 +436,10 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	var objectsToDelete []string
 	if eventID != "" {
 		if path == "from" {
-			// For selfie responses, only delete image.jpg
+			// For selfie responses: image.jpg and image_original.jpg (backup from shrink-images)
 			objectsToDelete = []string{
 				fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/image_original.jpg", explorerID, path, eventID),
 			}
 		} else if path == "staging" {
 			// For staging, delete image.jpg (TTS files deleted via extra_keys)
@@ -446,14 +447,16 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("staging/%s/image.jpg", eventID),
 			}
 		} else {
-			// For regular reflections, delete all associated media files
+			// For regular reflections: all media + backups (image_original from shrink-images, video_original from shrink-videos)
 			objectsToDelete = []string{
 				fmt.Sprintf("%s/%s/%s/image.jpg", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/image_original.jpg", explorerID, path, eventID),
 				fmt.Sprintf("%s/%s/%s/metadata.json", explorerID, path, eventID),
 				fmt.Sprintf("%s/%s/%s/audio.m4a", explorerID, path, eventID),
 				fmt.Sprintf("%s/%s/%s/deep_dive.m4a", explorerID, path, eventID),
 				fmt.Sprintf("%s/%s/%s/video.mp4", explorerID, path, eventID),
-				fmt.Sprintf("%s/%s/%s/video.mov", explorerID, path, eventID), // Defensive: just in case a .mov slipped in
+				fmt.Sprintf("%s/%s/%s/video_original.mp4", explorerID, path, eventID),
+				fmt.Sprintf("%s/%s/%s/video.mov", explorerID, path, eventID),
 			}
 			fmt.Printf("Attempting to delete objects for event %s: %v\n", eventID, objectsToDelete)
 		}
