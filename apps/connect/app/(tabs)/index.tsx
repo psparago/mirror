@@ -109,6 +109,7 @@ export default function CompanionHomeScreen() {
   const [aiDeepDiveAudioUrl, setAiDeepDiveAudioUrl] = useState<string | null>(null);
   const [aiAudioS3Key, setAiAudioS3Key] = useState<string | null>(null);
   const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
+  const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
@@ -333,6 +334,10 @@ export default function CompanionHomeScreen() {
         setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
         setAiAudioS3Key(aiResponse.audio_s3_key || null);
         setAiDeepDiveS3Key(aiResponse.deep_dive_audio_s3_key || null);
+        if (aiResponse.staging_event_id) {
+          setStagingEventId(aiResponse.staging_event_id);
+          stagingEventIdRef.current = aiResponse.staging_event_id;
+        }
 
         if (!options.silent) {
           // PROTECTION: Only update the description if the current one is empty
@@ -414,7 +419,8 @@ export default function CompanionHomeScreen() {
       setDeepDive('');
       setIntent('none'); // Reset intent - show action buttons
       setAudioUri(null); // Clear any previous audio
-      setStagingEventId(null); // Don't upload to staging until user chooses intent
+      setStagingEventId(null);
+      stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
       setSearchResults([]);
     } catch (error: any) {
       console.error('handleImageSelect error:', error);
@@ -486,7 +492,8 @@ export default function CompanionHomeScreen() {
 
         setIntent('none'); // Reset intent - show action buttons
         setAudioUri(null); // Clear any previous audio
-        setStagingEventId(null); // Don't upload to staging until user chooses intent
+        setStagingEventId(null);
+        stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
 
         // Reset the last processed URI to prevent stale URIs from being set
         lastProcessedUriRef.current = null;
@@ -529,7 +536,8 @@ export default function CompanionHomeScreen() {
 
       setIntent('none'); // Reset intent - show action buttons
       setAudioUri(null); // Clear any previous audio
-      setStagingEventId(null); // Don't upload to staging until user chooses intent
+      setStagingEventId(null);
+      stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
 
       // Reset the last processed URI to prevent stale URIs from being set
       lastProcessedUriRef.current = null;
@@ -587,6 +595,7 @@ export default function CompanionHomeScreen() {
         setDeepDive('');
         setIntent('none');
         setStagingEventId(null);
+        stagingEventIdRef.current = null;
         lastProcessedUriRef.current = null;
         setIsLoadingImage(false); // Hide spinner
       }
@@ -703,7 +712,8 @@ export default function CompanionHomeScreen() {
     let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
-    const stagingTtsKeysToDelete: string[] = [];
+      const stagingTtsKeysToDelete: string[] = [];
+      let stagingIdToDelete: string | null = null;
 
     try {
       setUploading(true);
@@ -729,7 +739,10 @@ export default function CompanionHomeScreen() {
         });
 
         if (aiResult) {
-          debugLog(`✅ AI Enhancement Success: Caption="${aiResult.short_caption?.substring(0, 30)}...", DeepDive="${aiResult.deep_dive?.substring(0, 30)}..."`);
+          if (aiResult._stagingId) stagingIdToDelete = aiResult._stagingId;
+          if (aiResult.short_caption || aiResult.deep_dive) {
+            debugLog(`✅ AI Enhancement Success: Caption="${aiResult.short_caption?.substring?.(0, 30)}...", DeepDive="${aiResult.deep_dive?.substring?.(0, 30)}..."`);
+          }
           // PROTECTION: Never overwrite the user's manual caption during this final polish phase
           // if it doesn't match the AI's returned version. We favor what the user sees on screen.
           if (!finalCaption && aiResult.short_caption) {
@@ -746,9 +759,10 @@ export default function CompanionHomeScreen() {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
         }
       } else {
-        // Capture TTS keys from state for cleanup (no inline AI call)
+        // Capture TTS keys and staging from state/ref for cleanup (no inline AI call)
         if (aiAudioS3Key) stagingTtsKeysToDelete.push(aiAudioS3Key);
         if (aiDeepDiveS3Key) stagingTtsKeysToDelete.push(aiDeepDiveS3Key);
+        stagingIdToDelete = stagingEventId || stagingEventIdRef.current;
       }
 
       // Generate unique event_id (timestamp-based)
@@ -925,17 +939,22 @@ export default function CompanionHomeScreen() {
       // 9. Cleanup Staging & Local (image + TTS artifacts)
       showToast('✅ Reflection sent!');
 
-      if ((stagingEventId || stagingTtsKeysToDelete.length > 0) && currentExplorerId) {
+      if ((stagingIdToDelete || stagingEventId || stagingEventIdRef.current || stagingTtsKeysToDelete.length > 0) && currentExplorerId) {
         try {
           const deleteParams = new URLSearchParams({
             path: 'staging',
             explorer_id: currentExplorerId,
           });
-          if (stagingEventId) deleteParams.set('event_id', stagingEventId);
+          const idToDelete = stagingIdToDelete || stagingEventId || stagingEventIdRef.current;
+          if (idToDelete) deleteParams.set('event_id', idToDelete);
           if (stagingTtsKeysToDelete.length > 0) {
             deleteParams.set('extra_keys', JSON.stringify(stagingTtsKeysToDelete));
           }
-          await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${deleteParams.toString()}`);
+          const deleteRes = await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${deleteParams.toString()}`, { method: 'DELETE' });
+          if (!deleteRes.ok) {
+            const body = await deleteRes.text();
+            console.warn('Staging cleanup request failed:', deleteRes.status, body);
+          }
         } catch (err) {
           console.warn('Staging cleanup failed (non-blocking):', err);
         }
@@ -958,6 +977,7 @@ export default function CompanionHomeScreen() {
       setShortCaption('');
       setDeepDive('');
       setStagingEventId(null);
+      stagingEventIdRef.current = null;
       setAudioUri(null);
       setAiAudioS3Key(null);
       setAiDeepDiveS3Key(null);
@@ -995,12 +1015,14 @@ export default function CompanionHomeScreen() {
     const ttsKeys: string[] = [];
     if (aiAudioS3Key) ttsKeys.push(aiAudioS3Key);
     if (aiDeepDiveS3Key) ttsKeys.push(aiDeepDiveS3Key);
-    if (!stagingEventId && ttsKeys.length === 0) return;
+    const stagingId = stagingEventId || stagingEventIdRef.current;
+    if (!stagingId && ttsKeys.length === 0) return;
     try {
       const params = new URLSearchParams({ path: 'staging', explorer_id: currentExplorerId });
-      if (stagingEventId) params.set('event_id', stagingEventId);
+      if (stagingId) params.set('event_id', stagingId);
       if (ttsKeys.length > 0) params.set('extra_keys', JSON.stringify(ttsKeys));
-      await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${params.toString()}`);
+      const res = await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${params.toString()}`, { method: 'DELETE' });
+      if (!res.ok) console.warn('Staging cleanup request failed:', res.status, await res.text());
     } catch (err) {
       console.warn('Staging cleanup failed:', err);
     }
@@ -1025,6 +1047,7 @@ export default function CompanionHomeScreen() {
     setDeepDive('');
     setIsAiThinking(false);
     setStagingEventId(null);
+    stagingEventIdRef.current = null;
     setIntent('none');
     setAudioUri(null);
     setAiAudioS3Key(null);
@@ -1051,6 +1074,7 @@ export default function CompanionHomeScreen() {
     setDeepDive('');
     setIsAiThinking(false);
     setStagingEventId(null);
+    stagingEventIdRef.current = null;
     setIntent('none');
     setAudioUri(null);
     setAiAudioS3Key(null);
@@ -1071,6 +1095,7 @@ export default function CompanionHomeScreen() {
       if (!stagingId) {
         stagingId = Date.now().toString();
         setStagingEventId(stagingId);
+        stagingEventIdRef.current = stagingId;
 
         let uriToUpload = photo.uri;
         let isTempThumbnail = false;
@@ -1113,7 +1138,9 @@ export default function CompanionHomeScreen() {
       const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
       if (getStagingUrlResponse.ok) {
         const { url: getStagingUrl } = await getStagingUrlResponse.json();
-        return await getAIDescription(getStagingUrl, options);
+        const aiResult = await getAIDescription(getStagingUrl, options);
+        // Always return _stagingId so caller can delete staging even when AI fails
+        return aiResult ? { ...aiResult, _stagingId: stagingId } : { _stagingId: stagingId };
       }
     } catch (error: any) {
       console.error("Error generating background Deep Dive:", error);

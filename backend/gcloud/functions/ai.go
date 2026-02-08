@@ -106,6 +106,17 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		DeepDiveAudioURL   string `json:"deep_dive_audio_url,omitempty"`
 		AudioS3Key         string `json:"audio_s3_key,omitempty"`
 		DeepDiveAudioS3Key string `json:"deep_dive_audio_s3_key,omitempty"`
+		StagingEventID     string `json:"staging_event_id,omitempty"`
+	}
+
+	// Extract staging event_id from image URL (e.g. .../staging/1738941234567/image.jpg) for client cleanup
+	if imageURL != "" {
+		if i := strings.Index(imageURL, "staging/"); i >= 0 {
+			start := i + len("staging/")
+			if end := strings.Index(imageURL[start:], "/image"); end >= 0 {
+				result.StagingEventID = imageURL[start : start+end]
+			}
+		}
 	}
 
 	// 3. Logic: If we have both target texts, just do TTS. If missing either, call Gemini for image analysis.
