@@ -365,6 +365,15 @@ export default function HomeScreen() {
     }
   }, [events.length]);
 
+  // When events list changes, ensure selectedEvent is still in the list (e.g. deleted by Companion)
+  useEffect(() => {
+    if (!selectedEvent) return;
+    const stillInList = events.some((e) => e.event_id === selectedEvent.event_id);
+    if (!stillInList) {
+      setSelectedEvent(events.length > 0 ? events[0] : null);
+    }
+  }, [events, selectedEvent?.event_id]);
+
 
   // Fetch metadata when a reflection is selected
   useEffect(() => {
@@ -531,13 +540,28 @@ export default function HomeScreen() {
           return;
         }
 
-        // 2. Check for NEW reflections
+        // 2. Check for added and removed reflections
         const newReflectionIds: string[] = [];
+        const removedReflectionIds: string[] = [];
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             newReflectionIds.push(change.doc.id);
+          } else if (change.type === 'removed') {
+            removedReflectionIds.push(change.doc.id);
           }
         });
+
+        // Remove deleted reflections from local state immediately
+        if (removedReflectionIds.length > 0) {
+          const remaining = eventsRef.current.filter(
+            (e) => !removedReflectionIds.includes(e.event_id)
+          );
+          setEvents(remaining);
+          setSelectedEvent((current) => {
+            if (!current || !removedReflectionIds.includes(current.event_id)) return current;
+            return remaining.length > 0 ? remaining[0] : null;
+          });
+        }
 
         if (newReflectionIds.length === 0) return;
 

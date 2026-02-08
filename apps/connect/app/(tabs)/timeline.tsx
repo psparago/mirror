@@ -1,10 +1,9 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, ExplorerConfig, useExplorer } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
-import { useFocusEffect } from 'expo-router';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -37,7 +36,6 @@ export default function SentTimelineScreen() {
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
-  const [currentIdentity, setCurrentIdentity] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<'mine' | 'all'>('mine');
   const [sortBy, setSortBy] = useState<'recent' | 'impact'>('recent');
   const metadataCache = useRef<Map<string, any>>(new Map());
@@ -59,28 +57,8 @@ export default function SentTimelineScreen() {
     }
   };
 
-  // Get the user from the Auth Hook
-  const { user } = useAuth();
-  const { currentExplorerId, loading: explorerLoading } = useExplorer();
-
-  // Load current identity from Firestore
-  useFocusEffect(
-    useCallback(() => {
-      const loadIdentity = async () => {
-        if (!user?.uid) return;
-
-        try {
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
-          const userData = userDoc.data();
-          setCurrentIdentity(userData?.companionName || null);
-        } catch (error) {
-          console.error('Error loading companion identity:', error);
-          setCurrentIdentity(null);
-        }
-      };
-      loadIdentity();
-    }, [user?.uid]) // Re-run if user changes
-  );
+  const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
+  const currentIdentity = activeRelationship?.companionName || null;
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
@@ -96,7 +74,7 @@ export default function SentTimelineScreen() {
 
     // Filter by sender if filterMode is 'mine'
     if (filterMode === 'mine' && currentIdentity) {
-      result = result.filter(r => r.sender === currentIdentity);
+      result = result.filter(r => r.sender?.toLowerCase() === currentIdentity.toLowerCase());
     }
 
     // Helper to get timestamp value in milliseconds
@@ -132,7 +110,7 @@ export default function SentTimelineScreen() {
   const reflectionCounts = useMemo(() => {
     const all = reflections.length; // already excludes soft-deleted items (filtered at source)
     const mine =
-      currentIdentity ? reflections.filter(r => r.sender === currentIdentity).length : 0;
+      currentIdentity ? reflections.filter(r => r.sender?.toLowerCase() === currentIdentity.toLowerCase()).length : 0;
     return { all, mine };
   }, [reflections, currentIdentity]);
 
@@ -464,6 +442,49 @@ export default function SentTimelineScreen() {
     // Trigger refresh when app comes to foreground
   }, [refreshTrigger]);
 
+  const deleteReflection = useCallback(async (item: SentReflection) => {
+    if (!currentExplorerId) return;
+
+    try {
+      // 1. Delete S3 objects (to/ path - reflection content)
+      const deleteRes = await fetch(
+        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${item.event_id}&explorer_id=${currentExplorerId}&path=to`,
+        { method: 'DELETE' }
+      );
+      if (!deleteRes.ok) {
+        const errData = await deleteRes.json().catch(() => ({}));
+        throw new Error(errData.errors?.join(', ') || 'Failed to delete reflection');
+      }
+
+      // 2. Delete selfie response image from S3 if it exists
+      const responseEventId = responseEventIdMap.get(item.event_id);
+      if (responseEventId) {
+        await fetch(
+          `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`,
+          { method: 'DELETE' }
+        ).catch(() => {});
+      }
+
+      // 3. Delete response doc if it exists
+      const responseRef = doc(db, ExplorerConfig.collections.responses, item.event_id);
+      try {
+        const responseDoc = await getDoc(responseRef);
+        if (responseDoc.exists()) {
+          await deleteDoc(responseRef);
+        }
+      } catch {}
+
+      // 4. Hard delete reflection document
+      const reflectionRef = doc(db, ExplorerConfig.collections.reflections, item.event_id);
+      await deleteDoc(reflectionRef);
+
+      showToast('🗑️ Reflection deleted');
+    } catch (error: any) {
+      console.error('Delete reflection error:', error);
+      Alert.alert('Delete Failed', error.message || 'Failed to delete reflection');
+    }
+  }, [currentExplorerId, responseEventIdMap]);
+
   const getStatusText = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
     if (status === 'deleted') return 'Deleted';
     if (status === 'replayed') return 'Replayed';
@@ -567,49 +588,6 @@ export default function SentTimelineScreen() {
       Alert.alert('Error', 'Failed to save selfie to Photos');
     }
   };
-
-  const deleteReflection = useCallback(async (item: SentReflection) => {
-    if (!currentExplorerId) return;
-
-    try {
-      // 1. Delete S3 objects (to/ path - reflection content)
-      const deleteRes = await fetch(
-        `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${item.event_id}&explorer_id=${currentExplorerId}&path=to`,
-        { method: 'DELETE' }
-      );
-      if (!deleteRes.ok) {
-        const errData = await deleteRes.json().catch(() => ({}));
-        throw new Error(errData.errors?.join(', ') || 'Failed to delete reflection');
-      }
-
-      // 2. Delete selfie response image from S3 if it exists
-      const responseEventId = responseEventIdMap.get(item.event_id);
-      if (responseEventId) {
-        await fetch(
-          `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${responseEventId}&path=from&explorer_id=${currentExplorerId}`,
-          { method: 'DELETE' }
-        ).catch(() => {});
-      }
-
-      // 3. Delete response doc if it exists
-      const responseRef = doc(db, ExplorerConfig.collections.responses, item.event_id);
-      try {
-        const responseDoc = await getDoc(responseRef);
-        if (responseDoc.exists()) {
-          await deleteDoc(responseRef);
-        }
-      } catch {}
-
-      // 4. Hard delete reflection document
-      const reflectionRef = doc(db, ExplorerConfig.collections.reflections, item.event_id);
-      await deleteDoc(reflectionRef);
-
-      showToast('🗑️ Reflection deleted');
-    } catch (error: any) {
-      console.error('Delete reflection error:', error);
-      Alert.alert('Delete Failed', error.message || 'Failed to delete reflection');
-    }
-  }, [currentExplorerId, responseEventIdMap]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -871,44 +849,20 @@ export default function SentTimelineScreen() {
                   ) : null}
                   <View style={styles.reflectionInfo}>
                     <View style={styles.reflectionContent}>
-                      <View style={styles.statusRow}>
-                        <View style={styles.statusBadge}>
-                          <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
-                          <Text style={styles.statusText}>
-                            {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                      <View style={styles.statusBadge}>
+                        <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
+                        <Text style={styles.statusText} numberOfLines={1}>
+                          {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                        </Text>
+                        {item.status === 'deleted' && item.deletedAt ? (
+                          <Text style={styles.engagementDate} numberOfLines={1}>
+                            {formatEngagementDate(item.deletedAt)}
                           </Text>
-                          {item.status === 'deleted' && item.deletedAt ? (
-                            <Text style={styles.engagementDate}>
-                              {formatEngagementDate(item.deletedAt)}
-                            </Text>
-                          ) : engagementTimestamp && item.status !== 'ready' ? (
-                            <Text style={styles.engagementDate}>
-                              {formatEngagementDate(engagementTimestamp)}
-                            </Text>
-                          ) : null}
-                        </View>
-                        {item.sender === currentIdentity && (
-                          <TouchableOpacity
-                            style={styles.deleteReflectionButton}
-                            onPress={() => {
-                              Alert.alert(
-                                'Delete Reflection',
-                                'Are you sure you want to permanently delete this reflection?',
-                                [
-                                  { text: 'Cancel', style: 'cancel' },
-                                  {
-                                    text: 'Delete',
-                                    style: 'destructive',
-                                    onPress: () => deleteReflection(item),
-                                  },
-                                ]
-                              );
-                            }}
-                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                          >
-                            <FontAwesome name="trash-o" size={18} color="#e74c3c" />
-                          </TouchableOpacity>
-                        )}
+                        ) : engagementTimestamp && item.status !== 'ready' ? (
+                          <Text style={styles.engagementDate} numberOfLines={1}>
+                            {formatEngagementDate(engagementTimestamp)}
+                          </Text>
+                        ) : null}
                       </View>
                       {item.hasResponse && (
                         <TouchableOpacity
@@ -950,6 +904,28 @@ export default function SentTimelineScreen() {
                         >
                           <FontAwesome name="camera" size={16} color="#2ecc71" />
                           <Text style={styles.responseText}>Selfie</Text>
+                        </TouchableOpacity>
+                      )}
+                      {currentIdentity && item.sender?.toLowerCase() === currentIdentity.toLowerCase() && (
+                        <TouchableOpacity
+                          style={styles.deleteReflectionButton}
+                          onPress={() => {
+                            Alert.alert(
+                              'Delete Reflection',
+                              'Are you sure you want to permanently delete this reflection?',
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                {
+                                  text: 'Delete',
+                                  style: 'destructive',
+                                  onPress: () => deleteReflection(item),
+                                },
+                              ]
+                            );
+                          }}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <FontAwesome name="trash-o" size={16} color="#e74c3c" />
                         </TouchableOpacity>
                       )}
                     </View>
@@ -1091,27 +1067,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 8,
-    gap: 12,
+    gap: 8,
+    flexWrap: 'wrap',
   },
   description: {
     fontSize: 14,
     color: '#e0e0e0', // Light text on dark background
     marginBottom: 4,
   },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
   deleteReflectionButton: {
     padding: 4,
+    flexShrink: 0,
   },
   statusDot: {
     width: 8,
@@ -1137,6 +1110,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
+    flexShrink: 0,
   },
   responseText: {
     fontSize: 12,
