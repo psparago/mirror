@@ -16,7 +16,7 @@ echo ""
 echo "1. [ ] VERSION BUMP? (app.json 'version')"
 echo "       Marketing number (e.g., 1.0.2 -> 1.0.3) if releasing new features."
 echo ""
-echo "2. [ ] BUILD NUMBER is remote?
+echo "2. [ ] BUILD NUMBER? (managed remotely by EAS - autoIncrement is ON)"
 echo ""
 echo "3. [ ] GIT COMMITTED?"
 echo "       EAS builds from git. Uncommitted changes in app.json are IGNORED."
@@ -36,7 +36,7 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# --- BUILD Explorer (COLE) ---
+# --- BUILD Reflections Explorer ---
 echo "🔨 Building Reflections Explorer..."
 cd "$PROJECT_ROOT/apps/explorer"
 # FIX: Use 'npx eas-cli' explicitly to avoid ambiguous binary errors
