@@ -9,19 +9,13 @@ import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
-// Import your Shared Auth
-import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
-
 import { useColorScheme } from '@/components/useColorScheme';
-import { useOTAUpdate } from '../hooks/useOTAUpdate';
-
-// ✅ NEW IMPORTS: For the Onboarding Flow
+import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
 import { useRelationships } from '@projectmirror/shared/hooks/useRelationships';
 import { JoinExplorerScreen } from '../components/JoinExplorerScreen';
+import { useOTAUpdate } from '../hooks/useOTAUpdate';
 
-export {
-  ErrorBoundary
-} from 'expo-router';
+export { ErrorBoundary } from 'expo-router';
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
@@ -34,22 +28,18 @@ Sentry.init({
   debug: false,
 });
 
-// --- COMPONENT 1: The "Inside" Layout (Nav + Auth Logic) ---
 function AppLayout() {
   const { user, loading: authLoading } = useAuth(); 
-  
-  // Fetch Relationships to check if we are "new"
   const { relationships, loading: relLoading } = useRelationships(user?.uid);
 
   const segments = useSegments();
   const router = useRouter();
   const colorScheme = useColorScheme();
-
   const rootNavigationState = useRootNavigationState();
 
   useEffect(() => {
-    // If the navigation tree isn't ready yet or auth is still loading, DO NOT try to redirect.
-    if (!rootNavigationState?.key || authLoading) return;
+    if (!rootNavigationState?.key) return;
+    if (authLoading) return;
 
     const inAuthGroup = segments[0] === '(auth)';
 
@@ -58,10 +48,8 @@ function AppLayout() {
     } else if (user && inAuthGroup) {
       router.replace('/');
     }
-  }, [user, authLoading, segments, rootNavigationState?.key]);
+  }, [user?.uid, authLoading, segments, rootNavigationState?.key]);
 
-  // We wait for BOTH Auth and Relationships to load before showing anything.
-  // This prevents the Join Screen from flashing before we know if you have relationships.
   if (authLoading || (user && relLoading)) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#121212' }}>
@@ -70,7 +58,6 @@ function AppLayout() {
     );
   }
 
-  // If logged in, but NO relationships, force the Join Screen.
   if (user && relationships.length === 0) {
      return (
         <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -79,7 +66,6 @@ function AppLayout() {
      );
   }
 
-  // Standard App Flow
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -92,24 +78,17 @@ function AppLayout() {
   );
 }
 
-// --- COMPONENT 2: The "Hard Reset" Wrapper ---
-// This component listens to Auth. When the User ID changes (or login happens),
-// it forces ExplorerProvider and AppLayout to completely destroy and recreate via the `key`.
 function AuthenticatedLayout() {
   const { user } = useAuth();
-
   return (
-    // ✅ THE FIX: The 'key' prop forces a full remount when user changes.
-    // This ensures useRelationships inside AppLayout starts as { loading: true } immediately.
     <ExplorerProvider key={user?.uid || 'guest'}>
       <AppLayout />
     </ExplorerProvider>
   );
 }
 
-// --- COMPONENT 3: The Root Entry (Providers + Assets) ---
 function RootLayout() {
-  const rootNavigationState = useRootNavigationState();
+  // ✅ FIX: Removed useRootNavigationState from here to stop the render loop
   useOTAUpdate();
 
   const [loaded, error] = useFonts({
