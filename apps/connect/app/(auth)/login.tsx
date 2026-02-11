@@ -1,9 +1,20 @@
 import { useAuth } from '@projectmirror/shared';
-import { GoogleSigninButton } from '@react-native-google-signin/google-signin';
-import { AppleAuthenticationButton, AppleAuthenticationButtonStyle, AppleAuthenticationButtonType } from 'expo-apple-authentication';
+import { FontAwesome } from '@expo/vector-icons';
+import {
+  AppleAuthenticationButton,
+  AppleAuthenticationButtonStyle,
+  AppleAuthenticationButtonType,
+} from 'expo-apple-authentication';
 import { useRouter } from 'expo-router';
 import React, { useEffect } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 export default function LoginScreen() {
   const { user, signInWithGoogle, signInWithApple, loading } = useAuth();
@@ -23,8 +34,8 @@ export default function LoginScreen() {
   // Show spinner while redirect is in progress after sign-in
   if (user) {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color="#000" />
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#fff" />
       </View>
     );
   }
@@ -34,6 +45,7 @@ export default function LoginScreen() {
       <View style={styles.contentContainer}>
         {/* BRANDING */}
         <View style={styles.header}>
+          <Text style={styles.appIcon}>✨</Text>
           <Text style={styles.title}>Reflections</Text>
           <Text style={styles.subtitle}>Connect with your Explorer</Text>
         </View>
@@ -41,15 +53,15 @@ export default function LoginScreen() {
         {/* ACTIONS */}
         <View style={styles.buttonContainer}>
           {loading ? (
-            <ActivityIndicator size="large" color="#000" />
+            <ActivityIndicator size="large" color="#fff" />
           ) : (
             <>
-              {/* Apple Sign In - Available on iOS */}
+              {/* Apple Sign In */}
               {Platform.OS === 'ios' && (
                 <AppleAuthenticationButton
                   buttonType={AppleAuthenticationButtonType.CONTINUE}
-                  buttonStyle={AppleAuthenticationButtonStyle.BLACK}
-                  cornerRadius={8}
+                  buttonStyle={AppleAuthenticationButtonStyle.WHITE}
+                  cornerRadius={12}
                   style={styles.appleButton}
                   onPress={async () => {
                     try {
@@ -61,10 +73,9 @@ export default function LoginScreen() {
                 />
               )}
 
-              {/* Google Sign In */}
-              <GoogleSigninButton
-                size={GoogleSigninButton.Size.Wide}
-                color={GoogleSigninButton.Color.Light}
+              {/* Google Sign In — custom styled button */}
+              <TouchableOpacity
+                style={styles.googleButton}
                 onPress={async () => {
                   try {
                     await signInWithGoogle();
@@ -73,10 +84,19 @@ export default function LoginScreen() {
                   }
                 }}
                 disabled={loading}
-              />
+                activeOpacity={0.8}
+              >
+                <FontAwesome name="google" size={18} color="#fff" style={{ marginRight: 10 }} />
+                <Text style={styles.googleButtonText}>Continue with Google</Text>
+              </TouchableOpacity>
             </>
           )}
         </View>
+
+        {/* FOOTER */}
+        <Text style={styles.footer}>
+          Sign in to send Reflections to your loved ones
+        </Text>
       </View>
     </View>
   );
@@ -85,39 +105,65 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
-    justifyContent: 'center', 
+    backgroundColor: '#0f1a20',
+    justifyContent: 'center',
     alignItems: 'center',
   },
   contentContainer: {
     width: '100%',
-    maxWidth: 400,
+    maxWidth: 380,
     paddingHorizontal: 30,
     alignItems: 'center',
   },
   header: {
-    marginBottom: 60,
+    marginBottom: 50,
     alignItems: 'center',
   },
+  appIcon: {
+    fontSize: 48,
+    marginBottom: 16,
+  },
   title: {
-    fontSize: 36,
+    fontSize: 34,
     fontWeight: '800',
-    color: '#1a1a1a',
-    letterSpacing: -1,
+    color: '#fff',
+    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: 18,
-    color: '#666',
+    fontSize: 17,
+    color: 'rgba(255, 255, 255, 0.6)',
     marginTop: 8,
     fontWeight: '500',
   },
   buttonContainer: {
     width: '100%',
-    gap: 16,
+    gap: 14,
     alignItems: 'center',
   },
   appleButton: {
-    width: '100%', 
-    height: 50,
-  }
+    width: '100%',
+    height: 52,
+  },
+  googleButton: {
+    width: '100%',
+    height: 52,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  googleButtonText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
+  },
+  footer: {
+    marginTop: 40,
+    fontSize: 13,
+    color: 'rgba(255, 255, 255, 0.35)',
+    textAlign: 'center',
+  },
 });
