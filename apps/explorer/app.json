@@ -9,6 +9,9 @@
     "newArchEnabled": false,
     "backgroundColor": "#ffffff",
     "userInterfaceStyle": "automatic",
+    "locales": {
+      "en": "./assets/locales/en.json"
+    },
     "splash": {
       "image": "./assets/images/splash-lg.png",
       "resizeMode": "contain",
@@ -22,7 +25,8 @@
       "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "CFBundleDisplayName": "Explorer"
+        "CFBundleDisplayName": "Explorer",
+        "CFBundleAllowMixedLocalizations": true
       },
       "config": {
         "usesNonExemptEncryption": false

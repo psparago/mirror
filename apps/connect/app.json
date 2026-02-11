@@ -8,6 +8,9 @@
     "scheme": "reflections-connect",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": false,
+    "locales": {
+      "en": "./assets/locales/en.json"
+    },
     "splash": {
       "image": "./assets/images/splash-lgc.png",
       "resizeMode": "contain",
@@ -21,7 +24,8 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "CFBundleDisplayName": "Companion"
+        "CFBundleDisplayName": "Companion",
+        "CFBundleAllowMixedLocalizations": true
       },
       "config": {
         "usesNonExemptEncryption": false
