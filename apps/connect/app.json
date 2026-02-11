@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Connect",
+    "name": "Reflections Connect",
     "slug": "reflections-connect",
     "version": "2.0.0",
     "orientation": "portrait",
@@ -16,11 +16,12 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.psparago.reflections.connect",
-      "buildNumber": "9",
+      "buildNumber": "10",
       "icon": "./assets/images/icon-companion.png",
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleDisplayName": "Companion"
       },
       "config": {
         "usesNonExemptEncryption": false
