@@ -2,7 +2,7 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import { useFonts } from 'expo-font';
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, useRootNavigationState, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { ActivityIndicator, View } from 'react-native';
@@ -45,8 +45,11 @@ function AppLayout() {
   const router = useRouter();
   const colorScheme = useColorScheme();
 
+  const rootNavigationState = useRootNavigationState();
+
   useEffect(() => {
-    if (authLoading) return;
+    // If the navigation tree isn't ready yet or auth is still loading, DO NOT try to redirect.
+    if (!rootNavigationState?.key || authLoading) return;
 
     const inAuthGroup = segments[0] === '(auth)';
 
@@ -55,7 +58,7 @@ function AppLayout() {
     } else if (user && inAuthGroup) {
       router.replace('/');
     }
-  }, [user, authLoading, segments]);
+  }, [user, authLoading, segments, rootNavigationState?.key]);
 
   // We wait for BOTH Auth and Relationships to load before showing anything.
   // This prevents the Join Screen from flashing before we know if you have relationships.
@@ -106,6 +109,7 @@ function AuthenticatedLayout() {
 
 // --- COMPONENT 3: The Root Entry (Providers + Assets) ---
 function RootLayout() {
+  const rootNavigationState = useRootNavigationState();
   useOTAUpdate();
 
   const [loaded, error] = useFonts({
