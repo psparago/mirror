@@ -38,16 +38,24 @@ function AppLayout() {
   const rootNavigationState = useRootNavigationState();
 
   useEffect(() => {
+    // Check if nav is ready
     if (!rootNavigationState?.key) return;
+    
+    // Check if auth is loading
     if (authLoading) return;
 
     const inAuthGroup = segments[0] === '(auth)';
+    
+    // Wrap navigation in setTimeout to push it to the next frame
+    const timer = setTimeout(() => {
+      if (!user && !inAuthGroup) {
+        router.replace('/(auth)/login'); 
+      } else if (user && inAuthGroup) {
+        router.replace('/');
+      }
+    }, 1);
 
-    if (!user && !inAuthGroup) {
-      router.replace('/(auth)/login'); 
-    } else if (user && inAuthGroup) {
-      router.replace('/');
-    }
+    return () => clearTimeout(timer);
   }, [user?.uid, authLoading, segments, rootNavigationState?.key]);
 
   if (authLoading || (user && relLoading)) {

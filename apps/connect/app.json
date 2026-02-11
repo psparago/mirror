@@ -17,16 +17,16 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-        "bundleIdentifier": "com.psparago.reflections.connect",
-        "buildNumber": "16",
-        "infoPlist": {
-          "ITSAppUsesNonExemptEncryption": false,
-          "CFBundleName": "Reflections Connect V2",
-          "CFBundleDisplayName": "Companion",
-          "NSMicrophoneUsageDescription": "Allow access to the microphone to record audio for your Reflections.",
-          "NSCameraUsageDescription": "Allow access to the camera to record video Reflections.",
-          "NSPhotoLibraryUsageDescription": "Allow access to your photo library to save or upload videos for your Reflections."
-        }
+      "bundleIdentifier": "com.psparago.reflections.connect",
+      "buildNumber": "16",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleName": "Reflections Connect V2",
+        "CFBundleDisplayName": "Companion",
+        "NSMicrophoneUsageDescription": "Allow access to the microphone to record audio for your Reflections.",
+        "NSCameraUsageDescription": "Allow access to the camera to record video Reflections.",
+        "NSPhotoLibraryUsageDescription": "Allow access to your photo library to save or upload videos for your Reflections."
+      }
     },
     "config": {
       "usesNonExemptEncryption": false
