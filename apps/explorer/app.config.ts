@@ -11,6 +11,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         bundleIdentifier: IS_DEV ? 'com.psparago.reflections.explorer.dev' : 'com.psparago.reflections.explorer',
         googleServicesFile: './GoogleService-Info.plist',
         infoPlist: {
+            ...config.ios?.infoPlist,
             CFBundleURLTypes: [
                 {
                     CFBundleURLSchemes: [

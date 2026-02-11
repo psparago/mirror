@@ -15,6 +15,7 @@ export interface Relationship {
   userId: string;
   role: string;
   companionName: string; // "Me" (How you appear to them)
+  explorerName?: string; // The Explorer's display name (e.g. "Cole")
 }
 
 export function useRelationships(userId: string | undefined) {
@@ -44,6 +45,7 @@ export function useRelationships(userId: string | undefined) {
           userId: data.userId,
           role: data.role,
           companionName: data.companionName,
+          explorerName: data.explorerName, // May be undefined for older relationships
         } as Relationship);
       });
       

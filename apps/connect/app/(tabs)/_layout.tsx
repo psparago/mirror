@@ -2,6 +2,7 @@ import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
+import { useExplorer } from '@projectmirror/shared';
 import { Tabs } from 'expo-router';
 import React, { useEffect } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
@@ -15,6 +16,7 @@ function TabBarIcon(props: {
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
+  const { explorerName } = useExplorer();
 
   
   // Global AppState listener for Firestore network
@@ -54,7 +56,8 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Reflections',
+          title: explorerName ? `${explorerName}'s Reflections` : 'Reflections',
+          tabBarLabel: 'Reflections',
           tabBarIcon: ({ color }) => <TabBarIcon name="clone" color={color} />,
         }}
       />
@@ -62,7 +65,8 @@ export default function TabLayout() {
       <Tabs.Screen
         name="timeline"
         options={{
-          title: 'Timeline',
+          title: explorerName ? `${explorerName}'s Timeline` : 'Timeline',
+          tabBarLabel: 'Timeline',
           tabBarIcon: ({ color }) => <TabBarIcon name="clock-o" color={color} />,
         }}
       />

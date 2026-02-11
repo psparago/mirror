@@ -113,7 +113,7 @@ export default function CompanionHomeScreen() {
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
-  const { currentExplorerId, activeRelationship } = useExplorer();
+  const { currentExplorerId, explorerName, activeRelationship } = useExplorer();
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -1226,7 +1226,9 @@ export default function CompanionHomeScreen() {
       style={styles.dashboardContainer}
     >
       <View style={styles.dashboardContent}>
-        <Text style={styles.dashboardTitle}>Create a Reflection</Text>
+        <Text style={styles.dashboardTitle}>
+          {explorerName ? `Reflection for ${explorerName}` : 'Create a Reflection'}
+        </Text>
 
         {/* Companion Name Display */}
         {companionName && (

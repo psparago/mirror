@@ -27,7 +27,7 @@ export default function SettingsScreen() {
 
   // CONTEXT (The new Source of Truth)
   // We grab activeRelationship to know WHO we are naming ourselves for (e.g. Peter)
-  const { activeRelationship, loading: explorerLoading } = useExplorer();
+  const { activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
   
   // We still fetch the full list for the "My Explorers" card at the bottom
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
@@ -66,7 +66,7 @@ export default function SettingsScreen() {
         updatedAt: serverTimestamp(),
       }, { merge: true });
 
-      Alert.alert('Success', `Name updated for ${activeRelationship.explorerId}`);
+      Alert.alert('Success', `Name updated for ${explorerName || activeRelationship.explorerId}`);
     } catch (error) {
       console.error('Error saving:', error);
       Alert.alert('Error', 'Failed to save name');
@@ -106,7 +106,7 @@ export default function SettingsScreen() {
               {activeRelationship ? (
                 <>
                   <Text style={styles.label}>
-                    My Name for <Text style={{color: '#2e78b7'}}>{activeRelationship.explorerId}</Text>
+                    My Name for <Text style={{color: '#2e78b7'}}>{explorerName || activeRelationship.explorerId}</Text>
                   </Text>
                   <Text style={styles.description}>
                     This is how you will appear to this specific Explorer.

@@ -50,6 +50,10 @@ export function JoinExplorerScreen() {
         return;
       }
 
+      // Extract the Explorer's display name from the document
+      const explorerData = explorerSnap.data();
+      const explorerName = explorerData?.displayName || explorerData?.display_name || explorerData?.name || targetId;
+
       // 2. Create the Relationship
       // We don't need to check for duplicates here because the 
       // main app logic would have hidden this screen if one existed.
@@ -58,6 +62,7 @@ export function JoinExplorerScreen() {
         userId: user?.uid,
         role: 'companion',
         companionName: myName,
+        explorerName: explorerName,
         createdAt: serverTimestamp(),
       });
 
