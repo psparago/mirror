@@ -2,7 +2,7 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import { useFonts } from 'expo-font';
-import { Stack } from 'expo-router';
+import { Stack, useRootNavigationState, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -15,7 +15,7 @@ import { useOTAUpdate } from '../hooks/useOTAUpdate';
 export { ErrorBoundary } from 'expo-router';
 
 export const unstable_settings = {
-  initialRouteName: 'index', 
+  initialRouteName: 'index', // Always start at the Boot Screen
 };
 
 SplashScreen.preventAutoHideAsync();
@@ -25,26 +25,39 @@ Sentry.init({
   debug: false,
 });
 
-// Wrapper to force re-mount when user changes (Critical for Auth reset)
+// --- THE SESSION GUARD ---
 function AuthenticatedLayout() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
+  const segments = useSegments() as string[];
+  const router = useRouter();
+  const rootNavigationState = useRootNavigationState();
   const colorScheme = useColorScheme();
 
+  useEffect(() => {
+    // Wait for everything to be ready
+    if (loading) return;
+    if (!rootNavigationState?.key) return;
+
+    // We ONLY guard the "(tabs)" group — the actual protected area.
+    // Everything else (BootScreen, Login, Join) manages its own navigation.
+    // This prevents race conditions where both the guard and BootScreen
+    // compete with router.replace() calls simultaneously.
+    const inProtectedArea = segments[0] === '(tabs)';
+
+    if (!user && inProtectedArea) {
+      router.replace('/(auth)/login');
+    }
+  }, [user, loading, segments, rootNavigationState?.key]);
+
   return (
+    // The "key" prop here is a backup that forces a full remount on user change
     <ExplorerProvider key={user?.uid || 'guest'}>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
           <Stack screenOptions={{ headerShown: false }}>
-            {/* The "Boot Screen" (Traffic Cop) */}
-            <Stack.Screen name="index" />
-            
-            {/* The Main App */}
+            <Stack.Screen name="index" /> 
             <Stack.Screen name="(tabs)" />
-            
-            {/* The "New User" Flow */}
             <Stack.Screen name="join" />
-            
-            {/* Auth Flow */}
             <Stack.Screen name="(auth)/login" />
           </Stack>
         </ThemeProvider>

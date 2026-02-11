@@ -1,11 +1,33 @@
 import { useAuth } from '@projectmirror/shared';
 import { GoogleSigninButton } from '@react-native-google-signin/google-signin';
 import { AppleAuthenticationButton, AppleAuthenticationButtonStyle, AppleAuthenticationButtonType } from 'expo-apple-authentication';
-import React from 'react';
+import { useRouter } from 'expo-router';
+import React, { useEffect } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 
 export default function LoginScreen() {
-  const { signInWithGoogle, signInWithApple, loading } = useAuth();
+  const { user, signInWithGoogle, signInWithApple, loading } = useAuth();
+  const router = useRouter();
+
+  // After successful sign-in, navigate to BootScreen which decides where to go.
+  // Deferred to next tick because the ExplorerProvider key remounts the tree
+  // when user changes — navigating during remount causes a crash.
+  useEffect(() => {
+    if (!user) return;
+    const timer = setTimeout(() => {
+      router.replace('/');
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [user]);
+
+  // Show spinner while redirect is in progress after sign-in
+  if (user) {
+    return (
+      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#000" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -69,7 +91,7 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     width: '100%',
-    maxWidth: 400, // Keeps it looking nice on iPad/Tablets too
+    maxWidth: 400,
     paddingHorizontal: 30,
     alignItems: 'center',
   },
@@ -79,7 +101,7 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 36,
-    fontWeight: '800', // Extra Bold
+    fontWeight: '800',
     color: '#1a1a1a',
     letterSpacing: -1,
   },
@@ -91,11 +113,11 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     width: '100%',
-    gap: 16, // Adds space between buttons
+    gap: 16,
     alignItems: 'center',
   },
   appleButton: {
     width: '100%', 
-    height: 50, // Matches Google's standard height
+    height: 50,
   }
 });
