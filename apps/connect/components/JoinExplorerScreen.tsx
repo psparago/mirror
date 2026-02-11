@@ -7,6 +7,7 @@ import {
     getDoc,
     serverTimestamp
 } from '@projectmirror/shared/firebase';
+import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
 import {
     ActivityIndicator,
@@ -22,6 +23,7 @@ import {
 
 export function JoinExplorerScreen() {
   const { user } = useAuth();
+  const router = useRouter();
   const [explorerIdInput, setExplorerIdInput] = useState('');
   const [nameInput, setNameInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -58,9 +60,9 @@ export function JoinExplorerScreen() {
         companionName: myName,
         createdAt: serverTimestamp(),
       });
-      
-      // Success! The useRelationships hook in the parent will 
-      // see the new record and automatically unmount this screen.
+
+      // Navigate to BootScreen which will see the new relationship and route to (tabs)
+      router.replace('/');
 
     } catch (error: any) {
       console.error("Join Error:", error);
