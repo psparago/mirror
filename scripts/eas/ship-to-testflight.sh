@@ -28,36 +28,54 @@ echo "========================================================"
 echo ""
 read -p "⚠️  Have you verified ALL of the above? Press [ENTER] to ship or [Ctrl+C] to abort..."
 
-echo ""
-echo "🚀 Building ALL Apps for TestFlight (Production)"
-echo ""
+# Parse argument: explorer | connect | (empty = both)
+TARGET="${1:-}"
+if [[ -n "$TARGET" && "$TARGET" != "explorer" && "$TARGET" != "connect" ]]; then
+  echo "Usage: $0 [explorer|connect]"
+  echo "  explorer - build and ship Reflections Explorer only"
+  echo "  connect  - build and ship Reflections Connect only"
+  echo "  (none)   - build and ship both apps"
+  exit 1
+fi
 
 # Save the script directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# --- BUILD Reflections Explorer ---
-echo "🔨 Building Reflections Explorer..."
-cd "$PROJECT_ROOT/apps/explorer"
-# FIX: Use 'npx eas-cli' explicitly to avoid ambiguous binary errors
-npx eas-cli build \
-  --profile production \
-  --platform ios \
-  --non-interactive \
-  --auto-submit
+build_explorer() {
+  echo "🔨 Building Reflections Explorer..."
+  cd "$PROJECT_ROOT/apps/explorer"
+  npx eas-cli build \
+    --profile production \
+    --platform ios \
+    --non-interactive \
+    --auto-submit
+  echo ""
+}
+
+build_connect() {
+  echo "🔨 Building Reflections Connect..."
+  cd "$PROJECT_ROOT/apps/connect"
+  npx eas-cli build \
+    --profile production \
+    --platform ios \
+    --non-interactive \
+    --auto-submit
+  echo ""
+}
 
 echo ""
-
-# --- BUILD Connect ---
-echo "🔨 Building Reflections Connect..."
-cd "$PROJECT_ROOT/apps/connect"
-
-# FIX: Replaced undefined $EAS_CMD with explicit 'npx eas-cli'
-npx eas-cli build \
-  --profile production \
-  --platform ios \
-  --non-interactive \
-  --auto-submit
-
+if [[ -z "$TARGET" ]]; then
+  echo "🚀 Building BOTH apps for TestFlight (Production)"
+else
+  echo "🚀 Building $TARGET for TestFlight (Production)"
+fi
 echo ""
+
+case "$TARGET" in
+  explorer) build_explorer ;;
+  connect)  build_connect ;;
+  *)       build_explorer; build_connect ;;
+esac
+
 echo "✅ Builds queued! They will appear in TestFlight automatically."
