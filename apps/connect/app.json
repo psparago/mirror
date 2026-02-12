@@ -21,6 +21,7 @@
       "buildNumber": "16",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleName": "Reflections Connect V2",
         "CFBundleDisplayName": "Companion",
         "CFBundleAllowMixedLocalizations": true,
         "NSMicrophoneUsageDescription": "Allow access to the microphone to record audio for your Reflections.",
