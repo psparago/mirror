@@ -25,7 +25,6 @@
       "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "CFBundleDisplayName": "Explorer",
         "CFBundleAllowMixedLocalizations": true
       },
       "config": {
