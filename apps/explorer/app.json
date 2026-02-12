@@ -25,7 +25,8 @@
       "icon": "./assets/images/icon-explorer.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "CFBundleAllowMixedLocalizations": true
+        "CFBundleAllowMixedLocalizations": true,
+        "CFBundleName": "Reflections Explorer V2"
       },
       "config": {
         "usesNonExemptEncryption": false
