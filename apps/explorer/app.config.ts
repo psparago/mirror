@@ -15,7 +15,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
             CFBundleURLTypes: [
                 {
                     CFBundleURLSchemes: [
-                        "com.googleusercontent.apps.759023712124-k4u8d605g32n41f6483d9u22cta28j3s"
+                        "com.googleusercontent.apps.759023712124-53bk46rivsfk3rr3ss23c0vtsrjch0g9"
                     ]
                 }
             ]
