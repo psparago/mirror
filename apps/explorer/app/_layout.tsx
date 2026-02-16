@@ -6,8 +6,8 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { DeviceSetupScreen } from '../components/DeviceSetupScreen';
+import { SystemUpdateModal } from '../components/SystemUpdateModal';
 import { ExplorerSelfProvider, useExplorerSelf } from '../context/ExplorerSelfContext';
-import { useOTAUpdate } from '../hooks/useOTAUpdate';
 
 Sentry.init({
   dsn: 'https://5510fbc509b29cd3d26ed552dc09ed83@o4507266632581120.ingest.us.sentry.io/4510748953870336',
@@ -45,8 +45,6 @@ function ExplorerAppContent() {
 function RootLayout() {
   const [authReady, setAuthReady] = useState(false);
 
-  useOTAUpdate();
-
   // Explorer must always be authenticated (anonymous) so Firestore rules using request.auth work.
   useEffect(() => {
     let attemptedAnonymousSignIn = false;
@@ -79,6 +77,7 @@ function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ExplorerSelfProvider>
         <ExplorerAppContent />
+        <SystemUpdateModal />
       </ExplorerSelfProvider>
     </GestureHandlerRootView>
   );

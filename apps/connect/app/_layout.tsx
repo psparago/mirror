@@ -10,7 +10,7 @@ import 'react-native-reanimated';
 
 import { useColorScheme } from '@/components/useColorScheme';
 import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
-import { useOTAUpdate } from '../hooks/useOTAUpdate';
+import { SystemUpdateModal } from '../components/SystemUpdateModel';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -67,8 +67,6 @@ function AuthenticatedLayout() {
 }
 
 function RootLayout() {
-  useOTAUpdate();
-
   const [loaded, error] = useFonts({
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
     ...FontAwesome.font,
@@ -89,6 +87,7 @@ function RootLayout() {
   return (
     <AuthProvider>
       <AuthenticatedLayout />
+      <SystemUpdateModal />
     </AuthProvider>
   );
 }

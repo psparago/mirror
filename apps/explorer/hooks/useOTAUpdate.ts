@@ -1,28 +1,51 @@
 import * as Updates from 'expo-updates';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { Alert } from 'react-native';
 
 export function useOTAUpdate() {
-    useEffect(() => {
-        async function check() {
-            if (__DEV__) return; // Don't check in dev mode
+  const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [manifest, setManifest] = useState<any>(null);
 
-            try {
-                const update = await Updates.checkForUpdateAsync();
+  // Check for updates on mount
+  useEffect(() => {
+    if (__DEV__) return; 
+    check();
+  }, []);
 
-                if (update.isAvailable) {
-                    // Optional: Show a toast or small UI here saying "Updating..."
-                    await Updates.fetchUpdateAsync();
+  const check = async () => {
+    try {
+      const update = await Updates.checkForUpdateAsync();
+      if (update.isAvailable) {
+        setManifest(update.manifest);
+        setIsUpdateAvailable(true);
+      }
+    } catch (e) {
+      // Fail silently in the background if network is bad
+      console.log('OTA Check failed:', e);
+    }
+  };
 
-                    // Immediate reload to apply the new code
-                    await Updates.reloadAsync();
-                }
-            } catch (e) {
-                // Updates frequently fail on bad networks.
-                // Silently fail so the user can still use the old version.
-                console.log('OTA Check failed:', e);
-            }
-        }
+  const downloadAndReload = async () => {
+    try {
+      setIsDownloading(true);
+      
+      // 1. Download the new bundle
+      await Updates.fetchUpdateAsync();
+      
+      // 2. Restart the app to apply
+      await Updates.reloadAsync();
+    } catch (e) {
+      setIsDownloading(false);
+      Alert.alert('Update Failed', 'Could not download the update. Please try again later.');
+      console.log('OTA Download failed:', e);
+    }
+  };
 
-        check();
-    }, []);
+  return {
+    isUpdateAvailable,
+    isDownloading,
+    manifest,
+    downloadAndReload,
+  };
 }
