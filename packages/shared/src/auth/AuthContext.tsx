@@ -15,8 +15,10 @@ import {
   doc,
   getDoc,
   serverTimestamp,
-  setDoc
+  setDoc,
+  updateDoc,
 } from '../firebase';
+import { usePushToken } from '../hooks/usePushToken';
 
 // From Google Cloud OAuth 2.0 Web client for reflections-1200b (used by Google Sign-In native SDK)
 const GOOGLE_WEB_CLIENT_ID = '759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com';
@@ -35,6 +37,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // PUSH TOKEN
+  const { token: pushToken, error } = usePushToken();
+
   // Initialize Google SDK
   useEffect(() => {
     GoogleSignin.configure({
@@ -50,6 +55,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     return unsubscribe;
   }, []);
+
+  // This runs whenever the User logs in OR the Token changes/arrives.
+  useEffect(() => {
+    if (user && pushToken) {
+      const saveToken = async () => {
+        try {
+          const userRef = doc(db, 'users', user.uid);
+          // We use updateDoc because we know the user doc exists (created on login)
+          await updateDoc(userRef, {
+            pushToken: pushToken
+          });
+          console.log('✅ Push Token synced for user:', user.uid);
+        } catch (error) {
+          // If the doc doesn't exist yet (race condition), setDoc with merge handles it
+          // But usually updateDoc is fine here since login creates the doc.
+          console.warn('Error syncing push token:', error);
+        }
+      };
+      saveToken();
+    }
+  }, [user, pushToken]);
 
   // --- GOOGLE SIGN IN ---
   const signInWithGoogle = async () => {
@@ -108,7 +134,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           AppleAuthentication.AppleAuthenticationScope.EMAIL,
         ],
         nonce: hashedNonce,
-      }); 
+      });
 
       // Extract the token
       const { identityToken } = appleCredential;
