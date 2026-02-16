@@ -2,8 +2,9 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { Stack } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
@@ -13,44 +14,64 @@ import {
   Platform,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   TouchableOpacity,
   View
 } from 'react-native';
 
+// 👇 IMPORT YOUR NEW HOOK
+import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
+
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
 
-  // AUTH
+  // AUTH & CONTEXT
   const { user, signOut } = useAuth();
-
-  // CONTEXT (The new Source of Truth)
-  // We grab activeRelationship to know WHO we are naming ourselves for (e.g. Peter)
   const { activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
-  
-  // We still fetch the full list for the "My Explorers" card at the bottom
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
+  
+  // 👇 INITIALIZE THE HOOK
+  // We pass the explorerName so the "First Time Alert" can use it
+  const { reminder, schedule, cancel, loading: reminderLoading } = useDailyReminder(explorerName);
 
+  // LOCAL STATE
   const [nameInput, setNameInput] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
+  
+  // STATE FOR ANDROID TIME PICKER (iOS doesn't need this)
+  const [showTimePicker, setShowTimePicker] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => {});
   }, []);
 
-  // 1. SYNC: Update the input box whenever the Active Relationship changes
   useEffect(() => {
     if (activeRelationship) {
       setNameInput(activeRelationship.companionName || '');
     } else {
-      setNameInput(''); // Clear if no explorer selected
+      setNameInput('');
     }
   }, [activeRelationship?.id, activeRelationship?.companionName]);
 
-  // 2. SAVE: Write to the Relationship Document (Not the User)
+  // --- HANDLERS ---
+
+  // Handle Time Picker Selection
+  const onTimeChange = (event: any, selectedDate?: Date) => {
+    // Android closes the picker automatically
+    if (Platform.OS === 'android') setShowTimePicker(false);
+    
+    if (selectedDate && event.type !== 'dismissed') {
+      const h = selectedDate.getHours();
+      const m = selectedDate.getMinutes();
+      // The hook handles saving and rescheduling immediately
+      schedule(h, m); 
+    }
+  };
+
   const saveCompanionName = async () => {
     const trimmedName = nameInput.trim();
     if (!trimmedName) {
@@ -58,7 +79,6 @@ export default function SettingsScreen() {
       return;
     }
     
-    // Safety check: Can't save a name if we don't have a relationship link
     if (!activeRelationship?.id) {
       Alert.alert('Error', 'No active explorer relationship found.');
       return;
@@ -66,7 +86,6 @@ export default function SettingsScreen() {
 
     setSaving(true);
     try {
-      // ✅ Update the RELATIONSHIP record
       await setDoc(doc(db, 'relationships', activeRelationship.id), {
         companionName: trimmedName,
         updatedAt: serverTimestamp(),
@@ -104,10 +123,82 @@ export default function SettingsScreen() {
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
 
+          {/* --------------------------------------------------------- */}
+          {/* SECTION: NOTIFICATIONS (NEW)                              */}
+          {/* --------------------------------------------------------- */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>Notifications</Text>
+            <View style={styles.card}>
+              <View style={[styles.row, { marginBottom: 0 }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.rowLabel}>Daily Reminder</Text>
+                  <Text style={styles.description}>
+                    Get a daily nudge to send a Reflection.
+                  </Text>
+                </View>
+                {reminderLoading ? (
+                  <ActivityIndicator size="small" />
+                ) : (
+                  <Switch
+                    value={reminder.enabled}
+                    onValueChange={(val) => {
+                      if (val) schedule(19, 0); // Default to 7 PM on enable
+                      else cancel();
+                    }}
+                    trackColor={{ false: '#333', true: '#2e78b7' }}
+                    thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
+                  />
+                )}
+              </View>
+
+              {/* Show Time Picker ONLY if enabled */}
+              {reminder.enabled && (
+                <>
+                  <View style={styles.divider} />
+                  <View style={styles.row}>
+                    <Text style={styles.rowLabel}>Time</Text>
+                    
+                    {Platform.OS === 'ios' ? (
+                       // iOS: Inline Picker
+                       <DateTimePicker
+                         value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
+                         mode="time"
+                         display="compact"
+                         themeVariant="dark"
+                         onChange={onTimeChange}
+                         style={{ width: 100 }}
+                       />
+                    ) : (
+                      // Android: Touchable Text -> Opens Modal
+                      <TouchableOpacity onPress={() => setShowTimePicker(true)}>
+                        <Text style={styles.linkText}>
+                          {formatTime(reminder.hour, reminder.minute)}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                  
+                  <Text style={[styles.helperText, { marginTop: -10, marginBottom: 10 }]}>
+                     We'll remind you every day at {formatTime(reminder.hour, reminder.minute)}.
+                  </Text>
+                </>
+              )}
+              
+              {/* Android Modal Picker (Hidden by default) */}
+              {showTimePicker && Platform.OS === 'android' && (
+                <DateTimePicker
+                  value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
+                  mode="time"
+                  display="default"
+                  onChange={onTimeChange}
+                />
+              )}
+            </View>
+          </View>
+
           {/* SECTION: IDENTITY */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
-            
             <View style={styles.card}>
               {activeRelationship ? (
                 <>
@@ -155,7 +246,6 @@ export default function SettingsScreen() {
           {/* SECTION: MY EXPLORERS */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>My Explorers</Text>
-
             {relationshipsLoading ? (
               <ActivityIndicator />
             ) : relationships.length === 0 ? (
@@ -384,5 +474,11 @@ const styles = StyleSheet.create({
   helperText: {
     color: '#888',
     fontStyle: 'italic',
+    fontSize: 12
+  },
+  linkText: {
+    color: '#2e78b7',
+    fontSize: 16,
+    fontWeight: '600'
   }
 });

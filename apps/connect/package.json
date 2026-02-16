@@ -13,6 +13,7 @@
     "@gorhom/bottom-sheet": "^5.2.8",
     "@projectmirror/shared": "*",
     "@react-native-async-storage/async-storage": "1.23.1",
+    "@react-native-community/datetimepicker": "8.2.0",
     "@react-native-google-signin/google-signin": "13.1.0",
     "@react-navigation/bottom-tabs": "^7.10.1",
     "@react-navigation/native": "^7.1.28",
