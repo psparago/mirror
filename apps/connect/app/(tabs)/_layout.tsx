@@ -3,9 +3,10 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { useExplorer } from '@projectmirror/shared';
-import { Tabs } from 'expo-router';
+import { Tabs, useRouter } from 'expo-router';
 import React, { useEffect } from 'react';
 import { AppState, AppStateStatus } from 'react-native';
+import { useDailyReminder } from '../../hooks/useDailyReminder';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -17,6 +18,16 @@ function TabBarIcon(props: {
 export default function TabLayout() {
   const colorScheme = useColorScheme();
   const { explorerName } = useExplorer();
+  const router = useRouter();
+
+  // Run first-time daily reminder onboarding in the authenticated app shell,
+  // so users don't have to visit Settings to be prompted.
+  useDailyReminder(explorerName, {
+    promptOnFirstRun: true,
+    onCustomTimeSelected: () => {
+      router.push('/settings');
+    },
+  });
 
   
   // Global AppState listener for Firestore network
@@ -56,7 +67,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: explorerName ? `${explorerName}'s Reflections` : 'Reflections',
+          title: explorerName ? `${explorerName}'s Reflections` : 'Create aReflections',
           tabBarLabel: 'Reflections',
           tabBarIcon: ({ color }) => <TabBarIcon name="clone" color={color} />,
         }}

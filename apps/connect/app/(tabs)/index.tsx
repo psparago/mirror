@@ -1,21 +1,18 @@
-import CameraModal from '@/components/CameraModal';
 import ReflectionComposer from '@/components/ReflectionComposer';
-import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
+import { useReflectionMedia } from '@/context/ReflectionMediaContext';
+import { prepareImageForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
 import { collection, db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import { BlurView } from 'expo-blur';
-import { CameraType, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
-import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { useVideoPlayer } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, AppStateStatus, FlatList, Modal, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, AppState, AppStateStatus, Modal, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 // Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
 const DEBUG_LOGS = __DEV__ && false;
@@ -84,22 +81,13 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
 
 export default function CompanionHomeScreen() {
   const MAX_VIDEO_DURATION_SECONDS = 60;
-  const MAX_VIDEO_DURATION_MS = MAX_VIDEO_DURATION_SECONDS * 1000;
-  const [permission, requestPermission] = useCameraPermissions();
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
-  const [facing, setFacing] = useState<CameraType>('front');
   const [description, setDescription] = useState('');
   const [showDescriptionInput, setShowDescriptionInput] = useState(false);
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [audioUri, setAudioUri] = useState<string | null>(null);
-  const [isSearchModalVisible, setIsSearchModalVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
-  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
-  const [isLoadingImage, setIsLoadingImage] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isAiGenerated, setIsAiGenerated] = useState(false);
   const [shortCaption, setShortCaption] = useState<string>('');
@@ -111,9 +99,9 @@ export default function CompanionHomeScreen() {
   const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
   const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
-  const [showCameraModal, setShowCameraModal] = useState(false);
   const [pressedButton, setPressedButton] = useState<string | null>(null);
   const { currentExplorerId, explorerName, activeRelationship } = useExplorer();
+  const { consumePendingMedia } = useReflectionMedia();
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
@@ -121,7 +109,6 @@ export default function CompanionHomeScreen() {
 
   // Video support state
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
-  const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
   const [showNameModal, setShowNameModal] = useState(false);
@@ -148,11 +135,9 @@ export default function CompanionHomeScreen() {
     };
   }, [videoPlayer]);
 
-  const cameraRef = useRef<any>(null);
   const lastProcessedUriRef = useRef<string | null>(null);
 
   // Timeout refs for cleanup
-  const cameraModalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingImageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioUriTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -176,7 +161,6 @@ export default function CompanionHomeScreen() {
   // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
-      if (cameraModalTimeoutRef.current) clearTimeout(cameraModalTimeoutRef.current);
       if (loadingImageTimeoutRef.current) clearTimeout(loadingImageTimeoutRef.current);
       if (audioUriTimeoutRef.current) clearTimeout(audioUriTimeoutRef.current);
     };
@@ -207,35 +191,42 @@ export default function CompanionHomeScreen() {
   // Request audio permissions on mount
   useEffect(() => {
     (async () => {
-      // Request microphone for audio recording
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
         console.warn('🎤 Microphone permission denied');
       } else {
         debugLog('✅ Microphone permission granted');
       }
-
-      // Request camera permission
-      if (!permission) {
-        debugLog('📸 Requesting camera permission...');
-        const cameraResult = await requestPermission();
-        if (cameraResult.granted) {
-          debugLog('✅ Camera permission granted');
-        } else {
-          console.warn('❌ Camera permission denied');
-        }
-      }
-
-      // Request photo library permission
-      debugLog('📷 Requesting photo library permission...');
-      const libraryResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (libraryResult.granted) {
-        debugLog('✅ Photo library permission granted');
-      } else {
-        console.warn('❌ Photo library permission denied');
-      }
     })();
   }, []);
+
+  // Consume pending media from camera/gallery/search screens
+  useEffect(() => {
+    const media = consumePendingMedia();
+    if (media) {
+      if (media.type === 'video') {
+        setMediaType('video');
+        setVideoUri(media.uri);
+        setPhoto({ uri: media.uri });
+      } else {
+        setMediaType('photo');
+        setVideoUri(null);
+        setPhoto({ uri: media.uri });
+      }
+      setImageSourceType(media.source === 'search' ? 'search' : 'camera');
+      setShowDescriptionInput(true);
+      setDescription('');
+      setIsAiGenerated(false);
+      setShortCaption('');
+      setDeepDive('');
+      setIntent('none');
+      setAudioUri(null);
+      setStagingEventId(null);
+      stagingEventIdRef.current = null;
+      // Prevent stale recorder URI from being re-applied as "new" audio.
+      lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+    }
+  });
 
   // Only update audioUri from recorder when we have a NEW URI and we're not recording.
   // Skip cache paths so we don't lock onto a transient file that may be deleted.
@@ -257,36 +248,6 @@ export default function CompanionHomeScreen() {
       });
     }
   }, [audioRecorder.uri, audioRecorder.isRecording]);
-
-  if (!permission) return <View />;
-  if (!permission.granted) {
-    return (
-      <View style={styles.container}>
-        <Text style={styles.permissionText}>We need your permission to show the camera</Text>
-        <TouchableOpacity onPress={requestPermission} style={styles.button}>
-          <Text style={styles.buttonText}>Grant Permission</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  const toggleCameraFacing = () => {
-    setFacing(current => (current === 'back' ? 'front' : 'back'));
-  };
-
-  const openCameraModal = () => {
-    setCameraMode('photo');
-    setFacing('front');
-    // Small delay to ensure facing state is updated before modal renders
-    if (cameraModalTimeoutRef.current) clearTimeout(cameraModalTimeoutRef.current);
-    cameraModalTimeoutRef.current = setTimeout(() => {
-      setShowCameraModal(true);
-    }, 50);
-  };
-
-  const closeCameraModal = () => {
-    setShowCameraModal(false);
-  };
 
   const getAIDescription = async (imageUrl: string, options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = {}) => {
     try {
@@ -360,260 +321,6 @@ export default function CompanionHomeScreen() {
       if (!options.silent) {
         setIsAiThinking(false);
       }
-    }
-  };
-
-  const searchUnsplash = async (query: string) => {
-    if (!query.trim()) return;
-
-    setIsSearching(true);
-    setSearchResults([]); // Clear previous results
-
-    try {
-      const response = await fetch(`${API_ENDPOINTS.UNSPLASH_SEARCH}?query=${encodeURIComponent(query)}`);
-
-      if (!response.ok) {
-        // Just set empty results - the empty state UI will handle the message
-        setSearchResults([]);
-        return;
-      }
-
-      const data = await response.json();
-
-      // Check if we have results
-      if (!data.results || data.results.length === 0) {
-        // No results found - empty state UI will show the message
-        setSearchResults([]);
-        return;
-      }
-
-      // Unsplash API returns { results: [...] }
-      setSearchResults(data.results || []);
-    } catch (error: any) {
-      console.error("Unsplash search error:", error);
-      // Just set empty results - the empty state UI will handle the message
-      setSearchResults([]);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleQuickPick = (term: string) => {
-    setSearchQuery(term);
-    searchUnsplash(term);
-  };
-
-  const handleImageSelect = async (imageUrl: string) => {
-    try {
-      setIsLoadingImage(true);
-      const optimizedUri = await prepareImageForUpload(imageUrl);
-
-      setPhoto({ uri: optimizedUri });
-      setImageSourceType('search');
-      setIsSearchModalVisible(false);
-      setShowDescriptionInput(true);
-      setSearchQuery('');
-      setDescription(''); // Clear previous description
-      setIsAiGenerated(false);
-      setShortCaption('');
-      setDeepDive('');
-      setIntent('none'); // Reset intent - show action buttons
-      setAudioUri(null); // Clear any previous audio
-      setStagingEventId(null);
-      stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
-      setSearchResults([]);
-    } catch (error: any) {
-      console.error('handleImageSelect error:', error);
-      Alert.alert('Error', 'Failed to prepare selected image for upload.');
-    } finally {
-      setIsLoadingImage(false);
-    }
-  };
-
-  const pickImageFromGallery = async () => {
-    try {
-      setIsLoadingGallery(true);
-      // Request media library permissions
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'We need access to your photos to select an image.');
-        setIsLoadingGallery(false);
-        return;
-      }
-
-      // Launch media picker (supports both images and videos)
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'], // Support both images and videos
-        allowsEditing: true,
-        quality: 0.5,
-        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS, // Allow up to 60 seconds for selection (we'll warn if too long)
-      });
-
-      if (!result.canceled && result.assets[0]) {
-        const asset = result.assets[0];
-
-        // Check if it's a video
-        if (asset.type === 'video') {
-          // Check duration
-          if (asset.duration && asset.duration > MAX_VIDEO_DURATION_MS) { // duration is in milliseconds
-            Alert.alert(
-              'Video Too Long',
-              `The selected video is ${Math.round(asset.duration / 1000)} seconds. Please select a video shorter than ${MAX_VIDEO_DURATION_SECONDS} seconds.`,
-              [{ text: 'OK' }]
-            );
-            setIsLoadingGallery(false);
-            return;
-          }
-
-          setIsLoadingImage(true); // Show spinner
-          const compressedUri = await prepareVideoForUpload(asset.uri);
-
-          setMediaType('video');
-          setVideoUri(compressedUri);
-          setPhoto({ uri: compressedUri });
-          setIsLoadingImage(false); // Hide spinner
-        } else {
-          const optimizedUri = await prepareImageForUpload(asset.uri);
-          setMediaType('photo');
-          setVideoUri(null);
-          setPhoto({ uri: optimizedUri });
-          setImageSourceType('camera');
-          setIsLoadingImage(false); // Hide spinner
-        }
-
-        setIsLoadingImage(true);
-        setShowDescriptionInput(true);
-        // Clear any previous audio recording when selecting new media
-        setAudioUri(null);
-        setDescription('');
-        setIsAiGenerated(false);
-        setShortCaption('');
-        setDeepDive('');
-
-        setIntent('none'); // Reset intent - show action buttons
-        setAudioUri(null); // Clear any previous audio
-        setStagingEventId(null);
-        stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
-
-        // Reset the last processed URI to prevent stale URIs from being set
-        lastProcessedUriRef.current = null;
-
-        // Small delay to ensure media loads
-        if (loadingImageTimeoutRef.current) clearTimeout(loadingImageTimeoutRef.current);
-        loadingImageTimeoutRef.current = setTimeout(() => setIsLoadingImage(false), 300);
-      }
-      setIsLoadingGallery(false);
-    } catch (error: any) {
-      console.error("Media picker error:", error);
-      Alert.alert("Error", "Failed to pick media from gallery");
-      setIsLoadingGallery(false);
-      setIsLoadingImage(false);
-    }
-  };
-
-  const takePhoto = async () => {
-    if (!cameraRef.current) return;
-
-    try {
-      const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
-      const optimizedUri = await prepareImageForUpload(picture.uri);
-      // Best-effort cleanup of original capture if it lives in cache
-      if (picture.uri !== optimizedUri) {
-        await safeDeleteCacheFile(picture.uri);
-      }
-      setPhoto({ uri: optimizedUri });
-      setMediaType('photo');
-      setImageSourceType('camera');
-      setShowDescriptionInput(true);
-      setShowCameraModal(false); // Close camera modal after taking photo
-      // Clear any previous audio recording when taking a new photo
-      setAudioUri(null);
-      setVideoUri(null);
-      setDescription('');
-      setIsAiGenerated(false);
-      setShortCaption('');
-      setDeepDive('');
-
-      setIntent('none'); // Reset intent - show action buttons
-      setAudioUri(null); // Clear any previous audio
-      setStagingEventId(null);
-      stagingEventIdRef.current = null; // Don't upload to staging until user chooses intent
-
-      // Reset the last processed URI to prevent stale URIs from being set
-      lastProcessedUriRef.current = null;
-    } catch (error: any) {
-      console.error("Photo capture error:", error);
-      Alert.alert("Error", "Failed to capture photo");
-    }
-  };
-
-  const recordVideoWithNativeCamera = async () => {
-    try {
-      debugLog('📹 Launching native camera for video recording...');
-
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-        allowsEditing: false,
-        quality: 0.8,
-        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS, // 60 second limit
-        cameraType: ImagePicker.CameraType.front, // Open in selfie mode
-      });
-
-      debugLog('📹 Camera result:', { cancelled: result.canceled, hasAssets: result.assets?.length });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
-        const video = result.assets[0];
-        debugLog('✅ Video recorded:', { uri: video.uri, duration: video.duration });
-
-        // Check duration (duration is in milliseconds)
-        if (video.duration && video.duration > MAX_VIDEO_DURATION_MS) {
-          Alert.alert(
-            "Video Too Long",
-            `Please record a video that's ${MAX_VIDEO_DURATION_SECONDS} seconds or less.`,
-            [{ text: "OK" }]
-          );
-          return;
-        }
-
-        setIsLoadingImage(true); // Show spinner
-        const compressedUri = await prepareVideoForUpload(video.uri);
-
-        // Best-effort cleanup of original recording if it lives in cache
-        if (video.uri !== compressedUri) {
-          await safeDeleteCacheFile(video.uri);
-        }
-
-        setVideoUri(compressedUri);
-        setPhoto({ uri: compressedUri });
-        setMediaType('video');
-        setShowDescriptionInput(true);
-        closeCameraModal();
-        setAudioUri(null);
-        setDescription('');
-        setIsAiGenerated(false);
-        setShortCaption('');
-        setDeepDive('');
-        setIntent('none');
-        setStagingEventId(null);
-        stagingEventIdRef.current = null;
-        lastProcessedUriRef.current = null;
-        setIsLoadingImage(false); // Hide spinner
-      }
-    } catch (error: any) {
-      console.error("❌ Video recording error:", error);
-      Alert.alert("Error", `Failed to record video: ${error.message || 'Unknown error'}`);
-    }
-  };
-
-  const handleCameraShutterPress = () => {
-    debugLog('🎬 Shutter button pressed', { cameraMode });
-
-    if (cameraMode === 'photo') {
-      debugLog('📸 Taking photo...');
-      takePhoto();
-    } else {
-      debugLog('📹 Launching native camera for video...');
-      recordVideoWithNativeCamera();
     }
   };
 
@@ -723,7 +430,7 @@ export default function CompanionHomeScreen() {
       // and we don't have human audio, we should refresh the TTS.
 
       const needsDeepDive = !finalDeepDive;
-      const needsCaptionAudio = !audioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
+      const needsCaptionAudio = !activeAudioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
 
       debugLog(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
 
@@ -735,7 +442,7 @@ export default function CompanionHomeScreen() {
           silent: true,
           targetCaption: finalCaption,
           targetDeepDive: finalDeepDive || undefined,
-          skipTts: !!audioUri
+          skipTts: !!activeAudioUri
         });
 
         if (aiResult) {
@@ -750,7 +457,7 @@ export default function CompanionHomeScreen() {
           }
 
           finalDeepDive = aiResult.deep_dive;
-          finalCaptionAudio = audioUri || aiResult.audio_url; // Keep human audio as absolute priority
+          finalCaptionAudio = activeAudioUri || aiResult.audio_url; // Keep human audio as absolute priority
           finalDeepDiveAudio = aiResult.deep_dive_audio_url;
           if (aiResult.audio_s3_key) stagingTtsKeysToDelete.push(aiResult.audio_s3_key);
           if (aiResult.deep_dive_audio_s3_key) stagingTtsKeysToDelete.push(aiResult.deep_dive_audio_s3_key);
@@ -763,6 +470,16 @@ export default function CompanionHomeScreen() {
         if (aiAudioS3Key) stagingTtsKeysToDelete.push(aiAudioS3Key);
         if (aiDeepDiveS3Key) stagingTtsKeysToDelete.push(aiDeepDiveS3Key);
         stagingIdToDelete = stagingEventId || stagingEventIdRef.current;
+      }
+
+      // Guardrail: never send text-only reflections that force Explorer TTS fallback.
+      // If no recorded human audio exists, we require AI-generated audio to be present.
+      if (!activeAudioUri && !finalCaptionAudio) {
+        Alert.alert(
+          'Voice Generation Failed',
+          'We could not generate the Reflection voice. Please tap Magic again, wait for it to finish, or record your own voice before sending.'
+        );
+        return;
       }
 
       // Generate unique event_id (timestamp-based)
@@ -778,8 +495,8 @@ export default function CompanionHomeScreen() {
 
       // Verify audio exists before adding to list
       let hasAudio = false;
-      if (audioUri) {
-        const fileInfo = await FileSystem.getInfoAsync(audioUri);
+      if (activeAudioUri) {
+        const fileInfo = await FileSystem.getInfoAsync(activeAudioUri);
         if (fileInfo.exists) {
           filesToSign.push('audio.m4a');
           hasAudio = true;
@@ -881,7 +598,7 @@ export default function CompanionHomeScreen() {
 
       // 6. Queue Audio Upload
       if (hasAudio && urls['audio.m4a']) {
-        const audioSource = audioUri || finalCaptionAudio;
+        const audioSource = activeAudioUri || finalCaptionAudio;
         if (audioSource) {
           debugLog('📤 uploadEventBundle: Queuing audio upload...');
           uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']).then(res => {
@@ -1079,7 +796,7 @@ export default function CompanionHomeScreen() {
     setAudioUri(null);
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
-    lastProcessedUriRef.current = null;
+    lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
   };
 
   const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
@@ -1171,7 +888,7 @@ export default function CompanionHomeScreen() {
     setShortCaption('');
     setDeepDive('');
     setIsAiThinking(false);
-    lastProcessedUriRef.current = null;
+    lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
   };
 
   // Show description input overlay if photo is captured
@@ -1243,10 +960,10 @@ export default function CompanionHomeScreen() {
               styles.dashboardButton,
               pressedButton === 'capture' && styles.dashboardButtonPressed
             ]}
-            onPress={openCameraModal}
+            onPress={() => router.push('/camera')}
             onPressIn={() => setPressedButton('capture')}
             onPressOut={() => setPressedButton(null)}
-            disabled={uploading || !permission?.granted}
+            disabled={uploading}
             activeOpacity={1}
           >
             <BlurView intensity={50} style={[
@@ -1272,10 +989,10 @@ export default function CompanionHomeScreen() {
               styles.dashboardButton,
               pressedButton === 'gallery' && styles.dashboardButtonPressed
             ]}
-            onPress={pickImageFromGallery}
+            onPress={() => router.push('/gallery')}
             onPressIn={() => setPressedButton('gallery')}
             onPressOut={() => setPressedButton(null)}
-            disabled={uploading || isLoadingGallery}
+            disabled={uploading}
             activeOpacity={1}
           >
             <BlurView intensity={50} style={[
@@ -1289,13 +1006,9 @@ export default function CompanionHomeScreen() {
                 end={{ x: 1, y: 1 }}
                 style={styles.innerGlow}
               />
-              {isLoadingGallery ? (
-                <ActivityIndicator size="large" color="#8E44AD" />
-              ) : (
-                <View style={styles.iconContainer}>
-                  <FontAwesome name="photo" size={53} color="#8E44AD" />
-                </View>
-              )}
+              <View style={styles.iconContainer}>
+                <FontAwesome name="photo" size={53} color="#8E44AD" />
+              </View>
               <Text style={styles.galleryButtonText}>Pick from Gallery</Text>
             </BlurView>
           </TouchableOpacity>
@@ -1305,7 +1018,7 @@ export default function CompanionHomeScreen() {
               styles.dashboardButton,
               pressedButton === 'search' && styles.dashboardButtonPressed
             ]}
-            onPress={() => setIsSearchModalVisible(true)}
+            onPress={() => router.push('/search')}
             onPressIn={() => setPressedButton('search')}
             onPressOut={() => setPressedButton(null)}
             disabled={uploading}
@@ -1330,135 +1043,6 @@ export default function CompanionHomeScreen() {
           </TouchableOpacity>
         </View>
       </View>
-
-      {/* Camera Modal */}
-      <CameraModal
-        key={showCameraModal ? 'open' : 'closed'}
-        visible={showCameraModal}
-        onClose={closeCameraModal}
-        cameraRef={cameraRef}
-        facing={facing}
-        onToggleFacing={toggleCameraFacing}
-        cameraMode={cameraMode}
-        onSetCameraMode={setCameraMode}
-        onShutterPress={handleCameraShutterPress}
-        uploading={uploading}
-      />
-
-      {/* Search Modal */}
-      <Modal
-        visible={isSearchModalVisible}
-        animationType="slide"
-        presentationStyle="fullScreen"
-        onRequestClose={() => setIsSearchModalVisible(false)}
-      >
-        <View style={styles.searchModalContainer}>
-          {/* Fixed Header Section */}
-          <View style={styles.searchFixedHeader}>
-            {/* Header */}
-            <View style={styles.searchHeader}>
-              <TouchableOpacity
-                style={styles.closeButton}
-                onPress={() => {
-                  setIsSearchModalVisible(false);
-                  setSearchQuery('');
-                  setSearchResults([]);
-                }}
-              >
-                <FontAwesome name="times" size={24} color="white" />
-              </TouchableOpacity>
-              <Text style={styles.searchTitle}>Search Images</Text>
-              <View style={styles.closeButtonPlaceholder} />
-            </View>
-
-            {/* Search Bar */}
-            <View style={styles.searchBarContainer}>
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search for images..."
-                placeholderTextColor="#999"
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-                onSubmitEditing={() => searchUnsplash(searchQuery)}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity
-                style={styles.searchSubmitButton}
-                onPress={() => searchUnsplash(searchQuery)}
-                disabled={isSearching || !searchQuery.trim()}
-              >
-                {isSearching ? (
-                  <ActivityIndicator size="small" color="white" />
-                ) : (
-                  <FontAwesome name="search" size={20} color="white" />
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {/* Quick-Pick Chips */}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.chipsContainer}
-              contentContainerStyle={styles.chipsContent}
-            >
-              {["Sushi", "Ice Cream Truck", "Trains", "mac and cheese"].map((term) => (
-                <TouchableOpacity
-                  key={term}
-                  style={styles.chip}
-                  onPress={() => handleQuickPick(term)}
-                >
-                  <Text style={styles.chipText}>{term}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-
-          {/* Results Area - Takes remaining space */}
-          <View style={styles.resultsArea}>
-            {isSearching && searchResults.length === 0 ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color="#2e78b7" />
-                <Text style={styles.loadingText}>Searching...</Text>
-              </View>
-            ) : searchResults.length > 0 ? (
-              <FlatList
-                data={searchResults}
-                numColumns={2}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.resultsGrid}
-                renderItem={({ item }) => (
-                  <TouchableOpacity
-                    style={styles.resultItem}
-                    onPress={() => handleImageSelect(item.urls.regular || item.urls.small)}
-                    activeOpacity={0.8}
-                  >
-                    <Image
-                      source={{ uri: item.urls.small || item.urls.regular }}
-                      style={styles.resultImage}
-                      contentFit="cover"
-                      recyclingKey={item.id}
-                      cachePolicy="memory-disk"
-                    />
-                  </TouchableOpacity>
-                )}
-              />
-            ) : searchQuery.trim() ? (
-              <View style={styles.emptyContainer}>
-                <FontAwesome name="image" size={48} color="#666" />
-                <Text style={styles.emptyText}>No images found for "{searchQuery}"</Text>
-                <Text style={styles.emptySubtext}>Try a different search term</Text>
-              </View>
-            ) : (
-              <View style={styles.emptyContainer}>
-                <FontAwesome name="search" size={48} color="#666" />
-                <Text style={styles.emptyText}>Search for images to get started</Text>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
 
       {/* Name Modal - First Launch Only */}
       <Modal
@@ -1696,70 +1280,6 @@ var styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
-  topControls: {
-    position: 'absolute',
-    top: 60,
-    left: 20,
-    right: 20,
-    zIndex: 1,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  closeCameraButton: {
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    padding: 12,
-    borderRadius: 30,
-    width: 50,
-    height: 50,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  flipButton: {
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    padding: 12,
-    borderRadius: 30,
-    width: 50,
-    height: 50,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  buttonContainer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flex: 1,
-    backgroundColor: 'transparent',
-    flexDirection: 'row',
-    marginBottom: 60,
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-    gap: 20,
-  },
-  galleryButtonBase: {
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    padding: 16,
-    borderRadius: 50,
-    width: 60,
-    height: 60,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  galleryButton: {
-    backgroundColor: 'rgba(46, 120, 183, 0.8)',
-  },
-  captureButton: {
-    backgroundColor: 'rgba(46, 120, 183, 0.8)',
-    padding: 20,
-    borderRadius: 50,
-    borderWidth: 2,
-    borderColor: 'white'
-  },
-  text: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white'
-  },
   previewContainer: {
     flex: 1,
     backgroundColor: '#000',
@@ -1905,129 +1425,6 @@ var styles = StyleSheet.create({
   searchButton: {
     // Same as galleryButton
   },
-  // Search Modal Styles
-  searchModalContainer: {
-    flex: 1,
-    backgroundColor: '#1a1a1a',
-  },
-  searchFixedHeader: {
-    backgroundColor: '#1a1a1a',
-    zIndex: 10,
-  },
-  resultsArea: {
-    flex: 1,
-  },
-  searchHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: 60,
-    paddingBottom: 20,
-    paddingHorizontal: 20,
-    backgroundColor: '#1a1a1a',
-  },
-  closeButton: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  closeButtonPlaceholder: {
-    width: 40,
-  },
-  searchTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  searchBarContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingBottom: 15,
-    gap: 10,
-  },
-  searchInput: {
-    flex: 1,
-    backgroundColor: '#333',
-    color: 'white',
-    paddingHorizontal: 15,
-    paddingVertical: 12,
-    borderRadius: 8,
-    fontSize: 16,
-  },
-  searchSubmitButton: {
-    backgroundColor: '#2e78b7',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    minWidth: 50,
-  },
-  chipsContainer: {
-    marginBottom: 15,
-  },
-  chipsContent: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    gap: 10,
-    alignItems: 'center',
-  },
-  chip: {
-    backgroundColor: '#2e78b7',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    minHeight: 40,
-    justifyContent: 'center',
-  },
-  chipText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  resultsGrid: {
-    padding: 10,
-  },
-  resultItem: {
-    flex: 1,
-    margin: 5,
-    aspectRatio: 1,
-    borderRadius: 8,
-    overflow: 'hidden',
-    backgroundColor: '#333',
-  },
-  resultImage: {
-    width: '100%',
-    height: '100%',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 15,
-  },
-  loadingText: {
-    color: 'white',
-    fontSize: 16,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  emptyText: {
-    color: '#999',
-    fontSize: 16,
-    marginTop: 15,
-    textAlign: 'center',
-  },
-  emptySubtext: {
-    color: '#666',
-    fontSize: 14,
-    marginTop: 8,
-    textAlign: 'center',
-  },
   aiIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2148,71 +1545,6 @@ var styles = StyleSheet.create({
     color: '#2e78b7',
     fontSize: 16,
     fontWeight: '600',
-  },
-  // Video-specific styles
-  modeToggleContainer: {
-    position: 'absolute',
-    top: 100,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 20,
-    paddingHorizontal: 20,
-    zIndex: 10,
-  },
-  modeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  modeButtonActive: {
-    backgroundColor: 'rgba(46, 120, 183, 0.8)',
-    borderColor: '#fff',
-  },
-  modeText: {
-    color: '#999',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  modeTextActive: {
-    color: '#fff',
-  },
-  videoRecordingIndicator: {
-    position: 'absolute',
-    top: 160,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    backgroundColor: 'rgba(255, 0, 0, 0.8)',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 25,
-    alignSelf: 'center',
-    zIndex: 10,
-  },
-  recordingDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#fff',
-  },
-  videoRecordingText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  captureButtonRecording: {
-    backgroundColor: '#d32f2f',
   },
   videoPreviewContainer: {
     width: '100%',

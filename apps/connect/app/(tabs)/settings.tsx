@@ -21,7 +21,6 @@ import {
   View
 } from 'react-native';
 
-// 👇 IMPORT YOUR NEW HOOK
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
 
 export default function SettingsScreen() {
@@ -32,21 +31,22 @@ export default function SettingsScreen() {
   const { user, signOut } = useAuth();
   const { activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
-  
+
   // 👇 INITIALIZE THE HOOK
   // We pass the explorerName so the "First Time Alert" can use it
-  const { reminder, schedule, cancel, loading: reminderLoading } = useDailyReminder(explorerName);
+  const { reminder, schedule, cancel, updateSettings, loading: reminderLoading } =
+    useDailyReminder(explorerName, { promptOnFirstRun: false });
 
   // LOCAL STATE
   const [nameInput, setNameInput] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
-  
+
   // STATE FOR ANDROID TIME PICKER (iOS doesn't need this)
   const [showTimePicker, setShowTimePicker] = useState(false);
 
   useEffect(() => {
-    AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => {});
+    AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -63,12 +63,12 @@ export default function SettingsScreen() {
   const onTimeChange = (event: any, selectedDate?: Date) => {
     // Android closes the picker automatically
     if (Platform.OS === 'android') setShowTimePicker(false);
-    
+
     if (selectedDate && event.type !== 'dismissed') {
       const h = selectedDate.getHours();
       const m = selectedDate.getMinutes();
-      // The hook handles saving and rescheduling immediately
-      schedule(h, m); 
+      // Preserve the currently selected reminder action (camera/gallery/home)
+      schedule(h, m, reminder.action);
     }
   };
 
@@ -78,7 +78,7 @@ export default function SettingsScreen() {
       Alert.alert('Name Required', 'Please enter a name');
       return;
     }
-    
+
     if (!activeRelationship?.id) {
       Alert.alert('Error', 'No active explorer relationship found.');
       return;
@@ -142,7 +142,7 @@ export default function SettingsScreen() {
                   <Switch
                     value={reminder.enabled}
                     onValueChange={(val) => {
-                      if (val) schedule(19, 0); // Default to 7 PM on enable
+                      if (val) schedule(19, 0, 'camera'); // Default to 7 PM on enable
                       else cancel();
                     }}
                     trackColor={{ false: '#333', true: '#2e78b7' }}
@@ -157,17 +157,17 @@ export default function SettingsScreen() {
                   <View style={styles.divider} />
                   <View style={styles.row}>
                     <Text style={styles.rowLabel}>Time</Text>
-                    
+
                     {Platform.OS === 'ios' ? (
-                       // iOS: Inline Picker
-                       <DateTimePicker
-                         value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
-                         mode="time"
-                         display="compact"
-                         themeVariant="dark"
-                         onChange={onTimeChange}
-                         style={{ width: 100 }}
-                       />
+                      // iOS: Inline Picker
+                      <DateTimePicker
+                        value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
+                        mode="time"
+                        display="compact"
+                        themeVariant="dark"
+                        onChange={onTimeChange}
+                        style={{ width: 100 }}
+                      />
                     ) : (
                       // Android: Touchable Text -> Opens Modal
                       <TouchableOpacity onPress={() => setShowTimePicker(true)}>
@@ -177,13 +177,49 @@ export default function SettingsScreen() {
                       </TouchableOpacity>
                     )}
                   </View>
-                  
+
+                  <View style={styles.divider} />
+                  <View style={{ marginBottom: 10 }}>
+                    <Text style={styles.rowLabel}>On Tap, Open:</Text>
+                    <View style={styles.actionRow}>
+                      {/* OPTION 1: NONE */}
+                      <TouchableOpacity
+                        style={[styles.actionBtn, reminder.action === 'none' && styles.actionBtnActive]}
+                        onPress={() => updateSettings({ action: 'none' })}
+                      >
+                        <Text style={[styles.actionText, reminder.action === 'none' && styles.actionTextActive]}>
+                          Home
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* OPTION 2: CAMERA */}
+                      <TouchableOpacity
+                        style={[styles.actionBtn, reminder.action === 'camera' && styles.actionBtnActive]}
+                        onPress={() => updateSettings({ action: 'camera' })}
+                      >
+                        <Text style={[styles.actionText, reminder.action === 'camera' && styles.actionTextActive]}>
+                          Camera
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* OPTION 3: GALLERY */}
+                      <TouchableOpacity
+                        style={[styles.actionBtn, reminder.action === 'gallery' && styles.actionBtnActive]}
+                        onPress={() => updateSettings({ action: 'gallery' })}
+                      >
+                        <Text style={[styles.actionText, reminder.action === 'gallery' && styles.actionTextActive]}>
+                          Gallery
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+
                   <Text style={[styles.helperText, { marginTop: -10, marginBottom: 10 }]}>
-                     We'll remind you every day at {formatTime(reminder.hour, reminder.minute)}.
+                    We'll remind you every day at {formatTime(reminder.hour, reminder.minute)}.
                   </Text>
                 </>
               )}
-              
+
               {/* Android Modal Picker (Hidden by default) */}
               {showTimePicker && Platform.OS === 'android' && (
                 <DateTimePicker
@@ -203,7 +239,7 @@ export default function SettingsScreen() {
               {activeRelationship ? (
                 <>
                   <Text style={styles.label}>
-                    My Name for <Text style={{color: '#2e78b7'}}>{explorerName || activeRelationship.explorerId}</Text>
+                    My Name for <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
                   </Text>
                   <Text style={styles.description}>
                     This is how you will appear to this specific Explorer.
@@ -266,9 +302,9 @@ export default function SettingsScreen() {
                     <Text style={styles.explorerCardValue}>{rel.role}</Text>
                   </View>
                   {activeRelationship?.id === rel.id && (
-                     <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
-                        <Text style={{ color: '#2e78b7', fontSize: 12, fontWeight: 'bold' }}>CURRENTLY SELECTED</Text>
-                     </View>
+                    <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
+                      <Text style={{ color: '#2e78b7', fontSize: 12, fontWeight: 'bold' }}>CURRENTLY SELECTED</Text>
+                    </View>
                   )}
                 </View>
               ))
@@ -480,5 +516,33 @@ const styles = StyleSheet.create({
     color: '#2e78b7',
     fontSize: 16,
     fontWeight: '600'
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#333',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  actionBtnActive: {
+    backgroundColor: '#2e78b7', // Active Blue
+    borderColor: '#2e78b7',
+  },
+  actionText: {
+    color: '#aaa',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  actionTextActive: {
+    color: '#fff',
+    fontWeight: '600',
   }
 });
