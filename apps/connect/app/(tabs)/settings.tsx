@@ -2,6 +2,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import { Stack } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -34,6 +35,11 @@ export default function SettingsScreen() {
 
   const [nameInput, setNameInput] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
+
+  useEffect(() => {
+    AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => {});
+  }, []);
 
   // 1. SYNC: Update the input box whenever the Active Relationship changes
   useEffect(() => {
@@ -224,6 +230,14 @@ export default function SettingsScreen() {
             <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
             <View style={styles.card}>
               <VersionDisplay />
+              {lastOtaLabel != null ? (
+                <View style={[styles.row, { marginTop: 12 }]}>
+                  <Text style={styles.rowLabel}>Last OTA</Text>
+                  <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]} numberOfLines={1}>
+                    {lastOtaLabel}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </View>
 

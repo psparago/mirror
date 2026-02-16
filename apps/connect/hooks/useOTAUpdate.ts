@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Updates from 'expo-updates';
 import { useEffect, useState } from 'react';
 import { Alert } from 'react-native';
@@ -30,10 +31,17 @@ export function useOTAUpdate() {
     try {
       setIsDownloading(true);
       
-      // 1. Download the new bundle
-      await Updates.fetchUpdateAsync();
+      // Download the new bundle
+      const result = await Updates.fetchUpdateAsync();
       
-      // 2. Restart the app to apply
+      // Fallback logic to find the label (Manifest union: only ExpoUpdatesManifest has extra)
+     const m = result.manifest as { extra?: { otaLabel?: string } } | null | undefined;
+     const incomingLabel = (m?.extra?.otaLabel as string | undefined) || manifest?.extra?.otaLabel || new Date().toLocaleString();
+
+      // SAVE IT
+      await AsyncStorage.setItem('last_ota_label', incomingLabel);
+        
+      // Restart the app to apply
       await Updates.reloadAsync();
     } catch (e) {
       setIsDownloading(false);

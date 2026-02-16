@@ -15,6 +15,7 @@ export default function SettingsScreen() {
 
     // Instant video playback setting
     const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
+    const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
 
     console.log('auth.currentUser.uid', auth.currentUser?.uid);
 
@@ -24,6 +25,10 @@ export default function SettingsScreen() {
                 setInstantVideoPlayback(value === 'true');
             }
         }).catch(err => console.warn('Failed to load setting:', err));
+    }, []);
+
+    useEffect(() => {
+        AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => {});
     }, []);
 
     const toggleInstantVideoPlayback = async (value: boolean) => {
@@ -66,6 +71,16 @@ export default function SettingsScreen() {
                                 </Text>
                             </View>
                         </View>
+                        {lastOtaLabel != null ? (
+                            <View style={[styles.settingRow, { marginTop: 12 }]}>
+                                <View style={styles.settingInfo}>
+                                    <Text style={styles.settingLabel}>Last OTA</Text>
+                                    <Text style={[styles.settingDescription, { fontFamily: 'monospace', fontSize: 11 }]}>
+                                        {lastOtaLabel}
+                                    </Text>
+                                </View>
+                            </View>
+                        ) : null}
                     </View>
                 </View>
 
