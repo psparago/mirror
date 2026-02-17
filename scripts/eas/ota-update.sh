@@ -22,8 +22,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# EAS update channel (named "prod" in EAS — not a git branch)
-UPDATE_CHANNEL="prod"
+# EAS update channel — must match the "channel" in eas.json for the build profile you ship.
+# Production builds use "production"; preview uses "preview".
+UPDATE_CHANNEL="production"
 
 update_explorer() {
   echo "🔵 Publishing OTA for Reflections Explorer..."
@@ -58,4 +59,4 @@ case "$TARGET" in
 esac
 
 echo "✅ OTA update(s) published!"
-echo "📱 Devices on the prod channel will receive the update automatically."
+echo "📱 Devices on the $UPDATE_CHANNEL channel will receive the update automatically."
