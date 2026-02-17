@@ -1,5 +1,6 @@
 import { auth, onAuthStateChanged, signInAnonymously } from '@projectmirror/shared/firebase';
 import * as Sentry from '@sentry/react-native';
+import Constants from 'expo-constants';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect, useState } from 'react';
@@ -9,8 +10,9 @@ import { DeviceSetupScreen } from '../components/DeviceSetupScreen';
 import { SystemUpdateModal } from '../components/SystemUpdateModal';
 import { ExplorerSelfProvider, useExplorerSelf } from '../context/ExplorerSelfContext';
 
+const sentryDsn = (Constants.expoConfig?.extra as { sentryDsn?: string } | undefined)?.sentryDsn;
 Sentry.init({
-  dsn: 'https://5510fbc509b29cd3d26ed552dc09ed83@o4507266632581120.ingest.us.sentry.io/4510748953870336',
+  dsn: sentryDsn,
   debug: false,
 });
 

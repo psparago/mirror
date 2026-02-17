@@ -494,11 +494,11 @@ export default function SentTimelineScreen() {
   };
 
   const getStatusColor = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
-    if (status === 'deleted') return '#e74c3c';
-    if (status === 'replayed') return '#2ecc71';
-    if (hasSelfie) return '#4a9eff';
-    if (hasEngagementTimestamp) return '#999';
-    return '#f39c12'; // Sent
+    if (status === 'deleted') return '#ef5350';
+    if (status === 'replayed') return '#4ade80';
+    if (hasSelfie) return '#38bdf8';
+    if (hasEngagementTimestamp) return '#22d3ee'; // Viewed — bright cyan
+    return '#fbbf24'; // Sent
   };
 
   const formatEngagementDate = (timestamp: any) => {
@@ -549,10 +549,14 @@ export default function SentTimelineScreen() {
 
   if (loading || explorerLoading || !currentExplorerId) {
     return (
-      <View style={styles.centerContainer}>
-        <ActivityIndicator size="large" color="#2e78b7" />
-        <Text style={styles.loadingText}>Loading timeline...</Text>
-      </View>
+      <SafeAreaView style={styles.container}>
+        <View style={styles.gradient}>
+          <View style={styles.centerContainer}>
+            <ActivityIndicator size="large" color="#4FC3F7" />
+            <Text style={styles.loadingText}>Loading timeline...</Text>
+          </View>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -620,7 +624,7 @@ export default function SentTimelineScreen() {
               <Text style={styles.modalCloseText}>✕</Text>
             </TouchableOpacity>
             {loadingSelfie ? (
-              <ActivityIndicator size="large" color="#2ecc71" />
+              <ActivityIndicator size="large" color="#4ade80" />
             ) : selfieImageUrl ? (
               <Image
                 source={{ uri: selfieImageUrl }}
@@ -668,6 +672,8 @@ export default function SentTimelineScreen() {
         </TouchableOpacity>
       </Modal>
 
+      {/* Timeline content: black background to blend with title (IG-style) */}
+      <View style={styles.gradient}>
       {/* Filter Tabs and Sort Toggle */}
       {/* Header Section */}
       <View style={styles.headerContainer}>
@@ -700,7 +706,7 @@ export default function SentTimelineScreen() {
               style={[styles.sortButton, sortBy === 'recent' && styles.sortButtonActive]}
               onPress={() => setSortBy('recent')}
             >
-              <FontAwesome name="clock-o" size={12} color={sortBy === 'recent' ? '#fff' : '#666'} style={{ marginRight: 4 }} />
+              <FontAwesome name="clock-o" size={12} color={sortBy === 'recent' ? '#4FC3F7' : '#aaa'} style={{ marginRight: 4 }} />
               <Text style={[styles.sortText, sortBy === 'recent' && styles.sortTextActive]}>Recent</Text>
             </TouchableOpacity>
 
@@ -708,7 +714,7 @@ export default function SentTimelineScreen() {
               style={[styles.sortButton, sortBy === 'impact' && styles.sortButtonActive]}
               onPress={() => setSortBy('impact')}
             >
-              <FontAwesome name="fire" size={12} color={sortBy === 'impact' ? '#fff' : '#666'} style={{ marginRight: 4 }} />
+              <FontAwesome name="fire" size={12} color={sortBy === 'impact' ? '#4FC3F7' : '#aaa'} style={{ marginRight: 4 }} />
               <Text style={[styles.sortText, sortBy === 'impact' && styles.sortTextActive]}>Impact</Text>
             </TouchableOpacity>
           </View>
@@ -718,7 +724,7 @@ export default function SentTimelineScreen() {
       {/* Empty State */}
       {!hasReflections && hasAnyReflections && filterMode === 'mine' && (
         <View style={styles.centerContainer}>
-          <FontAwesome name="inbox" size={64} color="#999" />
+          <FontAwesome name="inbox" size={64} color="#aaa" />
           <Text style={styles.emptyText}>No Reflections from you yet</Text>
           <Text style={styles.emptySubtext}>
             {currentIdentity ? `Send a Reflection as ${currentIdentity} to see it here` : 'Set your name in Settings to filter your Reflections'}
@@ -728,13 +734,14 @@ export default function SentTimelineScreen() {
 
       {!hasAnyReflections && (
         <View style={styles.centerContainer}>
-          <FontAwesome name="inbox" size={64} color="#999" />
+          <FontAwesome name="inbox" size={64} color="#aaa" />
           <Text style={styles.emptyText}>No Reflections sent yet</Text>
           <Text style={styles.emptySubtext}>Send a Reflection to see it here</Text>
         </View>
       )}
 
       {hasReflections && (
+        <View style={styles.listArea}>
         <FlatList
           data={displayReflections}
           keyExtractor={(item) => item.event_id}
@@ -750,7 +757,7 @@ export default function SentTimelineScreen() {
             const impactScore = rawEngagementCount + (hasSelfie ? 1 : 0);
 
             const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
-            const rankColor = isTopRanked ? '#f1c40f' : '#bdc3c7';
+            const rankColor = isTopRanked ? '#facc15' : '#cbd5e1';
 
             return (
               <TouchableOpacity
@@ -844,7 +851,7 @@ export default function SentTimelineScreen() {
                     </View>
                   ) : item.status === 'deleted' ? (
                     <View style={[styles.reflectionImage, styles.deletedImagePlaceholder]}>
-                      <FontAwesome name="trash" size={32} color="#e74c3c" />
+                      <FontAwesome name="trash" size={32} color="#ef5350" />
                     </View>
                   ) : null}
                   <View style={styles.reflectionInfo}>
@@ -902,7 +909,7 @@ export default function SentTimelineScreen() {
                           }}
                           activeOpacity={0.7}
                         >
-                          <FontAwesome name="camera" size={16} color="#2ecc71" />
+                          <FontAwesome name="camera" size={16} color="#4ade80" />
                           <Text style={styles.responseText}>Selfie</Text>
                         </TouchableOpacity>
                       )}
@@ -925,7 +932,7 @@ export default function SentTimelineScreen() {
                           }}
                           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
-                          <FontAwesome name="trash-o" size={16} color="#e74c3c" />
+                          <FontAwesome name="trash-o" size={16} color="#ef5350" />
                         </TouchableOpacity>
                       )}
                     </View>
@@ -986,7 +993,10 @@ export default function SentTimelineScreen() {
           }}
           contentContainerStyle={styles.listContainer}
         />
+        </View>
       )}
+
+      </View>
 
       <ReplayModal
         visible={!!selectedReflection}
@@ -1000,7 +1010,10 @@ export default function SentTimelineScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#1a1a1a', // Dark background
+  },
+  gradient: {
+    flex: 1,
+    backgroundColor: '#000',
   },
   centerContainer: {
     flex: 1,
@@ -1008,22 +1021,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: 20,
   },
+  listArea: {
+    flex: 1,
+  },
   listContainer: {
     padding: 8,
   },
+  // Explorer up-next style: soft cards on gradient (dark but inviting)
   reflectionItem: {
-    backgroundColor: '#2a2a2a', // Dark card background
+    backgroundColor: 'rgba(255,255,255,0.1)',
     padding: 12,
     marginVertical: 4,
     marginHorizontal: 8,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)', // Subtle light border
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 4,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
   },
   reflectionRow: {
     flexDirection: 'row',
@@ -1040,12 +1052,12 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 8,
-    backgroundColor: '#3a3a3a', // Darker placeholder
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
   deletedImagePlaceholder: {
     backgroundColor: '#f5f5f5',
     borderWidth: 2,
-    borderColor: '#e74c3c',
+    borderColor: '#ef5350',
     borderStyle: 'dashed',
     justifyContent: 'center',
     alignItems: 'center',
@@ -1056,7 +1068,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(231, 76, 60, 0.7)',
+    backgroundColor: 'rgba(239, 83, 80, 0.75)',
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1072,7 +1084,7 @@ const styles = StyleSheet.create({
   },
   description: {
     fontSize: 14,
-    color: '#e0e0e0', // Light text on dark background
+    color: '#fff',
     marginBottom: 4,
   },
   statusBadge: {
@@ -1093,12 +1105,12 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 14,
-    color: '#b0b0b0', // Lighter gray for dark theme
+    color: '#ccc',
     fontWeight: '600',
   },
   engagementDate: {
     fontSize: 12,
-    color: '#888', // Lighter for visibility
+    color: '#aaa',
     marginLeft: 8,
     fontStyle: 'italic',
   },
@@ -1106,7 +1118,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: 'rgba(46, 204, 113, 0.2)', // Darker green background
+    backgroundColor: 'rgba(74, 222, 128, 0.25)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
@@ -1114,12 +1126,12 @@ const styles = StyleSheet.create({
   },
   responseText: {
     fontSize: 12,
-    color: '#4ade80', // Brighter green for dark theme
+    color: '#4ade80',
     fontWeight: '600',
   },
   sentDate: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#aaa',
     marginTop: 4,
   },
   senderName: {
@@ -1129,25 +1141,25 @@ const styles = StyleSheet.create({
   },
   eventId: {
     fontSize: 12,
-    color: '#888', // Lighter for visibility
+    color: 'rgba(255,255,255,0.5)',
     fontFamily: 'monospace',
   },
 
   loadingText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#b0b0b0', // Lighter for dark theme
+    color: '#ccc',
   },
   emptyText: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#d0d0d0', // Lighter for dark theme
+    color: '#fff',
     marginTop: 16,
     marginBottom: 8,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#888', // Lighter for visibility
+    color: '#aaa',
   },
   modalOverlay: {
     flex: 1,
@@ -1193,7 +1205,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#2ecc71',
+    backgroundColor: '#4ade80',
     paddingVertical: 14,
     paddingHorizontal: 24,
     borderRadius: 25,
@@ -1231,12 +1243,12 @@ const styles = StyleSheet.create({
   },
   viewedDate: {
     fontSize: 12,
-    color: '#60a5fa', // Blue to differentiate from green Selfie button
+    color: '#22d3ee',
     marginTop: 4,
   },
   engagementCount: {
     fontSize: 12,
-    color: '#f59e0b', // Amber for engagement count
+    color: '#fbbf24',
     marginTop: 4,
   },
   engagementMetaRow: {
@@ -1247,13 +1259,10 @@ const styles = StyleSheet.create({
   },
   engagementMetaText: {
     fontSize: 12,
-    color: '#f59e0b', // Amber, matches old engagementCount style
+    color: '#fbbf24',
   },
   tabContainer: {
     flexDirection: 'row',
-    backgroundColor: '#1a1a1a',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 8,
   },
   tab: {
@@ -1265,11 +1274,11 @@ const styles = StyleSheet.create({
     borderBottomColor: 'transparent',
   },
   tabActive: {
-    borderBottomColor: '#2e78b7',
+    borderBottomColor: '#4FC3F7',
   },
   tabText: {
     fontSize: 16,
-    color: '#666',
+    color: '#ccc',
     fontWeight: '500',
   },
   tabTextActive: {
@@ -1277,33 +1286,27 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   tabTextDisabled: {
-    color: '#444',
+    color: 'rgba(255,255,255,0.4)',
     opacity: 0.5,
   },
-  headerContainer: {
-    backgroundColor: '#1a1a1a',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
+  headerContainer: {},
   sortContainer: {
     flexDirection: 'row',
-    justifyContent: 'space-between', // <--- This is the magic alignment fix
+    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20, // Match your screen margins
-    paddingVertical: 14,   // Give it vertical breathing room so it's not "squashed"
-    borderBottomWidth: 1,  // Optional: adds a subtle line below sort to separate from list
-    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
   },
   sortLabel: {
-    color: '#666',
+    color: '#ccc',
     fontSize: 13,
     fontWeight: '600',
-    textTransform: 'uppercase', // Makes it look like a proper header
+    textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
   sortButtonGroup: {
     flexDirection: 'row',
-    gap: 8, // Tighter gap between the two buttons
+    gap: 8,
   },
   sortButton: {
     flexDirection: 'row',
@@ -1311,20 +1314,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   sortButtonActive: {
-    backgroundColor: 'rgba(46, 120, 183, 0.2)',
+    backgroundColor: 'rgba(0,122,255,0.3)',
     borderWidth: 1,
-    borderColor: 'rgba(46, 120, 183, 0.5)',
+    borderColor: 'rgba(79, 195, 247, 0.5)',
   },
   sortText: {
     fontSize: 12,
-    color: '#666',
+    color: '#aaa',
     fontWeight: '600',
   },
   sortTextActive: {
-    color: '#2e78b7',
+    color: '#4FC3F7',
   },
   rankBadge: {
     position: 'absolute',

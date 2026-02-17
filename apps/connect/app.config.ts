@@ -13,11 +13,17 @@ const OTA_LABEL = process.env.OTA_VERSION || new Date().toLocaleString('en-US', 
     timeZoneName: 'short'
 });
 
+// Sentry DSN for project "reflections-connect" (org angelwareorg). Override with SENTRY_DSN_CONNECT env if needed.
+const SENTRY_DSN_CONNECT =
+  process.env.SENTRY_DSN_CONNECT ||
+  'https://e9b6b6e7a2330b40b346b9bc4e6d83c1@o4507266632581120.ingest.us.sentry.io/4510811902574592';
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
     ...config,
     extra: {
         ...config.extra,
         otaLabel: OTA_LABEL,
+        sentryDsn: SENTRY_DSN_CONNECT,
     },
     name: IS_DEV ? 'Connect Dev' : (config.name ?? 'Connect'),
     slug: config.slug ?? 'reflections-connect',

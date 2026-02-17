@@ -61,7 +61,7 @@ export default function TimelineHomeScreen() {
         activeOpacity={0.85}
       >
         <LinearGradient
-          colors={['#C2E9FB', '#A1C4FD', '#2E78B7']}
+          colors={['#7eb8da', '#4a90a4', '#2c5364']}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.fabGradient}
@@ -86,11 +86,13 @@ const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
     bottom: 2,
-    right: 24,
+    right: 6,
     width: 80,
     height: 80,
     borderRadius: 40,
     overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
     ...Platform.select({
       ios: {
         shadowColor: '#000',

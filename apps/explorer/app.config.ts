@@ -13,11 +13,17 @@ const OTA_LABEL = process.env.OTA_VERSION || new Date().toLocaleString('en-US', 
     timeZoneName: 'short'
 });
 
+// Sentry DSN for project "reflections-explorer" (org angelwareorg). Override with SENTRY_DSN_EXPLORER env if needed.
+const SENTRY_DSN_EXPLORER =
+  process.env.SENTRY_DSN_EXPLORER ||
+  'https://3b9c28e5a2deadc1601d2e4b80bfca9d@o4507266632581120.ingest.us.sentry.io/4510811894972416';
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
     ...config,
     extra: {
         ...config.extra,
         otaLabel: OTA_LABEL,
+        sentryDsn: SENTRY_DSN_EXPLORER,
     },
 
     name: IS_DEV ? 'Explorer Dev' : (config.name ?? 'Explorer'),
