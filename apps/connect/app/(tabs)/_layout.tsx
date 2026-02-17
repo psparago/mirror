@@ -67,18 +67,16 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: explorerName ? `${explorerName}'s Reflections` : 'Create aReflections',
+          title: explorerName ? `${explorerName}'s Reflections` : 'Reflections',
           tabBarLabel: 'Reflections',
-          tabBarIcon: ({ color }) => <TabBarIcon name="clone" color={color} />,
+          tabBarIcon: ({ color }) => <TabBarIcon name="list" color={color} />,
         }}
       />
 
       <Tabs.Screen
         name="timeline"
         options={{
-          title: explorerName ? `${explorerName}'s Timeline` : 'Timeline',
-          tabBarLabel: 'Timeline',
-          tabBarIcon: ({ color }) => <TabBarIcon name="clock-o" color={color} />,
+          href: null,
         }}
       />
 
@@ -86,6 +84,7 @@ export default function TabLayout() {
         name="settings"
         options={{
           title: 'Settings',
+          tabBarLabel: 'Settings',
           tabBarIcon: ({ color }) => <TabBarIcon name="cog" color={color} />,
         }}
       />

@@ -53,12 +53,8 @@ function AuthenticatedLayout() {
 
       console.log('🔔 Notification Tapped! Target:', targetScreen);
 
-      if (targetScreen === 'camera') {
-        router.push('/camera');
-      } else if (targetScreen === 'gallery') {
-        router.push('/gallery');
-      } else if (targetScreen === 'search') {
-        router.push('/search');
+      if (targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search') {
+        router.push(`/(tabs)?action=${targetScreen}` as any);
       } else {
         router.push('/(tabs)' as any);
       }
