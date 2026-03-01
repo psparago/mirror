@@ -2,7 +2,7 @@ import CreationModal from '@/components/CreationModal';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { FontAwesome } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
-import { LinearGradient } from 'expo-linear-gradient';
+
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import { Platform, StyleSheet, TouchableOpacity, View } from 'react-native';
@@ -58,16 +58,9 @@ export default function TimelineHomeScreen() {
       <TouchableOpacity
         style={styles.fab}
         onPress={() => setCreationModalVisible(true)}
-        activeOpacity={0.85}
+        activeOpacity={0.7}
       >
-        <LinearGradient
-          colors={['#7eb8da', '#4a90a4', '#2c5364']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.fabGradient}
-        >
-          <FontAwesome name="plus" size={36} color="#fff" />
-        </LinearGradient>
+        <FontAwesome name="plus" size={26} color="#fff" />
       </TouchableOpacity>
       <CreationModal
         visible={creationModalVisible}
@@ -85,30 +78,12 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
-    bottom: 2,
-    right: 6,
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.5)',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.35,
-        shadowRadius: 8,
-      },
-      android: {
-        elevation: 12,
-      },
-      default: {},
-    }),
-  },
-  fabGradient: {
-    width: '100%',
-    height: '100%',
+    bottom: 4,
+    right: 8,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#3897f0',
     alignItems: 'center',
     justifyContent: 'center',
   },
