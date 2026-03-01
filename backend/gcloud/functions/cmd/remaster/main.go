@@ -33,11 +33,6 @@ func getEnv(key, fallback string) string {
 
 func main() {
 	// 1. Setup Environment
-	apiKeyOpenAI := os.Getenv("OPENAI_API_KEY")
-	if apiKeyOpenAI == "" {
-		log.Fatal("❌ OPENAI_API_KEY is not set")
-	}
-
 	apiKeyGemini := os.Getenv("GEMINI_API_KEY")
 	if apiKeyGemini == "" {
 		log.Fatal("❌ GEMINI_API_KEY is not set")

@@ -98,6 +98,8 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	imageURL := r.URL.Query().Get("image_url")
 	targetCaption := r.URL.Query().Get("target_caption")
 	targetDeepDive := r.URL.Query().Get("target_deep_dive")
+	captionVoice := r.URL.Query().Get("caption_voice")
+	deepDiveVoice := r.URL.Query().Get("deep_dive_voice")
 
 	var result struct {
 		ShortCaption       string `json:"short_caption"`
@@ -230,10 +232,12 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// 6. Generate Speech using OpenAI (TTS)
+	// 6. Generate speech using Google Cloud TTS (Journey voice)
 	if result.ShortCaption != "" {
 		log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
-		speechData, err := GenerateSpeech(result.ShortCaption)
+		speechData, err := GenerateSpeechWithOptions(result.ShortCaption, SpeechOptions{
+			VoiceName: captionVoice,
+		})
 		if err == nil && len(speechData) > 0 {
 			audioKey := fmt.Sprintf("staging/%s/tts/%d.mp3", explorerID, time.Now().UnixNano())
 
@@ -253,7 +257,9 @@ Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
 	// 8. Generate Speech for Deep Dive
 	if result.DeepDive != "" {
 		log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
-		deepDiveSpeechData, err := GenerateSpeech(result.DeepDive)
+		deepDiveSpeechData, err := GenerateSpeechWithOptions(result.DeepDive, SpeechOptions{
+			VoiceName: deepDiveVoice,
+		})
 		if err == nil && len(deepDiveSpeechData) > 0 {
 			deepDiveAudioKey := fmt.Sprintf("staging/%s/tts/deepdive_%d.mp3", explorerID, time.Now().UnixNano())
 

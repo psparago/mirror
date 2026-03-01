@@ -59,19 +59,13 @@ else
   SKIP_AI=false
 fi
 
-# Check for OpenAI API key (optional, needed for TTS)
-if [ -z "$OPENAI_API_KEY" ]; then
-  echo -e "${YELLOW}Warning: OPENAI_API_KEY not found in .env.deploy${NC}"
-  echo "TTS functionality will be disabled."
-fi
-
 echo -e "${GREEN}✓ Environment variables loaded${NC}"
 echo ""
 
 # Common deployment parameters
 REGION="us-central1"
 RUNTIME="go125"
-ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION},OPENAI_API_KEY=${OPENAI_API_KEY}"
+ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
 # Function 1: get-s3-url
 echo -e "${YELLOW}Deploying get-s3-url...${NC}"

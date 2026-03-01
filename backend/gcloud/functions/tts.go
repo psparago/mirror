@@ -1,61 +1,116 @@
 package functions
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
+	"strings"
+
+	texttospeech "cloud.google.com/go/texttospeech/apiv1"
+	"cloud.google.com/go/texttospeech/apiv1/texttospeechpb"
 )
 
-type TTSRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
-	Voice string `json:"voice"`
+const (
+	DefaultGoogleTTSLanguageCode = "en-US"
+	DefaultGoogleTTSVoiceName    = "en-US-Journey-O"
+)
+
+// Limited allowlist keeps behavior predictable and avoids invalid user-supplied voices.
+var allowedGoogleTTSVoices = map[string]struct{}{
+	"en-US-Journey-F": {},
+	"en-US-Journey-D": {},
+	"en-US-Journey-O": {},
+	"en-US-Studio-O": {},
+	"en-US-Neural2-C": {},
+	"en-US-Studio-Q": {},
+	"en-US-Casual-K": {},
+	"en-US-Chirp3-HD-Sulafat": {},
+	"en-US-Chirp3-HD-Achernar": {},
+	"en-US-Chirp3-HD-Despina": {},
 }
 
-// GenerateSpeech calls OpenAI and returns the MP3 audio bytes
+// SpeechOptions allows callers to customize synthesis while keeping backward compatibility.
+type SpeechOptions struct {
+	VoiceName    string
+	LanguageCode string
+}
+
+// GenerateSpeech calls Google Cloud Text-to-Speech and returns MP3 audio bytes.
 func GenerateSpeech(text string) ([]byte, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is not set in environment")
-	}
+	ctx := context.Background()
 
-	url := "https://api.openai.com/v1/audio/speech"
-
-	// "alloy" is the most neutral/human voice.
-	// You can switch to "onyx" (deeper) or "nova" (brighter) later.
-	reqBody := TTSRequest{
-		Model: "tts-1",
-		Input: text,
-		Voice: "alloy",
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
+	client, err := texttospeech.NewClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
+		return nil, fmt.Errorf("failed to create Google TTS client: %w", err)
+	}
+	defer client.Close()
+
+	req := &texttospeechpb.SynthesizeSpeechRequest{
+		Input: &texttospeechpb.SynthesisInput{
+			InputSource: &texttospeechpb.SynthesisInput_Text{Text: text},
+		},
+		Voice: &texttospeechpb.VoiceSelectionParams{
+			LanguageCode: "en-US",
+		Name: DefaultGoogleTTSVoiceName,
+		},
+		AudioConfig: &texttospeechpb.AudioConfig{
+			AudioEncoding: texttospeechpb.AudioEncoding_MP3,
+		},
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	resp, err := client.SynthesizeSpeech(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to synthesize speech: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	return resp.AudioContent, nil
+}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+func sanitizeGoogleTTSVoice(voiceName string) string {
+	normalized := strings.TrimSpace(voiceName)
+	if normalized == "" {
+		return DefaultGoogleTTSVoiceName
+	}
+	if _, ok := allowedGoogleTTSVoices[normalized]; ok {
+		return normalized
+	}
+	return DefaultGoogleTTSVoiceName
+}
+
+func sanitizeGoogleTTSLanguage(languageCode string) string {
+	normalized := strings.TrimSpace(languageCode)
+	if normalized == "" {
+		return DefaultGoogleTTSLanguageCode
+	}
+	return normalized
+}
+
+// GenerateSpeechWithOptions allows voice/language overrides without breaking existing callers.
+func GenerateSpeechWithOptions(text string, opts SpeechOptions) ([]byte, error) {
+	ctx := context.Background()
+
+	client, err := texttospeech.NewClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to call OpenAI: %w", err)
+		return nil, fmt.Errorf("failed to create Google TTS client: %w", err)
 	}
-	defer resp.Body.Close()
+	defer client.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("OpenAI API error (%d): %s", resp.StatusCode, string(body))
+	req := &texttospeechpb.SynthesizeSpeechRequest{
+		Input: &texttospeechpb.SynthesisInput{
+			InputSource: &texttospeechpb.SynthesisInput_Text{Text: text},
+		},
+		Voice: &texttospeechpb.VoiceSelectionParams{
+			LanguageCode: sanitizeGoogleTTSLanguage(opts.LanguageCode),
+			Name:         sanitizeGoogleTTSVoice(opts.VoiceName),
+		},
+		AudioConfig: &texttospeechpb.AudioConfig{
+			AudioEncoding: texttospeechpb.AudioEncoding_MP3,
+		},
 	}
 
-	return io.ReadAll(resp.Body)
+	resp, err := client.SynthesizeSpeech(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to synthesize speech: %w", err)
+	}
+
+	return resp.AudioContent, nil
 }

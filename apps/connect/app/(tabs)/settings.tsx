@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -22,6 +23,57 @@ import {
 } from 'react-native';
 
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
+
+const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
+const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
+const VOICE_OPTIONS = [
+  {
+    label: 'Journey O',
+    value: 'en-US-Journey-O',
+    description: 'Softer, lower-pitch, more mature sister voice to Journey-F.'
+  },
+  {
+    label: 'Studio O',
+    value: 'en-US-Studio-O',
+    description: 'Warm, highly produced long-form female studio voice.'
+  },
+  {
+    label: 'Neural2 C',
+    value: 'en-US-Neural2-C',
+    description: 'Calm, soothing female voice on Neural2.'
+  },
+  {
+    label: 'Journey D',
+    value: 'en-US-Journey-D',
+    description: 'Deep, resonant, comforting male voice.'
+  },
+  {
+    label: 'Studio Q',
+    value: 'en-US-Studio-Q',
+    description: 'Polished, soft-spoken male studio voice.'
+  },
+  {
+    label: 'Casual K',
+    value: 'en-US-Casual-K',
+    description: 'Conversational, imperfect, casual male style.'
+  },
+  {
+    label: 'Chirp3 Sulafat',
+    value: 'en-US-Chirp3-HD-Sulafat',
+    description: 'Google-classified warm female voice.'
+  },
+  {
+    label: 'Chirp3 Achernar',
+    value: 'en-US-Chirp3-HD-Achernar',
+    description: 'Google-classified soft female voice.'
+  },
+  {
+    label: 'Chirp3 Despina',
+    value: 'en-US-Chirp3-HD-Despina',
+    description: 'Google-classified smooth female voice.'
+  },
+] as const;
+const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
@@ -41,12 +93,41 @@ export default function SettingsScreen() {
   const [nameInput, setNameInput] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
+  const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
+  const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
+
+  // VOICE PICKER MODAL STATE
+  const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
 
   // STATE FOR ANDROID TIME PICKER (iOS doesn't need this)
   const [showTimePicker, setShowTimePicker] = useState(false);
 
   useEffect(() => {
     AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => { });
+  }, []);
+
+  useEffect(() => {
+    const loadVoicePrefs = async () => {
+      try {
+        const [savedCaption, savedDeepDive] = await Promise.all([
+          AsyncStorage.getItem(CAPTION_VOICE_STORAGE_KEY),
+          AsyncStorage.getItem(DEEP_DIVE_VOICE_STORAGE_KEY),
+        ]);
+        if (savedCaption) {
+          setCaptionVoice(savedCaption);
+        } else {
+          await AsyncStorage.setItem(CAPTION_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
+        }
+        if (savedDeepDive) {
+          setDeepDiveVoice(savedDeepDive);
+        } else {
+          await AsyncStorage.setItem(DEEP_DIVE_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
+        }
+      } catch {
+        // keep defaults
+      }
+    };
+    loadVoicePrefs();
   }, []);
 
   useEffect(() => {
@@ -108,6 +189,31 @@ export default function SettingsScreen() {
     }
   };
 
+  const saveVoicePreference = async (
+    key: typeof CAPTION_VOICE_STORAGE_KEY | typeof DEEP_DIVE_VOICE_STORAGE_KEY,
+    value: string,
+    setter: (v: string) => void
+  ) => {
+    setter(value);
+    try {
+      await AsyncStorage.setItem(key, value);
+    } catch {
+      Alert.alert('Error', 'Failed to save voice preference.');
+    }
+  };
+
+  const getVoiceLabel = (value: string) =>
+    VOICE_OPTIONS.find((v) => v.value === value)?.label ?? value;
+
+  const handleVoicePick = (voice: typeof VOICE_OPTIONS[number]) => {
+    if (voicePickerTarget === 'caption') {
+      saveVoicePreference(CAPTION_VOICE_STORAGE_KEY, voice.value, setCaptionVoice);
+    } else if (voicePickerTarget === 'deep_dive') {
+      saveVoicePreference(DEEP_DIVE_VOICE_STORAGE_KEY, voice.value, setDeepDiveVoice);
+    }
+    setVoicePickerTarget(null);
+  };
+
   return (
     <View style={styles.container}>
       <Stack.Screen
@@ -123,8 +229,55 @@ export default function SettingsScreen() {
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
 
+          {/* SECTION: IDENTITY */}
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
+            <View style={styles.card}>
+              {activeRelationship ? (
+                <>
+                  <Text style={styles.label}>
+                    My Name for <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
+                  </Text>
+                  <Text style={styles.description}>
+                    This is how you will appear to this specific Explorer.
+                  </Text>
+
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter your name (e.g., Dad, Uncle Mike)"
+                    placeholderTextColor="#666"
+                    value={nameInput}
+                    onChangeText={setNameInput}
+                    autoCapitalize="words"
+                    editable={!saving}
+                  />
+                  <TouchableOpacity
+                    style={[
+                      styles.saveButton,
+                      (!nameInput.trim() || saving) && styles.saveButtonDisabled
+                    ]}
+                    onPress={saveCompanionName}
+                    disabled={!nameInput.trim() || saving}
+                  >
+                    {saving ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.saveButtonText}>Save Name</Text>
+                    )}
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <View style={{ padding: 10, alignItems: 'center' }}>
+                  <Text style={{ color: '#888', fontStyle: 'italic' }}>
+                    {explorerLoading ? "Loading explorer..." : "Link an Explorer to set your identity."}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+
           {/* --------------------------------------------------------- */}
-          {/* SECTION: NOTIFICATIONS (NEW)                              */}
+          {/* SECTION: NOTIFICATIONS (DAILY REMINDER)                   */}
           {/* --------------------------------------------------------- */}
           <View style={styles.section}>
             <Text style={[styles.sectionTitle, { color: tintColor }]}>Notifications</Text>
@@ -232,50 +385,29 @@ export default function SettingsScreen() {
             </View>
           </View>
 
-          {/* SECTION: IDENTITY */}
+          {/* SECTION: VOICE PREFERENCES */}
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
+            <Text style={[styles.sectionTitle, { color: tintColor }]}>Voice Preferences</Text>
             <View style={styles.card}>
-              {activeRelationship ? (
-                <>
-                  <Text style={styles.label}>
-                    My Name for <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
-                  </Text>
-                  <Text style={styles.description}>
-                    This is how you will appear to this specific Explorer.
-                  </Text>
+              <View style={styles.row}>
+                <Text style={styles.rowLabel}>Caption Voice</Text>
+                <TouchableOpacity onPress={() => setVoicePickerTarget('caption')}>
+                  <Text style={styles.linkText}>{getVoiceLabel(captionVoice)}</Text>
+                </TouchableOpacity>
+              </View>
 
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Enter your name (e.g., Dad, Uncle Mike)"
-                    placeholderTextColor="#666"
-                    value={nameInput}
-                    onChangeText={setNameInput}
-                    autoCapitalize="words"
-                    editable={!saving}
-                  />
-                  <TouchableOpacity
-                    style={[
-                      styles.saveButton,
-                      (!nameInput.trim() || saving) && styles.saveButtonDisabled
-                    ]}
-                    onPress={saveCompanionName}
-                    disabled={!nameInput.trim() || saving}
-                  >
-                    {saving ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={styles.saveButtonText}>Save Name</Text>
-                    )}
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <View style={{ padding: 10, alignItems: 'center' }}>
-                  <Text style={{ color: '#888', fontStyle: 'italic' }}>
-                    {explorerLoading ? "Loading explorer..." : "Link an Explorer to set your identity."}
-                  </Text>
-                </View>
-              )}
+              <View style={styles.divider} />
+
+              <View style={[styles.row, { marginBottom: 0 }]}>
+                <Text style={styles.rowLabel}>Deep Dive Voice</Text>
+                <TouchableOpacity onPress={() => setVoicePickerTarget('deep_dive')}>
+                  <Text style={styles.linkText}>{getVoiceLabel(deepDiveVoice)}</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={[styles.helperText, { marginTop: 12 }]}>
+                Your selected voice is used when AI generates caption and deep dive audio.
+              </Text>
             </View>
           </View>
 
@@ -374,6 +506,54 @@ export default function SettingsScreen() {
 
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Voice Picker Modal */}
+      <Modal
+        visible={voicePickerTarget !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setVoicePickerTarget(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <Text style={styles.modalTitle}>
+              {voicePickerTarget === 'caption' ? 'Caption Voice' : 'Deep Dive Voice'}
+            </Text>
+
+            <ScrollView style={styles.modalList} showsVerticalScrollIndicator={false}>
+              {VOICE_OPTIONS.map((voice) => {
+                const isSelected =
+                  voicePickerTarget === 'caption'
+                    ? captionVoice === voice.value
+                    : deepDiveVoice === voice.value;
+                return (
+                  <TouchableOpacity
+                    key={voice.value}
+                    style={[styles.modalOption, isSelected && styles.modalOptionActive]}
+                    onPress={() => handleVoicePick(voice)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.modalOptionHeader}>
+                      <Text style={[styles.modalOptionLabel, isSelected && styles.modalOptionLabelActive]}>
+                        {voice.label}
+                      </Text>
+                      {isSelected && <Text style={styles.modalCheckmark}>✓</Text>}
+                    </View>
+                    <Text style={styles.modalOptionDesc}>{voice.description}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={styles.modalCloseBtn}
+              onPress={() => setVoicePickerTarget(null)}
+            >
+              <Text style={styles.modalCloseBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -544,5 +724,104 @@ const styles = StyleSheet.create({
   actionTextActive: {
     color: '#fff',
     fontWeight: '600',
-  }
+  },
+  voiceOptionsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  voiceOptionBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#333',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  voiceOptionBtnActive: {
+    backgroundColor: '#2e78b7',
+    borderColor: '#2e78b7',
+  },
+  voiceOptionText: {
+    color: '#aaa',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  voiceOptionTextActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: '#1e1e1e',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 20,
+    paddingHorizontal: 16,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    maxHeight: '75%',
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  modalList: {
+    marginBottom: 12,
+  },
+  modalOption: {
+    backgroundColor: '#2c2c2c',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  modalOptionActive: {
+    backgroundColor: 'rgba(46,120,183,0.2)',
+    borderColor: '#2e78b7',
+  },
+  modalOptionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  modalOptionLabel: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  modalOptionLabelActive: {
+    color: '#5aadde',
+  },
+  modalCheckmark: {
+    color: '#2e78b7',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  modalOptionDesc: {
+    color: '#aaa',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  modalCloseBtn: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    backgroundColor: '#333',
+    borderRadius: 12,
+  },
+  modalCloseBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
 });

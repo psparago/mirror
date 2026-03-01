@@ -1,6 +1,7 @@
 import ReflectionComposer from '@/components/ReflectionComposer';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { prepareImageForUpload } from '@/utils/mediaProcessor';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
 import { collection, db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
@@ -20,6 +21,10 @@ const DEBUG_LOGS = __DEV__ && false;
 const debugLog = (...args: any[]) => {
   if (DEBUG_LOGS) console.log(...args);
 };
+
+const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
+const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
+const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
@@ -109,6 +114,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
   const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
+  const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
+  const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const { currentExplorerId, explorerName, activeRelationship } = useExplorer();
   const { pendingMedia, consumePendingMedia } = useReflectionMedia();
   const isFocused = useIsFocused();
@@ -191,6 +198,30 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       }
     };
   }, [videoPlayer]);
+
+  useEffect(() => {
+    const loadVoicePrefs = async () => {
+      try {
+        const [savedCaption, savedDeepDive] = await Promise.all([
+          AsyncStorage.getItem(CAPTION_VOICE_STORAGE_KEY),
+          AsyncStorage.getItem(DEEP_DIVE_VOICE_STORAGE_KEY),
+        ]);
+        if (savedCaption) {
+          setCaptionVoice(savedCaption);
+        } else {
+          await AsyncStorage.setItem(CAPTION_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
+        }
+        if (savedDeepDive) {
+          setDeepDiveVoice(savedDeepDive);
+        } else {
+          await AsyncStorage.setItem(DEEP_DIVE_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
+        }
+      } catch {
+        // keep defaults
+      }
+    };
+    loadVoicePrefs();
+  }, []);
 
   const lastProcessedUriRef = useRef<string | null>(null);
 
@@ -323,6 +354,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
+      if (captionVoice) fetchUrl += `&caption_voice=${encodeURIComponent(captionVoice)}`;
+      if (deepDiveVoice) fetchUrl += `&deep_dive_voice=${encodeURIComponent(deepDiveVoice)}`;
 
       // Add timeout to prevent 504 errors (60 seconds for AI generation)
       const controller = new AbortController();
