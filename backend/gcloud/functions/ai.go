@@ -151,13 +151,16 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Create multimodal input
-		promptText := fmt.Sprintf(`Analyze this image for a 15-year-old with Angelman Syndrome (%s). 
-IMPORTANT: DO NOT attempt to diagnose or guess if anyone in the photo has a medical disorder or syndrome (like Down Syndrome or Angelman Syndrome) based on their appearance, facial expressions, or gestures. Focus only on the observable activities, objects, and emotions.
+		promptText := fmt.Sprintf(`Analyze this image for a 15-year-old with Angelman Syndrome named %s.
 
-Return a SINGLE JSON object containing:
-"short_caption": A high-impact greeting (max 10 words).
-"deep_dive": A 2-3 sentence story about details in the photo.
-Format: {"short_caption": "string", "deep_dive": "string"}`, explorerName)
+RULES:
+1. DO NOT assume any person visible in the image or video IS %s. The content is being SENT TO %s by a family member or caregiver. Describe the people and scene without assigning the Explorer's name to anyone.
+2. DO NOT attempt to diagnose or guess if anyone in the photo has a medical disorder or syndrome based on their appearance. Focus only on observable activities, objects, and emotions.
+3. The short_caption is a warm, high-energy greeting TO %s about what is in the image (max 10 words).
+4. The deep_dive is a 2-3 sentence story describing interesting details in the image, written as if speaking TO %s.
+
+Return a SINGLE JSON object:
+{"short_caption": "string", "deep_dive": "string"}`, explorerName, explorerName, explorerName, explorerName, explorerName)
 
 		parts := []genai.Part{
 			genai.Text(promptText),

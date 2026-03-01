@@ -325,7 +325,8 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   if (!visible || !event) return null;
 
   // --- RENDER ---
-  const isVideo = state.hasTag('video_mode');
+  const hasVideo = !!event?.video_url;
+  const isVideo = hasVideo || state.hasTag('video_mode');
   const isSpeaking = state.hasTag('speaking');
   const isPlaying = state.hasTag('playing');
   const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null);
@@ -432,6 +433,20 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
                    contentFit="contain"
                    cachePolicy="memory-disk"
                  />
+              )}
+
+              {/* Replay overlay — appears after video + caption narration completes */}
+              {isFinished && event?.video_url && (
+                <View style={styles.replayOverlay}>
+                  <TouchableOpacity
+                    style={styles.replayButton}
+                    onPress={() => send({ type: 'REPLAY' })}
+                    activeOpacity={0.8}
+                  >
+                    <FontAwesome name="repeat" size={28} color="#fff" />
+                    <Text style={styles.replayText}>Replay</Text>
+                  </TouchableOpacity>
+                </View>
               )}
             </View>
           </View>
@@ -678,5 +693,29 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  replayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 24,
+    zIndex: 5,
+  },
+  replayButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  replayText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

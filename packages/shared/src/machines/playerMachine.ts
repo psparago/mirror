@@ -133,24 +133,27 @@ export const playerMachine = setup({
             tags: ['video_mode'],
             states: {
                 playback: {
-                    initial: 'narrating',
-                    entry: 'speakCaption',
+                    initial: 'playing',
+                    entry: 'playVideo',
                     states: {
-                        narrating: {
-                            tags: ['speaking', 'active'],
-                            on: {
-                                NARRATION_FINISHED: {
-                                    target: 'playing',
-                                    actions: [assign({ hasSpoken: true }), 'playVideo']
-                                },
-                                PAUSE: 'paused'
-                            }
-                        },
                         playing: {
                             tags: ['playing', 'active', 'video', 'loadingVideo'],
                             on: {
                                 PAUSE: 'paused',
-                                VIDEO_FINISHED: 'done'
+                                VIDEO_FINISHED: {
+                                    target: 'narratingCaption',
+                                    actions: [assign({ videoFinished: true }), 'speakCaption']
+                                }
+                            }
+                        },
+                        narratingCaption: {
+                            tags: ['speaking', 'active'],
+                            on: {
+                                NARRATION_FINISHED: {
+                                    target: 'done',
+                                    actions: assign({ hasSpoken: true })
+                                },
+                                PAUSE: 'paused'
                             }
                         },
                         paused: {
@@ -158,8 +161,8 @@ export const playerMachine = setup({
                             entry: 'pauseMedia',
                             on: {
                                 RESUME: [
-                                    { guard: ({ context }: { context: PlayerContext }) => !context.hasSpoken, target: 'narrating', actions: 'resumeMedia' },
-                                    { target: 'playing', actions: 'resumeMedia' }
+                                    { guard: ({ context }: { context: PlayerContext }) => !context.videoFinished, target: 'playing', actions: 'resumeMedia' },
+                                    { target: 'narratingCaption', actions: 'resumeMedia' }
                                 ]
                             }
                         },
@@ -171,7 +174,7 @@ export const playerMachine = setup({
                     states: {
                         waitingForStart: {
                             always: {
-                                guard: ({ context }) => context.hasSpoken,
+                                guard: ({ context }) => context.videoFinished,
                                 target: 'evaluating'
                             }
                         },
@@ -184,47 +187,58 @@ export const playerMachine = setup({
                         waiting: {
                             after: { 
                                 5000: 'snap',
-                                10000: 'done' // Fallback: complete after 10s even if selfie hangs
+                                10000: 'done'
                             }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
                             after: {
-                                5000: 'done' // Complete after 5s even if capture hangs
+                                5000: 'done'
                             }
                         },
                         done: { type: 'final' }
                     }
                 }
             },
-            // Only finish after BOTH playback and selfie regions complete
             onDone: '#lookingGlassPlayer.finished'
         },
 
-        // Instant video playback - skips narration, starts video immediately
         playingVideoInstant: {
             type: 'parallel',
             tags: ['video_mode'],
             states: {
                 playback: {
                     initial: 'playing',
-                    entry: 'playVideo', // Start video immediately
+                    entry: 'playVideo',
                     states: {
                         playing: {
                             tags: ['playing', 'active', 'video', 'loadingVideo'],
                             on: {
                                 PAUSE: 'paused',
-                                VIDEO_FINISHED: 'done'
+                                VIDEO_FINISHED: {
+                                    target: 'narratingCaption',
+                                    actions: [assign({ videoFinished: true }), 'speakCaption']
+                                }
+                            }
+                        },
+                        narratingCaption: {
+                            tags: ['speaking', 'active'],
+                            on: {
+                                NARRATION_FINISHED: {
+                                    target: 'done',
+                                    actions: assign({ hasSpoken: true })
+                                },
+                                PAUSE: 'paused'
                             }
                         },
                         paused: {
                             tags: ['paused', 'active'],
                             entry: 'pauseMedia',
                             on: {
-                                RESUME: {
-                                    target: 'playing',
-                                    actions: 'resumeMedia'
-                                }
+                                RESUME: [
+                                    { guard: ({ context }: { context: PlayerContext }) => !context.videoFinished, target: 'playing', actions: 'resumeMedia' },
+                                    { target: 'narratingCaption', actions: 'resumeMedia' }
+                                ]
                             }
                         },
                         done: { type: 'final' }
@@ -242,23 +256,19 @@ export const playerMachine = setup({
                         waiting: {
                             after: { 
                                 5000: 'snap',
-                                10000: 'done' // Fallback: complete after 10s even if selfie hangs
+                                10000: 'done'
                             }
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
                             after: {
-                                5000: 'done' // Complete after 5s even if capture hangs
-                            },
-                            on: {
-                                // Allow manual completion if selfie is taken
+                                5000: 'done'
                             }
                         },
                         done: { type: 'final' }
                     }
                 }
             },
-            // Only finish after BOTH playback and selfie regions complete
             onDone: '#lookingGlassPlayer.finished'
         },
 

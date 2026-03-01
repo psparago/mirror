@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ReplayModal } from './ReplayModal';
 
 // --- TYPES ---
@@ -54,10 +55,12 @@ export default function ReflectionComposer({
   onStopRecording
 }: ReflectionComposerProps) {
   // --- STATE ---
+  const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
   const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [videoEnded, setVideoEnded] = useState(false);
   
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -194,9 +197,16 @@ export default function ReflectionComposer({
 
   // Video Player
   const player = useVideoPlayer(mediaUri, (p) => {
-    p.loop = true;
+    p.loop = false;
     p.play();
   });
+
+  useEffect(() => {
+    const sub = player.addListener('playToEnd', () => {
+      setVideoEnded(true);
+    });
+    return () => sub.remove();
+  }, [player]);
 
   // --- HANDLERS ---
 
@@ -279,6 +289,12 @@ export default function ReflectionComposer({
 
   // --- RENDERERS ---
 
+  const handleReplay = useCallback(() => {
+    setVideoEnded(false);
+    player.currentTime = 0;
+    player.play();
+  }, [player]);
+
   const renderBackground = () => (
     <View style={styles.backgroundContainer}>
       {mediaType === 'video' ? (
@@ -288,8 +304,18 @@ export default function ReflectionComposer({
       )}
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
 
+      {/* REPLAY OVERLAY — shown when video finishes */}
+      {mediaType === 'video' && videoEnded && (
+        <View style={styles.replayOverlay}>
+          <TouchableOpacity style={styles.replayButton} onPress={handleReplay} activeOpacity={0.8}>
+            <FontAwesome name="repeat" size={28} color="#fff" />
+            <Text style={styles.replayText}>Replay</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* TOP CONTROLS */}
-      <View style={styles.topControls}>
+      <View style={[styles.topControls, { top: insets.top + 6 }]}>
         <View style={{ flex: 1 }} />
 
         {/* CIRCLED X CANCEL BUTTON */}
@@ -518,9 +544,8 @@ const styles = StyleSheet.create({
   },
   topControls: {
     position: 'absolute',
-    top: 10,
     left: 10,
-    right: 5,
+    right: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
     zIndex: 10,
@@ -807,5 +832,28 @@ sendButtonText: {
   color: '#fff',
   fontSize: 18,
   fontWeight: 'bold',
+},
+replayOverlay: {
+  ...StyleSheet.absoluteFillObject,
+  backgroundColor: 'rgba(0,0,0,0.5)',
+  alignItems: 'center',
+  justifyContent: 'center',
+  zIndex: 5,
+},
+replayButton: {
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 8,
+  width: 100,
+  height: 100,
+  borderRadius: 50,
+  backgroundColor: 'rgba(255,255,255,0.2)',
+  borderWidth: 2,
+  borderColor: 'rgba(255,255,255,0.4)',
+},
+replayText: {
+  color: '#fff',
+  fontSize: 14,
+  fontWeight: '600',
 },
 });

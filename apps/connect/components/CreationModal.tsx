@@ -200,6 +200,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   }, [videoPlayer]);
 
   useEffect(() => {
+    if (!visible) return;
     const loadVoicePrefs = async () => {
       try {
         const [savedCaption, savedDeepDive] = await Promise.all([
@@ -221,7 +222,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       }
     };
     loadVoicePrefs();
-  }, []);
+  }, [visible]);
 
   const lastProcessedUriRef = useRef<string | null>(null);
 

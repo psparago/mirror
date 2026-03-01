@@ -424,7 +424,7 @@ export default function SentTimelineScreen() {
     );
 
     return () => unsubscribe();
-  }, [currentExplorerId, responseEventIds]); // ADDED DEPENDENCY: currentExplorerId
+  }, [currentExplorerId]);
 
   // Refresh local data when app comes to foreground
   useEffect(() => {
