@@ -7,7 +7,7 @@ import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationshi
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Audio } from 'expo-av';
-import { Stack } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -80,6 +80,7 @@ const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
+  const router = useRouter();
 
   // AUTH & CONTEXT
   const { user, signOut } = useAuth();
@@ -119,14 +120,22 @@ export default function SettingsScreen() {
     await stopSample();
     setPlayingVoice(voiceValue);
     try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
       const res = await fetch(`${API_ENDPOINTS.GET_VOICE_SAMPLE}?voice=${encodeURIComponent(voiceValue)}`);
       if (!res.ok) throw new Error('Failed to fetch sample URL');
       const { url } = await res.json();
       const { sound } = await Audio.Sound.createAsync(
         { uri: url },
-        { shouldPlay: true }
+        { shouldPlay: true, volume: 1.0 }
       );
       soundRef.current = sound;
+      await sound.setVolumeAsync(1.0);
       sound.setOnPlaybackStatusUpdate((status) => {
         if (status.isLoaded && status.didJustFinish) {
           stopSample();
@@ -268,6 +277,17 @@ export default function SettingsScreen() {
         options={{
           title: 'Settings',
           headerBackTitle: 'Back',
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => router.back()}
+              style={styles.headerBackTouch}
+              activeOpacity={0.6}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <FontAwesome name="chevron-left" size={20} color={tintColor} />
+              <Text style={[styles.headerBackLabel, { color: tintColor }]}>Back</Text>
+            </TouchableOpacity>
+          ),
         }}
       />
 
@@ -627,6 +647,19 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#121212',
+  },
+  headerBackTouch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 44,
+    minWidth: 44,
+    paddingLeft: 8,
+    paddingRight: 16,
+    gap: 2,
+  },
+  headerBackLabel: {
+    fontSize: 17,
+    fontWeight: '400',
   },
   scrollContent: {
     padding: 16,
