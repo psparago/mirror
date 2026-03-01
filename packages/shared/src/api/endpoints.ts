@@ -10,4 +10,5 @@ export const API_ENDPOINTS = {
   AI_DESCRIPTION: 'https://us-central1-reflections-1200b.cloudfunctions.net/generate-ai-description',
   GET_BATCH_S3_UPLOAD_URLS: 'https://us-central1-reflections-1200b.cloudfunctions.net/get-batch-s3-upload-urls',
   GET_EVENT_BUNDLE: 'https://us-central1-reflections-1200b.cloudfunctions.net/get-event-bundle',
+  GET_VOICE_SAMPLE: 'https://us-central1-reflections-1200b.cloudfunctions.net/get-voice-sample',
 } as const;

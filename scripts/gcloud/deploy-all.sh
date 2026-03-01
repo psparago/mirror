@@ -172,7 +172,28 @@ else
 fi
 echo ""
 
-# Function 5: unsplash-search
+# Function 6: get-voice-sample
+echo -e "${YELLOW}Deploying get-voice-sample...${NC}"
+gcloud functions deploy get-voice-sample \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=GetVoiceSample \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars ${ENV_VARS} \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ get-voice-sample deployed successfully${NC}"
+else
+  echo -e "${RED}✗ get-voice-sample deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
+# Function 7: unsplash-search
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo -e "${YELLOW}Deploying unsplash-search...${NC}"
   
@@ -235,6 +256,7 @@ echo "  • list-mirror-events"
 echo "  • delete-mirror-event"
 echo "  • get-batch-s3-upload-urls"
 echo "  • get-event-bundle"
+echo "  • get-voice-sample"
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo "  • unsplash-search"
 fi

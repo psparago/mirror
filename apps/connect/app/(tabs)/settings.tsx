@@ -1,12 +1,14 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
+import { FontAwesome } from '@expo/vector-icons';
+import { API_ENDPOINTS, VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { Audio } from 'expo-av';
 import { Stack } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -98,6 +100,46 @@ export default function SettingsScreen() {
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
+  const [playingVoice, setPlayingVoice] = useState<string | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  const stopSample = useCallback(async () => {
+    if (soundRef.current) {
+      try { await soundRef.current.unloadAsync(); } catch { /* ignore */ }
+      soundRef.current = null;
+    }
+    setPlayingVoice(null);
+  }, []);
+
+  const playVoiceSample = useCallback(async (voiceValue: string) => {
+    if (playingVoice === voiceValue) {
+      await stopSample();
+      return;
+    }
+    await stopSample();
+    setPlayingVoice(voiceValue);
+    try {
+      const res = await fetch(`${API_ENDPOINTS.GET_VOICE_SAMPLE}?voice=${encodeURIComponent(voiceValue)}`);
+      if (!res.ok) throw new Error('Failed to fetch sample URL');
+      const { url } = await res.json();
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: url },
+        { shouldPlay: true }
+      );
+      soundRef.current = sound;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          stopSample();
+        }
+      });
+    } catch {
+      setPlayingVoice(null);
+    }
+  }, [playingVoice, stopSample]);
+
+  useEffect(() => {
+    return () => { stopSample(); };
+  }, [stopSample]);
 
   // STATE FOR ANDROID TIME PICKER (iOS doesn't need this)
   const [showTimePicker, setShowTimePicker] = useState(false);
@@ -211,6 +253,12 @@ export default function SettingsScreen() {
     } else if (voicePickerTarget === 'deep_dive') {
       saveVoicePreference(DEEP_DIVE_VOICE_STORAGE_KEY, voice.value, setDeepDiveVoice);
     }
+    stopSample();
+    setVoicePickerTarget(null);
+  };
+
+  const closeVoicePicker = () => {
+    stopSample();
     setVoicePickerTarget(null);
   };
 
@@ -512,7 +560,7 @@ export default function SettingsScreen() {
         visible={voicePickerTarget !== null}
         transparent
         animationType="slide"
-        onRequestClose={() => setVoicePickerTarget(null)}
+        onRequestClose={closeVoicePicker}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalSheet}>
@@ -526,6 +574,7 @@ export default function SettingsScreen() {
                   voicePickerTarget === 'caption'
                     ? captionVoice === voice.value
                     : deepDiveVoice === voice.value;
+                const isPlaying = playingVoice === voice.value;
                 return (
                   <TouchableOpacity
                     key={voice.value}
@@ -537,7 +586,23 @@ export default function SettingsScreen() {
                       <Text style={[styles.modalOptionLabel, isSelected && styles.modalOptionLabelActive]}>
                         {voice.label}
                       </Text>
-                      {isSelected && <Text style={styles.modalCheckmark}>✓</Text>}
+                      <View style={styles.modalOptionActions}>
+                        <TouchableOpacity
+                          onPress={(e) => {
+                            e.stopPropagation();
+                            playVoiceSample(voice.value);
+                          }}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          style={styles.sampleBtn}
+                        >
+                          <FontAwesome
+                            name={isPlaying ? 'stop-circle' : 'volume-up'}
+                            size={18}
+                            color={isPlaying ? '#ff6b6b' : '#5aadde'}
+                          />
+                        </TouchableOpacity>
+                        {isSelected && <Text style={styles.modalCheckmark}>✓</Text>}
+                      </View>
                     </View>
                     <Text style={styles.modalOptionDesc}>{voice.description}</Text>
                   </TouchableOpacity>
@@ -547,7 +612,7 @@ export default function SettingsScreen() {
 
             <TouchableOpacity
               style={styles.modalCloseBtn}
-              onPress={() => setVoicePickerTarget(null)}
+              onPress={closeVoicePicker}
             >
               <Text style={styles.modalCloseBtnText}>Cancel</Text>
             </TouchableOpacity>
@@ -794,6 +859,19 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 4,
+  },
+  modalOptionActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  sampleBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   modalOptionLabel: {
     color: '#fff',
