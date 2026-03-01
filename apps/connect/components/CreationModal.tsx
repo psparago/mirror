@@ -133,6 +133,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
   const pendingRouteRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
   const sourceTransitionLockRef = useRef(false);
+  const suppressPickerRecoveryRef = useRef(false);
+  const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
   const sheetRef = useRef<BottomSheet>(null);
 
   const beginSourceFlow = useCallback((route: '/camera' | '/gallery' | '/search') => {
@@ -146,6 +148,11 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     if (visible) {
       setPhase('picker');
       sourceTransitionLockRef.current = false;
+      suppressPickerRecoveryRef.current = false;
+      setTransitionUnlockTick((v) => v + 1);
+    } else {
+      // Reset one-shot suppression when modal is fully closed by parent.
+      suppressPickerRecoveryRef.current = false;
     }
   }, [visible]);
 
@@ -160,9 +167,24 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       // Keep lock briefly so sheet close callbacks can't immediately tear down the flow.
       setTimeout(() => {
         sourceTransitionLockRef.current = false;
+        setTransitionUnlockTick((v) => v + 1);
       }, 1200);
     });
   }, [phase, router]);
+
+  // If a source screen (camera/gallery/search) is dismissed without selecting media,
+  // we return to this screen focused but with no pending media. In that case, restore
+  // the picker sheet instead of staying on the "Opening creation tools..." overlay.
+  useEffect(() => {
+    if (!visible || !isFocused) return;
+    if (phase !== 'creating') return;
+    if (suppressPickerRecoveryRef.current) return;
+    if (sourceTransitionLockRef.current) return;
+    if (pendingRouteRef.current) return;
+    if (pendingMedia) return;
+    if (photo || showDescriptionInput) return;
+    setPhase('picker');
+  }, [visible, isFocused, phase, pendingMedia, photo, showDescriptionInput, transitionUnlockTick]);
 
   const initialActionTriggeredRef = useRef(false);
   useEffect(() => {
@@ -783,6 +805,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
 
       // 10. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
+      // On successful send, we want to fully close, not resurface picker.
+      suppressPickerRecoveryRef.current = true;
       setPhoto(null);
       setVideoUri(null);
       setMediaType('photo');
@@ -992,6 +1016,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   };
 
   const handleClose = () => {
+    // User-initiated cancel should preserve existing recovery behavior (sheet can resurface).
+    suppressPickerRecoveryRef.current = false;
     if (showDescriptionInput && photo) {
       cancelPhoto();
     }
