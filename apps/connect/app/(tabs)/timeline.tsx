@@ -1,6 +1,7 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useExplorer } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
@@ -36,8 +37,33 @@ export default function SentTimelineScreen() {
   const [selfieImageUrl, setSelfieImageUrl] = useState<string | null>(null);
   const [loadingSelfie, setLoadingSelfie] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Increment to force refresh
-  const [filterMode, setFilterMode] = useState<'mine' | 'all'>('mine');
-  const [sortBy, setSortBy] = useState<'recent' | 'impact'>('recent');
+  const [filterMode, setFilterModeState] = useState<'mine' | 'all'>('mine');
+  const [sortBy, setSortByState] = useState<'recent' | 'sent' | 'impact'>('recent');
+
+  const SORT_STORAGE_KEY = 'timeline_sort_order';
+  const FILTER_STORAGE_KEY = 'timeline_filter_mode';
+  const VALID_SORTS = new Set(['recent', 'sent', 'impact']);
+  const VALID_FILTERS = new Set(['mine', 'all']);
+
+  useEffect(() => {
+    Promise.all([
+      AsyncStorage.getItem(SORT_STORAGE_KEY),
+      AsyncStorage.getItem(FILTER_STORAGE_KEY),
+    ]).then(([sort, filter]) => {
+      if (sort && VALID_SORTS.has(sort)) setSortByState(sort as typeof sortBy);
+      if (filter && VALID_FILTERS.has(filter)) setFilterModeState(filter as typeof filterMode);
+    }).catch(() => {});
+  }, []);
+
+  const setSortBy = useCallback((val: typeof sortBy) => {
+    setSortByState(val);
+    AsyncStorage.setItem(SORT_STORAGE_KEY, val).catch(() => {});
+  }, []);
+
+  const setFilterMode = useCallback((val: typeof filterMode) => {
+    setFilterModeState(val);
+    AsyncStorage.setItem(FILTER_STORAGE_KEY, val).catch(() => {});
+  }, []);
   const metadataCache = useRef<Map<string, any>>(new Map());
   const METADATA_CACHE_MAX = 50;
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
@@ -59,6 +85,7 @@ export default function SentTimelineScreen() {
 
   const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
   const currentIdentity = activeRelationship?.companionName || null;
+  const snapshotGenRef = useRef(0);
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
@@ -86,22 +113,26 @@ export default function SentTimelineScreen() {
       return 0;
     };
 
-    // Sort by RESPONSE timestamp (viewed time) - most recent first
-    // If no response, use sent timestamp (original sent time, not engagement time)
     result.sort((a, b) => {
       if (sortBy === 'impact') {
-        // Calculate score: Engagement count + 1 bonus point if there is a selfie response
         const scoreA = (a.engagementCount || 0) + (responseEventIds.has(a.event_id) ? 1 : 0);
         const scoreB = (b.engagementCount || 0) + (responseEventIds.has(b.event_id) ? 1 : 0);
-
         const diff = scoreB - scoreA;
         if (diff !== 0) return diff;
       }
+
+      if (sortBy === 'sent') {
+        const aId = parseInt(a.event_id, 10) || 0;
+        const bId = parseInt(b.event_id, 10) || 0;
+        return bId - aId;
+      }
+
+      // 'recent' (default) and 'impact' tiebreaker: response timestamp, then sent timestamp
       const aResponseTs = responseTimestampMap.get(a.event_id);
       const bResponseTs = responseTimestampMap.get(b.event_id);
       const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.sentTimestamp || a.timestamp);
       const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.sentTimestamp || b.timestamp);
-      return bTime - aTime; // Most recent first
+      return bTime - aTime;
     });
 
     return result;
@@ -184,6 +215,8 @@ export default function SentTimelineScreen() {
     const unsubscribe = onSnapshot(
       q,
       async (snapshot: QuerySnapshot) => {
+        const gen = ++snapshotGenRef.current;
+
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
 
@@ -320,6 +353,7 @@ export default function SentTimelineScreen() {
         let allMirrorEventsMap = new Map<string, any>();
         try {
           const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
+          if (gen !== snapshotGenRef.current) return; // stale — newer snapshot arrived
           if (eventsResponse.ok) {
             const eventsData = await eventsResponse.json();
             (eventsData.events || []).forEach((e: any) => {
@@ -388,6 +422,7 @@ export default function SentTimelineScreen() {
           });
 
         const reflectionsList = await Promise.all(reflectionPromises);
+        if (gen !== snapshotGenRef.current) return; // stale — newer snapshot arrived
 
         // Store Event objects in state for replay functionality
         const eventsMap = new Map<string, Event>();
@@ -708,6 +743,14 @@ export default function SentTimelineScreen() {
             >
               <FontAwesome name="clock-o" size={12} color={sortBy === 'recent' ? '#4FC3F7' : '#aaa'} style={{ marginRight: 4 }} />
               <Text style={[styles.sortText, sortBy === 'recent' && styles.sortTextActive]}>Recent</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sortButton, sortBy === 'sent' && styles.sortButtonActive]}
+              onPress={() => setSortBy('sent')}
+            >
+              <FontAwesome name="paper-plane" size={12} color={sortBy === 'sent' ? '#4FC3F7' : '#aaa'} style={{ marginRight: 4 }} />
+              <Text style={[styles.sortText, sortBy === 'sent' && styles.sortTextActive]}>Sent</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
