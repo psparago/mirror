@@ -8,7 +8,6 @@ import {
   deleteDoc,
   doc,
   getDoc,
-  getDocs,
   increment,
   limit,
   onSnapshot,
@@ -51,7 +50,6 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
-  const [senderIdMap, setSenderIdMap] = useState<Record<string, string>>({});
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const selfieUploadInFlightRef = useRef(false);
 
@@ -85,42 +83,18 @@ export default function HomeScreen() {
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
 
-  // Load sender_id mapping from Firestore (the backfill wrote sender_id there,
-  // but S3 metadata.json files don't have it for older reflections)
-  useEffect(() => {
-    if (!currentExplorerId) return;
-    const q = query(
-      collection(db, ExplorerConfig.collections.reflections),
-      where('explorerId', '==', currentExplorerId)
-    );
-    getDocs(q).then(snap => {
-      const map: Record<string, string> = {};
-      snap.forEach(d => {
-        const sid = d.data().sender_id;
-        if (sid) map[d.id] = sid;
-      });
-      setSenderIdMap(map);
-    }).catch(() => {});
-  }, [currentExplorerId]);
-
   const filteredEvents = useMemo(() => {
     if (!selectedCompanionId) return events;
     const companion = companions.find(c => c.userId === selectedCompanionId);
     if (!companion) return events;
 
-    const senderMapSize = Object.keys(senderIdMap).length;
-
     return events.filter(e => {
-      const firestoreSenderId = senderIdMap[e.event_id];
-      if (firestoreSenderId) return firestoreSenderId === selectedCompanionId;
-
       const meta = eventMetadata[e.event_id];
       if (meta?.sender_id) return meta.sender_id === selectedCompanionId;
       if (meta?.sender) return meta.sender.toLowerCase() === companion.companionName.toLowerCase();
-
-      return !meta && (senderMapSize === 0);
+      return false;
     });
-  }, [events, eventMetadata, senderIdMap, selectedCompanionId, companions]);
+  }, [events, eventMetadata, selectedCompanionId, companions]);
 
   // When filter changes, ensure selectedEvent is still in the filtered list
   useEffect(() => {
@@ -604,19 +578,13 @@ export default function HomeScreen() {
         // 2. Check for added and removed reflections
         const newReflectionIds: string[] = [];
         const removedReflectionIds: string[] = [];
-        const newSenderIds: Record<string, string> = {};
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             newReflectionIds.push(change.doc.id);
-            const sid = change.doc.data().sender_id;
-            if (sid) newSenderIds[change.doc.id] = sid;
           } else if (change.type === 'removed') {
             removedReflectionIds.push(change.doc.id);
           }
         });
-        if (Object.keys(newSenderIds).length > 0) {
-          setSenderIdMap(prev => ({ ...prev, ...newSenderIds }));
-        }
 
         // Remove deleted reflections from local state immediately
         if (removedReflectionIds.length > 0) {

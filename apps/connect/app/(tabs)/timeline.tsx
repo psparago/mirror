@@ -108,7 +108,6 @@ export default function SentTimelineScreen() {
     // Filter by selected companion avatar (null = show all)
     if (selectedCompanionId) {
       const companion = companions.find(c => c.userId === selectedCompanionId);
-      console.log(`[AvatarFilter] filtering for ${selectedCompanionId}, companion: ${companion?.companionName}, reflections: ${result.length}, sample senders: ${result.slice(0, 3).map(r => `${r.sender}|${r.sender_id}`).join(', ')}`);
       if (companion) {
         result = result.filter(r => {
           if (r.sender_id) return r.sender_id === selectedCompanionId;
