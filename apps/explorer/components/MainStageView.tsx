@@ -1907,8 +1907,6 @@ const styles = StyleSheet.create({
     left: 20,
     right: 20,
     zIndex: 90,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255, 255, 255, 0.15)',
   },
 
   reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },

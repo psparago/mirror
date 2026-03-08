@@ -91,7 +91,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 12,
     paddingTop: 4,
-    paddingBottom: 14,
+    paddingBottom: 6,
     gap: 14,
   },
   avatarItem: {

@@ -8,6 +8,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   increment,
   limit,
   onSnapshot,
@@ -50,6 +51,7 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
+  const [senderIdMap, setSenderIdMap] = useState<Record<string, string>>({});
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const selfieUploadInFlightRef = useRef(false);
 
@@ -71,36 +73,6 @@ export default function HomeScreen() {
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
-  const filteredEvents = useMemo(() => {
-    if (!selectedCompanionId) {
-      console.log(`[ExplorerFilter] ALL selected, showing ${events.length} events`);
-      return events;
-    }
-    const companion = companions.find(c => c.userId === selectedCompanionId);
-    if (!companion) return events;
-    const metaCount = Object.keys(eventMetadata).length;
-    const filtered = events.filter(e => {
-      const meta = eventMetadata[e.event_id];
-      if (!meta) return true;
-      if (meta.sender_id) return meta.sender_id === selectedCompanionId;
-      if (meta.sender) return meta.sender.toLowerCase() === companion.companionName.toLowerCase();
-      return true;
-    });
-    console.log(`[ExplorerFilter] companion: ${companion.companionName}, events: ${events.length}, metaLoaded: ${metaCount}, filtered: ${filtered.length}`);
-    return filtered;
-  }, [events, eventMetadata, selectedCompanionId, companions]);
-
-  // When filter changes, ensure selectedEvent is still in the filtered list
-  useEffect(() => {
-    if (!selectedEvent) return;
-    const stillVisible = filteredEvents.some(e => e.event_id === selectedEvent.event_id);
-    if (!stillVisible && filteredEvents.length > 0) {
-      setSelectedEvent(filteredEvents[0]);
-    } else if (!stillVisible && filteredEvents.length === 0) {
-      setSelectedEvent(null);
-    }
-  }, [filteredEvents, selectedEvent]);
-
   // Explorer config with state for toggleable settings
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
@@ -112,6 +84,54 @@ export default function HomeScreen() {
   // Companion avatar filter
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
+
+  // Load sender_id mapping from Firestore (the backfill wrote sender_id there,
+  // but S3 metadata.json files don't have it for older reflections)
+  useEffect(() => {
+    if (!currentExplorerId) return;
+    const q = query(
+      collection(db, ExplorerConfig.collections.reflections),
+      where('explorerId', '==', currentExplorerId)
+    );
+    getDocs(q).then(snap => {
+      const map: Record<string, string> = {};
+      snap.forEach(d => {
+        const sid = d.data().sender_id;
+        if (sid) map[d.id] = sid;
+      });
+      setSenderIdMap(map);
+    }).catch(() => {});
+  }, [currentExplorerId]);
+
+  const filteredEvents = useMemo(() => {
+    if (!selectedCompanionId) return events;
+    const companion = companions.find(c => c.userId === selectedCompanionId);
+    if (!companion) return events;
+
+    const senderMapSize = Object.keys(senderIdMap).length;
+
+    return events.filter(e => {
+      const firestoreSenderId = senderIdMap[e.event_id];
+      if (firestoreSenderId) return firestoreSenderId === selectedCompanionId;
+
+      const meta = eventMetadata[e.event_id];
+      if (meta?.sender_id) return meta.sender_id === selectedCompanionId;
+      if (meta?.sender) return meta.sender.toLowerCase() === companion.companionName.toLowerCase();
+
+      return !meta && (senderMapSize === 0);
+    });
+  }, [events, eventMetadata, senderIdMap, selectedCompanionId, companions]);
+
+  // When filter changes, ensure selectedEvent is still in the filtered list
+  useEffect(() => {
+    if (!selectedEvent) return;
+    const stillVisible = filteredEvents.some(e => e.event_id === selectedEvent.event_id);
+    if (!stillVisible && filteredEvents.length > 0) {
+      setSelectedEvent(filteredEvents[0]);
+    } else if (!stillVisible && filteredEvents.length === 0) {
+      setSelectedEvent(null);
+    }
+  }, [filteredEvents, selectedEvent]);
 
   // Load settings from storage
   useEffect(() => {
@@ -584,13 +604,19 @@ export default function HomeScreen() {
         // 2. Check for added and removed reflections
         const newReflectionIds: string[] = [];
         const removedReflectionIds: string[] = [];
+        const newSenderIds: Record<string, string> = {};
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             newReflectionIds.push(change.doc.id);
+            const sid = change.doc.data().sender_id;
+            if (sid) newSenderIds[change.doc.id] = sid;
           } else if (change.type === 'removed') {
             removedReflectionIds.push(change.doc.id);
           }
         });
+        if (Object.keys(newSenderIds).length > 0) {
+          setSenderIdMap(prev => ({ ...prev, ...newSenderIds }));
+        }
 
         // Remove deleted reflections from local state immediately
         if (removedReflectionIds.length > 0) {
