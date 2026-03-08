@@ -23,5 +23,8 @@ export * from './explorer/ExplorerContext';
 // Components
 export { default as VersionDisplay } from './components/VersionDisplay';
 
+// Utilities
+export * from './utils/avatarDefaults';
+
 // State machines
 export * from './machines/playerMachine';

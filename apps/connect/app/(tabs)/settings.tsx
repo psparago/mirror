@@ -1,12 +1,15 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, VersionDisplay, useAuth, useExplorer } from '@projectmirror/shared';
-import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
+import { db, doc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
+import { Image } from 'expo-image';
+import * as ImagePicker from 'expo-image-picker';
 import { Stack, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -77,6 +80,8 @@ const VOICE_OPTIONS = [
 ] as const;
 const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 
+type SettingsTab = 'identity' | 'preferences' | 'account';
+
 export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
@@ -87,10 +92,11 @@ export default function SettingsScreen() {
   const { activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
   const { relationships, loading: relationshipsLoading } = useRelationships(user?.uid);
 
-  // 👇 INITIALIZE THE HOOK
-  // We pass the explorerName so the "First Time Alert" can use it
   const { reminder, schedule, cancel, updateSettings, loading: reminderLoading } =
     useDailyReminder(explorerName, { promptOnFirstRun: false });
+
+  // TAB STATE
+  const [activeTab, setActiveTab] = useState<SettingsTab>('identity');
 
   // LOCAL STATE
   const [nameInput, setNameInput] = useState<string>('');
@@ -98,6 +104,11 @@ export default function SettingsScreen() {
   const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
   const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+
+  const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
+  const avatarColor = getAvatarColor(user?.uid || '');
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
@@ -189,17 +200,92 @@ export default function SettingsScreen() {
     }
   }, [activeRelationship?.id, activeRelationship?.companionName]);
 
+  useEffect(() => {
+    if (!activeRelationship?.id) { setAvatarUrl(null); return; }
+    const unsub = onSnapshot(
+      doc(db, 'relationships', activeRelationship.id),
+      async (snap: any) => {
+        const data = snap.data();
+        const s3Key = data?.companionAvatarS3Key;
+        if (!s3Key) { setAvatarUrl(null); return; }
+        try {
+          const explorerId = activeRelationship.explorerId;
+          const res = await fetch(
+            `${API_ENDPOINTS.GET_S3_URL}?explorer_id=${explorerId}&event_id=${user?.uid}&filename=avatar.jpg&path=avatars&method=GET`
+          );
+          if (res.ok) {
+            const { url } = await res.json();
+            setAvatarUrl(url);
+          }
+        } catch {
+          setAvatarUrl(null);
+        }
+      }
+    );
+    return () => unsub();
+  }, [activeRelationship?.id, activeRelationship?.explorerId, user?.uid]);
+
+  const pickAvatar = useCallback(async (source: 'camera' | 'library') => {
+    if (!activeRelationship?.id || !user?.uid) return;
+
+    let result: ImagePicker.ImagePickerResult;
+    if (source === 'camera') {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission Required', 'Camera access is needed to take a photo.'); return; }
+      result = await ImagePicker.launchCameraAsync({ allowsEditing: true, aspect: [1, 1], quality: 0.7, cameraType: ImagePicker.CameraType.front });
+    } else {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission Required', 'Photo library access is needed.'); return; }
+      result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.7 });
+    }
+
+    if (result.canceled || !result.assets?.[0]) return;
+    const localUri = result.assets[0].uri;
+
+    setUploadingAvatar(true);
+    try {
+      const explorerId = activeRelationship.explorerId;
+
+      const presignRes = await fetch(
+        `${API_ENDPOINTS.GET_S3_URL}?explorer_id=${explorerId}&event_id=${user.uid}&filename=avatar.jpg&path=avatars`
+      );
+      if (!presignRes.ok) throw new Error('Failed to get upload URL');
+      const { url: presignedUrl } = await presignRes.json();
+
+      const uploadRes = await FileSystem.uploadAsync(presignedUrl, localUri, {
+        httpMethod: 'PUT',
+        headers: { 'Content-Type': 'image/jpeg' },
+      });
+      if (uploadRes.status !== 200) throw new Error(`Upload failed: ${uploadRes.status}`);
+
+      const s3Key = `${explorerId}/avatars/${user.uid}/avatar.jpg`;
+      await setDoc(doc(db, 'relationships', activeRelationship.id), {
+        companionAvatarS3Key: s3Key,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    } catch (err: any) {
+      console.error('Avatar upload failed:', err);
+      Alert.alert('Upload Failed', 'Could not save your photo. Please try again.');
+    } finally {
+      setUploadingAvatar(false);
+    }
+  }, [activeRelationship?.id, activeRelationship?.explorerId, user?.uid]);
+
+  const showAvatarPicker = useCallback(() => {
+    Alert.alert('Profile Photo', 'Choose a photo that represents you.', [
+      { text: 'Take a Selfie', onPress: () => pickAvatar('camera') },
+      { text: 'Choose from Library', onPress: () => pickAvatar('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [pickAvatar]);
+
   // --- HANDLERS ---
 
-  // Handle Time Picker Selection
   const onTimeChange = (event: any, selectedDate?: Date) => {
-    // Android closes the picker automatically
     if (Platform.OS === 'android') setShowTimePicker(false);
-
     if (selectedDate && event.type !== 'dismissed') {
       const h = selectedDate.getHours();
       const m = selectedDate.getMinutes();
-      // Preserve the currently selected reminder action (camera/gallery/home)
       schedule(h, m, reminder.action);
     }
   };
@@ -271,6 +357,303 @@ export default function SettingsScreen() {
     setVoicePickerTarget(null);
   };
 
+  // --- TAB CONTENT ---
+
+  const renderIdentityTab = () => (
+    <>
+      <View style={styles.section}>
+        <View style={styles.card}>
+          {activeRelationship ? (
+            <>
+              <View style={styles.avatarRow}>
+                <TouchableOpacity onPress={showAvatarPicker} disabled={uploadingAvatar} activeOpacity={0.7} style={styles.avatarTouchable}>
+                  <View style={[styles.avatarCircle, !avatarUrl && !uploadingAvatar && { backgroundColor: avatarColor }]}>
+                    {uploadingAvatar ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : avatarUrl ? (
+                      <Image source={{ uri: avatarUrl }} style={styles.avatarImage} contentFit="cover" />
+                    ) : (
+                      <Text style={styles.avatarInitial}>{avatarInitial}</Text>
+                    )}
+                  </View>
+                  <View style={styles.avatarBadge}>
+                    <FontAwesome name="camera" size={10} color="#fff" />
+                  </View>
+                </TouchableOpacity>
+                <View style={styles.avatarTextCol}>
+                  <Text style={styles.label}>
+                    My Name for Explorer <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
+                  </Text>
+                  <Text style={styles.description}>
+                    Tap the photo to set how you appear to this Explorer.
+                  </Text>
+                </View>
+              </View>
+
+              <TextInput
+                style={styles.input}
+                placeholder="Enter your name (e.g., Dad, Uncle Mike)"
+                placeholderTextColor="#666"
+                value={nameInput}
+                onChangeText={setNameInput}
+                autoCapitalize="words"
+                editable={!saving}
+              />
+              <TouchableOpacity
+                style={[
+                  styles.saveButton,
+                  (!nameInput.trim() || saving) && styles.saveButtonDisabled
+                ]}
+                onPress={saveCompanionName}
+                disabled={!nameInput.trim() || saving}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.saveButtonText}>Save Name</Text>
+                )}
+              </TouchableOpacity>
+            </>
+          ) : (
+            <View style={{ padding: 10, alignItems: 'center' }}>
+              <Text style={{ color: '#888', fontStyle: 'italic' }}>
+                {explorerLoading ? "Loading explorer..." : "Link an Explorer to set your identity."}
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    </>
+  );
+
+  const renderPreferencesTab = () => (
+    <>
+      {/* Notifications */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>Notifications</Text>
+        <View style={styles.card}>
+          <View style={[styles.row, { marginBottom: 0 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>Daily Reminder</Text>
+              <Text style={styles.description}>
+                Get a daily nudge to send a Reflection.
+              </Text>
+            </View>
+            {reminderLoading ? (
+              <ActivityIndicator size="small" />
+            ) : (
+              <Switch
+                value={reminder.enabled}
+                onValueChange={(val) => {
+                  if (val) schedule(19, 0, 'camera');
+                  else cancel();
+                }}
+                trackColor={{ false: '#333', true: '#2e78b7' }}
+                thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
+              />
+            )}
+          </View>
+
+          {reminder.enabled && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.row}>
+                <Text style={styles.rowLabel}>Time</Text>
+
+                {Platform.OS === 'ios' ? (
+                  <DateTimePicker
+                    value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
+                    mode="time"
+                    display="compact"
+                    themeVariant="dark"
+                    onChange={onTimeChange}
+                    style={{ width: 100 }}
+                  />
+                ) : (
+                  <TouchableOpacity onPress={() => setShowTimePicker(true)}>
+                    <Text style={styles.linkText}>
+                      {formatTime(reminder.hour, reminder.minute)}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <View style={styles.divider} />
+              <View style={{ marginBottom: 10 }}>
+                <Text style={styles.rowLabel}>On Tap, Open:</Text>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={[styles.actionBtn, reminder.action === 'none' && styles.actionBtnActive]}
+                    onPress={() => updateSettings({ action: 'none' })}
+                  >
+                    <Text style={[styles.actionText, reminder.action === 'none' && styles.actionTextActive]}>
+                      Home
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.actionBtn, reminder.action === 'camera' && styles.actionBtnActive]}
+                    onPress={() => updateSettings({ action: 'camera' })}
+                  >
+                    <Text style={[styles.actionText, reminder.action === 'camera' && styles.actionTextActive]}>
+                      Camera
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.actionBtn, reminder.action === 'gallery' && styles.actionBtnActive]}
+                    onPress={() => updateSettings({ action: 'gallery' })}
+                  >
+                    <Text style={[styles.actionText, reminder.action === 'gallery' && styles.actionTextActive]}>
+                      Gallery
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <Text style={[styles.helperText, { marginTop: -10, marginBottom: 10 }]}>
+                We'll remind you every day at {formatTime(reminder.hour, reminder.minute)}.
+              </Text>
+            </>
+          )}
+
+          {showTimePicker && Platform.OS === 'android' && (
+            <DateTimePicker
+              value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
+              mode="time"
+              display="default"
+              onChange={onTimeChange}
+            />
+          )}
+        </View>
+      </View>
+
+      {/* Voice Preferences */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>Voice</Text>
+        <View style={styles.card}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Caption Voice</Text>
+            <TouchableOpacity onPress={() => setVoicePickerTarget('caption')}>
+              <Text style={styles.linkText}>{getVoiceLabel(captionVoice)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={[styles.row, { marginBottom: 0 }]}>
+            <Text style={styles.rowLabel}>Deep Dive Voice</Text>
+            <TouchableOpacity onPress={() => setVoicePickerTarget('deep_dive')}>
+              <Text style={styles.linkText}>{getVoiceLabel(deepDiveVoice)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={[styles.helperText, { marginTop: 12 }]}>
+            Your selected voice is used when AI generates caption and deep dive audio.
+          </Text>
+        </View>
+      </View>
+    </>
+  );
+
+  const renderAccountTab = () => (
+    <>
+      {/* My Explorers */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>My Explorers</Text>
+        {relationshipsLoading ? (
+          <ActivityIndicator />
+        ) : relationships.length === 0 ? (
+          <Text style={styles.helperText}>No explorers linked yet.</Text>
+        ) : (
+          relationships.map((rel) => (
+            <View key={rel.id} style={styles.explorerCard}>
+              <View style={styles.explorerCardRow}>
+                <Text style={styles.explorerCardLabel}>ID:</Text>
+                <Text style={styles.explorerCardValue}>{rel.explorerId}</Text>
+              </View>
+              <View style={styles.explorerCardRow}>
+                <Text style={styles.explorerCardLabel}>My Name:</Text>
+                <Text style={styles.explorerCardValue}>{rel.companionName}</Text>
+              </View>
+              <View style={styles.explorerCardRow}>
+                <Text style={styles.explorerCardLabel}>Role:</Text>
+                <Text style={styles.explorerCardValue}>{rel.role}</Text>
+              </View>
+              {activeRelationship?.id === rel.id && (
+                <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
+                  <Text style={{ color: '#2e78b7', fontSize: 12, fontWeight: 'bold' }}>CURRENTLY SELECTED</Text>
+                </View>
+              )}
+            </View>
+          ))
+        )}
+      </View>
+
+      {/* Account */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
+        <View style={styles.card}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Signed in as</Text>
+            <Text
+              style={[styles.rowValue, { flex: 1, textAlign: 'right', marginLeft: 16 }]}
+              numberOfLines={1}
+              ellipsizeMode="middle"
+            >
+              {user?.email || 'Unknown'}
+            </Text>
+          </View>
+
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>Provider</Text>
+            <Text style={styles.rowValue}>
+              {user?.providerData[0]?.providerId || 'Unknown'}
+            </Text>
+          </View>
+
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>User ID</Text>
+            <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]}>
+              {user?.uid}
+            </Text>
+          </View>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={styles.logoutButton}
+            onPress={handleLogout}
+          >
+            <Text style={styles.logoutText}>Log Out</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* App Information */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
+        <View style={styles.card}>
+          <VersionDisplay />
+          {lastOtaLabel != null ? (
+            <View style={[styles.row, { marginTop: 12 }]}>
+              <Text style={styles.rowLabel}>Last OTA</Text>
+              <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]} numberOfLines={1}>
+                {lastOtaLabel}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+    </>
+  );
+
+  const TABS: { key: SettingsTab; label: string; icon: React.ComponentProps<typeof FontAwesome>['name'] }[] = [
+    { key: 'identity', label: 'Identity', icon: 'user-circle' },
+    { key: 'preferences', label: 'Preferences', icon: 'sliders' },
+    { key: 'account', label: 'Account', icon: 'cog' },
+  ];
+
   return (
     <View style={styles.container}>
       <Stack.Screen
@@ -291,287 +674,51 @@ export default function SettingsScreen() {
         }}
       />
 
+      {/* Explorer Context Banner */}
+      <View style={styles.explorerBanner}>
+        {explorerLoading ? (
+          <ActivityIndicator size="small" color="#aaa" />
+        ) : activeRelationship ? (
+          <Text style={styles.explorerBannerText}>
+            <FontAwesome name="heart" size={13} color="#E57373" />{' '}
+            Settings for Explorer <Text style={styles.explorerBannerName}>{explorerName || activeRelationship.explorerId}</Text>
+          </Text>
+        ) : (
+          <Text style={styles.explorerBannerText}>No Explorer linked</Text>
+        )}
+      </View>
+
+      {/* Tab Bar */}
+      <View style={styles.tabBar}>
+        {TABS.map((tab) => {
+          const isActive = activeTab === tab.key;
+          return (
+            <TouchableOpacity
+              key={tab.key}
+              style={[styles.tab, isActive && styles.tabActive]}
+              onPress={() => setActiveTab(tab.key)}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name={tab.icon} size={14} color={isActive ? '#fff' : '#888'} />
+              <Text style={[styles.tabLabel, isActive && styles.tabLabelActive]}>{tab.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
-
-          {/* SECTION: IDENTITY */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>Identity</Text>
-            <View style={styles.card}>
-              {activeRelationship ? (
-                <>
-                  <Text style={styles.label}>
-                    My Name for <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
-                  </Text>
-                  <Text style={styles.description}>
-                    This is how you will appear to this specific Explorer.
-                  </Text>
-
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Enter your name (e.g., Dad, Uncle Mike)"
-                    placeholderTextColor="#666"
-                    value={nameInput}
-                    onChangeText={setNameInput}
-                    autoCapitalize="words"
-                    editable={!saving}
-                  />
-                  <TouchableOpacity
-                    style={[
-                      styles.saveButton,
-                      (!nameInput.trim() || saving) && styles.saveButtonDisabled
-                    ]}
-                    onPress={saveCompanionName}
-                    disabled={!nameInput.trim() || saving}
-                  >
-                    {saving ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={styles.saveButtonText}>Save Name</Text>
-                    )}
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <View style={{ padding: 10, alignItems: 'center' }}>
-                  <Text style={{ color: '#888', fontStyle: 'italic' }}>
-                    {explorerLoading ? "Loading explorer..." : "Link an Explorer to set your identity."}
-                  </Text>
-                </View>
-              )}
-            </View>
-          </View>
-
-          {/* --------------------------------------------------------- */}
-          {/* SECTION: NOTIFICATIONS (DAILY REMINDER)                   */}
-          {/* --------------------------------------------------------- */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>Notifications</Text>
-            <View style={styles.card}>
-              <View style={[styles.row, { marginBottom: 0 }]}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.rowLabel}>Daily Reminder</Text>
-                  <Text style={styles.description}>
-                    Get a daily nudge to send a Reflection.
-                  </Text>
-                </View>
-                {reminderLoading ? (
-                  <ActivityIndicator size="small" />
-                ) : (
-                  <Switch
-                    value={reminder.enabled}
-                    onValueChange={(val) => {
-                      if (val) schedule(19, 0, 'camera'); // Default to 7 PM on enable
-                      else cancel();
-                    }}
-                    trackColor={{ false: '#333', true: '#2e78b7' }}
-                    thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
-                  />
-                )}
-              </View>
-
-              {/* Show Time Picker ONLY if enabled */}
-              {reminder.enabled && (
-                <>
-                  <View style={styles.divider} />
-                  <View style={styles.row}>
-                    <Text style={styles.rowLabel}>Time</Text>
-
-                    {Platform.OS === 'ios' ? (
-                      // iOS: Inline Picker
-                      <DateTimePicker
-                        value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
-                        mode="time"
-                        display="compact"
-                        themeVariant="dark"
-                        onChange={onTimeChange}
-                        style={{ width: 100 }}
-                      />
-                    ) : (
-                      // Android: Touchable Text -> Opens Modal
-                      <TouchableOpacity onPress={() => setShowTimePicker(true)}>
-                        <Text style={styles.linkText}>
-                          {formatTime(reminder.hour, reminder.minute)}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  <View style={styles.divider} />
-                  <View style={{ marginBottom: 10 }}>
-                    <Text style={styles.rowLabel}>On Tap, Open:</Text>
-                    <View style={styles.actionRow}>
-                      {/* OPTION 1: NONE */}
-                      <TouchableOpacity
-                        style={[styles.actionBtn, reminder.action === 'none' && styles.actionBtnActive]}
-                        onPress={() => updateSettings({ action: 'none' })}
-                      >
-                        <Text style={[styles.actionText, reminder.action === 'none' && styles.actionTextActive]}>
-                          Home
-                        </Text>
-                      </TouchableOpacity>
-
-                      {/* OPTION 2: CAMERA */}
-                      <TouchableOpacity
-                        style={[styles.actionBtn, reminder.action === 'camera' && styles.actionBtnActive]}
-                        onPress={() => updateSettings({ action: 'camera' })}
-                      >
-                        <Text style={[styles.actionText, reminder.action === 'camera' && styles.actionTextActive]}>
-                          Camera
-                        </Text>
-                      </TouchableOpacity>
-
-                      {/* OPTION 3: GALLERY */}
-                      <TouchableOpacity
-                        style={[styles.actionBtn, reminder.action === 'gallery' && styles.actionBtnActive]}
-                        onPress={() => updateSettings({ action: 'gallery' })}
-                      >
-                        <Text style={[styles.actionText, reminder.action === 'gallery' && styles.actionTextActive]}>
-                          Gallery
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-
-                  <Text style={[styles.helperText, { marginTop: -10, marginBottom: 10 }]}>
-                    We'll remind you every day at {formatTime(reminder.hour, reminder.minute)}.
-                  </Text>
-                </>
-              )}
-
-              {/* Android Modal Picker (Hidden by default) */}
-              {showTimePicker && Platform.OS === 'android' && (
-                <DateTimePicker
-                  value={new Date(new Date().setHours(reminder.hour, reminder.minute))}
-                  mode="time"
-                  display="default"
-                  onChange={onTimeChange}
-                />
-              )}
-            </View>
-          </View>
-
-          {/* SECTION: VOICE PREFERENCES */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>Voice Preferences</Text>
-            <View style={styles.card}>
-              <View style={styles.row}>
-                <Text style={styles.rowLabel}>Caption Voice</Text>
-                <TouchableOpacity onPress={() => setVoicePickerTarget('caption')}>
-                  <Text style={styles.linkText}>{getVoiceLabel(captionVoice)}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.divider} />
-
-              <View style={[styles.row, { marginBottom: 0 }]}>
-                <Text style={styles.rowLabel}>Deep Dive Voice</Text>
-                <TouchableOpacity onPress={() => setVoicePickerTarget('deep_dive')}>
-                  <Text style={styles.linkText}>{getVoiceLabel(deepDiveVoice)}</Text>
-                </TouchableOpacity>
-              </View>
-
-              <Text style={[styles.helperText, { marginTop: 12 }]}>
-                Your selected voice is used when AI generates caption and deep dive audio.
-              </Text>
-            </View>
-          </View>
-
-          {/* SECTION: MY EXPLORERS */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>My Explorers</Text>
-            {relationshipsLoading ? (
-              <ActivityIndicator />
-            ) : relationships.length === 0 ? (
-              <Text style={styles.helperText}>No explorers linked yet.</Text>
-            ) : (
-              relationships.map((rel) => (
-                <View key={rel.id} style={styles.explorerCard}>
-                  <View style={styles.explorerCardRow}>
-                    <Text style={styles.explorerCardLabel}>ID:</Text>
-                    <Text style={styles.explorerCardValue}>{rel.explorerId}</Text>
-                  </View>
-                  <View style={styles.explorerCardRow}>
-                    <Text style={styles.explorerCardLabel}>My Name:</Text>
-                    <Text style={styles.explorerCardValue}>{rel.companionName}</Text>
-                  </View>
-                  <View style={styles.explorerCardRow}>
-                    <Text style={styles.explorerCardLabel}>Role:</Text>
-                    <Text style={styles.explorerCardValue}>{rel.role}</Text>
-                  </View>
-                  {activeRelationship?.id === rel.id && (
-                    <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#333' }}>
-                      <Text style={{ color: '#2e78b7', fontSize: 12, fontWeight: 'bold' }}>CURRENTLY SELECTED</Text>
-                    </View>
-                  )}
-                </View>
-              ))
-            )}
-          </View>
-
-          {/* SECTION: ACCOUNT */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>Account</Text>
-            <View style={styles.card}>
-              <View style={styles.row}>
-                <Text style={styles.rowLabel}>Signed in as</Text>
-                <Text
-                  style={[styles.rowValue, { flex: 1, textAlign: 'right', marginLeft: 16 }]}
-                  numberOfLines={1}
-                  ellipsizeMode="middle"
-                >
-                  {user?.email || 'Unknown'}
-                </Text>
-              </View>
-
-              <View style={styles.row}>
-                <Text style={styles.rowLabel}>Provider</Text>
-                <Text style={styles.rowValue}>
-                  {user?.providerData[0]?.providerId || 'Unknown'}
-                </Text>
-              </View>
-
-              <View style={styles.row}>
-                <Text style={styles.rowLabel}>User ID</Text>
-                <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]}>
-                  {user?.uid}
-                </Text>
-              </View>
-
-              <View style={styles.divider} />
-
-              <TouchableOpacity
-                style={styles.logoutButton}
-                onPress={handleLogout}
-              >
-                <Text style={styles.logoutText}>Log Out</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {/* SECTION: INFO */}
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
-            <View style={styles.card}>
-              <VersionDisplay />
-              {lastOtaLabel != null ? (
-                <View style={[styles.row, { marginTop: 12 }]}>
-                  <Text style={styles.rowLabel}>Last OTA</Text>
-                  <Text style={[styles.rowValue, { fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }]} numberOfLines={1}>
-                    {lastOtaLabel}
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-          </View>
+          {activeTab === 'identity' && renderIdentityTab()}
+          {activeTab === 'preferences' && renderPreferencesTab()}
+          {activeTab === 'account' && renderAccountTab()}
 
           <View style={styles.footer}>
-            <Text style={styles.footerText}>Reflections Companion</Text>
+            <Text style={styles.footerText}>Reflections Connect</Text>
             <Text style={styles.footerSubtext}>by Angelware</Text>
           </View>
-
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -661,6 +808,60 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '400',
   },
+
+  // Explorer Context Banner
+  explorerBanner: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: '#1a1a1a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a2a',
+    alignItems: 'center',
+  },
+  explorerBannerText: {
+    color: '#aaa',
+    fontSize: 14,
+  },
+  explorerBannerName: {
+    color: '#2e78b7',
+    fontWeight: '700',
+  },
+
+  // Tab Bar
+  tabBar: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 8,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2a2a2a',
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: 'transparent',
+  },
+  tabActive: {
+    backgroundColor: '#2e78b7',
+  },
+  tabLabel: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#888',
+  },
+  tabLabelActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+
+  // Content
   scrollContent: {
     padding: 16,
     paddingBottom: 40,
@@ -677,6 +878,56 @@ const styles = StyleSheet.create({
     opacity: 0.7,
     letterSpacing: 0.5,
   },
+
+  // Avatar
+  avatarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+    gap: 14,
+  },
+  avatarCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  avatarImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+  },
+  avatarInitial: {
+    fontSize: 30,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  avatarTouchable: {
+    width: 72,
+    height: 72,
+  },
+  avatarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#3897f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#1e1e1e',
+    zIndex: 10,
+  },
+  avatarTextCol: {
+    flex: 1,
+  },
+
+  // Cards
   card: {
     backgroundColor: '#1e1e1e',
     borderRadius: 12,
@@ -764,6 +1015,8 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginTop: 4,
   },
+
+  // Explorer Cards
   explorerCard: {
     backgroundColor: '#1e1e1e',
     padding: 16,
@@ -811,7 +1064,7 @@ const styles = StyleSheet.create({
     borderColor: '#333',
   },
   actionBtnActive: {
-    backgroundColor: '#2e78b7', // Active Blue
+    backgroundColor: '#2e78b7',
     borderColor: '#2e78b7',
   },
   actionText: {
@@ -823,34 +1076,8 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
   },
-  voiceOptionsWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 10,
-    marginBottom: 8,
-  },
-  voiceOptionBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: '#333',
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  voiceOptionBtnActive: {
-    backgroundColor: '#2e78b7',
-    borderColor: '#2e78b7',
-  },
-  voiceOptionText: {
-    color: '#aaa',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  voiceOptionTextActive: {
-    color: '#fff',
-    fontWeight: '600',
-  },
+
+  // Voice Picker Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

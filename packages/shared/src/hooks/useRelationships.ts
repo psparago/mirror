@@ -16,6 +16,7 @@ export interface Relationship {
   role: string;
   companionName: string; // "Me" (How you appear to them)
   explorerName?: string; // The Explorer's display name (e.g. "Cole")
+  companionAvatarS3Key?: string; // S3 key for companion's profile photo
 }
 
 export function useRelationships(userId: string | undefined) {
@@ -45,7 +46,8 @@ export function useRelationships(userId: string | undefined) {
           userId: data.userId,
           role: data.role,
           companionName: data.companionName,
-          explorerName: data.explorerName, // May be undefined for older relationships
+          explorerName: data.explorerName,
+          companionAvatarS3Key: data.companionAvatarS3Key,
         } as Relationship);
       });
       

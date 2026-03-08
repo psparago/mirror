@@ -50,11 +50,10 @@ func GetSignedURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Determine upload path: "to" (companion -> cole), "from" (cole -> companion), or "staging" (temporary)
-	// Default to "from" for Cole's responses, "to" for companion uploads
+	// 5. Determine upload path
 	path := r.URL.Query().Get("path")
-	if path != "to" && path != "from" && path != "staging" {
-		path = "from" // Default to Cole's responses
+	if path != "to" && path != "from" && path != "staging" && path != "avatars" {
+		path = "from"
 	}
 
 	// 6. Check if this is an event bundle upload (new structure)
