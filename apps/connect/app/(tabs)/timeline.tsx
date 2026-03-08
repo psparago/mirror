@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerConfig, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
@@ -14,8 +14,8 @@ import { Event, EventMetadata } from '@projectmirror/shared';
 
 interface SentReflection {
   event_id: string;
-  timestamp: any; // Current status timestamp (may be engagement/replay time)
-  sentTimestamp?: any; // Original "sent" timestamp (preserved from 'ready' status)
+  timestamp: any;
+  sentTimestamp?: any;
   status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
   engagementTimestamp?: any;
   engagementCount?: number;
@@ -25,6 +25,7 @@ interface SentReflection {
   reflectionImageUrl?: string;
   description?: string;
   sender?: string;
+  sender_id?: string;
 }
 
 export default function SentTimelineScreen() {
@@ -85,7 +86,12 @@ export default function SentTimelineScreen() {
 
   const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
   const currentIdentity = activeRelationship?.companionName || null;
+  const currentUserId = activeRelationship?.userId || null;
   const snapshotGenRef = useRef(0);
+
+  // Companion avatar filter
+  const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
+  const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
@@ -99,9 +105,17 @@ export default function SentTimelineScreen() {
     // Do not include soft-deleted items in the timeline list
     result = result.filter(r => !r.deletedAt && r.status !== 'deleted');
 
-    // Filter by sender if filterMode is 'mine'
-    if (filterMode === 'mine' && currentIdentity) {
-      result = result.filter(r => r.sender?.toLowerCase() === currentIdentity.toLowerCase());
+    // Filter by selected companion avatar (null = show all)
+    if (selectedCompanionId) {
+      const companion = companions.find(c => c.userId === selectedCompanionId);
+      console.log(`[AvatarFilter] filtering for ${selectedCompanionId}, companion: ${companion?.companionName}, reflections: ${result.length}, sample senders: ${result.slice(0, 3).map(r => `${r.sender}|${r.sender_id}`).join(', ')}`);
+      if (companion) {
+        result = result.filter(r => {
+          if (r.sender_id) return r.sender_id === selectedCompanionId;
+          if (r.sender) return r.sender.toLowerCase() === companion.companionName.toLowerCase();
+          return false;
+        });
+      }
     }
 
     // Helper to get timestamp value in milliseconds
@@ -136,7 +150,7 @@ export default function SentTimelineScreen() {
     });
 
     return result;
-  }, [reflections, responseEventIds, responseTimestampMap, filterMode, currentIdentity, sortBy]);
+  }, [reflections, responseEventIds, responseTimestampMap, selectedCompanionId, companions, sortBy]);
 
   const reflectionCounts = useMemo(() => {
     const all = reflections.length; // already excludes soft-deleted items (filtered at source)
@@ -273,6 +287,7 @@ export default function SentTimelineScreen() {
               engagementCount: typeof data.engagement_count === 'number' ? data.engagement_count : 0,
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
               sender: data.sender,
+              sender_id: data.sender_id,
             });
           } else {
             // We already have this event_id - always update to higher priority status
@@ -709,33 +724,21 @@ export default function SentTimelineScreen() {
 
       {/* Timeline content: black background to blend with title (IG-style) */}
       <View style={styles.gradient}>
-      {/* Filter Tabs and Sort Toggle */}
       {/* Header Section */}
       <View style={styles.headerContainer}>
-        {/* Existing Tabs */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[styles.tab, filterMode === 'mine' && styles.tabActive]}
-            onPress={() => setFilterMode('mine')}
-            disabled={!currentIdentity}
-          >
-            <Text style={[styles.tabText, filterMode === 'mine' && styles.tabTextActive, !currentIdentity && styles.tabTextDisabled]}>
-              My Reflections ({reflectionCounts.mine})
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, filterMode === 'all' && styles.tabActive]}
-            onPress={() => setFilterMode('all')}
-          >
-            <Text style={[styles.tabText, filterMode === 'all' && styles.tabTextActive]}>
-              All ({reflectionCounts.all})
-            </Text>
-          </TouchableOpacity>
-        </View>
+        {/* Companion Avatar Filter */}
+        {companions.length > 0 && (
+          <AvatarFilterBar
+            companions={companions}
+            selectedId={selectedCompanionId}
+            onSelect={setSelectedCompanionId}
+            loading={companionsLoading}
+          />
+        )}
 
         {/* Sort Toggle */}
         <View style={styles.sortContainer}>
-          <Text style={styles.sortLabel}>Sort Order</Text>
+          <Text style={styles.sortLabel}>{displayReflections.length} Reflection{displayReflections.length !== 1 ? 's' : ''}</Text>
           <View style={styles.sortButtonGroup}>
             <TouchableOpacity
               style={[styles.sortButton, sortBy === 'recent' && styles.sortButtonActive]}
@@ -765,13 +768,10 @@ export default function SentTimelineScreen() {
       </View>
 
       {/* Empty State */}
-      {!hasReflections && hasAnyReflections && filterMode === 'mine' && (
+      {!hasReflections && hasAnyReflections && selectedCompanionId && (
         <View style={styles.centerContainer}>
           <FontAwesome name="inbox" size={64} color="#aaa" />
-          <Text style={styles.emptyText}>No Reflections from you yet</Text>
-          <Text style={styles.emptySubtext}>
-            {currentIdentity ? `Send a Reflection as ${currentIdentity} to see it here` : 'Set your name in Settings to filter your Reflections'}
-          </Text>
+          <Text style={styles.emptyText}>No Reflections from this companion</Text>
         </View>
       )}
 
@@ -1339,6 +1339,11 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   headerContainer: {},
+  filterSortRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   sortContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',

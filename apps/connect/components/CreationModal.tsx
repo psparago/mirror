@@ -740,6 +740,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       const metadata: any = {
         description: finalCaption || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
         sender: companionName || "Companion",
+        sender_id: user?.uid || undefined,
         timestamp: timestamp,
         event_id: eventID,
         content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
@@ -831,6 +832,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         explorerId: currentExplorerId,
         event_id: eventID,
         sender: companionName || "Companion",
+        sender_id: user?.uid || undefined,
         status: "ready",
         timestamp: serverTimestamp(),
         type: "mirror_event",

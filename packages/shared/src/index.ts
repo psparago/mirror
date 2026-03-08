@@ -20,8 +20,13 @@ export * from './auth/AuthContext';
 export * from './explorer/ExplorerConfig';
 export * from './explorer/ExplorerContext';
 
+// Hooks
+export * from './hooks/useCompanionAvatars';
+
 // Components
 export { default as VersionDisplay } from './components/VersionDisplay';
+export { AvatarFilterBar } from './components/AvatarFilterBar';
+export type { AvatarFilterBarProps } from './components/AvatarFilterBar';
 
 // Utilities
 export * from './utils/avatarDefaults';

@@ -1,7 +1,7 @@
 import MainStageView from '@/components/MainStageView';
 import { DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, ListEventsResponse } from '@projectmirror/shared';
+import { API_ENDPOINTS, AvatarFilterBar, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useCompanionAvatars } from '@projectmirror/shared';
 import {
   collection,
   db,
@@ -71,6 +71,36 @@ export default function HomeScreen() {
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
+  const filteredEvents = useMemo(() => {
+    if (!selectedCompanionId) {
+      console.log(`[ExplorerFilter] ALL selected, showing ${events.length} events`);
+      return events;
+    }
+    const companion = companions.find(c => c.userId === selectedCompanionId);
+    if (!companion) return events;
+    const metaCount = Object.keys(eventMetadata).length;
+    const filtered = events.filter(e => {
+      const meta = eventMetadata[e.event_id];
+      if (!meta) return true;
+      if (meta.sender_id) return meta.sender_id === selectedCompanionId;
+      if (meta.sender) return meta.sender.toLowerCase() === companion.companionName.toLowerCase();
+      return true;
+    });
+    console.log(`[ExplorerFilter] companion: ${companion.companionName}, events: ${events.length}, metaLoaded: ${metaCount}, filtered: ${filtered.length}`);
+    return filtered;
+  }, [events, eventMetadata, selectedCompanionId, companions]);
+
+  // When filter changes, ensure selectedEvent is still in the filtered list
+  useEffect(() => {
+    if (!selectedEvent) return;
+    const stillVisible = filteredEvents.some(e => e.event_id === selectedEvent.event_id);
+    if (!stillVisible && filteredEvents.length > 0) {
+      setSelectedEvent(filteredEvents[0]);
+    } else if (!stillVisible && filteredEvents.length === 0) {
+      setSelectedEvent(null);
+    }
+  }, [filteredEvents, selectedEvent]);
+
   // Explorer config with state for toggleable settings
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
@@ -78,6 +108,10 @@ export default function HomeScreen() {
 
   //const { currentExplorerId, loading: explorerLoading } = useExplorer();
   const { explorerId: currentExplorerId } = useExplorerSelf();
+
+  // Companion avatar filter
+  const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
+  const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
 
   // Load settings from storage
   useEffect(() => {
@@ -1340,9 +1374,19 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      {/* Companion Filter Bar */}
+      {companions.length > 0 && (
+        <AvatarFilterBar
+          companions={companions}
+          selectedId={selectedCompanionId}
+          onSelect={setSelectedCompanionId}
+          loading={companionsLoading}
+        />
+      )}
+
       {/* Layer 1 (Bottom): Always-rendered Grid of Reflections */}
       <FlatList
-        data={events}
+        data={filteredEvents}
         renderItem={renderEvent}
         // Stable keys prevent cell churn/flicker (index-based keys cause "blank then there" on refresh)
         keyExtractor={(item) => item.event_id}
@@ -1367,7 +1411,17 @@ export default function HomeScreen() {
           <MainStageView
             visible={true}
             selectedEvent={selectedEvent}
-            events={events}
+            events={filteredEvents}
+            filterBar={
+              companions.length > 0 ? (
+                <AvatarFilterBar
+                  companions={companions}
+                  selectedId={selectedCompanionId}
+                  onSelect={setSelectedCompanionId}
+                  loading={companionsLoading}
+                />
+              ) : undefined
+            }
             eventMetadata={eventMetadata}
             onClose={closeFullScreen}
             onEventSelect={handleEventPress}

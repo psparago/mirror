@@ -65,7 +65,7 @@ interface MainStageProps {
     instantVideoPlayback?: boolean;
     readVideoCaptions?: boolean;
   };
-
+  filterBar?: React.ReactNode;
 }
 
 export default function MainStageView({
@@ -87,6 +87,7 @@ export default function MainStageView({
   recentlyArrivedIds,
   onReplay,
   config,
+  filterBar,
 }: MainStageProps) {
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
@@ -1481,6 +1482,13 @@ export default function MainStageView({
 
               </View>
 
+              {/* Avatar Filter Bar */}
+              {filterBar && (
+                <View style={[styles.stageFilterBar, { top: insets.top + 38 }]}>
+                  {filterBar}
+                </View>
+              )}
+
               {/* Media Container */}
               <View style={styles.mediaContainer}>
                 <GestureDetector gesture={verticalSwipeGesture}>
@@ -1724,6 +1732,7 @@ export default function MainStageView({
                   );
                 })()}
               </View>
+
             </View>
 
             {/* RIGHT PANE */}
@@ -1893,6 +1902,14 @@ const styles = StyleSheet.create({
   splitContainerPortrait: { flexDirection: 'column' },
   stagePane: { position: 'relative' },
   headerBar: { position: 'absolute', left: 20, right: 20, zIndex: 100 },
+  stageFilterBar: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    zIndex: 90,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255, 255, 255, 0.15)',
+  },
 
   reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
   positionText: {
@@ -1908,8 +1925,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    paddingTop: 80, // More space for header
-    paddingBottom: 120, // More space for caption bar
+    paddingTop: 170,
+    paddingBottom: 120,
   },
   mediaFrame: {
     flex: 1,

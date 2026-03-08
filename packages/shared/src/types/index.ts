@@ -17,6 +17,7 @@ export interface ListPhotosResponse {
 export interface EventMetadata {
   description: string;
   sender: string;
+  sender_id?: string; // Firebase userId of the companion who sent this reflection
   timestamp: string;
   event_id: string;
   // Note: audio_url/video_url are NOT stored in metadata.json (presigned URLs expire)
