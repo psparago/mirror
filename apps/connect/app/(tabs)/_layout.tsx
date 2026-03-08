@@ -2,10 +2,12 @@ import { useClientOnlyValue } from '@/components/useClientOnlyValue';
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
-import { useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
+import { db, doc, onSnapshot } from '@projectmirror/shared/firebase';
+import { Image } from 'expo-image';
 import { Tabs, useRouter } from 'expo-router';
-import React, { useEffect } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { AppState, AppStateStatus, StyleSheet, Text, View } from 'react-native';
 import { useDailyReminder } from '../../hooks/useDailyReminder';
 
 function TabBarIcon(props: {
@@ -17,8 +19,38 @@ function TabBarIcon(props: {
 
 export default function TabLayout() {
   const colorScheme = useColorScheme();
-  const { explorerName } = useExplorer();
+  const { explorerName, activeRelationship } = useExplorer();
+  const { user } = useAuth();
   const router = useRouter();
+
+  const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
+  const explorerId = activeRelationship?.explorerId;
+
+  useEffect(() => {
+    if (!explorerId) { setExplorerAvatarUrl(null); return; }
+    const unsub = onSnapshot(
+      doc(db, 'explorers', explorerId),
+      async (snap: any) => {
+        const data = snap.data();
+        if (!data?.explorerAvatarS3Key) { setExplorerAvatarUrl(null); return; }
+        try {
+          const res = await fetch(
+            `${API_ENDPOINTS.GET_S3_URL}?explorer_id=${explorerId}&event_id=explorer&filename=avatar.jpg&path=avatars&method=GET`
+          );
+          if (res.ok) {
+            const { url } = await res.json();
+            setExplorerAvatarUrl(url);
+          }
+        } catch {
+          setExplorerAvatarUrl(null);
+        }
+      }
+    );
+    return () => unsub();
+  }, [explorerId]);
+
+  const explorerInitial = getAvatarInitial(explorerName || explorerId || '');
+  const explorerColor = getAvatarColor(explorerId || '');
 
   // Run first-time daily reminder onboarding in the authenticated app shell,
   // so users don't have to visit Settings to be prompted.
@@ -67,9 +99,23 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: explorerName ? `${explorerName}'s Reflections` : 'Reflections',
           tabBarLabel: 'Reflections',
           tabBarIcon: ({ color }) => <TabBarIcon name="list" color={color} />,
+          headerTitle: () => (
+            <View style={layoutStyles.headerTitleRow}>
+              <View style={[layoutStyles.headerAvatar, !explorerAvatarUrl && { backgroundColor: explorerColor }]}>
+                {explorerAvatarUrl ? (
+                  <Image source={{ uri: explorerAvatarUrl }} style={layoutStyles.headerAvatarImage} contentFit="cover" />
+                ) : (
+                  <Text style={layoutStyles.headerAvatarInitial}>{explorerInitial}</Text>
+                )}
+              </View>
+              <Text style={layoutStyles.headerTitleText} numberOfLines={1}>
+                {explorerName ? `${explorerName}'s Reflections` : 'Reflections'}
+              </Text>
+            </View>
+          ),
+          headerTitleAlign: 'left',
         }}
       />
 
@@ -91,4 +137,37 @@ export default function TabLayout() {
     </Tabs>
   );
 }
+
+const layoutStyles = StyleSheet.create({
+  headerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  headerAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  headerAvatarImage: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+  },
+  headerAvatarInitial: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  headerTitleText: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#fff',
+    flexShrink: 1,
+  },
+});
 

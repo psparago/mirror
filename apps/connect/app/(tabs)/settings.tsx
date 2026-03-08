@@ -2,7 +2,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
-import { db, doc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { db, doc, getDoc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -106,9 +106,14 @@ export default function SettingsScreen() {
   const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
+  const [uploadingExplorerAvatar, setUploadingExplorerAvatar] = useState(false);
+  const isCaregiver = activeRelationship?.role === 'caregiver';
 
   const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
   const avatarColor = getAvatarColor(user?.uid || '');
+  const explorerAvatarInitial = getAvatarInitial(explorerName || activeRelationship?.explorerId || '');
+  const explorerAvatarColor = getAvatarColor(activeRelationship?.explorerId || '');
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
@@ -279,6 +284,87 @@ export default function SettingsScreen() {
     ]);
   }, [pickAvatar]);
 
+  // --- EXPLORER AVATAR ---
+
+  useEffect(() => {
+    if (!activeRelationship?.explorerId) { setExplorerAvatarUrl(null); return; }
+    const explorerId = activeRelationship.explorerId;
+    const unsub = onSnapshot(
+      doc(db, 'explorers', explorerId),
+      async (snap: any) => {
+        const data = snap.data();
+        const s3Key = data?.explorerAvatarS3Key;
+        if (!s3Key) { setExplorerAvatarUrl(null); return; }
+        try {
+          const res = await fetch(
+            `${API_ENDPOINTS.GET_S3_URL}?explorer_id=${explorerId}&event_id=explorer&filename=avatar.jpg&path=avatars&method=GET`
+          );
+          if (res.ok) {
+            const { url } = await res.json();
+            setExplorerAvatarUrl(url);
+          }
+        } catch {
+          setExplorerAvatarUrl(null);
+        }
+      }
+    );
+    return () => unsub();
+  }, [activeRelationship?.explorerId]);
+
+  const pickExplorerAvatar = useCallback(async (source: 'camera' | 'library') => {
+    if (!activeRelationship?.explorerId) return;
+
+    let result: ImagePicker.ImagePickerResult;
+    if (source === 'camera') {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission Required', 'Camera access is needed to take a photo.'); return; }
+      result = await ImagePicker.launchCameraAsync({ allowsEditing: true, aspect: [1, 1], quality: 0.7, cameraType: ImagePicker.CameraType.back });
+    } else {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission Required', 'Photo library access is needed.'); return; }
+      result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.7 });
+    }
+
+    if (result.canceled || !result.assets?.[0]) return;
+    const localUri = result.assets[0].uri;
+
+    setUploadingExplorerAvatar(true);
+    try {
+      const explorerId = activeRelationship.explorerId;
+
+      const presignRes = await fetch(
+        `${API_ENDPOINTS.GET_S3_URL}?explorer_id=${explorerId}&event_id=explorer&filename=avatar.jpg&path=avatars`
+      );
+      if (!presignRes.ok) throw new Error('Failed to get upload URL');
+      const { url: presignedUrl } = await presignRes.json();
+
+      const uploadRes = await FileSystem.uploadAsync(presignedUrl, localUri, {
+        httpMethod: 'PUT',
+        headers: { 'Content-Type': 'image/jpeg' },
+      });
+      if (uploadRes.status !== 200) throw new Error(`Upload failed: ${uploadRes.status}`);
+
+      const s3Key = `${explorerId}/avatars/explorer/avatar.jpg`;
+      await setDoc(doc(db, 'explorers', explorerId), {
+        explorerAvatarS3Key: s3Key,
+      }, { merge: true });
+    } catch (err: any) {
+      console.error('Explorer avatar upload failed:', err);
+      Alert.alert('Upload Failed', 'Could not save the photo. Please try again.');
+    } finally {
+      setUploadingExplorerAvatar(false);
+    }
+  }, [activeRelationship?.explorerId]);
+
+  const showExplorerAvatarPicker = useCallback(() => {
+    const name = explorerName || 'the Explorer';
+    Alert.alert(`Photo of ${name}`, `Choose a photo that represents ${name}.`, [
+      { text: 'Take a Photo', onPress: () => pickExplorerAvatar('camera') },
+      { text: 'Choose from Library', onPress: () => pickExplorerAvatar('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [pickExplorerAvatar, explorerName]);
+
   // --- HANDLERS ---
 
   const onTimeChange = (event: any, selectedDate?: Date) => {
@@ -423,6 +509,39 @@ export default function SettingsScreen() {
           )}
         </View>
       </View>
+
+      {/* Explorer Avatar (caregiver only) */}
+      {isCaregiver && activeRelationship && (
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: tintColor }]}>Explorer Photo</Text>
+          <View style={styles.card}>
+            <View style={styles.avatarRow}>
+              <TouchableOpacity onPress={showExplorerAvatarPicker} disabled={uploadingExplorerAvatar} activeOpacity={0.7} style={styles.avatarTouchable}>
+                <View style={[styles.avatarCircle, !explorerAvatarUrl && !uploadingExplorerAvatar && { backgroundColor: explorerAvatarColor }]}>
+                  {uploadingExplorerAvatar ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : explorerAvatarUrl ? (
+                    <Image source={{ uri: explorerAvatarUrl }} style={styles.avatarImage} contentFit="cover" />
+                  ) : (
+                    <Text style={styles.avatarInitial}>{explorerAvatarInitial}</Text>
+                  )}
+                </View>
+                <View style={styles.avatarBadge}>
+                  <FontAwesome name="camera" size={10} color="#fff" />
+                </View>
+              </TouchableOpacity>
+              <View style={styles.avatarTextCol}>
+                <Text style={styles.label}>
+                  Photo of <Text style={{ color: '#2e78b7' }}>{explorerName || activeRelationship.explorerId}</Text>
+                </Text>
+                <Text style={styles.description}>
+                  Set a photo for {explorerName || 'the Explorer'} so Companions can recognize them.
+                </Text>
+              </View>
+            </View>
+          </View>
+        </View>
+      )}
     </>
   );
 
@@ -679,10 +798,18 @@ export default function SettingsScreen() {
         {explorerLoading ? (
           <ActivityIndicator size="small" color="#aaa" />
         ) : activeRelationship ? (
-          <Text style={styles.explorerBannerText}>
-            <FontAwesome name="heart" size={13} color="#E57373" />{' '}
-            Settings for Explorer <Text style={styles.explorerBannerName}>{explorerName || activeRelationship.explorerId}</Text>
-          </Text>
+          <View style={styles.explorerBannerRow}>
+            <View style={[styles.explorerBannerAvatar, !explorerAvatarUrl && { backgroundColor: explorerAvatarColor }]}>
+              {explorerAvatarUrl ? (
+                <Image source={{ uri: explorerAvatarUrl }} style={styles.explorerBannerAvatarImage} contentFit="cover" />
+              ) : (
+                <Text style={styles.explorerBannerAvatarInitial}>{explorerAvatarInitial}</Text>
+              )}
+            </View>
+            <Text style={styles.explorerBannerText}>
+              Settings for <Text style={styles.explorerBannerName}>{explorerName || activeRelationship.explorerId}</Text>
+            </Text>
+          </View>
         ) : (
           <Text style={styles.explorerBannerText}>No Explorer linked</Text>
         )}
@@ -817,6 +944,30 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#2a2a2a',
     alignItems: 'center',
+  },
+  explorerBannerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  explorerBannerAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  explorerBannerAvatarImage: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  explorerBannerAvatarInitial: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#fff',
   },
   explorerBannerText: {
     color: '#aaa',
