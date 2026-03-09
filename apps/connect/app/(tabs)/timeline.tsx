@@ -737,7 +737,6 @@ export default function SentTimelineScreen() {
 
         {/* Sort Toggle */}
         <View style={styles.sortContainer}>
-          <Text style={styles.sortLabel}>{displayReflections.length} Reflection{displayReflections.length !== 1 ? 's' : ''}</Text>
           <View style={styles.sortButtonGroup}>
             <TouchableOpacity
               style={[styles.sortButton, sortBy === 'recent' && styles.sortButtonActive]}
@@ -762,6 +761,9 @@ export default function SentTimelineScreen() {
               <FontAwesome name="fire" size={12} color={sortBy === 'impact' ? '#4FC3F7' : '#aaa'} style={{ marginRight: 4 }} />
               <Text style={[styles.sortText, sortBy === 'impact' && styles.sortTextActive]}>Impact</Text>
             </TouchableOpacity>
+          </View>
+          <View style={styles.countBadge}>
+            <Text style={styles.countBadgeText}>{displayReflections.length.toLocaleString()}</Text>
           </View>
         </View>
       </View>
@@ -1350,12 +1352,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 14,
   },
-  sortLabel: {
+  countBadge: {
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 12,
+    minWidth: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  countBadgeText: {
     color: '#ccc',
-    fontSize: 13,
-    fontWeight: '600',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    fontSize: 12,
+    fontWeight: '700',
   },
   sortButtonGroup: {
     flexDirection: 'row',
