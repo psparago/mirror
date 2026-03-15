@@ -98,6 +98,11 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	imageURL := r.URL.Query().Get("image_url")
 	targetCaption := r.URL.Query().Get("target_caption")
 	targetDeepDive := r.URL.Query().Get("target_deep_dive")
+	clientPrompt := strings.TrimSpace(r.URL.Query().Get("prompt"))
+	companionName := strings.TrimSpace(r.URL.Query().Get("companion_name"))
+	companionInReflection := r.URL.Query().Get("companion_in_reflection") == "true"
+	explorerInReflection := r.URL.Query().Get("explorer_in_reflection") == "true"
+	peopleContext := strings.TrimSpace(r.URL.Query().Get("people_context"))
 	captionVoice := r.URL.Query().Get("caption_voice")
 	deepDiveVoice := r.URL.Query().Get("deep_dive_voice")
 
@@ -150,17 +155,54 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Create multimodal input
-		promptText := fmt.Sprintf(`Analyze this image for a 15-year-old with Angelman Syndrome named %s.
+		// Use client-provided prompt if available; otherwise fall back to
+		// server-side construction (backwards compat for older app versions).
+		var promptText string
+		if clientPrompt != "" {
+			promptText = clientPrompt
+			log.Printf("Using client-provided prompt (%d chars)", len(clientPrompt))
+		} else {
+			log.Printf("No client prompt — using legacy server-side prompt builder")
+			var contextLines []string
+			if companionName != "" && companionInReflection {
+				contextLines = append(contextLines, fmt.Sprintf("%s is the sender and has confirmed they appear in the image.", companionName))
+			} else if companionName != "" {
+				contextLines = append(contextLines, fmt.Sprintf("%s is the sender of this Reflection.", companionName))
+			} else {
+				contextLines = append(contextLines, "A family member or caregiver is the sender of this Reflection.")
+			}
+			if explorerInReflection {
+				contextLines = append(contextLines, fmt.Sprintf("%s has been confirmed to be in this image.", explorerName))
+			} else {
+				contextLines = append(contextLines, fmt.Sprintf("%s is the AUDIENCE — they are NOT in this image.", explorerName))
+			}
+			if peopleContext != "" {
+				contextLines = append(contextLines, fmt.Sprintf("The sender identified these people: %s", peopleContext))
+			}
 
-RULES:
-1. DO NOT assume any person visible in the image or video IS %s. The content is being SENT TO %s by a family member or caregiver. Describe the people and scene without assigning the Explorer's name to anyone.
-2. DO NOT attempt to diagnose or guess if anyone in the photo has a medical disorder or syndrome based on their appearance. Focus only on observable activities, objects, and emotions.
-3. The short_caption is a warm, high-energy greeting TO %s about what is in the image (max 10 words).
-4. The deep_dive is a 2-3 sentence story describing interesting details in the image, written as if speaking TO %s.
+			var identityRules string
+			if explorerInReflection {
+				identityRules = fmt.Sprintf("IDENTITY RULES:\n1. %s IS in this image. You may use their name.\n2. Use provided names for others; otherwise describe by visible traits.\n3. DO NOT guess medical conditions.", explorerName)
+			} else {
+				identityRules = fmt.Sprintf("CRITICAL IDENTITY RULES:\n1. NEVER identify anyone as %s. They are the viewer.\n2. Use provided names if given; otherwise describe by visible traits.\n3. DO NOT guess medical conditions.", explorerName)
+			}
 
-Return a SINGLE JSON object:
-{"short_caption": "string", "deep_dive": "string"}`, explorerName, explorerName, explorerName, explorerName, explorerName)
+			var companionRules string
+			if companionName != "" && companionInReflection {
+				companionRules = fmt.Sprintf("Since %s is both sender and visible, use their name naturally.", companionName)
+			} else if companionName != "" {
+				companionRules = fmt.Sprintf("Work %s's name in so it feels like the Reflection comes from them.", companionName)
+			} else {
+				companionRules = "You may refer to the sender as a family member or caregiver."
+			}
+
+			var contextBlock string
+			for _, line := range contextLines {
+				contextBlock += "- " + line + "\n"
+			}
+			promptText = fmt.Sprintf("Analyze this image for a 15-year-old with Angelman Syndrome named %s.\n\nCONTEXT:\n%s\n%s\n\nCONTENT RULES:\n4. short_caption: warm greeting TO %s (max 10 words).\n5. deep_dive: 2-3 sentence story speaking TO %s.\n6. %s\n\nReturn JSON: {\"short_caption\": \"string\", \"deep_dive\": \"string\"}",
+				explorerName, contextBlock, identityRules, explorerName, explorerName, companionRules)
+		}
 
 		parts := []genai.Part{
 			genai.Text(promptText),

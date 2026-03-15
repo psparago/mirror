@@ -1,14 +1,22 @@
 import { FontAwesome } from '@expo/vector-icons';
 import BottomSheet, { BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
-import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import Animated, {
+  FadeIn,
+  FadeOut,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+  Easing,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ReplayModal } from './ReplayModal';
 
@@ -22,15 +30,15 @@ interface ReflectionComposerProps {
   aiArtifacts?: {
     caption?: string;
     deepDive?: string;
-    audioUrl?: string; // The URL of the generated AI audio (if any)
+    audioUrl?: string;
     deepDiveAudioUrl?: string;
   };
   isAiThinking: boolean;
-  
   // Actions
   onCancel: () => void;
+  onReplaceMedia: () => void;
   onSend: (data: { caption: string; audioUri: string | null; deepDive: string | null }) => void;
-  onTriggerMagic: (targetCaption?: string) => Promise<void>; // The function to call API_ENDPOINTS.AI_DESCRIPTION
+  onTriggerMagic: (targetCaption?: string) => Promise<void>;
   isSending: boolean;
   
   // Audio Recorder (passed from parent or hook)
@@ -47,6 +55,7 @@ export default function ReflectionComposer({
   aiArtifacts,
   isAiThinking,
   onCancel: onRetake,
+  onReplaceMedia,
   onSend,
   onTriggerMagic,
   isSending,
@@ -70,6 +79,52 @@ export default function ReflectionComposer({
   const isBlockedByAi = isAiThinking && !isAiCancelled;
   const hasRecordedAudio = !!audioUri;
 
+  // Sparkle animation: rotating star + pulsing text
+  const sparkleRotation = useSharedValue(0);
+  const sparkleScale = useSharedValue(1);
+  const textOpacity = useSharedValue(1);
+
+  useEffect(() => {
+    if (isBlockedByAi) {
+      sparkleRotation.value = withRepeat(
+        withTiming(360, { duration: 3000, easing: Easing.linear }),
+        -1,
+        false,
+      );
+      sparkleScale.value = withRepeat(
+        withSequence(
+          withTiming(1.2, { duration: 800, easing: Easing.inOut(Easing.ease) }),
+          withTiming(0.9, { duration: 800, easing: Easing.inOut(Easing.ease) }),
+        ),
+        -1,
+        true,
+      );
+      textOpacity.value = withRepeat(
+        withSequence(
+          withTiming(0.5, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+          withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+        ),
+        -1,
+        true,
+      );
+    } else {
+      sparkleRotation.value = 0;
+      sparkleScale.value = 1;
+      textOpacity.value = 1;
+    }
+  }, [isBlockedByAi]);
+
+  const sparkleIconStyle = useAnimatedStyle(() => ({
+    transform: [
+      { rotate: `${sparkleRotation.value}deg` },
+      { scale: sparkleScale.value },
+    ],
+  }));
+
+  const sparkleTextStyle = useAnimatedStyle(() => ({
+    opacity: textOpacity.value,
+  }));
+
   // Track last AI caption to detect edits
   const lastAiCaptionRef = useRef<string | null>(null);
   const hasTriggeredRegenForCurrentEditRef = useRef(false);
@@ -84,7 +139,6 @@ export default function ReflectionComposer({
     // 2. The parent isn't already thinking (prevent double-fire).
     // 3. The user hasn't explicitly cancelled it.
     if (!caption && !isAiThinking && !isAiCancelled) {
-      console.log("✨ Auto-triggering AI Magic...");
       // Fire and forget (errors handled in parent) - no target caption on initial trigger
       onTriggerMagic().catch(() => console.log("Auto-magic failed"));
     }
@@ -227,10 +281,6 @@ export default function ReflectionComposer({
     // Get audio URL - prioritize user voice over AI voice
     // Pass through if it exists - ReplayModal will handle validation
     const audioUrl = audioUri || aiArtifacts?.audioUrl || undefined;
-    
-    if (audioUrl) {
-      console.log('🔊 [Preview] Passing audio URL to ReplayModal:', audioUrl);
-    }
 
     // 1. Construct the Mock Event
     const mockEvent: Event = {
@@ -298,9 +348,9 @@ export default function ReflectionComposer({
   const renderBackground = () => (
     <View style={styles.backgroundContainer}>
       {mediaType === 'video' ? (
-        <VideoView player={player} style={styles.media} contentFit="cover" nativeControls={false} />
+        <VideoView player={player} style={styles.media} contentFit="contain" nativeControls={false} />
       ) : (
-        <Image source={{ uri: mediaUri }} style={styles.media} contentFit="cover" />
+        <Image source={{ uri: mediaUri }} style={styles.media} contentFit="contain" />
       )}
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
 
@@ -316,13 +366,22 @@ export default function ReflectionComposer({
 
       {/* TOP CONTROLS */}
       <View style={[styles.topControls, { top: insets.top + 6 }]}>
+        <TouchableOpacity
+          style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
+          onPress={onReplaceMedia}
+          disabled={isSending || isBlockedByAi}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="pencil" size={14} color="#fff" />
+          <Text style={styles.replaceMediaText}>Edit</Text>
+        </TouchableOpacity>
         <View style={{ flex: 1 }} />
 
         {/* CIRCLED X CANCEL BUTTON */}
         <TouchableOpacity 
-          style={styles.circledCancelButton} 
+          style={[styles.circledCancelButton, isBlockedByAi && { opacity: 0.35 }]} 
           onPress={onRetake} 
-          disabled={isSending}
+          disabled={isSending || isBlockedByAi}
         >
           <FontAwesome name="times" size={18} color="#fff" />
         </TouchableOpacity>
@@ -332,7 +391,6 @@ export default function ReflectionComposer({
 
   const renderMainTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
-      <Text style={styles.helperText}>Add context, Preview or Send this Reflection</Text>
       <View style={styles.quickActionsRow}>
         
         {/* VOICE CHIP */}
@@ -472,7 +530,27 @@ export default function ReflectionComposer({
       {/* 1. IMMERSIVE MEDIA */}
       {renderBackground()}
 
-      {/* 2. BOTTOM SHEET TOOLKIT */}
+      {/* 2. AI SPARKLE OVERLAY — rendered outside the bottom sheet */}
+      {isBlockedByAi && (
+        <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
+          <View style={styles.sparkleCard}>
+            <Animated.View style={sparkleIconStyle}>
+              <FontAwesome name="magic" size={36} color="#f39c12" />
+            </Animated.View>
+            <Animated.Text style={[styles.aiOverlayText, sparkleTextStyle]}>
+              Adding sparkle to your Reflection!
+            </Animated.Text>
+            <TouchableOpacity
+              style={styles.cancelAiButton}
+              onPress={() => setIsAiCancelled(true)}
+            >
+              <Text style={styles.cancelAiText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* 3. BOTTOM SHEET TOOLKIT */}
       <BottomSheet
         ref={sheetRef}
         index={0}
@@ -489,23 +567,6 @@ export default function ReflectionComposer({
           {activeTab === 'main' && renderMainTab()}
           {activeTab === 'voice' && renderVoiceTab()}
           {activeTab === 'text' && renderTextTab()}
-
-          {/* AI LOCKDOWN OVERLAY */}
-          {isBlockedByAi && (
-            <View style={[StyleSheet.absoluteFill, styles.lockdownOverlay]}>
-              {/* Using tint="dark" to match your dark theme preference */}
-              <BlurView intensity={30} tint="dark" style={styles.blurContainer}>
-                <ActivityIndicator size="large" color="#f39c12" />
-                <Text style={styles.aiOverlayText}>Adding Sparkle to your Reflection!</Text>
-                <TouchableOpacity 
-                  style={styles.cancelAiButton} 
-                  onPress={() => setIsAiCancelled(true)} 
-                >
-                  <Text style={styles.cancelAiText}>Cancel</Text>
-                </TouchableOpacity>
-              </BlurView>
-            </View>
-          )}
         </BottomSheetView>
       </BottomSheet>
 
@@ -559,6 +620,22 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.3)',
+  },
+  replaceMediaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  replaceMediaText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   previewButton: {
     flexDirection: 'row',
@@ -736,17 +813,20 @@ const styles = StyleSheet.create({
   },
 
   // AI LOCKDOWN OVERLAY
-  lockdownOverlay: {
-    zIndex: 100,
-    borderRadius: 0, // Matches sheet interior
-    overflow: 'hidden',
-  },
-  blurContainer: {
-    flex: 1,
+  sparkleOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
-    backgroundColor: 'rgba(0,0,0,0.6)', // Dark tint for dark mode
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  sparkleCard: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderRadius: 20,
+    paddingVertical: 36,
+    paddingHorizontal: 40,
+    gap: 16,
   },
   aiOverlayText: {
     color: '#f39c12', // Gold/Orange for visibility on dark

@@ -1,6 +1,7 @@
 import ReflectionComposer from '@/components/ReflectionComposer';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { prepareImageForUpload } from '@/utils/mediaProcessor';
+import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
@@ -9,12 +10,14 @@ import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, 
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { useVideoPlayer } from 'expo-video';
+import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import BottomSheet, { BottomSheetBackdrop, BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetBackdrop, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, AppState, AppStateStatus, Modal, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Animated, AppState, AppStateStatus, KeyboardAvoidingView, Modal, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
 const DEBUG_LOGS = __DEV__ && false;
@@ -128,14 +131,21 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
+  const [isCompanionInReflection, setIsCompanionInReflection] = useState(false);
+  const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
+  const [peopleContext, setPeopleContext] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
   const [showNameModal, setShowNameModal] = useState(false);
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
   const pendingRouteRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
   const sourceTransitionLockRef = useRef(false);
   const suppressPickerRecoveryRef = useRef(false);
   const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
   const sheetRef = useRef<BottomSheet>(null);
+  const detailsSheetRef = useRef<BottomSheet>(null);
 
   const beginSourceFlow = useCallback((route: '/camera' | '/gallery' | '/search') => {
     sourceTransitionLockRef.current = true;
@@ -147,6 +157,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   useEffect(() => {
     if (visible) {
       setPhase('picker');
+      setConfirming(false);
+      setIsCompanionInReflection(false);
+      setIsExplorerInReflection(false);
+      setPeopleContext('');
       sourceTransitionLockRef.current = false;
       suppressPickerRecoveryRef.current = false;
       setTransitionUnlockTick((v) => v + 1);
@@ -332,7 +346,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         setPhoto({ uri: media.uri });
       }
       setImageSourceType(media.source === 'search' ? 'search' : 'camera');
-      setShowDescriptionInput(true);
+      setMediaSource(`/${media.source}` as '/camera' | '/gallery' | '/search');
+      setConfirming(true);
       setDescription('');
       setIsAiGenerated(false);
       setShortCaption('');
@@ -373,7 +388,16 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         setIsAiGenerated(false);
       }
 
+      const prompt = buildReflectionPrompt({
+        explorerName: explorerName || 'the Explorer',
+        companionName: companionName || undefined,
+        companionInReflection: isCompanionInReflection,
+        explorerInReflection: isExplorerInReflection,
+        peopleContext: peopleContext.trim() || undefined,
+      });
+
       let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${currentExplorerId}`;
+      fetchUrl += `&prompt=${encodeURIComponent(prompt)}`;
       if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
@@ -821,6 +845,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       setAudioUri(null);
       setAiAudioS3Key(null);
       setAiDeepDiveS3Key(null);
+      setIsCompanionInReflection(false);
+      setIsExplorerInReflection(false);
+      setPeopleContext('');
+      setConfirming(false);
       sheetRef.current?.close();
       onClose();
       if (audioRecorder.isRecording) {
@@ -876,7 +904,6 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     const videoUriToClean = videoUri;
     await deleteStagingArtifacts();
 
-    // Best-effort cleanup of any cache-based temp media
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
 
@@ -895,6 +922,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     setAudioUri(null);
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
+    setIsCompanionInReflection(false);
+    setIsExplorerInReflection(false);
+    setPeopleContext('');
+    setConfirming(false);
   };
 
   const retakePhoto = async () => {
@@ -902,11 +933,9 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     const videoUriToClean = videoUri;
     await deleteStagingArtifacts();
 
-    // Best-effort cleanup of any cache-based temp media
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
 
-    // Clear all state and return to camera
     setPhoto(null);
     setVideoUri(null);
     setMediaType('photo');
@@ -922,6 +951,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     setAudioUri(null);
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
+    setIsCompanionInReflection(false);
+    setIsExplorerInReflection(false);
+    setPeopleContext('');
+    setConfirming(false);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
   };
 
@@ -1017,10 +1050,48 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
   };
 
+  const handleReplaceMedia = async () => {
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
+    await deleteStagingArtifacts();
+
+    await safeDeleteCacheFile(photoUriToClean);
+    await safeDeleteCacheFile(videoUriToClean);
+
+    setPhoto(null);
+    setVideoUri(null);
+    setMediaType('photo');
+    setDescription('');
+    setShowDescriptionInput(false);
+    setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
+    setAiAudioUrl(null);
+    setAiDeepDiveAudioUrl(null);
+    setAiAudioS3Key(null);
+    setAiDeepDiveS3Key(null);
+    setIsAiThinking(false);
+    setStagingEventId(null);
+    stagingEventIdRef.current = null;
+    setIntent('none');
+    setAudioUri(null);
+    lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+
+    if (mediaSource) {
+      beginSourceFlow(mediaSource);
+    } else {
+      setPhase('picker');
+      setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+    }
+  };
+
   const handleClose = () => {
-    // User-initiated cancel should preserve existing recovery behavior (sheet can resurface).
     suppressPickerRecoveryRef.current = false;
-    if (showDescriptionInput && photo) {
+    if (confirming && photo) {
+      setConfirming(false);
+      setPhoto(null);
+      setVideoUri(null);
+    } else if (showDescriptionInput && photo) {
       cancelPhoto();
     }
     // Do NOT reset phase to 'picker' here — that would briefly make showPicker
@@ -1044,12 +1115,41 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     []
   );
 
+  // Loop the video preview during the confirmation screen
+  useEffect(() => {
+    if (confirming && videoUri && videoPlayer) {
+      videoPlayer.loop = true;
+      videoPlayer.play();
+    } else if (videoPlayer && confirming === false) {
+      videoPlayer.pause();
+    }
+  }, [confirming, videoUri, videoPlayer]);
+
+  const handleConfirmCancel = async () => {
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
+    await safeDeleteCacheFile(photoUriToClean);
+    await safeDeleteCacheFile(videoUriToClean);
+    setPhoto(null);
+    setVideoUri(null);
+    setMediaType('photo');
+    setConfirming(false);
+    setPhase('picker');
+    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+  };
+
+  const handleConfirmChoose = () => {
+    setConfirming(false);
+    setShowDescriptionInput(true);
+  };
+
   // Compute visibility states — NO conditional returns so nothing unmounts/remounts.
   // Uses an absolutely-positioned View instead of <Modal> to avoid iOS UIWindow
   // stacking issues with the camera's fullScreenModal presentation.
-  const showComposer = showDescriptionInput && !!photo;
-  const showCreatingWait = phase === 'creating' && !showComposer;
-  const showFullScreenOverlay = visible && isFocused && (showComposer || showCreatingWait);
+  const showConfirmation = confirming && !!photo;
+  const showComposer = showDescriptionInput && !!photo && !confirming;
+  const showCreatingWait = phase === 'creating' && !showComposer && !showConfirmation;
+  const showFullScreenOverlay = visible && isFocused && (showComposer || showCreatingWait || showConfirmation);
   const showPicker = visible && phase === 'picker' && !showFullScreenOverlay;
 
 
@@ -1128,7 +1228,163 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
           An absolute View stays in the normal view hierarchy and always paints. */}
       {showFullScreenOverlay && (
         <View style={styles.fullScreenOverlay}>
-          {showComposer && photo ? (
+          {showConfirmation && photo ? (
+            <KeyboardAvoidingView
+              style={styles.confirmationContainer}
+              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            >
+              <View style={styles.confirmationMedia}>
+                {mediaType === 'video' && videoUri ? (
+                  <VideoView
+                    player={videoPlayer}
+                    style={StyleSheet.absoluteFill}
+                    contentFit="contain"
+                    nativeControls={false}
+                  />
+                ) : (
+                  <Image
+                    source={{ uri: photo.uri }}
+                    style={StyleSheet.absoluteFill}
+                    contentFit="contain"
+                  />
+                )}
+              </View>
+              <View style={[styles.confirmationBar, { paddingBottom: Math.max(insets.bottom, 16) }]}>
+                <View style={styles.confirmBarRow}>
+                  <View style={styles.confirmLeftColumn}>
+                    <TouchableOpacity
+                      style={styles.confirmPresenceToggle}
+                      onPress={() => setIsCompanionInReflection(!isCompanionInReflection)}
+                      activeOpacity={0.7}
+                    >
+                      <FontAwesome
+                        name={isCompanionInReflection ? 'check-square-o' : 'square-o'}
+                        size={16}
+                        color={isCompanionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
+                      />
+                      <Text style={[
+                        styles.confirmPresenceText,
+                        isCompanionInReflection && styles.confirmPresenceTextActive,
+                      ]}>
+                        I'm in this
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.confirmPresenceToggle}
+                      onPress={() => setIsExplorerInReflection(!isExplorerInReflection)}
+                      activeOpacity={0.7}
+                    >
+                      <FontAwesome
+                        name={isExplorerInReflection ? 'check-square-o' : 'square-o'}
+                        size={16}
+                        color={isExplorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
+                      />
+                      <Text style={[
+                        styles.confirmPresenceText,
+                        isExplorerInReflection && styles.confirmPresenceTextActive,
+                      ]}>
+                        {explorerName || 'Explorer'} is in this
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={() => detailsSheetRef.current?.snapToIndex(0)}
+                      style={styles.addDetailsBtn}
+                      activeOpacity={0.7}
+                    >
+                      <FontAwesome
+                        name="magic"
+                        size={12}
+                        color={peopleContext.trim().length > 0 ? '#f39c12' : '#4CAF50'}
+                      />
+                      <Text style={[
+                        styles.addDetailsText,
+                        peopleContext.trim().length > 0 && { color: '#f39c12' },
+                      ]}>
+                        More Details
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.confirmRightColumn}>
+                    <TouchableOpacity onPress={handleConfirmChoose} style={styles.confirmChooseBtn}>
+                      <Text style={styles.confirmChooseText}>Choose</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={handleConfirmCancel} style={styles.confirmCancelBtn}>
+                      <Text style={styles.confirmCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+              <BottomSheet
+                ref={detailsSheetRef}
+                index={-1}
+                snapPoints={[360]}
+                enablePanDownToClose
+                backgroundStyle={{ backgroundColor: '#1a1a2e' }}
+                handleIndicatorStyle={{ backgroundColor: 'rgba(255,255,255,0.3)' }}
+              >
+                <BottomSheetView style={styles.detailsSheetContent}>
+                  <Text style={styles.detailsSheetTitle}>More Details</Text>
+                  <TouchableOpacity
+                    style={styles.sheetPresenceToggle}
+                    onPress={() => setIsCompanionInReflection(!isCompanionInReflection)}
+                    activeOpacity={0.7}
+                  >
+                    <FontAwesome
+                      name={isCompanionInReflection ? 'check-square-o' : 'square-o'}
+                      size={16}
+                      color={isCompanionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
+                    />
+                    <Text style={[
+                      styles.confirmPresenceText,
+                      isCompanionInReflection && styles.confirmPresenceTextActive,
+                    ]}>
+                      I'm in this
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.sheetPresenceToggle}
+                    onPress={() => setIsExplorerInReflection(!isExplorerInReflection)}
+                    activeOpacity={0.7}
+                  >
+                    <FontAwesome
+                      name={isExplorerInReflection ? 'check-square-o' : 'square-o'}
+                      size={16}
+                      color={isExplorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
+                    />
+                    <Text style={[
+                      styles.confirmPresenceText,
+                      isExplorerInReflection && styles.confirmPresenceTextActive,
+                    ]}>
+                      {explorerName || 'Explorer'} is in this
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.detailsInputRow}>
+                    <FontAwesome name="users" size={14} color="rgba(255,255,255,0.4)" style={{ marginTop: 2 }} />
+                    <BottomSheetTextInput
+                      style={styles.detailsInput}
+                      placeholder="e.g. Nona, dog Dalton, baby Dante, at Nona's house"
+                      placeholderTextColor="rgba(255,255,255,0.3)"
+                      value={peopleContext}
+                      onChangeText={setPeopleContext}
+                      returnKeyType="done"
+                      autoCorrect={false}
+                      autoCapitalize="words"
+                    />
+                  </View>
+                  <Text style={styles.detailsHint}>
+                    Use commas to separate names, pets, places, or other details
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.detailsDoneBtn}
+                    onPress={() => detailsSheetRef.current?.close()}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.detailsDoneText}>Done</Text>
+                  </TouchableOpacity>
+                </BottomSheetView>
+              </BottomSheet>
+            </KeyboardAvoidingView>
+          ) : showComposer && photo ? (
             <View style={styles.composerContainer}>
               <ReflectionComposer
                 mediaUri={photo.uri}
@@ -1144,6 +1400,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
                 isAiThinking={isAiThinking}
                 isSending={uploading}
                 onCancel={handleClose}
+                onReplaceMedia={handleReplaceMedia}
                 onTriggerMagic={async (targetCaption?: string) => {
                   const result = await generateDeepDiveBackground({
                     silent: false,
@@ -1649,6 +1906,146 @@ var styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  confirmationContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  confirmationMedia: {
+    flex: 1,
+    margin: 12,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  confirmationBar: {
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+  },
+  confirmBarRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  confirmLeftColumn: {
+    alignItems: 'flex-start',
+    gap: 6,
+    flex: 1,
+  },
+  confirmRightColumn: {
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 16,
+  },
+  confirmPresenceToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingVertical: 3,
+  },
+  confirmPresenceText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  confirmPresenceTextActive: {
+    color: '#4FC3F7',
+  },
+  addDetailsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+    paddingVertical: 4,
+  },
+  addDetailsText: {
+    color: '#4CAF50',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  confirmChooseBtn: {
+    backgroundColor: '#2E78B7',
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 20,
+    minWidth: 90,
+    alignItems: 'center',
+  },
+  confirmChooseText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  confirmCancelBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 24,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+    minWidth: 90,
+    alignItems: 'center',
+  },
+  confirmCancelText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  detailsSheetContent: {
+    paddingHorizontal: 20,
+    paddingTop: 4,
+    paddingBottom: 20,
+    gap: 10,
+  },
+  sheetPresenceToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  detailsSheetTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  detailsInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  detailsInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+    padding: 0,
+  },
+  detailsHint: {
+    color: 'rgba(255,255,255,0.3)',
+    fontSize: 11,
+    marginLeft: 2,
+  },
+  detailsDoneBtn: {
+    alignSelf: 'center',
+    backgroundColor: '#2E78B7',
+    paddingVertical: 10,
+    paddingHorizontal: 28,
+    borderRadius: 20,
+    marginTop: 6,
+  },
+  detailsDoneText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
   companionNameContainer: {
     alignItems: 'center',
