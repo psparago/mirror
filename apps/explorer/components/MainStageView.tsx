@@ -39,6 +39,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 interface MainStageProps {
   visible: boolean;
   selectedEvent: Event | null;
+  startIdleOnInitialSelection?: boolean;
   events: Event[];
   eventMetadata: { [key: string]: EventMetadata };
   onClose: () => void;
@@ -64,6 +65,7 @@ interface MainStageProps {
     enableInfiniteScroll?: boolean;
     instantVideoPlayback?: boolean;
     readVideoCaptions?: boolean;
+    autoPlayDeepDive?: boolean;
   };
   filterBar?: React.ReactNode;
 }
@@ -71,6 +73,7 @@ interface MainStageProps {
 export default function MainStageView({
   visible,
   selectedEvent,
+  startIdleOnInitialSelection = false,
   events,
   eventMetadata,
   onClose,
@@ -135,6 +138,9 @@ export default function MainStageView({
 
   // Track when caption OR sparkle (Tell Me More) is playing - disable both buttons to prevent impatient multiple taps
   const [isCaptionOrSparklePlaying, setIsCaptionOrSparklePlaying] = useState(false);
+
+  // True while the co-host breath timer is active (hides replay button during breath)
+  const [isDeepDivePending, setIsDeepDivePending] = useState(false);
   const setIsCaptionOrSparklePlayingRef = useRef<(v: boolean) => void>(() => { });
   useEffect(() => {
     setIsCaptionOrSparklePlayingRef.current = setIsCaptionOrSparklePlaying;
@@ -156,6 +162,11 @@ export default function MainStageView({
   // Track previous event to prevent restart loops
   const prevEventIdRef = useRef<string | null>(null);
   const lastVideoFinishedEventIdRef = useRef<string | null>(null);
+  const hasConsumedInitialIdleSelectionRef = useRef(false);
+
+  // Co-Host: track whether deep dive has already auto-played for the current reflection
+  const hasAutoPlayedDeepDiveRef = useRef(false);
+  const deepDiveBreathTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Track active caption session to prevent ghost TTS callbacks
   const captionSessionRef = useRef(0);
@@ -652,10 +663,30 @@ export default function MainStageView({
     const isVideo =
       !!selectedEventRef.current?.video_url || selectedMetadataRef.current?.content_type === 'video';
 
+    if (currentState?.matches('idle') && selectedEventRef.current && selectedMetadataRef.current) {
+      debugLog('▶️ Tapped to start playback from idle');
+      const useInstantPlayback = config?.instantVideoPlayback && isVideo;
+      if (useInstantPlayback) {
+        send({
+          type: 'SELECT_EVENT_INSTANT',
+          event: selectedEventRef.current,
+          metadata: selectedMetadataRef.current
+        });
+      } else {
+        send({
+          type: 'SELECT_EVENT',
+          event: selectedEventRef.current,
+          metadata: selectedMetadataRef.current
+        });
+      }
+      return;
+    }
+
     // For videos: no pause/resume - only replay when finished
     if (isVideo) {
       if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
         debugLog('🔁 User pressed REPLAY (video)');
+        hasAutoPlayedDeepDiveRef.current = false;
 
         // For videos, respect instant playback config on replay
         const useInstantPlayback = config?.instantVideoPlayback;
@@ -690,9 +721,20 @@ export default function MainStageView({
         debugLog('⏸️ Tapped to Pause');
         send({ type: 'PAUSE' });
       }
-    } else if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
+    } else if (currentState && (
+      currentState.matches('finished') ||
+      currentState.matches({ viewingPhoto: 'viewing' }) ||
+      currentState.matches({ playingAudio: { playback: 'done' } })
+    )) {
       debugLog('🔁 User pressed REPLAY');
-      send({ type: 'REPLAY' });
+      hasAutoPlayedDeepDiveRef.current = false;
+
+      // playingAudio doesn't handle REPLAY — re-select the event
+      if (currentState.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
+        send({ type: 'SELECT_EVENT', event: selectedEventRef.current, metadata: selectedMetadataRef.current });
+      } else {
+        send({ type: 'REPLAY' });
+      }
       if (onReplayRef.current && selectedEventRef.current) {
         onReplayRef.current(selectedEventRef.current);
       }
@@ -779,6 +821,10 @@ export default function MainStageView({
       if (selfieFadeTimeoutRef.current) {
         clearTimeout(selfieFadeTimeoutRef.current);
         selfieFadeTimeoutRef.current = null;
+      }
+      if (deepDiveBreathTimeoutRef.current) {
+        clearTimeout(deepDiveBreathTimeoutRef.current);
+        deepDiveBreathTimeoutRef.current = null;
       }
     };
   }, []);
@@ -937,6 +983,64 @@ export default function MainStageView({
     performSelfieCaptureRef.current = performSelfieCapture;
   }, [performSelfieCapture]);
 
+  // Play deep dive directly (bypasses state machine).
+  // Used when the machine is in a state that doesn't handle TELL_ME_MORE
+  // (e.g. playingAudio). All values accessed via refs so deps are empty.
+  const playDeepDiveDirectly = useCallback(async () => {
+    setIsCaptionOrSparklePlayingRef.current(true);
+    Speech.stop();
+    if (captionSoundRefForActions.current) {
+      try {
+        await captionSoundRefForActions.current.stopAsync();
+        await captionSoundRefForActions.current.unloadAsync();
+      } catch (e) { /* already stopped */ }
+      captionSoundRefForActions.current = null;
+      captionSoundRef.current = null;
+      setCaptionSound(null);
+    }
+
+    const event = selectedEventRef.current;
+    const metadata = selectedMetadataRef.current;
+
+    if (event?.deep_dive_audio_url) {
+      try {
+        if (soundRef.current) await soundRef.current.unloadAsync();
+        const { sound: newSound } = await Audio.Sound.createAsync(
+          { uri: event.deep_dive_audio_url },
+          { shouldPlay: true, volume: 1.0 }
+        );
+        soundRef.current = newSound;
+        setSound(newSound);
+        newSound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsCaptionOrSparklePlayingRef.current(false);
+            newSound.unloadAsync();
+            soundRef.current = null;
+          }
+        });
+      } catch (err) {
+        console.warn('❌ Direct deep dive audio error:', err);
+        if (metadata?.deep_dive) {
+          Speech.speak(metadata.deep_dive, {
+            volume: 1.0,
+            onDone: () => setIsCaptionOrSparklePlayingRef.current(false),
+            onError: () => setIsCaptionOrSparklePlayingRef.current(false),
+          });
+        } else {
+          setIsCaptionOrSparklePlayingRef.current(false);
+        }
+      }
+    } else if (metadata?.deep_dive) {
+      Speech.speak(metadata.deep_dive, {
+        volume: 1.0,
+        onDone: () => setIsCaptionOrSparklePlayingRef.current(false),
+        onError: () => setIsCaptionOrSparklePlayingRef.current(false),
+      });
+    } else {
+      setIsCaptionOrSparklePlayingRef.current(false);
+    }
+  }, []);
+
 
 
   // --- HARDWARE SYNC (Side Effects) ---
@@ -1000,6 +1104,59 @@ export default function MainStageView({
     wasFinishedRef.current = isFinished;
   }, [state?.value]);
 
+  // --- CO-HOST: Auto-Play Deep Dive ---
+
+  // Stable booleans derived from state (never object references) so the effect
+  // dependency comparison is reliable and doesn't spuriously re-fire.
+  const isCaptionDoneForPhoto = !!state && state.matches({ viewingPhoto: 'viewing' });
+  const isAudioPlaybackDone = !!state && state.matches({ playingAudio: { playback: 'done' } });
+  const isInFinishedState = !!state && state.matches('finished');
+  const captionCycleDone = isCaptionDoneForPhoto || isAudioPlaybackDone || isInFinishedState;
+
+  // Reset the auto-play guard whenever the reflection changes
+  useEffect(() => {
+    hasAutoPlayedDeepDiveRef.current = false;
+    setIsDeepDivePending(false);
+    if (deepDiveBreathTimeoutRef.current) {
+      clearTimeout(deepDiveBreathTimeoutRef.current);
+      deepDiveBreathTimeoutRef.current = null;
+    }
+  }, [selectedEvent?.event_id]);
+
+  // After the caption/audio finishes, take a short "breath" then auto-trigger deep dive.
+  // For viewingPhoto/finished: sends TELL_ME_MORE (machine handles it).
+  // For playingAudio: plays deep dive directly (machine doesn't handle TELL_ME_MORE there).
+  useEffect(() => {
+    if (!captionCycleDone || !selectedEvent) return;
+    if (config?.autoPlayDeepDive === false) return;
+    if (hasAutoPlayedDeepDiveRef.current) return;
+
+    const hasDeepDive = !!selectedMetadata?.deep_dive || !!selectedEvent?.deep_dive_audio_url;
+    if (!hasDeepDive) return;
+
+    setIsDeepDivePending(true);
+
+    const timeoutId = setTimeout(() => {
+      hasAutoPlayedDeepDiveRef.current = true;
+      deepDiveBreathTimeoutRef.current = null;
+      setIsDeepDivePending(false);
+
+      const currentState = stateRef.current;
+      if (currentState?.matches({ playingAudio: { playback: 'done' } })) {
+        playDeepDiveDirectly();
+      } else {
+        send({ type: 'TELL_ME_MORE' });
+      }
+    }, 750);
+    deepDiveBreathTimeoutRef.current = timeoutId;
+
+    return () => {
+      clearTimeout(timeoutId);
+      deepDiveBreathTimeoutRef.current = null;
+      setIsDeepDivePending(false);
+    };
+  }, [captionCycleDone, selectedEvent?.event_id, selectedMetadata?.deep_dive, selectedEvent?.deep_dive_audio_url, config?.autoPlayDeepDive, send, playDeepDiveDirectly]);
+
   // --- SYNC REACT EVENTS TO MACHINE ---
 
   // 1. New Event Selected (ONLY when event_id actually changes)
@@ -1022,7 +1179,12 @@ export default function MainStageView({
       const isVideo = !!selectedEvent?.video_url;
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
 
-      if (useInstantPlayback) {
+      if (startIdleOnInitialSelection && !hasConsumedInitialIdleSelectionRef.current) {
+        hasConsumedInitialIdleSelectionRef.current = true;
+        translateY.value = 0;
+        scale.value = 1;
+        opacity.value = 1;
+      } else if (useInstantPlayback) {
         debugLog('⚡ Using instant video playback (skipping narration)');
         send({ type: 'SELECT_EVENT_INSTANT', event: selectedEvent!, metadata: selectedMetadata! });
       } else {
@@ -1104,7 +1266,10 @@ export default function MainStageView({
 
     const isVideo = !!selectedEvent?.video_url;
 
-    if (state.matches('finished')) {
+    if (state.matches('idle')) {
+      controlsOpacity.value = withTiming(1, { duration: 200 });
+      selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
+    } else if (state.matches('finished')) {
       // Finished: Show controls AND hide bubble
       controlsOpacity.value = withTiming(1, { duration: 200 });
       selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
@@ -1113,6 +1278,9 @@ export default function MainStageView({
       controlsOpacity.value = withTiming(1, { duration: 200 });
     } else if (state.matches({ viewingPhoto: 'viewing' })) {
       // Photo viewing: Show controls
+      controlsOpacity.value = withTiming(1, { duration: 200 });
+    } else if (state.matches({ playingAudio: { playback: 'done' } })) {
+      // Audio playback done: Show controls (replay button)
       controlsOpacity.value = withTiming(1, { duration: 200 });
     } else {
       // Playing: Hide controls (videos never show pause controls)
@@ -1166,23 +1334,38 @@ export default function MainStageView({
     replayInProgressRef.current = true;
     setTimeout(() => { replayInProgressRef.current = false; }, 600);
 
+    // Reset co-host so deep dive auto-plays again on the next cycle
+    hasAutoPlayedDeepDiveRef.current = false;
+    setIsDeepDivePending(false);
+
+    // Stop any in-progress direct deep dive playback
+    Speech.stop();
+    if (soundRef.current) {
+      soundRef.current.stopAsync().catch(() => { });
+      soundRef.current.unloadAsync().catch(() => { });
+      soundRef.current = null;
+    }
+    setIsCaptionOrSparklePlaying(false);
+
     debugLog('🔁 User pressed REPLAY');
 
-    // For videos, respect instant playback config on replay
-    const isVideo = !!selectedEventRef.current?.video_url;
-    const useInstantPlayback = config?.instantVideoPlayback && isVideo;
-
-    if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
-      // Replay with instant playback (skip narration)
-      debugLog('⚡ Replaying with instant video playback (skipping narration)');
-      send({
-        type: 'SELECT_EVENT_INSTANT',
-        event: selectedEventRef.current,
-        metadata: selectedMetadataRef.current
-      });
+    // playingAudio doesn't handle REPLAY — re-select the event to restart the cycle
+    if (state.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
+      send({ type: 'SELECT_EVENT', event: selectedEventRef.current, metadata: selectedMetadataRef.current });
     } else {
-      // Standard replay (respects narration for videos)
-      send({ type: 'REPLAY' });
+      const isVideo = !!selectedEventRef.current?.video_url;
+      const useInstantPlayback = config?.instantVideoPlayback && isVideo;
+
+      if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
+        debugLog('⚡ Replaying with instant video playback (skipping narration)');
+        send({
+          type: 'SELECT_EVENT_INSTANT',
+          event: selectedEventRef.current,
+          metadata: selectedMetadataRef.current
+        });
+      } else {
+        send({ type: 'REPLAY' });
+      }
     }
 
     if (onReplayRef.current && selectedEventRef.current) {
@@ -1406,6 +1589,14 @@ export default function MainStageView({
   if (!selectedEvent) return null;
 
 
+  // Replay overlay: visible when media isn't actively playing.
+  // Hidden during the co-host breath (isDeepDivePending) and direct deep dive playback.
+  const showReplayOverlay =
+    !isCaptionOrSparklePlaying &&
+    !isDeepDivePending &&
+    (isInFinishedState || isCaptionDoneForPhoto || isAudioPlaybackDone);
+  const showPlayOverlay = state.matches('idle');
+
   // Animated style for root container (swipe-to-minimize)
   const rootAnimatedStyle = useAnimatedStyle(() => {
     return {
@@ -1515,12 +1706,19 @@ export default function MainStageView({
                         cachePolicy="memory-disk"
                       />
                     )}
-                    {/* Replay Icon Overlay (videos don't pause, only show replay when finished) */}
+                    {/* Play/Replay overlay */}
                     <Animated.View
                       style={[styles.playOverlay, controlsAnimatedStyle]}
-                      pointerEvents={state.matches('finished') ? 'auto' : 'none'}
+                      pointerEvents={showPlayOverlay || showReplayOverlay ? 'auto' : 'none'}
                     >
-                      {state.matches('finished') ? (
+                      {showPlayOverlay ? (
+                        <TouchableOpacity onPress={handleSingleTap} style={styles.playButton}>
+                          <BlurView intensity={30} style={styles.playOverlayBlur}>
+                            <FontAwesome name="play" size={64} color="rgba(255, 255, 255, 0.95)" />
+                          </BlurView>
+                        </TouchableOpacity>
+                      ) : null}
+                      {showReplayOverlay ? (
                         <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
                           <BlurView intensity={30} style={styles.playOverlayBlur}>
                             <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
@@ -1943,7 +2141,17 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.15)',
   },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
-  playOverlay: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, justifyContent: 'center', alignItems: 'center' },
+  playOverlay: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 20,
+    elevation: 20,
+  },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
   cameraBubble: { position: 'absolute', width: 100, height: 100, borderRadius: 50, overflow: 'hidden', borderWidth: 2, borderColor: '#fff', zIndex: 99999, elevation: 10 },

@@ -1,5 +1,5 @@
 import MainStageView from '@/components/MainStageView';
-import { DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
+import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, AvatarFilterBar, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useCompanionAvatars } from '@projectmirror/shared';
 import {
@@ -26,7 +26,7 @@ import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -72,12 +72,14 @@ export default function HomeScreen() {
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
 
   // Explorer config with state for toggleable settings
+  const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
+  const [startIdleOnInitialSelection, setStartIdleOnInitialSelection] = useState(false);
 
   //const { currentExplorerId, loading: explorerLoading } = useExplorer();
-  const { explorerId: currentExplorerId } = useExplorerSelf();
+  const { explorerId: currentExplorerId, explorerData } = useExplorerSelf();
 
   // Companion avatar filter
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
@@ -107,8 +109,7 @@ export default function HomeScreen() {
     }
   }, [filteredEvents, selectedEvent]);
 
-  // Load settings from storage
-  useEffect(() => {
+  const loadExplorerPreferences = useCallback(() => {
     AsyncStorage.getItem('enableInfiniteScroll').then(value => {
       if (value !== null) {
         setEnableInfiniteScroll(value === 'true');
@@ -128,16 +129,32 @@ export default function HomeScreen() {
     }).catch(err => console.warn('Failed to load read video captions setting:', err));
   }, []);
 
+  useEffect(() => {
+    const firestoreAutoplay = explorerData?.settings?.autoplay;
+    setAutoplay(typeof firestoreAutoplay === 'boolean' ? firestoreAutoplay : DEFAULT_AUTOPLAY);
+  }, [explorerData?.settings?.autoplay]);
+
+  // Load settings from storage on mount and when returning from Settings
+  useEffect(() => {
+    loadExplorerPreferences();
+  }, [loadExplorerPreferences]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadExplorerPreferences();
+    }, [loadExplorerPreferences])
+  );
+
   // Memoize config to prevent unnecessary re-renders
   const EXPLORER_CONFIG = useMemo(() => ({
     playVideoCaptions: false,
-    autoplay: true,
+    autoplay,
     loopFeed: true,
     showStartMarker: true,
     enableInfiniteScroll,
     instantVideoPlayback,
     readVideoCaptions,
-  }), [enableInfiniteScroll, instantVideoPlayback, readVideoCaptions]);
+  }), [autoplay, enableInfiniteScroll, instantVideoPlayback, readVideoCaptions]);
 
 
 
@@ -391,9 +408,15 @@ export default function HomeScreen() {
   useEffect(() => {
     if (events.length > 0 && !hasAutoSelectedRef.current) {
       hasAutoSelectedRef.current = true;
-      handleEventPress(events[0]);
+      if (autoplay) {
+        handleEventPress(events[0]);
+      } else {
+        selectedEventIdRef.current = events[0].event_id;
+        setStartIdleOnInitialSelection(true);
+        setSelectedEvent(events[0]);
+      }
     }
-  }, [events.length]);
+  }, [autoplay, events, handleEventPress]);
 
   // Keep selectedEventIdRef in sync for multi-tap guard (e.g. when closing modal or swiping)
   useEffect(() => {
@@ -755,6 +778,7 @@ export default function HomeScreen() {
   }, []);
 
   const handleEventPress = useCallback(async (item: Event) => {
+    setStartIdleOnInitialSelection(false);
     // Ignore multiple taps on the already-selected card (use ref for immediate effect before state updates)
     if (item.event_id === selectedEventIdRef.current) return;
     selectedEventIdRef.current = item.event_id;
@@ -1431,6 +1455,7 @@ export default function HomeScreen() {
             readEventIds={readEventIds}
             onReplay={(event) => sendReplaySignal(event.event_id)}
             config={EXPLORER_CONFIG}
+            startIdleOnInitialSelection={startIdleOnInitialSelection}
           />
         </View>
       )}

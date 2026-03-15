@@ -1,18 +1,21 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
-import { VersionDisplay } from '@projectmirror/shared';
-import { auth } from '@projectmirror/shared/firebase';
+import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
+import { ExplorerConfig, VersionDisplay } from '@projectmirror/shared';
+import { auth, db, doc, setDoc } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { useExplorerSelf } from '../context/ExplorerSelfContext';
 
 export default function SettingsScreen() {
     const colorScheme = useColorScheme();
     const tintColor = Colors[colorScheme ?? 'light'].tint;
     const router = useRouter();
+    const { explorerId, explorerData } = useExplorerSelf();
 
+    const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
     // Instant video playback setting
     const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
     const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
@@ -28,14 +31,40 @@ export default function SettingsScreen() {
     }, []);
 
     useEffect(() => {
+        const firestoreAutoplay = explorerData?.settings?.autoplay;
+        setAutoplay(typeof firestoreAutoplay === 'boolean' ? firestoreAutoplay : DEFAULT_AUTOPLAY);
+    }, [explorerData?.settings?.autoplay]);
+
+    useEffect(() => {
         AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => {});
     }, []);
+
+    const toggleAutoplay = async (value: boolean) => {
+        setAutoplay(value);
+        try {
+            if (!explorerId) {
+                throw new Error('Missing Explorer ID');
+            }
+            await setDoc(
+                doc(db, ExplorerConfig.collections.explorers, explorerId),
+                {
+                    settings: {
+                        ...(explorerData?.settings ?? {}),
+                        autoplay: value,
+                    },
+                },
+                { merge: true }
+            );
+        } catch (err) {
+            console.warn('Failed to save autoplay setting to Firestore:', err);
+            setAutoplay(typeof explorerData?.settings?.autoplay === 'boolean' ? explorerData.settings.autoplay : DEFAULT_AUTOPLAY);
+        }
+    };
 
     const toggleInstantVideoPlayback = async (value: boolean) => {
         setInstantVideoPlayback(value);
         try {
             await AsyncStorage.setItem('instantVideoPlayback', value.toString());
-            console.log('✅ Instant video playback setting saved:', value);
         } catch (err) {
             console.warn('Failed to save setting:', err);
         }
@@ -88,6 +117,20 @@ export default function SettingsScreen() {
                     <Text style={[styles.sectionTitle, { color: tintColor }]}>Preferences</Text>
                     <View style={styles.card}>
                         <View style={styles.settingRow}>
+                            <View style={styles.settingInfo}>
+                                <Text style={styles.settingLabel}>Autoplay on Open</Text>
+                                <Text style={styles.settingDescription}>
+                                    Open the newest Reflection automatically when Explorer starts
+                                </Text>
+                            </View>
+                            <Switch
+                                value={autoplay}
+                                onValueChange={toggleAutoplay}
+                                trackColor={{ false: '#767577', true: '#4FC3F7' }}
+                                thumbColor={autoplay ? '#fff' : '#f4f3f4'}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { marginTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', paddingTop: 16 }]}>
                             <View style={styles.settingInfo}>
                                 <Text style={styles.settingLabel}>Instant Video Playback</Text>
                                 <Text style={styles.settingDescription}>
