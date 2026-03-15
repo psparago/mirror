@@ -79,6 +79,7 @@ export interface Explorer {
   
   settings?: {
     allow_video?: boolean;
+    autoplay?: boolean;
   };
   explorerAvatarS3Key?: string; // S3 key for the Explorer's profile photo
   created_at: string;

@@ -6,7 +6,7 @@ import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
@@ -32,6 +32,10 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   const soundRef = useRef<Audio.Sound | null>(null);
   const captionSoundRef = useRef<Audio.Sound | null>(null);
   const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null);
+  const [isDeepDivePending, setIsDeepDivePending] = useState(false);
+  const [isDirectDeepDivePlaying, setIsDirectDeepDivePlaying] = useState(false);
+  const hasAutoPlayedDeepDiveRef = useRef(false);
+  const deepDiveBreathTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
@@ -86,6 +90,16 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   useEffect(() => {
     eventRef.current = event;
   }, [event]);
+
+  useEffect(() => {
+    hasAutoPlayedDeepDiveRef.current = false;
+    setIsDeepDivePending(false);
+    setIsDirectDeepDivePlaying(false);
+    if (deepDiveBreathTimeoutRef.current) {
+      clearTimeout(deepDiveBreathTimeoutRef.current);
+      deepDiveBreathTimeoutRef.current = null;
+    }
+  }, [event?.event_id, visible]);
 
   const machine = useMemo(() => playerMachine.provide({
     actions: {
@@ -298,39 +312,6 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
   }, [videoPlayer, send]);
 
 
-  // LOGIC FOR SPARKLE BUTTON
-  // Check if we are stuck in the "Done but waiting for selfie" state
-  const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
-  
-  // For images (non-video, non-audio), check if we're in viewingPhoto state
-  // The state machine accepts TELL_ME_MORE from any viewingPhoto sub-state
-  const isViewingPhoto = state.matches('viewingPhoto');
-  const isViewingPhotoViewing = state.matches({ viewingPhoto: 'viewing' });
-  const isViewingPhotoNarrating = state.matches({ viewingPhoto: 'narrating' });
-  
-  const isFinished = state.matches('finished');
-  
-  // Show sparkle if:
-  // 1. Finished state
-  // 2. Audio done (bypassing selfie wait)
-  // 3. Viewing photo - show after a short delay to allow narration to start, or if we're in viewing sub-state
-  // For images, we use SELECT_EVENT_INSTANT which sets hasSpoken: true, but viewingPhoto still calls speakCaption
-  // So we show the button when not actively narrating
-  const canShowSparkle = event?.metadata?.deep_dive && (
-    isFinished || 
-    isAudioDoneButStuck ||
-    (isViewingPhoto && !isViewingPhotoNarrating) // Show when in viewingPhoto but not narrating
-  );
-
-  if (!visible || !event) return null;
-
-  // --- RENDER ---
-  const hasVideo = !!event?.video_url;
-  const isVideo = hasVideo || state.hasTag('video_mode');
-  const isSpeaking = state.hasTag('speaking');
-  const isPlaying = state.hasTag('playing');
-  const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null);
-
   // Helper to normalize audio URLs
   // For local file paths, we need to use file:// prefix for expo-av
   // For remote URLs (http/https), use as-is
@@ -352,10 +333,148 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
     return url;
   };
 
+  const playDeepDiveDirectly = useCallback(async () => {
+    setIsDirectDeepDivePlaying(true);
+    setIsDeepDivePending(false);
+
+    Speech.stop();
+    if (captionSoundRef.current) {
+      await captionSoundRef.current.unloadAsync().catch(() => {});
+      captionSoundRef.current = null;
+      setCaptionSound(null);
+    }
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+
+    const deepDiveAudioUrl = normalizeAudioUrl(eventRef.current?.deep_dive_audio_url);
+    const isValidUrl = !!deepDiveAudioUrl &&
+      (deepDiveAudioUrl.startsWith('http://') ||
+       deepDiveAudioUrl.startsWith('https://') ||
+       deepDiveAudioUrl.startsWith('file://'));
+
+    if (isValidUrl) {
+      try {
+        const { sound: newSound } = await Audio.Sound.createAsync(
+          { uri: deepDiveAudioUrl },
+          { shouldPlay: true, volume: 1.0 }
+        );
+        soundRef.current = newSound;
+        newSound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsDirectDeepDivePlaying(false);
+            newSound.unloadAsync();
+            soundRef.current = null;
+          }
+        });
+      } catch {
+        if (eventRef.current?.metadata?.deep_dive) {
+          Speech.speak(eventRef.current.metadata.deep_dive, {
+            volume: 1.0,
+            onDone: () => setIsDirectDeepDivePlaying(false),
+            onError: () => setIsDirectDeepDivePlaying(false),
+            onStopped: () => setIsDirectDeepDivePlaying(false),
+          });
+        } else {
+          setIsDirectDeepDivePlaying(false);
+        }
+      }
+    } else if (eventRef.current?.metadata?.deep_dive) {
+      Speech.speak(eventRef.current.metadata.deep_dive, {
+        volume: 1.0,
+        onDone: () => setIsDirectDeepDivePlaying(false),
+        onError: () => setIsDirectDeepDivePlaying(false),
+        onStopped: () => setIsDirectDeepDivePlaying(false),
+      });
+    } else {
+      setIsDirectDeepDivePlaying(false);
+    }
+  }, []);
+
+  // LOGIC FOR SPARKLE / CO-HOST
+  const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
+  const isViewingPhoto = state.matches('viewingPhoto');
+  const isViewingPhotoViewing = state.matches({ viewingPhoto: 'viewing' });
+  const isViewingPhotoNarrating = state.matches({ viewingPhoto: 'narrating' });
+  const isFinished = state.matches('finished');
+  const hasDeepDive = !!event?.metadata?.deep_dive || !!event?.deep_dive_audio_url;
+  const canShowSparkle = hasDeepDive && (
+    isFinished ||
+    isAudioDoneButStuck ||
+    (isViewingPhoto && !isViewingPhotoNarrating)
+  );
+
+  useEffect(() => {
+    if (!visible || !event || !hasDeepDive) return;
+    if (hasAutoPlayedDeepDiveRef.current) return;
+    if (!(isViewingPhotoViewing || isAudioDoneButStuck || isFinished)) return;
+
+    const shouldPlayDirectly = isAudioDoneButStuck;
+    setIsDeepDivePending(true);
+    const timeoutId = setTimeout(() => {
+      hasAutoPlayedDeepDiveRef.current = true;
+      deepDiveBreathTimeoutRef.current = null;
+      setIsDeepDivePending(false);
+
+      if (shouldPlayDirectly) {
+        playDeepDiveDirectly();
+      } else {
+        send({ type: 'TELL_ME_MORE' });
+      }
+    }, 750);
+
+    deepDiveBreathTimeoutRef.current = timeoutId;
+    return () => {
+      clearTimeout(timeoutId);
+      deepDiveBreathTimeoutRef.current = null;
+      setIsDeepDivePending(false);
+    };
+  }, [
+    visible,
+    event?.event_id,
+    hasDeepDive,
+    isViewingPhotoViewing,
+    isAudioDoneButStuck,
+    isFinished,
+    playDeepDiveDirectly,
+    send
+  ]);
+
+  if (!visible || !event) return null;
+
+  // --- RENDER ---
+  const hasVideo = !!event?.video_url;
+  const isVideo = hasVideo || state.hasTag('video_mode');
+  const isSpeaking = state.hasTag('speaking');
+  const isPlaying = state.hasTag('playing');
+  const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null) || isDirectDeepDivePlaying;
+
   const handleSwipeClose = () => {
     sendRef.current({ type: 'CLOSE' });
     setTimeout(() => { onClose(); }, 100);
   };
+
+  const handleReplay = () => {
+    hasAutoPlayedDeepDiveRef.current = false;
+    setIsDeepDivePending(false);
+    setIsDirectDeepDivePlaying(false);
+    if (deepDiveBreathTimeoutRef.current) {
+      clearTimeout(deepDiveBreathTimeoutRef.current);
+      deepDiveBreathTimeoutRef.current = null;
+    }
+
+    send({
+      type: 'SELECT_EVENT_INSTANT',
+      event: event,
+      metadata: event.metadata || ({} as EventMetadata)
+    });
+  };
+
+  const showReplayOverlay =
+    !isDeepDivePending &&
+    !isDirectDeepDivePlaying &&
+    (isFinished || isAudioDoneButStuck || isViewingPhotoViewing);
 
   const swipeDownGesture = Gesture.Pan()
     .activeOffsetY([10, 200])
@@ -435,12 +554,12 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
                  />
               )}
 
-              {/* Replay overlay — appears after video + caption narration completes */}
-              {isFinished && event?.video_url && (
+              {/* Replay overlay — appears after caption + deep dive completes */}
+              {showReplayOverlay && (
                 <View style={styles.replayOverlay}>
                   <TouchableOpacity
                     style={styles.replayButton}
-                    onPress={() => send({ type: 'REPLAY' })}
+                    onPress={handleReplay}
                     activeOpacity={0.8}
                   >
                     <FontAwesome name="repeat" size={28} color="#fff" />
@@ -488,52 +607,15 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
           </View>
 
           {/* TELL ME MORE SPARKLE */}
-          {canShowSparkle && (
+          {canShowSparkle && !isDeepDivePending && !isDirectDeepDivePlaying && (
             <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
               <TouchableOpacity
                 onPress={async () => {
+                  hasAutoPlayedDeepDiveRef.current = true;
+                  setIsDeepDivePending(false);
                   // If we're stuck in playingAudio state, directly play deep dive (bypass state machine)
                   if (isAudioDoneButStuck || state.matches('playingAudio')) {
-                    // Stop previous media
-                    Speech.stop();
-                    if (captionSoundRef.current) {
-                      await captionSoundRef.current.unloadAsync().catch(()=>{});
-                      setCaptionSound(null);
-                      captionSoundRef.current = null;
-                    }
-                    if (soundRef.current) {
-                      await soundRef.current.unloadAsync().catch(()=>{});
-                      soundRef.current = null;
-                    }
-
-                    // Play deep dive directly
-                    if (event?.deep_dive_audio_url) {
-                      try {
-                        const { sound: newSound } = await Audio.Sound.createAsync(
-                          { uri: event.deep_dive_audio_url },
-                          { shouldPlay: true, volume: 1.0 }
-                        );
-                        soundRef.current = newSound;
-                        newSound.setOnPlaybackStatusUpdate((status) => {
-                          if (status.isLoaded && status.didJustFinish) {
-                            newSound.unloadAsync();
-                            soundRef.current = null;
-                          }
-                        });
-                      } catch (err) {
-                        if (event?.metadata?.deep_dive) {
-                          Speech.speak(event.metadata.deep_dive, {
-                            volume: 1.0,
-                            onError: () => {},
-                          });
-                        }
-                      }
-                    } else if (event?.metadata?.deep_dive) {
-                      Speech.speak(event.metadata.deep_dive, {
-                        volume: 1.0,
-                        onError: () => {},
-                      });
-                    }
+                    await playDeepDiveDirectly();
                   } else if (isViewingPhoto) {
                     // For viewingPhoto state, try state machine first, but have fallback
                     send({ type: 'TELL_ME_MORE' });
@@ -570,7 +652,8 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
                     send({ type: 'TELL_ME_MORE' });
                   }
                 }}
-                style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
+                disabled={isAnyAudioPlaying}
+                style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isAnyAudioPlaying ? 0.4 : 1 }}
               >
                 <BlurView intensity={50} style={styles.tellMeMoreBlur}>
                   <Text style={{ fontSize: 32 }}>✨</Text>
