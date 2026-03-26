@@ -206,81 +206,89 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. List objects in the "{explorerID}/to/" prefix (Cole's inbox)
-	// Don't use delimiter - we need to see all nested objects
-	input := &s3.ListObjectsV2Input{
+	// Don't use delimiter - we need to see all nested objects.
+	// Paginate: S3 returns at most 1000 keys per ListObjectsV2 call; without this,
+	// newer events disappear from the API while still present in the bucket.
+	listInput := &s3.ListObjectsV2Input{
 		Bucket: aws.String("reflections-1200b-storage"),
 		Prefix: aws.String(fmt.Sprintf("%s/to/", explorerID)),
-	}
-
-	result, err := s3Client.ListObjectsV2(ctx, input)
-	if err != nil {
-		http.Error(w, "S3 List Error: "+err.Error(), 500)
-		return
 	}
 
 	// 6. Organize events by folder (event_id)
 	eventMap := make(map[string]*Event)
 	folderPrefix := fmt.Sprintf("%s/to/", explorerID)
 
-	// Process all objects to find image.jpg and metadata.json files
-	// (No need to process CommonPrefixes since we removed the delimiter)
-	for _, obj := range result.Contents {
-		key := *obj.Key
-		// Skip the folder itself
-		if key == folderPrefix {
-			continue
+	for {
+		result, err := s3Client.ListObjectsV2(ctx, listInput)
+		if err != nil {
+			http.Error(w, "S3 List Error: "+err.Error(), 500)
+			return
 		}
 
-		// Extract event_id and filename from path like \"cole/to/{event_id}/image.jpg\"
-		relativePath := key[len(folderPrefix):]
-		parts := strings.Split(relativePath, "/")
-
-		// Should have exactly 2 parts: [event_id, filename]
-		if len(parts) == 2 {
-			eventID := parts[0]
-			filename := parts[1]
-
-			// Ensure event exists in map
-			if _, exists := eventMap[eventID]; !exists {
-				eventMap[eventID] = &Event{
-					EventID: eventID,
-				}
-			}
-
-			// Generate presigned GET URL (Expiry: 4 hours)
-			presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String("reflections-1200b-storage"),
-				Key:    aws.String(key),
-			}, s3.WithPresignExpires(4*time.Hour))
-			if err != nil {
-				fmt.Printf("Error presigning %s: %v\n", key, err)
+		// Process all objects to find image.jpg and metadata.json files
+		for _, obj := range result.Contents {
+			key := *obj.Key
+			// Skip the folder itself
+			if key == folderPrefix {
 				continue
 			}
 
-			// Assign URL based on filename
-			if filename == "image.jpg" {
-				eventMap[eventID].ImageURL = presignedRes.URL
-				fmt.Printf("Found image for event %s\n", eventID)
-			} else if filename == "metadata.json" {
-				eventMap[eventID].MetadataURL = presignedRes.URL
-				fmt.Printf("Found metadata for event %s\n", eventID)
-			} else if filename == "audio.m4a" || filename == "audio.mp3" || filename == "audio_caption.mp3" || filename == "caption.mp3" {
-				eventMap[eventID].AudioURL = presignedRes.URL
-				fmt.Printf("Found audio for event %s\n", eventID)
-			} else if filename == "deep_dive.m4a" || filename == "deep_dive.mp3" || filename == "deep_dive_audio.mp3" {
-				eventMap[eventID].DeepDiveAudioURL = presignedRes.URL
-				fmt.Printf("Found deep dive audio for event %s\n", eventID)
-			} else if filename == "video.mp4" {
-				eventMap[eventID].VideoURL = presignedRes.URL
-				fmt.Printf("Found video for event %s\n", eventID)
+			// Extract event_id and filename from path like \"cole/to/{event_id}/image.jpg\"
+			relativePath := key[len(folderPrefix):]
+			parts := strings.Split(relativePath, "/")
+
+			// Should have exactly 2 parts: [event_id, filename]
+			if len(parts) == 2 {
+				eventID := parts[0]
+				filename := parts[1]
+
+				// Ensure event exists in map
+				if _, exists := eventMap[eventID]; !exists {
+					eventMap[eventID] = &Event{
+						EventID: eventID,
+					}
+				}
+
+				// Generate presigned GET URL (Expiry: 4 hours)
+				presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String("reflections-1200b-storage"),
+					Key:    aws.String(key),
+				}, s3.WithPresignExpires(4*time.Hour))
+				if err != nil {
+					fmt.Printf("Error presigning %s: %v\n", key, err)
+					continue
+				}
+
+				// Assign URL based on filename
+				if filename == "image.jpg" {
+					eventMap[eventID].ImageURL = presignedRes.URL
+					fmt.Printf("Found image for event %s\n", eventID)
+				} else if filename == "metadata.json" {
+					eventMap[eventID].MetadataURL = presignedRes.URL
+					fmt.Printf("Found metadata for event %s\n", eventID)
+				} else if filename == "audio.m4a" || filename == "audio.mp3" || filename == "audio_caption.mp3" || filename == "caption.mp3" {
+					eventMap[eventID].AudioURL = presignedRes.URL
+					fmt.Printf("Found audio for event %s\n", eventID)
+				} else if filename == "deep_dive.m4a" || filename == "deep_dive.mp3" || filename == "deep_dive_audio.mp3" {
+					eventMap[eventID].DeepDiveAudioURL = presignedRes.URL
+					fmt.Printf("Found deep dive audio for event %s\n", eventID)
+				} else if filename == "video.mp4" {
+					eventMap[eventID].VideoURL = presignedRes.URL
+					fmt.Printf("Found video for event %s\n", eventID)
+				}
+			} else {
+				// Log unexpected path structure for debugging
+				fmt.Printf("Unexpected path structure: %s (parts: %v)\n", key, parts)
 			}
-		} else {
-			// Log unexpected path structure for debugging
-			fmt.Printf("Unexpected path structure: %s (parts: %v)\n", key, parts)
 		}
+
+		if !aws.ToBool(result.IsTruncated) {
+			break
+		}
+		listInput.ContinuationToken = result.NextContinuationToken
 	}
 
-	// 6. Convert map to slice and fetch metadata for each event
+	// 7. Convert map to slice and fetch metadata for each event
 	var events []Event
 	for _, event := range eventMap {
 		// Fetch metadata if URL exists
@@ -292,7 +300,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 		events = append(events, *event)
 	}
 
-	// 7. Return as JSON
+	// 8. Return as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"events": events,
