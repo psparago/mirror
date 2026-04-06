@@ -1,7 +1,7 @@
 import MainStageView from '@/components/MainStageView';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, AvatarFilterBar, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useCompanionAvatars } from '@projectmirror/shared';
+import { API_ENDPOINTS, AvatarFilterBar, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useCompanionAvatars, useThrottledCallback } from '@projectmirror/shared';
 import {
   collection,
   db,
@@ -402,21 +402,6 @@ export default function HomeScreen() {
 
     loadReadState();
   }, []);
-
-  // Auto-select the first (most recent) event when events load (only once)
-  const hasAutoSelectedRef = useRef(false);
-  useEffect(() => {
-    if (events.length > 0 && !hasAutoSelectedRef.current) {
-      hasAutoSelectedRef.current = true;
-      if (autoplay) {
-        handleEventPress(events[0]);
-      } else {
-        selectedEventIdRef.current = events[0].event_id;
-        setStartIdleOnInitialSelection(true);
-        setSelectedEvent(events[0]);
-      }
-    }
-  }, [autoplay, events, handleEventPress]);
 
   // Keep selectedEventIdRef in sync for multi-tap guard (e.g. when closing modal or swiping)
   useEffect(() => {
@@ -845,6 +830,23 @@ export default function HomeScreen() {
     }
   }, [eventMetadata, refreshEventUrls, refreshNeighborUrls]);
 
+  const throttledHandleEventPress = useThrottledCallback(handleEventPress);
+
+  // Auto-select the first (most recent) event when events load (only once)
+  const hasAutoSelectedRef = useRef(false);
+  useEffect(() => {
+    if (events.length > 0 && !hasAutoSelectedRef.current) {
+      hasAutoSelectedRef.current = true;
+      if (autoplay) {
+        handleEventPress(events[0]);
+      } else {
+        selectedEventIdRef.current = events[0].event_id;
+        setStartIdleOnInitialSelection(true);
+        setSelectedEvent(events[0]);
+      }
+    }
+  }, [autoplay, events, handleEventPress]);
+
   // Helper to format event date
   const formatEventDate = (eventId: string): string => {
     const timestamp = parseInt(eventId, 10);
@@ -873,7 +875,7 @@ export default function HomeScreen() {
           styles.gridCard,
           isNewArrival && styles.gridCardNewArrival
         ]}
-        onPress={() => handleEventPress(item)}
+        onPress={() => throttledHandleEventPress(item)}
         activeOpacity={0.8}
       >
         {/* Unread indicator dot */}
@@ -1362,7 +1364,7 @@ export default function HomeScreen() {
                 // Find and select the first new arrival
                 const newestArrival = events.find(e => recentlyArrivedIds.includes(e.event_id));
                 if (newestArrival) {
-                  handleEventPress(newestArrival);
+                  throttledHandleEventPress(newestArrival);
                 }
               }}
               style={styles.newArrivalPill}
@@ -1442,7 +1444,7 @@ export default function HomeScreen() {
             }
             eventMetadata={eventMetadata}
             onClose={closeFullScreen}
-            onEventSelect={handleEventPress}
+            onEventSelect={throttledHandleEventPress}
             onDelete={deleteEvent}
             onCaptureSelfie={captureSelfieResponse}
             onPlaybackIdle={handleMainStagePlaybackIdle}

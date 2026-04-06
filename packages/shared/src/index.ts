@@ -22,6 +22,7 @@ export * from './explorer/ExplorerContext';
 
 // Hooks
 export * from './hooks/useCompanionAvatars';
+export * from './hooks/useThrottledCallback';
 
 // Components
 export { default as VersionDisplay } from './components/VersionDisplay';

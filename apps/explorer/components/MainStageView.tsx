@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { Event, EventMetadata, playerMachine } from '@projectmirror/shared';
+import { Event, EventMetadata, playerMachine, useThrottledCallback } from '@projectmirror/shared';
 
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
@@ -590,8 +590,6 @@ export default function MainStageView({
   }, [send, state, sound, captionSound]);
 
   const lastTapRef = useRef<number>(0);
-  const lastUpNextSelectionRef = useRef<{ id: string; time: number } | null>(null);
-  const replayInProgressRef = useRef(false);
 
   // Helper functions to handle gestures (must be on JS thread, not worklets)
   const handleHorizontalSwipe = useCallback((translationX: number) => {
@@ -741,6 +739,8 @@ export default function MainStageView({
     }
   }, [send, config?.instantVideoPlayback]);
 
+  const throttledSingleTap = useThrottledCallback(handleSingleTap);
+
   // Horizontal swipe gesture for next/prev (applied to root container)
   const horizontalSwipeGesture = Gesture.Pan()
     .activeOffsetX([-20, 20]) // Activate after 20px horizontal movement
@@ -766,7 +766,7 @@ export default function MainStageView({
       // Handle single tap (only if no significant movement)
       // Stricter threshold to avoid accidental taps during video
       if (Math.abs(event.translationX) < 5 && Math.abs(event.translationY) < 5 && event.velocityX === 0 && event.velocityY === 0) {
-        runOnJS(handleSingleTap)();
+        runOnJS(throttledSingleTap)();
       }
     });
 
@@ -1328,17 +1328,10 @@ export default function MainStageView({
 
   // --- RENDERING HELPERS ---
 
-  const handleReplay = () => {
-    // Ignore rapid multiple taps on replay
-    if (replayInProgressRef.current) return;
-    replayInProgressRef.current = true;
-    setTimeout(() => { replayInProgressRef.current = false; }, 600);
-
-    // Reset co-host so deep dive auto-plays again on the next cycle
+  const handleReplayImpl = useCallback(() => {
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
 
-    // Stop any in-progress direct deep dive playback
     Speech.stop();
     if (soundRef.current) {
       soundRef.current.stopAsync().catch(() => { });
@@ -1349,7 +1342,6 @@ export default function MainStageView({
 
     debugLog('🔁 User pressed REPLAY');
 
-    // playingAudio doesn't handle REPLAY — re-select the event to restart the cycle
     if (state.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
       send({ type: 'SELECT_EVENT', event: selectedEventRef.current, metadata: selectedMetadataRef.current });
     } else {
@@ -1371,7 +1363,9 @@ export default function MainStageView({
     if (onReplayRef.current && selectedEventRef.current) {
       onReplayRef.current(selectedEventRef.current);
     }
-  };
+  }, [state, send, config?.instantVideoPlayback]);
+
+  const handleReplay = useThrottledCallback(handleReplayImpl);
 
   const handleAdminToggle = () => {
     // Only verify answer when ENTERING admin mode
@@ -1412,16 +1406,145 @@ export default function MainStageView({
     }
   };
 
-  const handleUpNextItemPress = (event: Event) => {
-    // Ignore multiple taps on the already-selected card
-    if (event.event_id === selectedEvent?.event_id) return;
-    // Debounce rapid repeat taps on same card (before parent state propagates)
-    const now = Date.now();
-    const prev = lastUpNextSelectionRef.current;
-    if (prev && prev.id === event.event_id && now - prev.time < 400) return;
-    lastUpNextSelectionRef.current = { id: event.event_id, time: now };
-    onEventSelect(event);
-  };
+  const handleUpNextItemPressCore = useCallback(
+    (event: Event) => {
+      if (event.event_id === selectedEvent?.event_id) return;
+      onEventSelect(event);
+    },
+    [selectedEvent?.event_id, onEventSelect]
+  );
+
+  const handleUpNextItemPress = useThrottledCallback(handleUpNextItemPressCore);
+
+  const handlePlayCaptionPress = useCallback(async () => {
+    const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
+    const isDisabled = isMediaPlaying || isCaptionOrSparklePlaying;
+    if (isDisabled) return;
+
+    setIsCaptionOrSparklePlaying(true);
+    Speech.stop();
+    if (captionSound) {
+      try {
+        await captionSound.stopAsync();
+        await captionSound.unloadAsync();
+      } catch (e) {
+        debugLog('Caption already stopped');
+      }
+      setCaptionSound(null);
+    }
+
+    if (selectedEvent?.audio_url) {
+      debugLog('🔊 Playing caption audio file');
+      try {
+        const { sound: newSound } = await Audio.Sound.createAsync(
+          { uri: selectedEvent.audio_url },
+          { shouldPlay: true }
+        );
+
+        newSound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            debugLog('✅ Caption audio finished');
+            setIsCaptionOrSparklePlaying(false);
+            newSound.unloadAsync();
+          }
+        });
+        setCaptionSound(newSound);
+      } catch (err) {
+        console.warn('Audio playback error:', err);
+        setIsCaptionOrSparklePlaying(false);
+      }
+    } else if (selectedMetadata?.description) {
+      debugLog('🔊 Playing caption via TTS (Fallback)');
+      Speech.stop();
+      const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
+      Speech.speak(textToSpeak, {
+        onDone: () => {
+          debugLog('✅ Caption TTS finished');
+          setIsCaptionOrSparklePlaying(false);
+        },
+        onError: (err) => {
+          console.warn('TTS error:', err);
+          setIsCaptionOrSparklePlaying(false);
+        }
+      });
+    } else {
+      setIsCaptionOrSparklePlaying(false);
+    }
+  }, [state, isCaptionOrSparklePlaying, captionSound, selectedEvent, selectedMetadata]);
+
+  const throttledPlayCaptionPress = useThrottledCallback(handlePlayCaptionPress);
+
+  const handleTellMeMorePress = useCallback(async () => {
+    const isFinished = state.matches('finished');
+    const isViewingPhoto = state.matches('viewingPhoto');
+    const isNarrating = state.matches({ viewingPhoto: 'narrating' });
+    const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
+    const canShow = isFinished || isAudioDoneButStuck || (isViewingPhoto && !isNarrating);
+    if (!canShow) return;
+
+    const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
+    const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
+    if (isSparkleDisabled) return;
+
+    debugLog('✨ User pressed Tell Me More button');
+    setIsCaptionOrSparklePlaying(true);
+    const currentState = state;
+
+    if (currentState.matches({ playingAudio: { playback: 'done' } })) {
+      debugLog('🔄 In playingAudio state - directly playing deep dive');
+      Speech.stop();
+      if (captionSoundRefForActions.current) {
+        try {
+          await captionSoundRefForActions.current.stopAsync();
+          await captionSoundRefForActions.current.unloadAsync();
+        } catch (e) { /* already stopped */ }
+        captionSoundRefForActions.current = null;
+      }
+
+      const event = selectedEventRef.current;
+      const metadata = selectedMetadataRef.current;
+
+      if (event?.deep_dive_audio_url) {
+        try {
+          if (soundRef.current) await soundRef.current.unloadAsync();
+          const { sound: newSound } = await Audio.Sound.createAsync(
+            { uri: event.deep_dive_audio_url },
+            { shouldPlay: true, volume: 1.0 }
+          );
+          soundRef.current = newSound;
+          newSound.setOnPlaybackStatusUpdate((status) => {
+            if (status.isLoaded && status.didJustFinish) {
+              setIsCaptionOrSparklePlaying(false);
+              newSound.unloadAsync();
+              soundRef.current = null;
+            }
+          });
+        } catch (err) {
+          if (metadata?.deep_dive) {
+            Speech.speak(metadata.deep_dive, {
+              volume: 1.0,
+              onDone: () => setIsCaptionOrSparklePlaying(false),
+              onError: () => setIsCaptionOrSparklePlaying(false),
+            });
+          } else {
+            setIsCaptionOrSparklePlaying(false);
+          }
+        }
+      } else if (metadata?.deep_dive) {
+        Speech.speak(metadata.deep_dive, {
+          volume: 1.0,
+          onDone: () => setIsCaptionOrSparklePlaying(false),
+          onError: () => setIsCaptionOrSparklePlaying(false),
+        });
+      } else {
+        setIsCaptionOrSparklePlaying(false);
+      }
+    } else {
+      send({ type: 'TELL_ME_MORE' });
+    }
+  }, [state, isCaptionOrSparklePlaying, send]);
+
+  const throttledTellMeMorePress = useThrottledCallback(handleTellMeMorePress);
 
   const formatEventDate = (eventId: string): string => {
     const timestamp = parseInt(eventId, 10);
@@ -1712,7 +1835,7 @@ export default function MainStageView({
                       pointerEvents={showPlayOverlay || showReplayOverlay ? 'auto' : 'none'}
                     >
                       {showPlayOverlay ? (
-                        <TouchableOpacity onPress={handleSingleTap} style={styles.playButton}>
+                        <TouchableOpacity onPress={throttledSingleTap} style={styles.playButton}>
                           <BlurView intensity={30} style={styles.playOverlayBlur}>
                             <FontAwesome name="play" size={64} color="rgba(255, 255, 255, 0.95)" />
                           </BlurView>
@@ -1770,69 +1893,25 @@ export default function MainStageView({
 
                     return (selectedEvent?.audio_url || selectedMetadata?.description) && (
                       <TouchableOpacity
-                        style={[styles.playCaptionButton, isDisabled && styles.playCaptionButtonDisabled]}
-                        onPress={async () => {
-                          if (isDisabled) return;
-
-                          setIsCaptionOrSparklePlaying(true);
-
-                          // Stop any existing audio first
-                          Speech.stop();
-                          if (captionSound) {
-                            try {
-                              await captionSound.stopAsync();
-                              await captionSound.unloadAsync();
-                            } catch (e) {
-                              debugLog('Caption already stopped');
-                            }
-                            setCaptionSound(null);
-                          }
-
-                          // Use audio file narration
-                          if (selectedEvent?.audio_url) {
-                            debugLog('🔊 Playing caption audio file');
-                            try {
-                              const { sound: newSound } = await Audio.Sound.createAsync(
-                                { uri: selectedEvent.audio_url },
-                                { shouldPlay: true }
-                              );
-
-                              newSound.setOnPlaybackStatusUpdate((status) => {
-                                if (status.isLoaded && status.didJustFinish) {
-                                  debugLog('✅ Caption audio finished');
-                                  setIsCaptionOrSparklePlaying(false);
-                                  newSound.unloadAsync();
-                                }
-                              });
-                              setCaptionSound(newSound);
-                            } catch (err) {
-                              console.warn('Audio playback error:', err);
-                              setIsCaptionOrSparklePlaying(false);
-                            }
-                          } else if (selectedMetadata?.description) {
-                            // Only use TTS as a last resort if audio file is missing (despite expectation)
-                            debugLog('🔊 Playing caption via TTS (Fallback)');
-                            Speech.stop();
-                            const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
-                            Speech.speak(textToSpeak, {
-                              onDone: () => {
-                                debugLog('✅ Caption TTS finished');
-                                setIsCaptionOrSparklePlaying(false);
-                              },
-                              onError: (err) => {
-                                console.warn('TTS error:', err);
-                                setIsCaptionOrSparklePlaying(false);
-                              }
-                            });
-                          }
-                        }}
+                        style={[
+                          styles.playCaptionButton,
+                          isDisabled && styles.playCaptionButtonDisabled,
+                          isCaptionOrSparklePlaying && styles.playCaptionButtonWhileNarration,
+                        ]}
+                        onPress={throttledPlayCaptionPress}
                         activeOpacity={isDisabled ? 1 : 0.7}
                         disabled={isDisabled}
                       >
                         <FontAwesome
                           name="volume-up"
                           size={18}
-                          color={isDisabled ? "rgba(255, 255, 255, 0.3)" : "rgba(255, 255, 255, 0.8)"}
+                          color={
+                            isCaptionOrSparklePlaying
+                              ? 'rgba(255, 255, 255, 0.22)'
+                              : isDisabled
+                                ? 'rgba(255, 255, 255, 0.3)'
+                                : 'rgba(255, 255, 255, 0.8)'
+                          }
                         />
                       </TouchableOpacity>
                     );
@@ -1851,79 +1930,33 @@ export default function MainStageView({
                   const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
                   if (!canShow) return null;
                   return (
-                    <Animated.View key="tellMeMore" style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
+                    <Animated.View
+                      key="tellMeMore"
+                      style={[
+                        styles.tellMeMoreFAB,
+                        tellMeMoreAnimatedStyle,
+                        isCaptionOrSparklePlaying && styles.tellMeMoreFABNarration,
+                      ]}
+                    >
                       <TouchableOpacity
-                        onPress={async () => {
-                          if (isSparkleDisabled) return;
-                          debugLog('✨ User pressed Tell Me More button');
-                          setIsCaptionOrSparklePlaying(true);
-                          const currentState = state;
-
-                          // If we're in playingAudio state with audio done, play deep dive directly
-                          // (the state machine doesn't handle TELL_ME_MORE in playingAudio)
-                          if (currentState.matches({ playingAudio: { playback: 'done' } })) {
-                            debugLog('🔄 In playingAudio state - directly playing deep dive');
-
-                            // Stop any existing audio/speech
-                            Speech.stop();
-                            if (captionSoundRefForActions.current) {
-                              try {
-                                await captionSoundRefForActions.current.stopAsync();
-                                await captionSoundRefForActions.current.unloadAsync();
-                              } catch (e) { }
-                              captionSoundRefForActions.current = null;
-                            }
-
-                            // Play deep dive directly
-                            const event = selectedEventRef.current;
-                            const metadata = selectedMetadataRef.current;
-
-                            if (event?.deep_dive_audio_url) {
-                              try {
-                                if (soundRef.current) await soundRef.current.unloadAsync();
-                                const { sound: newSound } = await Audio.Sound.createAsync(
-                                  { uri: event.deep_dive_audio_url },
-                                  { shouldPlay: true, volume: 1.0 }
-                                );
-                                soundRef.current = newSound;
-                                newSound.setOnPlaybackStatusUpdate((status) => {
-                                  if (status.isLoaded && status.didJustFinish) {
-                                    setIsCaptionOrSparklePlaying(false);
-                                    newSound.unloadAsync();
-                                    soundRef.current = null;
-                                  }
-                                });
-                              } catch (err) {
-                                if (metadata?.deep_dive) {
-                                  Speech.speak(metadata.deep_dive, {
-                                    volume: 1.0,
-                                    onDone: () => setIsCaptionOrSparklePlaying(false),
-                                    onError: () => setIsCaptionOrSparklePlaying(false),
-                                  });
-                                } else {
-                                  setIsCaptionOrSparklePlaying(false);
-                                }
-                              }
-                            } else if (metadata?.deep_dive) {
-                              Speech.speak(metadata.deep_dive, {
-                                volume: 1.0,
-                                onDone: () => setIsCaptionOrSparklePlaying(false),
-                                onError: () => setIsCaptionOrSparklePlaying(false),
-                              });
-                            } else {
-                              setIsCaptionOrSparklePlaying(false);
-                            }
-                          } else {
-                            // For other states, use the state machine
-                            send({ type: 'TELL_ME_MORE' });
-                          }
+                        onPress={throttledTellMeMorePress}
+                        style={{
+                          flex: 1,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                          opacity: isSparkleDisabled ? 0.32 : 1,
                         }}
-                        style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isSparkleDisabled ? 0.4 : 1 }}
                         disabled={isSparkleDisabled}
                         activeOpacity={isSparkleDisabled ? 1 : 0.7}
                       >
-                        <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                          <Text style={{ fontSize: 32 }}>✨</Text>
+                        <BlurView
+                          intensity={isCaptionOrSparklePlaying ? 28 : 50}
+                          style={[
+                            styles.tellMeMoreBlur,
+                            isCaptionOrSparklePlaying && styles.tellMeMoreBlurDimmed,
+                          ]}
+                        >
+                          <Text style={{ fontSize: 32, opacity: isCaptionOrSparklePlaying ? 0.5 : 1 }}>✨</Text>
                         </BlurView>
                       </TouchableOpacity>
                     </Animated.View>
@@ -2185,7 +2218,10 @@ const styles = StyleSheet.create({
     marginLeft: 12,
   },
   playCaptionButtonDisabled: {
-    opacity: 0.4,
+    opacity: 0.35,
+  },
+  playCaptionButtonWhileNarration: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
   },
 
   tellMeMoreFAB: {
@@ -2198,7 +2234,13 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
   },
+  tellMeMoreFABNarration: {
+    opacity: 0.88,
+  },
   tellMeMoreBlur: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
+  tellMeMoreBlurDimmed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
   upNextPane: {
     borderLeftWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.25)',

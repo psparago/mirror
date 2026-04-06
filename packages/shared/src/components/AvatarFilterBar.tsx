@@ -1,4 +1,5 @@
 import React from 'react';
+import { useThrottledCallback } from '../hooks/useThrottledCallback';
 import {
   ActivityIndicator,
   Image,
@@ -21,6 +22,10 @@ const AVATAR_SIZE = 48;
 const RING_SIZE = AVATAR_SIZE + 6;
 
 export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: AvatarFilterBarProps) {
+  const throttledOnSelect = useThrottledCallback((userId: string | null) => {
+    onSelect(userId);
+  });
+
   if (loading) {
     return (
       <View style={styles.container}>
@@ -43,7 +48,7 @@ export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: A
       {/* "All" chip */}
       <TouchableOpacity
         style={styles.avatarItem}
-        onPress={() => onSelect(null)}
+        onPress={() => throttledOnSelect(null)}
         activeOpacity={0.7}
       >
         <View style={[styles.avatarRing, isAllSelected && styles.avatarRingActive]}>
@@ -62,7 +67,7 @@ export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: A
           <TouchableOpacity
             key={c.userId}
             style={styles.avatarItem}
-            onPress={() => onSelect(isSelected ? null : c.userId)}
+            onPress={() => throttledOnSelect(isSelected ? null : c.userId)}
             activeOpacity={0.7}
           >
             <View style={[styles.avatarRing, isSelected && styles.avatarRingActive]}>
