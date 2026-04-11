@@ -4,7 +4,7 @@ import { prepareImageForUpload } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, EventMetadata, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
 import { collection, db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
@@ -760,27 +760,31 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         }));
       }
 
-      // 7. Queue Metadata Upload
-      const metadata: any = {
-        description: finalCaption || (hasAudio ? "Voice message" : (mediaType === 'video' ? "Video message" : "")),
-        sender: companionName || "Companion",
-        sender_id: user?.uid || undefined,
-        timestamp: timestamp,
+      // 7. Queue Metadata Upload (S3 metadata.json + same object on Firestore after upload)
+      const contentType: NonNullable<EventMetadata['content_type']> =
+        mediaType === 'video' ? 'video' : hasAudio ? 'audio' : 'text';
+      const eventMetadata: EventMetadata = {
+        description:
+          finalCaption ||
+          (hasAudio ? 'Voice message' : mediaType === 'video' ? 'Video message' : ''),
+        sender: companionName || 'Companion',
+        timestamp,
         event_id: eventID,
-        content_type: mediaType === 'video' ? 'video' : (hasAudio ? 'audio' : 'text'),
-        short_caption: finalCaption,
-        deep_dive: finalDeepDive,
+        content_type: contentType,
         image_source: imageSourceType,
+        ...(user?.uid ? { sender_id: user.uid } : {}),
+        ...(finalCaption ? { short_caption: finalCaption } : {}),
+        ...(finalDeepDive?.trim() ? { deep_dive: finalDeepDive } : {}),
       };
 
-      debugLog('📄 Final Metadata to upload:', JSON.stringify(metadata, null, 2));
+      debugLog('📄 Final Metadata to upload:', JSON.stringify(eventMetadata, null, 2));
 
       if (urls['metadata.json']) {
         debugLog('📤 uploadEventBundle: Queuing metadata upload...');
         uploadPromises.push(
           fetch(urls['metadata.json'], {
             method: 'PUT',
-            body: JSON.stringify(metadata, null, 2),
+            body: JSON.stringify(eventMetadata, null, 2),
             headers: { 'Content-Type': 'application/json' },
           }).then(async res => {
             if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
@@ -796,6 +800,24 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       debugLog(`📡 uploadEventBundle: Executing ${uploadPromises.length} uploads in parallel...`);
       await Promise.all(uploadPromises);
       debugLog('✅ uploadEventBundle: All uploads completed successfully');
+
+      // 8b. Presigned GET for metadata.json (for older Explorers + parity with list API)
+      let metadataGetUrl: string | undefined;
+      if (currentExplorerId) {
+        try {
+          const metaUrlRes = await fetch(
+            `${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${encodeURIComponent(eventID)}&filename=metadata.json&method=GET&explorer_id=${encodeURIComponent(currentExplorerId)}`
+          );
+          if (metaUrlRes.ok) {
+            const { url } = await metaUrlRes.json();
+            metadataGetUrl = url;
+          } else {
+            console.warn('GET_S3_URL for metadata.json failed:', metaUrlRes.status);
+          }
+        } catch (e) {
+          console.warn('Failed to obtain metadata.json presigned GET URL:', e);
+        }
+      }
 
       // 9. Cleanup Staging & Local (image + TTS artifacts)
       showToast('✅ Reflection sent!');
@@ -855,7 +877,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         await stopRecording();
       }
 
-      // 11. Write Signal to Firestore
+      // 11. Write Signal to Firestore (metadata embedded for Explorers; metadata_url for backward compatibility)
       setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), {
         explorerId: currentExplorerId,
         event_id: eventID,
@@ -865,6 +887,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         timestamp: serverTimestamp(),
         type: "mirror_event",
         engagement_count: 0,
+        metadata: eventMetadata,
+        ...(metadataGetUrl ? { metadata_url: metadataGetUrl } : {}),
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {
