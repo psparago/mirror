@@ -1289,7 +1289,8 @@ export default function MainStageView({
   }, [state, controlsOpacity, selfieMirrorOpacity]);
 
   // 4. ANIMATIONS (VU Meter & Pulse)
-  const isMachineSpeaking = state && (state.matches({ playingVideo: { playback: 'narrating' } }) ||
+  const isMachineSpeaking = state && (state.matches({ playingVideo: { playback: 'narratingCaption' } }) ||
+    state.matches({ playingVideoInstant: { playback: 'narratingCaption' } }) ||
     state.matches({ viewingPhoto: 'narrating' }) ||
     state.matches({ playingDeepDive: { active: 'playing' } }));
   const isPlayingAudioState = state && state.matches('playingAudio');
