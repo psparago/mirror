@@ -34,6 +34,36 @@ import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanRespon
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
+/** Fetches JSON metadata in small batches to avoid bridge overload and parsing spikes. */
+async function loadEventMetadataBatched(
+  eventsList: Event[],
+  onLoaded: (eventId: string, metadata: EventMetadata) => void,
+  options?: { batchSize?: number; batchDelayMs?: number }
+): Promise<void> {
+  const batchSize = options?.batchSize ?? 2;
+  const batchDelayMs = options?.batchDelayMs ?? 50;
+  const targets = eventsList.filter((e) => e.metadata_url);
+  for (let i = 0; i < targets.length; i += batchSize) {
+    const chunk = targets.slice(i, i + batchSize);
+    await Promise.all(
+      chunk.map(async (event) => {
+        try {
+          const metaResponse = await fetch(event.metadata_url!);
+          if (metaResponse.ok) {
+            const metadata: EventMetadata = await metaResponse.json();
+            onLoaded(event.event_id, metadata);
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch metadata for ${event.event_id}:`, err);
+        }
+      })
+    );
+    if (i + batchSize < targets.length && batchDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, batchDelayMs));
+    }
+  }
+}
+
 export default function HomeScreen() {
   const router = useRouter();
 
@@ -513,30 +543,10 @@ export default function HomeScreen() {
       // Just update immediately, the centering logic in MainStageView will handle the focus stability
       setEvents(eventsWithTimestamp);
 
-      // Fetch metadata for each event
-      const metadataPromises = (data.events || []).map(async (event) => {
-        if (event.metadata_url) {
-          try {
-            const metaResponse = await fetch(event.metadata_url);
-            if (metaResponse.ok) {
-              const metadata: EventMetadata = await metaResponse.json();
-              return { eventId: event.event_id, metadata };
-            }
-          } catch (err) {
-            console.warn(`Failed to fetch metadata for ${event.event_id}:`, err);
-          }
-        }
-        return null;
+      // Metadata: incremental updates in small batches (do not block refresh / loading flags)
+      void loadEventMetadataBatched(sortedEvents, (eventId, metadata) => {
+        setEventMetadata((prev) => ({ ...prev, [eventId]: metadata }));
       });
-
-      const metadataResults = await Promise.all(metadataPromises);
-      const metadataMap: { [key: string]: EventMetadata } = {};
-      metadataResults.forEach(result => {
-        if (result) {
-          metadataMap[result.eventId] = result.metadata;
-        }
-      });
-      setEventMetadata(metadataMap);
     } catch (err: any) {
       console.error('Error fetching events:', err);
       setError(err.message || 'Failed to load events');
@@ -629,54 +639,40 @@ export default function HomeScreen() {
             const now = Date.now();
             const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
 
-            // 5. PRE-FETCH METADATA for New Items (Blocking for auto-play safety)
-            const metaPromises = newItems.map(async (item) => {
-              if (item.metadata_url) {
-                try {
-                  const mRes = await fetch(item.metadata_url);
-                  if (mRes.ok) {
-                    const meta: EventMetadata = await mRes.json();
-                    return { id: item.event_id, meta };
-                  }
-                } catch (e) {
-                  console.warn(`Failed pre-fetching meta for ${item.event_id}`, e);
-                }
-              }
-              return null;
+            // Merge new events immediately; metadata and arrival UI follow incrementally
+            setEvents(prev => {
+              const merged = [...signedNewItems, ...prev];
+              return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
             });
 
-            // Sequential: Wait for meta, then inject, then auto-play
-            Promise.all(metaPromises).then(results => {
-              const updates: { [key: string]: EventMetadata } = {};
-              results.forEach(r => { if (r) updates[r.id] = r.meta; });
-
-              if (Object.keys(updates).length > 0) {
-                debugLog(`✅ Pre-fetched metadata for ${Object.keys(updates).length} new items`);
-                setEventMetadata(prev => ({ ...prev, ...updates }));
-              }
-
-              // Update events list
-              setEvents(prev => {
-                const merged = [...signedNewItems, ...prev];
-                return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
+            const notifyNewArrivalForEvent = (eventId: string) => {
+              let shouldChime = false;
+              setRecentlyArrivedIds(prev => {
+                if (prev.includes(eventId) || readEventIdsRef.current.includes(eventId)) return prev;
+                shouldChime = true;
+                debugLog(`✨ New arrival ready after metadata: ${eventId}`);
+                return [...prev, eventId];
               });
+              if (shouldChime) void playArrivalChime();
+            };
 
-              // Mark new arrivals (shows pill notification) but DO NOT auto-play
-              if (newItems.length > 0) {
-                const newIds = newItems.map(item => item.event_id);
-                debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} - checking against read state`);
-
-                setRecentlyArrivedIds(prev => {
-                  // Only add IDs that aren't already in recentlyArrivedIds AND aren't read (using Ref for freshest values)
-                  const freshIds = newIds.filter(id => !prev.includes(id) && !readEventIdsRef.current.includes(id));
-                  if (freshIds.length === 0) return prev;
-
-                  debugLog(`✨ Adding ${freshIds.length} truly fresh arrivals to notify user`);
-                  playArrivalChime();
-                  return [...prev, ...freshIds];
-                });
+            for (const item of newItems) {
+              if (!item.metadata_url) {
+                debugLog(`🔔 New arrival (no metadata URL): ${item.event_id}`);
+                notifyNewArrivalForEvent(item.event_id);
               }
-            });
+            }
+
+            const newIds = newItems.map((item) => item.event_id);
+            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} — metadata loading in batches`);
+
+            const withMeta = newItems.filter((i) => i.metadata_url);
+            if (withMeta.length > 0) {
+              void loadEventMetadataBatched(withMeta, (eventId, meta) => {
+                setEventMetadata((prev) => ({ ...prev, [eventId]: meta }));
+                notifyNewArrivalForEvent(eventId);
+              });
+            }
           }
 
         } catch (error) {
