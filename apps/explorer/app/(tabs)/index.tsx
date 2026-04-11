@@ -79,36 +79,6 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   return meta;
 }
 
-/** Fetches JSON metadata in small batches to avoid bridge overload and parsing spikes. */
-async function loadEventMetadataBatched(
-  eventsList: Event[],
-  onLoaded: (eventId: string, metadata: EventMetadata) => void,
-  options?: { batchSize?: number; batchDelayMs?: number }
-): Promise<void> {
-  const batchSize = options?.batchSize ?? 2;
-  const batchDelayMs = options?.batchDelayMs ?? 50;
-  const targets = eventsList.filter((e) => e.metadata_url && !eventHasEmbeddedMetadata(e));
-  for (let i = 0; i < targets.length; i += batchSize) {
-    const chunk = targets.slice(i, i + batchSize);
-    await Promise.all(
-      chunk.map(async (event) => {
-        try {
-          const metaResponse = await fetch(event.metadata_url!);
-          if (metaResponse.ok) {
-            const metadata: EventMetadata = await metaResponse.json();
-            onLoaded(event.event_id, metadata);
-          }
-        } catch (err) {
-          console.warn(`Failed to fetch metadata for ${event.event_id}:`, err);
-        }
-      })
-    );
-    if (i + batchSize < targets.length && batchDelayMs > 0) {
-      await new Promise((r) => setTimeout(r, batchDelayMs));
-    }
-  }
-}
-
 export default function HomeScreen() {
   const router = useRouter();
 
@@ -501,26 +471,8 @@ export default function HomeScreen() {
         ...prev,
         [selectedEvent.event_id]: selectedEvent.metadata as EventMetadata,
       }));
-      return;
     }
-    if (!selectedEvent.metadata_url) return;
-    fetch(selectedEvent.metadata_url)
-      .then((res) => {
-        if (res.ok) {
-          return res.json();
-        }
-        throw new Error(`Failed to fetch metadata: ${res.status}`);
-      })
-      .then((metadata: EventMetadata) => {
-        setEventMetadata((prev) => ({
-          ...prev,
-          [selectedEvent.event_id]: metadata,
-        }));
-      })
-      .catch((err) => {
-        console.warn(`Failed to fetch metadata for ${selectedEvent.event_id}:`, err);
-      });
-  }, [selectedEvent?.event_id, selectedEvent?.metadata_url, selectedEvent?.metadata, eventMetadata]);
+  }, [selectedEvent?.event_id, selectedEvent?.metadata, eventMetadata]);
 
   // Get metadata for selected event  
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
@@ -610,13 +562,6 @@ export default function HomeScreen() {
         }
         setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
       }
-
-      const needsS3Metadata = sortedEvents.filter(
-        (e) => e.metadata_url && !embeddedById[e.event_id]
-      );
-      void loadEventMetadataBatched(needsS3Metadata, (eventId, metadata) => {
-        setEventMetadata((prev) => ({ ...prev, [eventId]: metadata }));
-      });
     } catch (err: any) {
       console.error('Error fetching events:', err);
       setError(err.message || 'Failed to load events');
@@ -740,11 +685,6 @@ export default function HomeScreen() {
               setEventMetadata((prev) => ({ ...prev, ...fromListOnly }));
             }
 
-            const idsMetadataReady = new Set<string>([
-              ...Object.keys(firestoreMetadataById),
-              ...Object.keys(fromListOnly),
-            ]);
-
             // Merge new events immediately; metadata and arrival UI follow incrementally
             setEvents(prev => {
               const merged = [...signedNewItems, ...prev];
@@ -756,32 +696,17 @@ export default function HomeScreen() {
               setRecentlyArrivedIds(prev => {
                 if (prev.includes(eventId) || readEventIdsRef.current.includes(eventId)) return prev;
                 shouldChime = true;
-                debugLog(`✨ New arrival ready after metadata: ${eventId}`);
+                debugLog(`✨ New arrival: ${eventId}`);
                 return [...prev, eventId];
               });
               if (shouldChime) void playArrivalChime();
             };
 
             const newIds = newItems.map((item) => item.event_id);
-            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} — metadata loading in batches`);
+            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')}`);
 
             for (const item of newItems) {
-              if (idsMetadataReady.has(item.event_id)) {
-                notifyNewArrivalForEvent(item.event_id);
-              } else if (!item.metadata_url) {
-                debugLog(`🔔 New arrival (no metadata URL): ${item.event_id}`);
-                notifyNewArrivalForEvent(item.event_id);
-              }
-            }
-
-            const needS3Metadata = newItems.filter(
-              (i) => !idsMetadataReady.has(i.event_id) && i.metadata_url
-            );
-            if (needS3Metadata.length > 0) {
-              void loadEventMetadataBatched(needS3Metadata, (eventId, meta) => {
-                setEventMetadata((prev) => ({ ...prev, [eventId]: meta }));
-                notifyNewArrivalForEvent(eventId);
-              });
+              notifyNewArrivalForEvent(item.event_id);
             }
           }
 
@@ -886,27 +811,12 @@ export default function HomeScreen() {
       return filtered;
     });
 
-    // Fetch metadata if not already loaded
-    if (!eventMetadata[item.event_id]) {
-      if (eventHasEmbeddedMetadata(item)) {
-        setEventMetadata((prev) => ({
-          ...prev,
-          [item.event_id]: item.metadata as EventMetadata,
-        }));
-      } else if (item.metadata_url) {
-        try {
-          const metaResponse = await fetch(item.metadata_url);
-          if (metaResponse.ok) {
-            const metadata: EventMetadata = await metaResponse.json();
-            setEventMetadata((prev) => ({
-              ...prev,
-              [item.event_id]: metadata,
-            }));
-          }
-        } catch (err) {
-          console.warn(`Failed to fetch metadata for ${item.event_id}:`, err);
-        }
-      }
+    // Copy embedded metadata into grid state if not already loaded
+    if (!eventMetadata[item.event_id] && eventHasEmbeddedMetadata(item)) {
+      setEventMetadata((prev) => ({
+        ...prev,
+        [item.event_id]: item.metadata as EventMetadata,
+      }));
     }
 
     // Refresh URLs in background (non-blocking) if they are stale
@@ -921,24 +831,12 @@ export default function HomeScreen() {
           // Trigger predictive refresh for neighbors
           refreshNeighborUrls(eventIdToRefresh);
 
-          // Fetch metadata for refreshed event if not already loaded
-          if (!eventMetadata[refreshedEvent.event_id]) {
-            if (eventHasEmbeddedMetadata(refreshedEvent)) {
-              setEventMetadata((prev) => ({
-                ...prev,
-                [refreshedEvent.event_id]: refreshedEvent.metadata as EventMetadata,
-              }));
-            } else if (refreshedEvent.metadata_url) {
-              fetch(refreshedEvent.metadata_url)
-                .then((res) => res.json())
-                .then((metadata: EventMetadata) => {
-                  setEventMetadata((prev) => ({
-                    ...prev,
-                    [refreshedEvent.event_id]: metadata,
-                  }));
-                })
-                .catch((err) => console.warn('Failed to fetch metadata for refreshed event:', err));
-            }
+          // Merge embedded metadata from refreshed bundle if not already loaded
+          if (!eventMetadata[refreshedEvent.event_id] && eventHasEmbeddedMetadata(refreshedEvent)) {
+            setEventMetadata((prev) => ({
+              ...prev,
+              [refreshedEvent.event_id]: refreshedEvent.metadata as EventMetadata,
+            }));
           }
         }
       }).catch(err => {

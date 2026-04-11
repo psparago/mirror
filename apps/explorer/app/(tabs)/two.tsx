@@ -12,35 +12,6 @@ function eventHasEmbeddedMetadata(event: Event): boolean {
   );
 }
 
-async function loadEventMetadataBatched(
-  eventsList: Event[],
-  onLoaded: (eventId: string, metadata: EventMetadata) => void,
-  options?: { batchSize?: number; batchDelayMs?: number }
-): Promise<void> {
-  const batchSize = options?.batchSize ?? 2;
-  const batchDelayMs = options?.batchDelayMs ?? 50;
-  const targets = eventsList.filter((e) => e.metadata_url && !eventHasEmbeddedMetadata(e));
-  for (let i = 0; i < targets.length; i += batchSize) {
-    const chunk = targets.slice(i, i + batchSize);
-    await Promise.all(
-      chunk.map(async (event) => {
-        try {
-          const metaResponse = await fetch(event.metadata_url!);
-          if (metaResponse.ok) {
-            const metadata: EventMetadata = await metaResponse.json();
-            onLoaded(event.event_id, metadata);
-          }
-        } catch (err) {
-          console.warn(`Failed to fetch metadata for ${event.event_id}:`, err);
-        }
-      })
-    );
-    if (i + batchSize < targets.length && batchDelayMs > 0) {
-      await new Promise((r) => setTimeout(r, batchDelayMs));
-    }
-  }
-}
-
 export default function TabTwoScreen() {
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
@@ -85,11 +56,6 @@ export default function TabTwoScreen() {
         }
         setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
       }
-
-      const needsS3Metadata = list.filter((e) => e.metadata_url && !embeddedById[e.event_id]);
-      void loadEventMetadataBatched(needsS3Metadata, (eventId, metadata) => {
-        setEventMetadata((prev) => ({ ...prev, [eventId]: metadata }));
-      });
     } catch (err: any) {
       console.error('Error fetching events:', err);
       setError(err.message || 'Failed to load events');

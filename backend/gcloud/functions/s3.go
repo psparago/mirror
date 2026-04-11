@@ -164,16 +164,16 @@ type EventMetadata struct {
 type Event struct {
 	EventID          string         `json:"event_id"`
 	ImageURL         string         `json:"image_url"` // Always a thumbnail for video events
-	MetadataURL      string         `json:"metadata_url"`
 	AudioURL         string         `json:"audio_url,omitempty"` // Optional audio file URL
 	VideoURL         string         `json:"video_url,omitempty"` // Optional video file URL
 	DeepDiveAudioURL string         `json:"deep_dive_audio_url,omitempty"`
 	Metadata         *EventMetadata `json:"metadata,omitempty"`
 }
 
-// ListMirrorEvents lists event bundles in Cole's inbox and returns presigned GET URLs
-// for image.jpg, metadata.json, and audio.m4a (if present) for each event.
-// Returns: JSON with "events" array, each containing event_id, image_url, metadata_url, and optional audio_url
+// ListMirrorEvents lists event bundles in the Explorer inbox and returns presigned GET URLs
+// for image.jpg, audio, deep dive audio, and video (if present). Legacy metadata.json keys
+// are ignored (metadata is provided via Firestore, not this API).
+// Returns: JSON with "events" array (event_id, image_url, optional media URLs, optional metadata).
 func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 	// 1. Standard CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -225,7 +225,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Process all objects to find image.jpg and metadata.json files
+		// Process all objects (skip legacy metadata.json — no presign / no metadata_url in API)
 		for _, obj := range result.Contents {
 			key := *obj.Key
 			// Skip the folder itself
@@ -241,6 +241,10 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 			if len(parts) == 2 {
 				eventID := parts[0]
 				filename := parts[1]
+
+				if filename == "metadata.json" {
+					continue
+				}
 
 				// Ensure event exists in map
 				if _, exists := eventMap[eventID]; !exists {
@@ -263,9 +267,6 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 				if filename == "image.jpg" {
 					eventMap[eventID].ImageURL = presignedRes.URL
 					fmt.Printf("Found image for event %s\n", eventID)
-				} else if filename == "metadata.json" {
-					eventMap[eventID].MetadataURL = presignedRes.URL
-					fmt.Printf("Found metadata for event %s\n", eventID)
 				} else if filename == "audio.m4a" || filename == "audio.mp3" || filename == "audio_caption.mp3" || filename == "caption.mp3" {
 					eventMap[eventID].AudioURL = presignedRes.URL
 					fmt.Printf("Found audio for event %s\n", eventID)
@@ -288,15 +289,9 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 		listInput.ContinuationToken = result.NextContinuationToken
 	}
 
-	// 7. Convert map to slice and fetch metadata for each event
+	// 7. Convert map to slice
 	var events []Event
 	for _, event := range eventMap {
-		// Fetch metadata if URL exists
-		if event.MetadataURL != "" {
-			// Extract the S3 key from the presigned URL to fetch metadata
-			// For now, we'll return the metadata URL and let the frontend fetch it
-			// This keeps the response size manageable
-		}
 		events = append(events, *event)
 	}
 
@@ -364,6 +359,10 @@ func GetEventBundle(w http.ResponseWriter, r *http.Request) {
 		key := *obj.Key
 		filename := key[len(prefix):]
 
+		if filename == "metadata.json" {
+			continue
+		}
+
 		presignedRes, err := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String("reflections-1200b-storage"),
 			Key:    aws.String(key),
@@ -377,8 +376,6 @@ func GetEventBundle(w http.ResponseWriter, r *http.Request) {
 		switch filename {
 		case "image.jpg":
 			event.ImageURL = presignedRes.URL
-		case "metadata.json":
-			event.MetadataURL = presignedRes.URL
 		case "audio.m4a", "audio.mp3", "audio_caption.mp3", "caption.mp3":
 			event.AudioURL = presignedRes.URL
 		case "deep_dive.m4a", "deep_dive.mp3", "deep_dive_audio.mp3":

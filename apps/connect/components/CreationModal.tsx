@@ -630,8 +630,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
-      // 1. Prepare list of files to upload
-      const filesToSign = ['image.jpg', 'metadata.json'];
+      // 1. Prepare list of files to upload (media only; metadata lives on Firestore)
+      const filesToSign = ['image.jpg'];
       if (mediaType === 'video' && videoUri) {
         filesToSign.push('video.mp4');
       }
@@ -760,7 +760,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         }));
       }
 
-      // 7. Queue Metadata Upload (S3 metadata.json + same object on Firestore after upload)
+      // 7. Build metadata for Firestore (not uploaded to S3)
       const contentType: NonNullable<EventMetadata['content_type']> =
         mediaType === 'video' ? 'video' : hasAudio ? 'audio' : 'text';
       const eventMetadata: EventMetadata = {
@@ -777,47 +777,12 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         ...(finalDeepDive?.trim() ? { deep_dive: finalDeepDive } : {}),
       };
 
-      debugLog('📄 Final Metadata to upload:', JSON.stringify(eventMetadata, null, 2));
-
-      if (urls['metadata.json']) {
-        debugLog('📤 uploadEventBundle: Queuing metadata upload...');
-        uploadPromises.push(
-          fetch(urls['metadata.json'], {
-            method: 'PUT',
-            body: JSON.stringify(eventMetadata, null, 2),
-            headers: { 'Content-Type': 'application/json' },
-          }).then(async res => {
-            if (!res.ok) throw new Error(`Metadata upload failed: ${res.status}`);
-            debugLog('✅ uploadEventBundle: Metadata upload SUCCESS');
-            return res;
-          })
-        );
-      } else {
-        console.error('❌ uploadEventBundle: Missing metadata.json presigned URL');
-      }
+      debugLog('📄 Final metadata (Firestore):', JSON.stringify(eventMetadata, null, 2));
 
       // 8. Execute All Uploads Parallelly
       debugLog(`📡 uploadEventBundle: Executing ${uploadPromises.length} uploads in parallel...`);
       await Promise.all(uploadPromises);
       debugLog('✅ uploadEventBundle: All uploads completed successfully');
-
-      // 8b. Presigned GET for metadata.json (for older Explorers + parity with list API)
-      let metadataGetUrl: string | undefined;
-      if (currentExplorerId) {
-        try {
-          const metaUrlRes = await fetch(
-            `${API_ENDPOINTS.GET_S3_URL}?path=to&event_id=${encodeURIComponent(eventID)}&filename=metadata.json&method=GET&explorer_id=${encodeURIComponent(currentExplorerId)}`
-          );
-          if (metaUrlRes.ok) {
-            const { url } = await metaUrlRes.json();
-            metadataGetUrl = url;
-          } else {
-            console.warn('GET_S3_URL for metadata.json failed:', metaUrlRes.status);
-          }
-        } catch (e) {
-          console.warn('Failed to obtain metadata.json presigned GET URL:', e);
-        }
-      }
 
       // 9. Cleanup Staging & Local (image + TTS artifacts)
       showToast('✅ Reflection sent!');
@@ -877,7 +842,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         await stopRecording();
       }
 
-      // 11. Write Signal to Firestore (metadata embedded for Explorers; metadata_url for backward compatibility)
+      // 11. Write signal to Firestore (metadata is the source of truth for clients)
       setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), {
         explorerId: currentExplorerId,
         event_id: eventID,
@@ -888,7 +853,6 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         type: "mirror_event",
         engagement_count: 0,
         metadata: eventMetadata,
-        ...(metadataGetUrl ? { metadata_url: metadataGetUrl } : {}),
       }).catch(err => console.error("Firestore signal error:", err));
 
     } catch (error: any) {
