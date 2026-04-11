@@ -16,6 +16,7 @@ import {
   disableNetwork,
   doc,
   enableNetwork,
+  getCountFromServer,
   getDoc,
   getDocs,
   increment,
@@ -67,7 +68,7 @@ export const db = initializeFirestore(app, {
 });
 
 export {
-  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, disableNetwork, doc, enableNetwork, getDoc,
+  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, disableNetwork, doc, enableNetwork, getCountFromServer, getDoc,
   getDocs, increment, limit, limitToLast, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch
 };
 

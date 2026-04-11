@@ -1,6 +1,6 @@
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
-import { collection, db, deleteDoc, doc, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
@@ -132,6 +132,9 @@ export default function SentTimelineScreen() {
   }, []);
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
+  /** True total Firestore reflection signals for this Explorer (list query is capped at 100). */
+  const [totalReflectionCount, setTotalReflectionCount] = useState<number | null>(null);
+  const countRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
   const currentIdentity = activeRelationship?.companionName || null;
@@ -200,12 +203,32 @@ export default function SentTimelineScreen() {
     return result;
   }, [reflections, responseEventIds, responseTimestampMap, selectedCompanionId, companions, sortBy]);
 
-  const reflectionCounts = useMemo(() => {
-    const all = reflections.length; // already excludes soft-deleted items (filtered at source)
-    const mine =
-      currentIdentity ? reflections.filter(r => r.sender?.toLowerCase() === currentIdentity.toLowerCase()).length : 0;
-    return { all, mine };
-  }, [reflections, currentIdentity]);
+  const timelineBadgeCount = useMemo(() => {
+    const listLen = displayReflections.length;
+    if (selectedCompanionId) {
+      return listLen;
+    }
+    if (totalReflectionCount !== null) {
+      return totalReflectionCount;
+    }
+    return listLen;
+  }, [displayReflections.length, selectedCompanionId, totalReflectionCount]);
+
+  const scheduleReflectionCountRefresh = useCallback(() => {
+    if (!currentExplorerId) return;
+    if (countRefreshTimerRef.current) clearTimeout(countRefreshTimerRef.current);
+    countRefreshTimerRef.current = setTimeout(async () => {
+      countRefreshTimerRef.current = null;
+      try {
+        const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
+        const countQuery = query(reflectionsRef, where('explorerId', '==', currentExplorerId));
+        const countSnap = await getCountFromServer(countQuery);
+        setTotalReflectionCount(countSnap.data().count);
+      } catch (err) {
+        console.warn('Timeline reflection count failed:', err);
+      }
+    }, 350);
+  }, [currentExplorerId]);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState('');
@@ -260,9 +283,16 @@ export default function SentTimelineScreen() {
     // GUARD: If no Explorer ID is set yet, stop loading and do not query
     if (!currentExplorerId) {
       setLoading(false);
+      setTotalReflectionCount(null);
+      if (countRefreshTimerRef.current) {
+        clearTimeout(countRefreshTimerRef.current);
+        countRefreshTimerRef.current = null;
+      }
       return;
     }
-    
+
+    scheduleReflectionCountRefresh();
+
     setLoading(true);
 
     // Listen to reflections collection for sent Reflections
@@ -486,6 +516,7 @@ export default function SentTimelineScreen() {
 
         setReflections(reflectionsList);
         setLoading(false);
+        scheduleReflectionCountRefresh();
       },
       (error) => {
         console.error('Error listening to reflections:', error);
@@ -493,8 +524,14 @@ export default function SentTimelineScreen() {
       }
     );
 
-    return () => unsubscribe();
-  }, [currentExplorerId]);
+    return () => {
+      unsubscribe();
+      if (countRefreshTimerRef.current) {
+        clearTimeout(countRefreshTimerRef.current);
+        countRefreshTimerRef.current = null;
+      }
+    };
+  }, [currentExplorerId, scheduleReflectionCountRefresh]);
 
   // Refresh local data when app comes to foreground
   useEffect(() => {
@@ -784,7 +821,7 @@ export default function SentTimelineScreen() {
             </TouchableOpacity>
           </View>
           <View style={styles.countBadge}>
-            <Text style={styles.countBadgeText}>{displayReflections.length.toLocaleString()}</Text>
+            <Text style={styles.countBadgeText}>{timelineBadgeCount.toLocaleString()}</Text>
           </View>
         </View>
       </View>

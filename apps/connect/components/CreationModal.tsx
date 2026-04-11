@@ -135,6 +135,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
   const [peopleContext, setPeopleContext] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [confirmVideoEnded, setConfirmVideoEnded] = useState(false);
   const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
   const [showNameModal, setShowNameModal] = useState(false);
   const router = useRouter();
@@ -1114,15 +1115,71 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     []
   );
 
-  // Loop the video preview during the confirmation screen
+  // Video confirmation: load URI with replace() (picker/trim URIs need this), play once, no loop.
   useEffect(() => {
-    if (confirming && videoUri && videoPlayer) {
-      videoPlayer.loop = true;
-      videoPlayer.play();
-    } else if (videoPlayer && confirming === false) {
-      videoPlayer.pause();
+    if (confirming && videoUri && videoPlayer && mediaType === 'video') {
+      setConfirmVideoEnded(false);
+      videoPlayer.loop = false;
+      try {
+        videoPlayer.replace(videoUri);
+      } catch {
+        // replace can throw if player is tearing down; play() may still work
+      }
+      const raf = requestAnimationFrame(() => {
+        try {
+          videoPlayer.play();
+        } catch {
+          // ignore
+        }
+      });
+      return () => cancelAnimationFrame(raf);
     }
-  }, [confirming, videoUri, videoPlayer]);
+    if (videoPlayer && !confirming) {
+      try {
+        videoPlayer.pause();
+      } catch {
+        // ignore
+      }
+    }
+    return undefined;
+  }, [confirming, videoUri, videoPlayer, mediaType]);
+
+  useEffect(() => {
+    if (!confirming || mediaType !== 'video' || !videoPlayer) return;
+    const subPlayToEnd = videoPlayer.addListener('playToEnd', () => {
+      setConfirmVideoEnded(true);
+    });
+    // Trimmed / short exports often omit playToEnd; mirror Explorer MainStage near-end detection.
+    const subPlaying = videoPlayer.addListener('playingChange', ({ isPlaying }: { isPlaying: boolean }) => {
+      if (isPlaying) return;
+      const duration = videoPlayer.duration;
+      if (!(duration > 0)) return;
+      const epsilon = Math.min(0.45, Math.max(0.06, duration * 0.12));
+      if (videoPlayer.currentTime >= duration - epsilon) {
+        setConfirmVideoEnded(true);
+      }
+    });
+    return () => {
+      subPlayToEnd.remove();
+      subPlaying.remove();
+    };
+  }, [confirming, mediaType, videoPlayer]);
+
+  const handleConfirmVideoReplay = useCallback(() => {
+    if (!videoPlayer || !videoUri) return;
+    setConfirmVideoEnded(false);
+    try {
+      videoPlayer.replace(videoUri);
+    } catch {
+      // ignore
+    }
+    try {
+      videoPlayer.currentTime = 0;
+      videoPlayer.play();
+    } catch {
+      // ignore
+    }
+  }, [videoPlayer, videoUri]);
 
   const handleConfirmCancel = async () => {
     const photoUriToClean = photo?.uri ?? null;
@@ -1239,12 +1296,36 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
             >
               <View style={styles.confirmationMedia}>
                 {mediaType === 'video' && videoUri ? (
-                  <VideoView
-                    player={videoPlayer}
-                    style={StyleSheet.absoluteFill}
-                    contentFit="contain"
-                    nativeControls={false}
-                  />
+                  <>
+                    <VideoView
+                      player={videoPlayer}
+                      style={StyleSheet.absoluteFill}
+                      contentFit="contain"
+                      nativeControls={false}
+                    />
+                    <TouchableOpacity
+                      style={styles.confirmVideoReplayFab}
+                      onPress={handleConfirmVideoReplay}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityLabel="Replay video"
+                    >
+                      <FontAwesome name="repeat" size={16} color="#fff" />
+                      <Text style={styles.confirmVideoReplayFabText}>Replay</Text>
+                    </TouchableOpacity>
+                    {confirmVideoEnded ? (
+                      <View style={styles.confirmReplayOverlay} pointerEvents="box-none">
+                        <TouchableOpacity
+                          style={styles.confirmReplayButton}
+                          onPress={handleConfirmVideoReplay}
+                          activeOpacity={0.85}
+                        >
+                          <FontAwesome name="repeat" size={28} color="#fff" />
+                          <Text style={styles.confirmReplayText}>Replay</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </>
                 ) : (
                   <Image
                     source={{ uri: photo.uri }}
@@ -1317,6 +1398,14 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
                     </TouchableOpacity>
                   </View>
                 </View>
+                {peopleContext.trim().length > 0 ? (
+                  <View style={styles.confirmPeopleSummary}>
+                    <Text style={styles.confirmPeopleSummaryLabel}>Your details</Text>
+                    <Text style={styles.confirmPeopleSummaryText} numberOfLines={5}>
+                      {peopleContext.trim()}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
               <BottomSheet
                 ref={detailsSheetRef}
@@ -1920,6 +2009,50 @@ var styles = StyleSheet.create({
     margin: 12,
     borderRadius: 12,
     overflow: 'hidden',
+    position: 'relative',
+  },
+  confirmReplayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  confirmReplayButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  confirmReplayText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  confirmVideoReplayFab: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    zIndex: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  confirmVideoReplayFabText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   confirmationBar: {
     paddingHorizontal: 20,
@@ -1993,6 +2126,24 @@ var styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.6)',
     fontSize: 16,
     fontWeight: '500',
+  },
+  confirmPeopleSummary: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.2)',
+  },
+  confirmPeopleSummaryLabel: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  confirmPeopleSummaryText: {
+    color: '#f0c14b',
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 20,
   },
   detailsSheetContent: {
     paddingHorizontal: 20,

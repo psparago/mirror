@@ -126,6 +126,13 @@ export default function HomeScreen() {
   //const { currentExplorerId, loading: explorerLoading } = useExplorer();
   const { explorerId: currentExplorerId, explorerData } = useExplorerSelf();
 
+  const explorerDisplayName = useMemo(() => {
+    const d = explorerData as Record<string, unknown> | null | undefined;
+    if (!d || typeof d !== 'object') return null;
+    const raw = d.displayName ?? d.display_name ?? d.name;
+    return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null;
+  }, [explorerData]);
+
   // Companion avatar filter
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
@@ -1476,6 +1483,7 @@ export default function HomeScreen() {
             onReplay={(event) => sendReplaySignal(event.event_id)}
             config={EXPLORER_CONFIG}
             startIdleOnInitialSelection={startIdleOnInitialSelection}
+            explorerDisplayName={explorerDisplayName}
           />
         </View>
       )}

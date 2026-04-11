@@ -256,6 +256,11 @@ export default function ReflectionComposer({
   });
 
   useEffect(() => {
+    if (mediaType !== 'video') return;
+    player.loop = false;
+  }, [player, mediaType, mediaUri]);
+
+  useEffect(() => {
     const sub = player.addListener('playToEnd', () => {
       setVideoEnded(true);
     });
@@ -366,15 +371,28 @@ export default function ReflectionComposer({
 
       {/* TOP CONTROLS */}
       <View style={[styles.topControls, { top: insets.top + 6 }]}>
-        <TouchableOpacity
-          style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
-          onPress={onReplaceMedia}
-          disabled={isSending || isBlockedByAi}
-          activeOpacity={0.7}
-        >
-          <FontAwesome name="pencil" size={14} color="#fff" />
-          <Text style={styles.replaceMediaText}>Edit</Text>
-        </TouchableOpacity>
+        <View style={styles.topControlsLeft}>
+          <TouchableOpacity
+            style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
+            onPress={onReplaceMedia}
+            disabled={isSending || isBlockedByAi}
+            activeOpacity={0.7}
+          >
+            <FontAwesome name="pencil" size={14} color="#fff" />
+            <Text style={styles.replaceMediaText}>Edit</Text>
+          </TouchableOpacity>
+          {mediaType === 'video' ? (
+            <TouchableOpacity
+              style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={handleReplay}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="repeat" size={14} color="#fff" />
+              <Text style={styles.replaceMediaText}>Replay</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
         <View style={{ flex: 1 }} />
 
         {/* CIRCLED X CANCEL BUTTON */}
@@ -609,7 +627,13 @@ const styles = StyleSheet.create({
     right: 10,
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     zIndex: 10,
+  },
+  topControlsLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   circledCancelButton: {
     width: 40,

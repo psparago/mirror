@@ -68,6 +68,8 @@ interface MainStageProps {
     autoPlayDeepDive?: boolean;
   };
   filterBar?: React.ReactNode;
+  /** Shown in the header as "{name}'s Reflections" when multiple items exist. */
+  explorerDisplayName?: string | null;
 }
 
 export default function MainStageView({
@@ -91,6 +93,7 @@ export default function MainStageView({
   onReplay,
   config,
   filterBar,
+  explorerDisplayName,
 }: MainStageProps) {
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
@@ -1757,6 +1760,11 @@ export default function MainStageView({
     opacity: toastOpacityShared.value,
   }));
 
+  const reflectionsHeaderTitle =
+    explorerDisplayName?.trim().length
+      ? `${explorerDisplayName.trim()}'s Reflections`
+      : 'Reflections';
+
   return (
     <GestureDetector gesture={horizontalSwipeGesture}>
       <Animated.View style={[styles.modalContainer, rootAnimatedStyle]}>
@@ -1784,7 +1792,15 @@ export default function MainStageView({
                         </BlurView>
                       </TouchableOpacity>
                     ) : (
-                      events.length > 1 && <Text style={styles.reflectionsTitle}>Reflections</Text>
+                      events.length > 1 && (
+                        <Text
+                          style={styles.reflectionsTitle}
+                          numberOfLines={1}
+                          ellipsizeMode="tail"
+                        >
+                          {reflectionsHeaderTitle}
+                        </Text>
+                      )
                     )}
                   </View>
 
@@ -2141,7 +2157,7 @@ const styles = StyleSheet.create({
     zIndex: 90,
   },
 
-  reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  reflectionsTitle: { color: '#fff', fontSize: 18, fontWeight: '700', flexShrink: 1 },
   positionText: {
     color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 14,
