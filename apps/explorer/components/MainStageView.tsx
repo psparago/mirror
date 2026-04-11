@@ -149,11 +149,58 @@ export default function MainStageView({
     setIsCaptionOrSparklePlayingRef.current = setIsCaptionOrSparklePlaying;
   }, []);
 
-  // Get metadata (memoized to prevent unnecessary re-renders)
-  const selectedMetadata = useMemo(
-    () => selectedEvent ? eventMetadata[selectedEvent.event_id] : null,
-    [selectedEvent, eventMetadata]
-  );
+  // Prefer merged Firestore/list map; fall back to embedded Event.metadata or a minimal
+  // bundle so play / narration / refs never stall when the map is briefly empty (OTA timing).
+  const selectedMetadata = useMemo((): EventMetadata | null => {
+    if (!selectedEvent) return null;
+    const fromMap = eventMetadata[selectedEvent.event_id];
+    if (fromMap) return fromMap;
+
+    const embedded = selectedEvent.metadata;
+    if (embedded && typeof embedded === 'object') {
+      const m = embedded as Partial<EventMetadata> & Record<string, unknown>;
+      const desc =
+        typeof m.description === 'string' && m.description.trim()
+          ? m.description.trim()
+          : typeof m.short_caption === 'string' && m.short_caption.trim()
+            ? m.short_caption.trim()
+            : '';
+      const short =
+        typeof m.short_caption === 'string' && m.short_caption.trim()
+          ? m.short_caption.trim()
+          : typeof m.description === 'string' && m.description.trim()
+            ? m.description.trim()
+            : '';
+      const primary = short || desc || 'Reflection';
+      return {
+        event_id: typeof m.event_id === 'string' && m.event_id ? m.event_id : selectedEvent.event_id,
+        description: desc || primary,
+        short_caption: short || primary,
+        sender: typeof m.sender === 'string' && m.sender.trim() ? m.sender.trim() : 'Companion',
+        timestamp:
+          typeof m.timestamp === 'string' && m.timestamp
+            ? m.timestamp
+            : new Date().toISOString(),
+        ...(typeof m.sender_id === 'string' ? { sender_id: m.sender_id } : {}),
+        ...(m.content_type === 'text' || m.content_type === 'audio' || m.content_type === 'video'
+          ? { content_type: m.content_type }
+          : {}),
+        ...(m.image_source === 'camera' || m.image_source === 'search' ? { image_source: m.image_source } : {}),
+        ...(typeof m.deep_dive === 'string' ? { deep_dive: m.deep_dive } : {}),
+        ...(typeof m.deep_dive_audio_url === 'string' ? { deep_dive_audio_url: m.deep_dive_audio_url } : {}),
+      };
+    }
+
+    return {
+      event_id: selectedEvent.event_id,
+      description: 'Reflection',
+      short_caption: 'Reflection',
+      sender: 'Companion',
+      timestamp: new Date().toISOString(),
+      ...(selectedEvent.video_url ? { content_type: 'video' as const } : {}),
+      ...(!selectedEvent.video_url && selectedEvent.audio_url ? { content_type: 'audio' as const } : {}),
+    };
+  }, [selectedEvent, eventMetadata]);
 
   const positionText = useMemo(() => {
     if (!selectedEvent || events.length === 0) return '';

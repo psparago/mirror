@@ -40,7 +40,8 @@ function eventHasEmbeddedMetadata(event: Event): boolean {
   return (
     typeof m.description === 'string' ||
     typeof m.short_caption === 'string' ||
-    typeof m.sender === 'string'
+    typeof m.sender === 'string' ||
+    typeof m.deep_dive === 'string'
   );
 }
 
