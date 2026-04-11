@@ -36,6 +36,33 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+function trimMeta(s?: string): string {
+  return typeof s === 'string' ? s.trim() : '';
+}
+
+/** True when the only "caption" we have is the generic fallback word (not a real title). */
+function isGenericReflectionCaption(s: string): boolean {
+  return /^reflection$/i.test(s.trim());
+}
+
+/**
+ * Title / caption line for tiles and stage: prefer map, then embedded Event.metadata.
+ * Up Next used to read only `description`; empty string is falsy so it always showed "Reflection"
+ * when the real text lived in `short_caption` or on the Event.
+ */
+function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
+  const mCap = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
+  const emb = event?.metadata;
+  const e = emb && typeof emb === 'object' ? (emb as Partial<EventMetadata>) : null;
+  const eCap = e ? trimMeta(e.short_caption) || trimMeta(e.description) : '';
+  if (eCap && (!mCap || isGenericReflectionCaption(mCap))) {
+    return trimMeta(e?.short_caption) || eCap || trimMeta(e?.description) || eCap;
+  }
+  if (mCap) return mCap;
+  if (eCap) return eCap;
+  return 'Reflection';
+}
+
 interface MainStageProps {
   visible: boolean;
   selectedEvent: Event | null;
@@ -154,7 +181,22 @@ export default function MainStageView({
   const selectedMetadata = useMemo((): EventMetadata | null => {
     if (!selectedEvent) return null;
     const fromMap = eventMetadata[selectedEvent.event_id];
-    if (fromMap) return fromMap;
+    if (fromMap) {
+      const emb = selectedEvent.metadata;
+      if (emb && typeof emb === 'object') {
+        const e = emb as Partial<EventMetadata>;
+        const mapCap = trimMeta(fromMap.short_caption) || trimMeta(fromMap.description);
+        const embCap = trimMeta(e.short_caption) || trimMeta(e.description);
+        if (embCap && (!mapCap || isGenericReflectionCaption(mapCap))) {
+          return {
+            ...fromMap,
+            short_caption: trimMeta(fromMap.short_caption) || trimMeta(e.short_caption) || embCap,
+            description: trimMeta(fromMap.description) || trimMeta(e.description) || embCap,
+          };
+        }
+      }
+      return fromMap;
+    }
 
     const embedded = selectedEvent.metadata;
     if (embedded && typeof embedded === 'object') {
@@ -316,7 +358,8 @@ export default function MainStageView({
       },
 
       speakCaption: async () => {
-        const text = selectedMetadataRef.current?.description;
+        const meta = selectedMetadataRef.current;
+        const text = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
         const audioUrl = selectedEventRef.current?.audio_url;
 
         // Use current session (already incremented by stopAllMedia or initial)
@@ -1504,10 +1547,11 @@ export default function MainStageView({
         console.warn('Audio playback error:', err);
         setIsCaptionOrSparklePlaying(false);
       }
-    } else if (selectedMetadata?.description) {
+    } else if (trimMeta(selectedMetadata?.short_caption) || trimMeta(selectedMetadata?.description)) {
       debugLog('🔊 Playing caption via TTS (Fallback)');
       Speech.stop();
-      const textToSpeak = selectedMetadata.short_caption || selectedMetadata.description;
+      const textToSpeak =
+        trimMeta(selectedMetadata?.short_caption) || trimMeta(selectedMetadata?.description) || '';
       Speech.speak(textToSpeak, {
         onDone: () => {
           debugLog('✅ Caption TTS finished');
@@ -1695,7 +1739,8 @@ export default function MainStageView({
           />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
-              {isNowPlaying && '▶️ '}{itemMetadata?.description || 'Reflection'}
+              {isNowPlaying && '▶️ '}
+              {displayCaptionFrom(itemMetadata, item)}
             </Text>
 
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -1932,7 +1977,7 @@ export default function MainStageView({
                   <View style={{ flex: 1 }}>
                     {/* Caption/Description - FIRST */}
                     <Text style={styles.descriptionText} numberOfLines={2}>
-                      {selectedMetadata?.short_caption || selectedMetadata?.description || ''}
+                      {displayCaptionFrom(selectedMetadata, selectedEvent)}
                     </Text>
 
                     {/* From + Date line - SECOND */}
@@ -1955,7 +2000,11 @@ export default function MainStageView({
                     const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
                     const isDisabled = isMediaPlaying || isCaptionOrSparklePlaying;
 
-                    return (selectedEvent?.audio_url || selectedMetadata?.description) && (
+                    return (
+                      selectedEvent?.audio_url ||
+                      trimMeta(selectedMetadata?.short_caption) ||
+                      trimMeta(selectedMetadata?.description)
+                    ) && (
                       <TouchableOpacity
                         style={[
                           styles.playCaptionButton,

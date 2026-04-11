@@ -52,7 +52,8 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   const description = typeof o.description === 'string' ? o.description : '';
   const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
   const sender = typeof o.sender === 'string' ? o.sender : '';
-  if (!description && !shortCaption && !sender) return null;
+  const deepDive = typeof o.deep_dive === 'string' ? o.deep_dive : '';
+  if (!description && !shortCaption && !sender && !deepDive) return null;
 
   const ts = o.timestamp;
   let timestamp: string;
@@ -64,8 +65,9 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
     timestamp = new Date().toISOString();
   }
 
+  const captionSeed = shortCaption || description || (deepDive ? deepDive.trim().slice(0, 120) : '') || 'Reflection';
   const meta: EventMetadata = {
-    description: description || shortCaption || 'Reflection',
+    description: description || shortCaption || captionSeed,
     sender: sender || 'Companion',
     timestamp,
     event_id: typeof o.event_id === 'string' ? o.event_id : fallbackEventId,
@@ -76,6 +78,8 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   }
   if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
   if (shortCaption) meta.short_caption = shortCaption;
+  else if (description) meta.short_caption = description;
+  else if (deepDive.trim()) meta.short_caption = captionSeed;
   if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
   return meta;
 }
@@ -600,23 +604,37 @@ export default function HomeScreen() {
 
     // 1. Set up Firestore listener (The "Doorbell")
     // db from shared
+    // LIST_MIRROR_EVENTS does not include metadata; captions live on Firestore signal docs.
+    // Keep enough rows to cover typical libraries so grid + stage can resolve sender/caption/deep_dive.
+    const REFLECTION_SIGNALS_LIMIT = 400;
     const q = query(
       collection(db, ExplorerConfig.collections.reflections),
       where('explorerId', '==', currentExplorerId),
       orderBy('timestamp', 'desc'),
-      limit(10)
+      limit(REFLECTION_SIGNALS_LIMIT)
     );
     let isInitialLoad = true;
 
     const unsubscribe = onSnapshot(q,
       async (snapshot: QuerySnapshot) => {
-        // Skip initial load to prevent double-fetching on mount
+        // Always merge metadata from the full snapshot (fixes cold start: we used to skip the
+        // first snapshot entirely, so eventMetadata stayed empty and every card showed "Reflection").
+        const fromAllDocs: Record<string, EventMetadata> = {};
+        for (const docSnap of snapshot.docs) {
+          const id = docSnap.id;
+          const meta = normalizeFirestoreMetadata(docSnap.data()?.metadata, id);
+          if (meta) fromAllDocs[id] = meta;
+        }
+        if (Object.keys(fromAllDocs).length > 0) {
+          setEventMetadata((prev) => ({ ...prev, ...fromAllDocs }));
+        }
+
         if (isInitialLoad) {
           isInitialLoad = false;
           return;
         }
 
-        // 2. Check for added and removed reflections
+        // 2. Check for added / modified / removed reflections
         const newReflectionIds: string[] = [];
         const removedReflectionIds: string[] = [];
         const firestoreMetadataById: Record<string, EventMetadata> = {};
@@ -628,10 +646,26 @@ export default function HomeScreen() {
             if (fromFs) {
               firestoreMetadataById[id] = fromFs;
             }
+          } else if (change.type === 'modified') {
+            const id = change.doc.id;
+            const fromFs = normalizeFirestoreMetadata(change.doc.data()?.metadata, id);
+            if (fromFs) {
+              firestoreMetadataById[id] = fromFs;
+            }
           } else if (change.type === 'removed') {
             removedReflectionIds.push(change.doc.id);
           }
         });
+
+        if (Object.keys(firestoreMetadataById).length > 0) {
+          if (__DEV__) {
+            console.log(
+              '🗣️ Metadata applied from Firestore (delta)',
+              Object.keys(firestoreMetadataById).join(', ')
+            );
+          }
+          setEventMetadata((prev) => ({ ...prev, ...firestoreMetadataById }));
+        }
 
         // Remove deleted reflections from local state immediately
         if (removedReflectionIds.length > 0) {
@@ -648,16 +682,6 @@ export default function HomeScreen() {
         if (newReflectionIds.length === 0) return;
 
         debugLog(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
-
-        if (Object.keys(firestoreMetadataById).length > 0) {
-          if (__DEV__) {
-            console.log(
-              '🗣️ Metadata applied from Firestore',
-              Object.keys(firestoreMetadataById).join(', ')
-            );
-          }
-          setEventMetadata((prev) => ({ ...prev, ...firestoreMetadataById }));
-        }
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
         try {
@@ -937,7 +961,7 @@ export default function HomeScreen() {
         <View style={styles.gridCardContent}>
           {/* Description/Title */}
           <Text style={styles.gridCardTitle} numberOfLines={2}>
-            {metadata?.description || metadata?.short_caption || 'Reflection'}
+            {metadata?.short_caption || metadata?.description || 'Reflection'}
           </Text>
 
           {/* Metadata row */}
