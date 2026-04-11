@@ -2,6 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Image, StyleSheet, Text, View, useWindowDimensions, TouchableOpacity, Modal } from 'react-native';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 
+function eventHasEmbeddedMetadata(event: Event): boolean {
+  const m = event.metadata;
+  if (!m || typeof m !== 'object') return false;
+  return (
+    typeof m.description === 'string' ||
+    typeof m.short_caption === 'string' ||
+    typeof m.sender === 'string'
+  );
+}
+
 async function loadEventMetadataBatched(
   eventsList: Event[],
   onLoaded: (eventId: string, metadata: EventMetadata) => void,
@@ -9,7 +19,7 @@ async function loadEventMetadataBatched(
 ): Promise<void> {
   const batchSize = options?.batchSize ?? 2;
   const batchDelayMs = options?.batchDelayMs ?? 50;
-  const targets = eventsList.filter((e) => e.metadata_url);
+  const targets = eventsList.filter((e) => e.metadata_url && !eventHasEmbeddedMetadata(e));
   for (let i = 0; i < targets.length; i += batchSize) {
     const chunk = targets.slice(i, i + batchSize);
     await Promise.all(
@@ -60,7 +70,24 @@ export default function TabTwoScreen() {
       const list = data.events || [];
       setEvents(list);
 
-      void loadEventMetadataBatched(list, (eventId, metadata) => {
+      const embeddedById: Record<string, EventMetadata> = {};
+      for (const e of list) {
+        if (eventHasEmbeddedMetadata(e)) {
+          embeddedById[e.event_id] = e.metadata as EventMetadata;
+        }
+      }
+      if (Object.keys(embeddedById).length > 0) {
+        if (__DEV__) {
+          console.log(
+            '🗣️ Metadata applied from embedded event.metadata (no S3)',
+            Object.keys(embeddedById).join(', ')
+          );
+        }
+        setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
+      }
+
+      const needsS3Metadata = list.filter((e) => e.metadata_url && !embeddedById[e.event_id]);
+      void loadEventMetadataBatched(needsS3Metadata, (eventId, metadata) => {
         setEventMetadata((prev) => ({ ...prev, [eventId]: metadata }));
       });
     } catch (err: any) {

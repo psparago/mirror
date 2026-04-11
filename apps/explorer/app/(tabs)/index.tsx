@@ -34,6 +34,51 @@ import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanRespon
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
+function eventHasEmbeddedMetadata(event: Event): boolean {
+  const m = event.metadata;
+  if (!m || typeof m !== 'object') return false;
+  return (
+    typeof m.description === 'string' ||
+    typeof m.short_caption === 'string' ||
+    typeof m.sender === 'string'
+  );
+}
+
+/** Coerce Firestore `metadata` field (plain JSON / Timestamp) into EventMetadata. */
+function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): EventMetadata | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const description = typeof o.description === 'string' ? o.description : '';
+  const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
+  const sender = typeof o.sender === 'string' ? o.sender : '';
+  if (!description && !shortCaption && !sender) return null;
+
+  const ts = o.timestamp;
+  let timestamp: string;
+  if (typeof ts === 'string') {
+    timestamp = ts;
+  } else if (ts && typeof ts === 'object' && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
+    timestamp = (ts as { toDate: () => Date }).toDate().toISOString();
+  } else {
+    timestamp = new Date().toISOString();
+  }
+
+  const meta: EventMetadata = {
+    description: description || shortCaption || 'Reflection',
+    sender: sender || 'Companion',
+    timestamp,
+    event_id: typeof o.event_id === 'string' ? o.event_id : fallbackEventId,
+  };
+  if (typeof o.sender_id === 'string') meta.sender_id = o.sender_id;
+  if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
+    meta.content_type = o.content_type;
+  }
+  if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
+  if (shortCaption) meta.short_caption = shortCaption;
+  if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
+  return meta;
+}
+
 /** Fetches JSON metadata in small batches to avoid bridge overload and parsing spikes. */
 async function loadEventMetadataBatched(
   eventsList: Event[],
@@ -42,7 +87,7 @@ async function loadEventMetadataBatched(
 ): Promise<void> {
   const batchSize = options?.batchSize ?? 2;
   const batchDelayMs = options?.batchDelayMs ?? 50;
-  const targets = eventsList.filter((e) => e.metadata_url);
+  const targets = eventsList.filter((e) => e.metadata_url && !eventHasEmbeddedMetadata(e));
   for (let i = 0; i < targets.length; i += batchSize) {
     const chunk = targets.slice(i, i + batchSize);
     await Promise.all(
@@ -450,25 +495,32 @@ export default function HomeScreen() {
 
   // Fetch metadata when a reflection is selected
   useEffect(() => {
-    if (selectedEvent && !eventMetadata[selectedEvent.event_id] && selectedEvent.metadata_url) {
-      fetch(selectedEvent.metadata_url)
-        .then(res => {
-          if (res.ok) {
-            return res.json();
-          }
-          throw new Error(`Failed to fetch metadata: ${res.status}`);
-        })
-        .then((metadata: EventMetadata) => {
-          setEventMetadata(prev => ({
-            ...prev,
-            [selectedEvent.event_id]: metadata
-          }));
-        })
-        .catch(err => {
-          console.warn(`Failed to fetch metadata for ${selectedEvent.event_id}:`, err);
-        });
+    if (!selectedEvent || eventMetadata[selectedEvent.event_id]) return;
+    if (eventHasEmbeddedMetadata(selectedEvent)) {
+      setEventMetadata((prev) => ({
+        ...prev,
+        [selectedEvent.event_id]: selectedEvent.metadata as EventMetadata,
+      }));
+      return;
     }
-  }, [selectedEvent?.event_id, selectedEvent?.metadata_url, eventMetadata]);
+    if (!selectedEvent.metadata_url) return;
+    fetch(selectedEvent.metadata_url)
+      .then((res) => {
+        if (res.ok) {
+          return res.json();
+        }
+        throw new Error(`Failed to fetch metadata: ${res.status}`);
+      })
+      .then((metadata: EventMetadata) => {
+        setEventMetadata((prev) => ({
+          ...prev,
+          [selectedEvent.event_id]: metadata,
+        }));
+      })
+      .catch((err) => {
+        console.warn(`Failed to fetch metadata for ${selectedEvent.event_id}:`, err);
+      });
+  }, [selectedEvent?.event_id, selectedEvent?.metadata_url, selectedEvent?.metadata, eventMetadata]);
 
   // Get metadata for selected event  
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
@@ -543,8 +595,26 @@ export default function HomeScreen() {
       // Just update immediately, the centering logic in MainStageView will handle the focus stability
       setEvents(eventsWithTimestamp);
 
-      // Metadata: incremental updates in small batches (do not block refresh / loading flags)
-      void loadEventMetadataBatched(sortedEvents, (eventId, metadata) => {
+      const embeddedById: Record<string, EventMetadata> = {};
+      for (const e of sortedEvents) {
+        if (eventHasEmbeddedMetadata(e)) {
+          embeddedById[e.event_id] = e.metadata as EventMetadata;
+        }
+      }
+      if (Object.keys(embeddedById).length > 0) {
+        if (__DEV__) {
+          console.log(
+            '🗣️ Metadata applied from embedded event.metadata (no S3)',
+            Object.keys(embeddedById).join(', ')
+          );
+        }
+        setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
+      }
+
+      const needsS3Metadata = sortedEvents.filter(
+        (e) => e.metadata_url && !embeddedById[e.event_id]
+      );
+      void loadEventMetadataBatched(needsS3Metadata, (eventId, metadata) => {
         setEventMetadata((prev) => ({ ...prev, [eventId]: metadata }));
       });
     } catch (err: any) {
@@ -596,9 +666,15 @@ export default function HomeScreen() {
         // 2. Check for added and removed reflections
         const newReflectionIds: string[] = [];
         const removedReflectionIds: string[] = [];
+        const firestoreMetadataById: Record<string, EventMetadata> = {};
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
-            newReflectionIds.push(change.doc.id);
+            const id = change.doc.id;
+            newReflectionIds.push(id);
+            const fromFs = normalizeFirestoreMetadata(change.doc.data()?.metadata, id);
+            if (fromFs) {
+              firestoreMetadataById[id] = fromFs;
+            }
           } else if (change.type === 'removed') {
             removedReflectionIds.push(change.doc.id);
           }
@@ -620,6 +696,15 @@ export default function HomeScreen() {
 
         debugLog(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
 
+        if (Object.keys(firestoreMetadataById).length > 0) {
+          if (__DEV__) {
+            console.log(
+              '🗣️ Metadata applied from Firestore',
+              Object.keys(firestoreMetadataById).join(', ')
+            );
+          }
+          setEventMetadata((prev) => ({ ...prev, ...firestoreMetadataById }));
+        }
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
         try {
@@ -639,6 +724,27 @@ export default function HomeScreen() {
             const now = Date.now();
             const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
 
+            const fromListOnly: Record<string, EventMetadata> = {};
+            for (const item of newItems) {
+              if (eventHasEmbeddedMetadata(item) && !firestoreMetadataById[item.event_id]) {
+                fromListOnly[item.event_id] = item.metadata as EventMetadata;
+              }
+            }
+            if (Object.keys(fromListOnly).length > 0) {
+              if (__DEV__) {
+                console.log(
+                  '🗣️ Metadata applied from embedded event.metadata (no S3)',
+                  Object.keys(fromListOnly).join(', ')
+                );
+              }
+              setEventMetadata((prev) => ({ ...prev, ...fromListOnly }));
+            }
+
+            const idsMetadataReady = new Set<string>([
+              ...Object.keys(firestoreMetadataById),
+              ...Object.keys(fromListOnly),
+            ]);
+
             // Merge new events immediately; metadata and arrival UI follow incrementally
             setEvents(prev => {
               const merged = [...signedNewItems, ...prev];
@@ -656,19 +762,23 @@ export default function HomeScreen() {
               if (shouldChime) void playArrivalChime();
             };
 
+            const newIds = newItems.map((item) => item.event_id);
+            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} — metadata loading in batches`);
+
             for (const item of newItems) {
-              if (!item.metadata_url) {
+              if (idsMetadataReady.has(item.event_id)) {
+                notifyNewArrivalForEvent(item.event_id);
+              } else if (!item.metadata_url) {
                 debugLog(`🔔 New arrival (no metadata URL): ${item.event_id}`);
                 notifyNewArrivalForEvent(item.event_id);
               }
             }
 
-            const newIds = newItems.map((item) => item.event_id);
-            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')} — metadata loading in batches`);
-
-            const withMeta = newItems.filter((i) => i.metadata_url);
-            if (withMeta.length > 0) {
-              void loadEventMetadataBatched(withMeta, (eventId, meta) => {
+            const needS3Metadata = newItems.filter(
+              (i) => !idsMetadataReady.has(i.event_id) && i.metadata_url
+            );
+            if (needS3Metadata.length > 0) {
+              void loadEventMetadataBatched(needS3Metadata, (eventId, meta) => {
                 setEventMetadata((prev) => ({ ...prev, [eventId]: meta }));
                 notifyNewArrivalForEvent(eventId);
               });
@@ -777,18 +887,25 @@ export default function HomeScreen() {
     });
 
     // Fetch metadata if not already loaded
-    if (!eventMetadata[item.event_id] && item.metadata_url) {
-      try {
-        const metaResponse = await fetch(item.metadata_url);
-        if (metaResponse.ok) {
-          const metadata: EventMetadata = await metaResponse.json();
-          setEventMetadata(prev => ({
-            ...prev,
-            [item.event_id]: metadata
-          }));
+    if (!eventMetadata[item.event_id]) {
+      if (eventHasEmbeddedMetadata(item)) {
+        setEventMetadata((prev) => ({
+          ...prev,
+          [item.event_id]: item.metadata as EventMetadata,
+        }));
+      } else if (item.metadata_url) {
+        try {
+          const metaResponse = await fetch(item.metadata_url);
+          if (metaResponse.ok) {
+            const metadata: EventMetadata = await metaResponse.json();
+            setEventMetadata((prev) => ({
+              ...prev,
+              [item.event_id]: metadata,
+            }));
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch metadata for ${item.event_id}:`, err);
         }
-      } catch (err) {
-        console.warn(`Failed to fetch metadata for ${item.event_id}:`, err);
       }
     }
 
@@ -805,16 +922,23 @@ export default function HomeScreen() {
           refreshNeighborUrls(eventIdToRefresh);
 
           // Fetch metadata for refreshed event if not already loaded
-          if (refreshedEvent.metadata_url && !eventMetadata[refreshedEvent.event_id]) {
-            fetch(refreshedEvent.metadata_url)
-              .then(res => res.json())
-              .then((metadata: EventMetadata) => {
-                setEventMetadata(prev => ({
-                  ...prev,
-                  [refreshedEvent.event_id]: metadata
-                }));
-              })
-              .catch(err => console.warn("Failed to fetch metadata for refreshed event:", err));
+          if (!eventMetadata[refreshedEvent.event_id]) {
+            if (eventHasEmbeddedMetadata(refreshedEvent)) {
+              setEventMetadata((prev) => ({
+                ...prev,
+                [refreshedEvent.event_id]: refreshedEvent.metadata as EventMetadata,
+              }));
+            } else if (refreshedEvent.metadata_url) {
+              fetch(refreshedEvent.metadata_url)
+                .then((res) => res.json())
+                .then((metadata: EventMetadata) => {
+                  setEventMetadata((prev) => ({
+                    ...prev,
+                    [refreshedEvent.event_id]: metadata,
+                  }));
+                })
+                .catch((err) => console.warn('Failed to fetch metadata for refreshed event:', err));
+            }
           }
         }
       }).catch(err => {

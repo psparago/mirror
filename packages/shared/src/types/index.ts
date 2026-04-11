@@ -37,6 +37,7 @@ export interface Event {
   audio_url?: string; // Optional presigned GET URL for audio.m4a
   video_url?: string; // Optional presigned GET URL for video.mp4
   deep_dive_audio_url?: string; // Optional presigned GET URL for deep_dive.m4a
+  /** Inline bundle (e.g. from Firestore); when set, Explorer can skip S3 metadata.json fetch. */
   metadata?: EventMetadata;
   refreshedAt?: number; // Local timestamp when URLs were last refreshed
 }
