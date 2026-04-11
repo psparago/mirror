@@ -23,9 +23,74 @@ interface SentReflection {
   hasResponse?: boolean;
   responseImageUrl?: string;
   reflectionImageUrl?: string;
+  /** Denormalized for list row; prefer reading from `metadata` when present */
   description?: string;
   sender?: string;
   sender_id?: string;
+  metadata?: EventMetadata;
+}
+
+function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMetadata | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const description = typeof o.description === 'string' ? o.description : '';
+  const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
+  const sender = typeof o.sender === 'string' ? o.sender : '';
+  if (!description && !shortCaption && !sender) return undefined;
+
+  let timestamp: string;
+  const ts = o.timestamp;
+  if (typeof ts === 'string') {
+    timestamp = ts;
+  } else if (ts && typeof ts === 'object' && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
+    timestamp = (ts as { toDate: () => Date }).toDate().toISOString();
+  } else {
+    timestamp = new Date().toISOString();
+  }
+
+  const event_id =
+    typeof o.event_id === 'string' && o.event_id.length > 0 ? o.event_id : fallbackEventId;
+  const meta: EventMetadata = {
+    description: description || shortCaption || 'Reflection',
+    sender: sender || 'Companion',
+    timestamp,
+    event_id,
+  };
+  if (typeof o.sender_id === 'string' && o.sender_id) meta.sender_id = o.sender_id;
+  if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
+    meta.content_type = o.content_type;
+  }
+  if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
+  if (shortCaption) meta.short_caption = shortCaption;
+  if (typeof o.deep_dive === 'string' && o.deep_dive) meta.deep_dive = o.deep_dive;
+  return meta;
+}
+
+function applyDisplayFromMetadata(reflection: SentReflection): void {
+  const m = reflection.metadata;
+  if (!m) return;
+  const blurb = m.short_caption || m.description;
+  if (blurb) reflection.description = blurb;
+  if (m.sender) reflection.sender = m.sender;
+  if (m.sender_id) reflection.sender_id = m.sender_id;
+  if (!reflection.sentTimestamp && m.timestamp) {
+    try {
+      reflection.sentTimestamp = new Date(m.timestamp);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function reflectionBlurb(item: SentReflection): string | undefined {
+  const m = item.metadata;
+  const text = m?.short_caption || m?.description || item.description;
+  const s = typeof text === 'string' ? text.trim() : '';
+  return s || undefined;
+}
+
+function reflectionSenderLabel(item: SentReflection): string | undefined {
+  return item.metadata?.sender || item.sender;
 }
 
 export default function SentTimelineScreen() {
@@ -65,24 +130,8 @@ export default function SentTimelineScreen() {
     setFilterModeState(val);
     AsyncStorage.setItem(FILTER_STORAGE_KEY, val).catch(() => {});
   }, []);
-  const metadataCache = useRef<Map<string, any>>(new Map());
-  const METADATA_CACHE_MAX = 50;
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
-
-  const setMetadataCache = (key: string, value: any) => {
-    const cache = metadataCache.current;
-    if (cache.has(key)) {
-      cache.delete(key); // refresh LRU position
-    }
-    cache.set(key, value);
-    if (cache.size > METADATA_CACHE_MAX) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey) {
-        cache.delete(oldestKey);
-      }
-    }
-  };
 
   const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
   const currentIdentity = activeRelationship?.companionName || null;
@@ -361,16 +410,25 @@ export default function SentTimelineScreen() {
               }
             }
           }
+
+          const row = reflectionMap.get(actualEventId);
+          if (row) {
+            const m = coerceEmbeddedMetadata(data.metadata, actualEventId);
+            if (m) {
+              row.metadata = m;
+              applyDisplayFromMetadata(row);
+            }
+          }
         }
 
         // Fetch Mirror Events List ONCE for all reflections
-        let allMirrorEventsMap = new Map<string, any>();
+        let allMirrorEventsMap = new Map<string, Event>();
         try {
           const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
           if (gen !== snapshotGenRef.current) return; // stale — newer snapshot arrived
           if (eventsResponse.ok) {
             const eventsData = await eventsResponse.json();
-            (eventsData.events || []).forEach((e: any) => {
+            (eventsData.events || []).forEach((e: Event) => {
               allMirrorEventsMap.set(e.event_id, e);
             });
           }
@@ -378,70 +436,33 @@ export default function SentTimelineScreen() {
           console.error('Error fetching reflection events list:', error);
         }
 
-        // Convert map to array and fetch additional data
-        const reflectionPromises = Array.from(reflectionMap.values())
-          // Do not include soft-deleted items in the timeline list
+        // Enrich from list API (image URLs + embedded metadata when Firestore has none yet)
+        const reflectionsList = Array.from(reflectionMap.values())
           .filter((reflection) => !reflection.deletedAt && reflection.status !== 'deleted')
-          .map(async (reflection) => {
-            // Fetch Reflection image URL from backend (including deleted ones so we can show thumbnail)
+          .map((reflection) => {
             const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
             if (matchingEvent?.image_url) {
               reflection.reflectionImageUrl = matchingEvent.image_url;
-
-              // Also fetch metadata for description and timestamp (only for non-deleted)
-              if (reflection.status !== 'deleted' && matchingEvent.metadata_url) {
-                // Check cache first
-                if (metadataCache.current.has(matchingEvent.metadata_url)) {
-                  const cachedMetadata = metadataCache.current.get(matchingEvent.metadata_url);
-                  if (cachedMetadata) {
-                    setMetadataCache(matchingEvent.metadata_url, cachedMetadata);
-                    reflection.description = cachedMetadata.description;
-                    // Use metadata timestamp as sentTimestamp if we don't have one
-                    if (!reflection.sentTimestamp && cachedMetadata.timestamp) {
-                      try {
-                        reflection.sentTimestamp = new Date(cachedMetadata.timestamp);
-                      } catch (e) {
-                        // Invalid timestamp in metadata, ignore
-                      }
-                    }
-                  }
-                } else {
-                  try {
-                    const metaResponse = await fetch(matchingEvent.metadata_url);
-                    if (metaResponse.ok) {
-                      const metadata = await metaResponse.json();
-                      setMetadataCache(matchingEvent.metadata_url, metadata);
-                      reflection.description = metadata.description;
-                      // Use metadata timestamp as sentTimestamp if we don't have one
-                      if (!reflection.sentTimestamp && metadata.timestamp) {
-                        try {
-                          reflection.sentTimestamp = new Date(metadata.timestamp);
-                        } catch (e) {
-                          // Invalid timestamp in metadata, ignore
-                        }
-                      }
-                    }
-                  } catch (err) {
-                    console.error('Error fetching metadata:', err);
-                  }
-                }
-              }
+            }
+            const listMeta = matchingEvent?.metadata;
+            if (listMeta && !reflection.metadata) {
+              reflection.metadata = listMeta;
+              applyDisplayFromMetadata(reflection);
             }
 
-            // Check for selfie response - use responseEventIds state (updated by listener)
-            // Don't show selfie if reflection is deleted
-            reflection.hasResponse = !reflection.deletedAt && reflection.status !== 'deleted' && responseEventIds.has(reflection.event_id);
+            reflection.hasResponse =
+              !reflection.deletedAt &&
+              reflection.status !== 'deleted' &&
+              responseEventIds.has(reflection.event_id);
 
             return reflection;
           });
-
-        const reflectionsList = await Promise.all(reflectionPromises);
         if (gen !== snapshotGenRef.current) return; // stale — newer snapshot arrived
 
         // Store Event objects in state for replay functionality
         const eventsMap = new Map<string, Event>();
         allMirrorEventsMap.forEach((event, eventId) => {
-          eventsMap.set(eventId, event as Event);
+          eventsMap.set(eventId, event);
         });
         setEventObjectsMap(eventsMap);
 
@@ -829,23 +850,9 @@ export default function SentTimelineScreen() {
                     }
                   }
 
-                  // Fetch metadata if not already cached or in Event object
-                  let metadata = fullEvent?.metadata as EventMetadata | undefined;
-                  if (!metadata && fullEvent?.metadata_url) {
-                    if (metadataCache.current.has(fullEvent.metadata_url)) {
-                      metadata = metadataCache.current.get(fullEvent.metadata_url);
-                    } else {
-                      try {
-                        const metaResponse = await fetch(fullEvent.metadata_url);
-                        if (metaResponse.ok) {
-                          metadata = await metaResponse.json();
-                          setMetadataCache(fullEvent.metadata_url, metadata);
-                        }
-                      } catch (err) {
-                        console.error('Error fetching metadata for replay:', err);
-                      }
-                    }
-                  }
+                  const metadata =
+                    (item.metadata as EventMetadata | undefined) ??
+                    (fullEvent?.metadata as EventMetadata | undefined);
 
                   // Helper to convert timestamp to ISO string
                   const timestampToISO = (ts: any): string => {
@@ -861,13 +868,12 @@ export default function SentTimelineScreen() {
                   const eventForReplay: Event = {
                     event_id: item.event_id,
                     image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
-                    metadata_url: fullEvent?.metadata_url, // Optional - preserve undefined if not present
                     audio_url: fullEvent?.audio_url,
                     video_url: fullEvent?.video_url,
                     deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
                     metadata: metadata || {
                       description: item.description || 'Reflection',
-                      sender: item.sender || 'Companion',
+                      sender: reflectionSenderLabel(item) || 'Companion',
                       timestamp: timestampToISO(item.sentTimestamp || item.timestamp),
                       event_id: item.event_id,
                       short_caption: item.description || 'Reflection',
@@ -957,7 +963,8 @@ export default function SentTimelineScreen() {
                           <Text style={styles.responseText}>Selfie</Text>
                         </TouchableOpacity>
                       )}
-                      {currentIdentity && item.sender?.toLowerCase() === currentIdentity.toLowerCase() && (
+                      {currentIdentity &&
+                        reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase() && (
                         <TouchableOpacity
                           style={styles.deleteReflectionButton}
                           onPress={() => {
@@ -981,13 +988,14 @@ export default function SentTimelineScreen() {
                       )}
                     </View>
 
-                    {item.description && (
+                    {reflectionBlurb(item) && (
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        {item.description === 'Voice message' && (
+                        {(reflectionBlurb(item) === 'Voice message' ||
+                          item.metadata?.content_type === 'audio') && (
                           <FontAwesome name="microphone" size={14} color="#e0e0e0" />
                         )}
                         <Text style={styles.description} numberOfLines={2}>
-                          {item.description}
+                          {reflectionBlurb(item)}
                         </Text>
                       </View>
                     )}
@@ -1014,9 +1022,11 @@ export default function SentTimelineScreen() {
                     {/* Sent date */}
                     <View style={styles.timestampRow}>
                       <Text style={styles.sentDate}>
-                        {item.sender ? (
+                        {reflectionSenderLabel(item) ? (
                           <>
-                            Sent by <Text style={styles.senderName}>{item.sender}</Text> • {formatEngagementDate(
+                            Sent by{' '}
+                            <Text style={styles.senderName}>{reflectionSenderLabel(item)}</Text> •{' '}
+                            {formatEngagementDate(
                               item.sentTimestamp ||
                               (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
                             )}

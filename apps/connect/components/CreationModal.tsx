@@ -141,6 +141,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
   const pendingRouteRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
+  /** Kept in sync with the active source route; avoids Hermes/ReferenceError if a stale closure still touches this binding after hot reload. */
+  const lastSourceForRecoveryRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
   const sourceTransitionLockRef = useRef(false);
   const suppressPickerRecoveryRef = useRef(false);
   const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
@@ -148,6 +150,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const detailsSheetRef = useRef<BottomSheet>(null);
 
   const beginSourceFlow = useCallback((route: '/camera' | '/gallery' | '/search') => {
+    lastSourceForRecoveryRef.current = route;
     sourceTransitionLockRef.current = true;
     pendingRouteRef.current = route;
     sheetRef.current?.close();
@@ -163,10 +166,12 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       setPeopleContext('');
       sourceTransitionLockRef.current = false;
       suppressPickerRecoveryRef.current = false;
+      lastSourceForRecoveryRef.current = null;
       setTransitionUnlockTick((v) => v + 1);
     } else {
       // Reset one-shot suppression when modal is fully closed by parent.
       suppressPickerRecoveryRef.current = false;
+      lastSourceForRecoveryRef.current = null;
     }
   }, [visible]);
 
@@ -187,8 +192,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   }, [phase, router]);
 
   // If a source screen (camera/gallery/search) is dismissed without selecting media,
-  // we return to this screen focused but with no pending media. In that case, restore
-  // the picker sheet instead of staying on the "Opening creation tools..." overlay.
+  // we return to this screen focused but with no pending media. Restore the picker sheet
+  // (do not re-push the same route — that left users on "Opening creation tools..." until Close).
   useEffect(() => {
     if (!visible || !isFocused) return;
     if (phase !== 'creating') return;
@@ -197,7 +202,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     if (pendingRouteRef.current) return;
     if (pendingMedia) return;
     if (photo || showDescriptionInput) return;
+    lastSourceForRecoveryRef.current = null;
+    pendingRouteRef.current = null;
     setPhase('picker');
+    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
   }, [visible, isFocused, phase, pendingMedia, photo, showDescriptionInput, transitionUnlockTick]);
 
   const initialActionTriggeredRef = useRef(false);
@@ -209,7 +217,9 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     if (initialActionTriggeredRef.current) return;
     initialActionTriggeredRef.current = true;
     sourceTransitionLockRef.current = true;
-    pendingRouteRef.current = `/${initialAction}` as '/camera' | '/gallery' | '/search';
+    const route = `/${initialAction}` as '/camera' | '/gallery' | '/search';
+    pendingRouteRef.current = route;
+    lastSourceForRecoveryRef.current = route;
     setPhase('creating');
     onActionTriggered?.();
   }, [visible, initialAction, router, onActionTriggered]);
@@ -335,6 +345,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     if (!pendingMedia) return;
     const media = consumePendingMedia();
     if (media) {
+      lastSourceForRecoveryRef.current = null;
       setPhase('creating');
       if (media.type === 'video') {
         setMediaType('video');
@@ -1122,8 +1133,13 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     setVideoUri(null);
     setMediaType('photo');
     setConfirming(false);
-    setPhase('picker');
-    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+    const retry = mediaSource;
+    if (retry === '/gallery' || retry === '/camera' || retry === '/search') {
+      beginSourceFlow(retry);
+    } else {
+      setPhase('picker');
+      setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+    }
   };
 
   const handleConfirmChoose = () => {
