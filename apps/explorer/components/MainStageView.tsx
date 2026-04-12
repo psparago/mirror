@@ -50,6 +50,24 @@ function isGenericReflectionCaption(s: string): boolean {
  * Up Next used to read only `description`; empty string is falsy so it always showed "Reflection"
  * when the real text lived in `short_caption` or on the Event.
  */
+const EVENT_DATE_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const;
+
+/** Avoid Intl / toLocaleDateString on hot paths (large Up Next / metadata lists). */
+function formatEventDateFromId(eventId: string): string {
+  const timestamp = parseInt(eventId, 10);
+  if (Number.isNaN(timestamp)) return '—';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return 'today';
+  if (diffDays === 1) return 'yesterday';
+  return `${EVENT_DATE_MONTHS[date.getMonth()]} ${date.getDate()}`;
+}
+
 function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
   const mCap = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
   const emb = event?.metadata;
@@ -1641,17 +1659,6 @@ export default function MainStageView({
 
   const throttledTellMeMorePress = useThrottledCallback(handleTellMeMorePress);
 
-  const formatEventDate = (eventId: string): string => {
-    const timestamp = parseInt(eventId, 10);
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    if (diffDays === 0) return 'today';
-    if (diffDays === 1) return 'yesterday';
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
-
   // Up Next list uses the unique `events` list (no duplication).
   // If looping is enabled, reaching the end wraps back to the top.
   const upNextEvents = events;
@@ -1765,7 +1772,7 @@ export default function MainStageView({
             </View>
 
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
-              {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDate(item.event_id)}
+              {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDateFromId(item.event_id)}
             </Text>
 
             <Text style={styles.reflectionId}>
@@ -1988,7 +1995,7 @@ export default function MainStageView({
                         </Text>
                         {selectedEvent?.event_id && (
                           <Text style={styles.dateText}>
-                            {' • '}{formatEventDate(selectedEvent.event_id)}
+                            {' • '}{formatEventDateFromId(selectedEvent.event_id)}
                           </Text>
                         )}
                       </View>

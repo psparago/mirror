@@ -84,6 +84,24 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   return meta;
 }
 
+const EVENT_DATE_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+] as const;
+
+/** Avoid Intl / toLocaleDateString on hot paths (large reflection lists). */
+function formatEventDateFromId(eventId: string): string {
+  const timestamp = parseInt(eventId, 10);
+  if (Number.isNaN(timestamp)) return '—';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays === 0) return 'today';
+  if (diffDays === 1) return 'yesterday';
+  return `${EVENT_DATE_MONTHS[date.getMonth()]} ${date.getDate()}`;
+}
+
 export default function HomeScreen() {
   const router = useRouter();
 
@@ -897,18 +915,6 @@ export default function HomeScreen() {
     }
   }, [autoplay, events, handleEventPress]);
 
-  // Helper to format event date
-  const formatEventDate = (eventId: string): string => {
-    const timestamp = parseInt(eventId, 10);
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    if (diffDays === 0) return 'today';
-    if (diffDays === 1) return 'yesterday';
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
-
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
     const isRead = readEventIds.includes(item.event_id);
@@ -967,7 +973,7 @@ export default function HomeScreen() {
           {/* Metadata row */}
           <View style={styles.gridCardMeta}>
             <Text style={styles.gridCardDate}>
-              {formatEventDate(item.event_id)}
+              {formatEventDateFromId(item.event_id)}
             </Text>
             {isNewArrival && (
               <Text style={styles.gridCardNewBadge}>NEW</Text>
