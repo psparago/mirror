@@ -4,8 +4,8 @@ import { prepareImageForUpload } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, EventMetadata, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
-import { collection, db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
+import { collection, db, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -95,9 +95,17 @@ export interface CreationModalProps {
   onClose: () => void;
   initialAction?: CreationModalInitialAction | null;
   onActionTriggered?: () => void;
+  /** Open in edit mode: pre-filled narrative + existing media preview (timeline). */
+  editEvent?: Event | null;
 }
 
-export default function CreationModal({ visible, onClose, initialAction, onActionTriggered }: CreationModalProps) {
+export default function CreationModal({
+  visible,
+  onClose,
+  initialAction,
+  onActionTriggered,
+  editEvent = null,
+}: CreationModalProps) {
   const MAX_VIDEO_DURATION_SECONDS = 60;
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
@@ -116,6 +124,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [aiAudioS3Key, setAiAudioS3Key] = useState<string | null>(null);
   const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
   const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
+  /** Production `event_id` being edited (never use as staging folder id). */
+  const editSourceEventIdRef = useRef<string | null>(null);
+  const mediaReplacedDuringEditRef = useRef(false);
+  const [isEditingExistingReflection, setIsEditingExistingReflection] = useState(false);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
@@ -134,6 +146,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   const [isCompanionInReflection, setIsCompanionInReflection] = useState(false);
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
   const [peopleContext, setPeopleContext] = useState('');
+  const [searchQueryContext, setSearchQueryContext] = useState<string>('');
+  const [searchCanonicalName, setSearchCanonicalName] = useState<string>('');
   const [confirming, setConfirming] = useState(false);
   const [confirmVideoEnded, setConfirmVideoEnded] = useState(false);
   const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
@@ -159,22 +173,86 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
   }, []);
 
   useEffect(() => {
-    if (visible) {
+    if (!visible) {
+      suppressPickerRecoveryRef.current = false;
+      lastSourceForRecoveryRef.current = null;
+      editSourceEventIdRef.current = null;
+      mediaReplacedDuringEditRef.current = false;
+      setIsEditingExistingReflection(false);
+      return;
+    }
+
+    if (editEvent?.event_id) {
+      const m = editEvent.metadata;
+      const desc =
+        (m?.description?.trim() ||
+          m?.short_caption?.trim() ||
+          '') as string;
+      const shortCap = (m?.short_caption?.trim() || desc) as string;
+      const dd = (m?.deep_dive?.trim() || '') as string;
+
+      editSourceEventIdRef.current = editEvent.event_id;
+      mediaReplacedDuringEditRef.current = false;
+      setIsEditingExistingReflection(true);
+
       setPhase('picker');
-      setConfirming(false);
-      setIsCompanionInReflection(false);
-      setIsExplorerInReflection(false);
-      setPeopleContext('');
+      setConfirming(true);
+      setIsCompanionInReflection(!!m?.companion_in_reflection);
+      setIsExplorerInReflection(!!m?.explorer_in_reflection);
+      setPeopleContext(typeof m?.people_context === 'string' ? m.people_context : '');
+      setSearchQueryContext(typeof m?.search_query === 'string' ? m.search_query : '');
+      setSearchCanonicalName(typeof m?.search_canonical_name === 'string' ? m.search_canonical_name : '');
       sourceTransitionLockRef.current = false;
       suppressPickerRecoveryRef.current = false;
       lastSourceForRecoveryRef.current = null;
       setTransitionUnlockTick((v) => v + 1);
-    } else {
-      // Reset one-shot suppression when modal is fully closed by parent.
-      suppressPickerRecoveryRef.current = false;
-      lastSourceForRecoveryRef.current = null;
+
+      if (editEvent.video_url) {
+        setMediaType('video');
+        setVideoUri(editEvent.video_url);
+        setPhoto({ uri: editEvent.image_url });
+      } else {
+        setMediaType('photo');
+        setVideoUri(null);
+        setPhoto({ uri: editEvent.image_url });
+      }
+      setImageSourceType(m?.image_source === 'search' ? 'search' : 'camera');
+      setDescription(desc);
+      setShowDescriptionInput(false);
+      setShortCaption(shortCap);
+      setDeepDive(dd);
+      setIntent('none');
+      setAudioUri(null);
+      lastProcessedUriRef.current = null;
+      setStagingEventId(null);
+      stagingEventIdRef.current = null;
+      setAiAudioUrl(editEvent.audio_url || null);
+      setAiDeepDiveAudioUrl(editEvent.deep_dive_audio_url || null);
+      setAiAudioS3Key(null);
+      setAiDeepDiveS3Key(null);
+      setIsAiGenerated(!!dd || !!shortCap);
+      setIsAiThinking(false);
+      return;
     }
-  }, [visible]);
+
+    setIsEditingExistingReflection(false);
+    editSourceEventIdRef.current = null;
+    mediaReplacedDuringEditRef.current = false;
+
+    setPhase('picker');
+    setConfirming(false);
+    setIsCompanionInReflection(false);
+    setIsExplorerInReflection(false);
+    setPeopleContext('');
+    setSearchQueryContext('');
+    setSearchCanonicalName('');
+    setSearchQueryContext('');
+    setSearchCanonicalName('');
+    sourceTransitionLockRef.current = false;
+    suppressPickerRecoveryRef.current = false;
+    lastSourceForRecoveryRef.current = null;
+    setTransitionUnlockTick((v) => v + 1);
+  }, [visible, editEvent]);
 
   useEffect(() => {
     if (phase !== 'creating') return;
@@ -215,6 +293,10 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       initialActionTriggeredRef.current = false;
       return;
     }
+    if (editEvent?.event_id) {
+      initialActionTriggeredRef.current = false;
+      return;
+    }
     if (initialActionTriggeredRef.current) return;
     initialActionTriggeredRef.current = true;
     sourceTransitionLockRef.current = true;
@@ -223,7 +305,7 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     lastSourceForRecoveryRef.current = route;
     setPhase('creating');
     onActionTriggered?.();
-  }, [visible, initialAction, router, onActionTriggered]);
+  }, [visible, initialAction, editEvent?.event_id, router, onActionTriggered]);
 
   // Video player for preview
   const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
@@ -358,6 +440,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         setPhoto({ uri: media.uri });
       }
       setImageSourceType(media.source === 'search' ? 'search' : 'camera');
+      setSearchQueryContext(media.searchQuery || '');
+      setSearchCanonicalName(media.searchCanonicalName || '');
       setMediaSource(`/${media.source}` as '/camera' | '/gallery' | '/search');
       setConfirming(true);
       setDescription('');
@@ -369,6 +453,9 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       setStagingEventId(null);
       stagingEventIdRef.current = null;
       lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+      if (editSourceEventIdRef.current) {
+        mediaReplacedDuringEditRef.current = true;
+      }
     }
   }, [isFocused, pendingMedia]);
 
@@ -570,6 +657,76 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       return;
     }
 
+    const editIdMeta = editSourceEventIdRef.current;
+    const replacedMeta = mediaReplacedDuringEditRef.current;
+    const hasNewLocalVoiceMeta = !!(activeAudioUri && activeAudioUri.startsWith('file'));
+    const photoUriMeta = photo.uri;
+    const remoteMediaMeta =
+      typeof photoUriMeta === 'string' &&
+      (photoUriMeta.startsWith('http://') || photoUriMeta.startsWith('https://'));
+
+    if (editIdMeta && !replacedMeta && remoteMediaMeta && !hasNewLocalVoiceMeta) {
+      try {
+        setUploading(true);
+        const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
+        const snap = await getDoc(ref);
+        if (!snap.exists()) {
+          throw new Error('Reflection not found');
+        }
+        const prevMeta = (snap.data()?.metadata as EventMetadata | undefined) || ({} as EventMetadata);
+        const patch: Record<string, unknown> = {
+          'metadata.description': finalCaption || prevMeta.description || 'Reflection',
+          'metadata.short_caption': finalCaption || prevMeta.short_caption || finalCaption || 'Reflection',
+          'metadata.companion_in_reflection': isCompanionInReflection,
+          'metadata.explorer_in_reflection': isExplorerInReflection,
+          'metadata.people_context': peopleContext.trim() || deleteField(),
+          'metadata.search_query': searchQueryContext.trim() || deleteField(),
+          'metadata.search_canonical_name': searchCanonicalName.trim() || deleteField(),
+        };
+        if (finalDeepDive?.trim()) {
+          patch['metadata.deep_dive'] = finalDeepDive;
+        } else {
+          patch['metadata.deep_dive'] = deleteField();
+        }
+        await updateDoc(ref, patch as Record<string, string | ReturnType<typeof deleteField>>);
+        showToast('✅ Reflection updated');
+        suppressPickerRecoveryRef.current = true;
+        setPhoto(null);
+        setVideoUri(null);
+        setMediaType('photo');
+        setDescription('');
+        setShowDescriptionInput(false);
+        setIsAiGenerated(false);
+        setShortCaption('');
+        setDeepDive('');
+        setStagingEventId(null);
+        stagingEventIdRef.current = null;
+        setAudioUri(null);
+        setAiAudioS3Key(null);
+        setAiDeepDiveS3Key(null);
+        setIsCompanionInReflection(false);
+        setIsExplorerInReflection(false);
+        setPeopleContext('');
+        setSearchQueryContext('');
+        setSearchCanonicalName('');
+        setConfirming(false);
+        editSourceEventIdRef.current = null;
+        mediaReplacedDuringEditRef.current = false;
+        setIsEditingExistingReflection(false);
+        sheetRef.current?.close();
+        onClose();
+        if (audioRecorder.isRecording) {
+          await stopRecording();
+        }
+      } catch (error: any) {
+        console.error('Metadata-only update error:', error);
+        Alert.alert('Update Error', error.message || 'Failed to update reflection');
+      } finally {
+        setUploading(false);
+      }
+      return;
+    }
+
     let tempThumbnail: string | null = null;
     let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
@@ -637,8 +794,8 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         return;
       }
 
-      // Generate unique event_id (timestamp-based)
-      const eventID = Date.now().toString();
+      const eventID = editSourceEventIdRef.current || Date.now().toString();
+      const startedAsEditBundle = !!editSourceEventIdRef.current;
       debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
@@ -787,6 +944,11 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
         ...(user?.uid ? { sender_id: user.uid } : {}),
         ...(finalCaption ? { short_caption: finalCaption } : {}),
         ...(finalDeepDive?.trim() ? { deep_dive: finalDeepDive } : {}),
+        companion_in_reflection: isCompanionInReflection,
+        explorer_in_reflection: isExplorerInReflection,
+        ...(peopleContext.trim() ? { people_context: peopleContext.trim() } : {}),
+        ...(searchQueryContext.trim() ? { search_query: searchQueryContext.trim() } : {}),
+        ...(searchCanonicalName.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
       };
 
       debugLog('📄 Final metadata (Firestore):', JSON.stringify(eventMetadata, null, 2));
@@ -847,7 +1009,12 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       setIsCompanionInReflection(false);
       setIsExplorerInReflection(false);
       setPeopleContext('');
+      setSearchQueryContext('');
+      setSearchCanonicalName('');
       setConfirming(false);
+      editSourceEventIdRef.current = null;
+      mediaReplacedDuringEditRef.current = false;
+      setIsEditingExistingReflection(false);
       sheetRef.current?.close();
       onClose();
       if (audioRecorder.isRecording) {
@@ -855,17 +1022,22 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
       }
 
       // 11. Write signal to Firestore (metadata is the source of truth for clients)
-      setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), {
+      const firestorePayload: Record<string, unknown> = {
         explorerId: currentExplorerId,
         event_id: eventID,
-        sender: companionName || "Companion",
+        sender: companionName || 'Companion',
         sender_id: user?.uid || undefined,
-        status: "ready",
+        status: 'ready',
         timestamp: serverTimestamp(),
-        type: "mirror_event",
-        engagement_count: 0,
+        type: 'mirror_event',
         metadata: eventMetadata,
-      }).catch(err => console.error("Firestore signal error:", err));
+      };
+      if (!startedAsEditBundle) {
+        firestorePayload.engagement_count = 0;
+      }
+      setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), firestorePayload, {
+        merge: true,
+      }).catch((err) => console.error('Firestore signal error:', err));
 
     } catch (error: any) {
       console.error("Full Upload Error:", error);
@@ -925,7 +1097,12 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
     setPeopleContext('');
+    setSearchQueryContext('');
+    setSearchCanonicalName('');
     setConfirming(false);
+    editSourceEventIdRef.current = null;
+    mediaReplacedDuringEditRef.current = false;
+    setIsEditingExistingReflection(false);
   };
 
   const retakePhoto = async () => {
@@ -954,8 +1131,13 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
     setPeopleContext('');
+    setSearchQueryContext('');
+    setSearchCanonicalName('');
     setConfirming(false);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+    editSourceEventIdRef.current = null;
+    mediaReplacedDuringEditRef.current = false;
+    setIsEditingExistingReflection(false);
   };
 
   const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
@@ -1050,7 +1232,53 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
   };
 
+  const handleReplaceMediaInEdit = async () => {
+    mediaReplacedDuringEditRef.current = true;
+    const stagingId = stagingEventId || stagingEventIdRef.current;
+    if (stagingId && stagingId !== editSourceEventIdRef.current) {
+      await deleteStagingArtifacts();
+    } else {
+      const ttsKeys: string[] = [];
+      if (aiAudioS3Key) ttsKeys.push(aiAudioS3Key);
+      if (aiDeepDiveS3Key) ttsKeys.push(aiDeepDiveS3Key);
+      if (ttsKeys.length > 0 && currentExplorerId) {
+        try {
+          const params = new URLSearchParams({ path: 'staging', explorer_id: currentExplorerId });
+          params.set('extra_keys', JSON.stringify(ttsKeys));
+          const res = await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${params.toString()}`, {
+            method: 'DELETE',
+          });
+          if (!res.ok) console.warn('TTS staging cleanup failed:', res.status);
+        } catch (e) {
+          console.warn('TTS staging cleanup failed:', e);
+        }
+      }
+      setAiAudioS3Key(null);
+      setAiDeepDiveS3Key(null);
+    }
+
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
+    await safeDeleteCacheFile(photoUriToClean);
+    await safeDeleteCacheFile(videoUriToClean);
+
+    setPhoto(null);
+    setVideoUri(null);
+    setMediaType('photo');
+    setStagingEventId(null);
+    stagingEventIdRef.current = null;
+    setAiAudioUrl(null);
+    setAiDeepDiveAudioUrl(null);
+    setIsAiThinking(false);
+    setPhase('picker');
+    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+  };
+
   const handleReplaceMedia = async () => {
+    if (editSourceEventIdRef.current) {
+      await handleReplaceMediaInEdit();
+      return;
+    }
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
     await deleteStagingArtifacts();
@@ -1494,6 +1722,9 @@ export default function CreationModal({ visible, onClose, initialAction, onActio
                 isSending={uploading}
                 onCancel={handleClose}
                 onReplaceMedia={handleReplaceMedia}
+                onReplaceMediaFromPreview={
+                  isEditingExistingReflection ? handleReplaceMediaInEdit : undefined
+                }
                 onTriggerMagic={async (targetCaption?: string) => {
                   const result = await generateDeepDiveBackground({
                     silent: false,

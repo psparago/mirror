@@ -28,6 +28,13 @@ export interface EventMetadata {
   short_caption?: string; // Brief greeting - auto-played on load
   deep_dive?: string; // Detailed story - played when ✨ is tapped
   deep_dive_audio_url?: string; // Optional TTS for deep dive
+  // Narrative context captured during creation/edit flow
+  companion_in_reflection?: boolean;
+  explorer_in_reflection?: boolean;
+  people_context?: string;
+  // Search provenance for image reflections
+  search_query?: string;
+  search_canonical_name?: string;
 }
 
 export interface Event {

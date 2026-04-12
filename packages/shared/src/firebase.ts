@@ -13,6 +13,7 @@ import {
   arrayUnion,
   collection,
   deleteDoc,
+  deleteField,
   disableNetwork,
   doc,
   enableNetwork,
@@ -68,7 +69,7 @@ export const db = initializeFirestore(app, {
 });
 
 export {
-  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, disableNetwork, doc, enableNetwork, getCountFromServer, getDoc,
+  addDoc, arrayRemove, arrayUnion, collection, deleteDoc, deleteField, disableNetwork, doc, enableNetwork, getCountFromServer, getDoc,
   getDocs, increment, limit, limitToLast, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch
 };
 

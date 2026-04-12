@@ -1,6 +1,7 @@
 import CreationModal from '@/components/CreationModal';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { FontAwesome } from '@expo/vector-icons';
+import { Event } from '@projectmirror/shared';
 import { useNavigation } from '@react-navigation/native';
 
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -13,6 +14,7 @@ export default function TimelineHomeScreen() {
   type CreationModalInitialAction = 'camera' | 'gallery' | 'search';
   const [creationModalVisible, setCreationModalVisible] = useState(false);
   const [initialAction, setInitialAction] = useState<CreationModalInitialAction | null>(null);
+  const [editingReflection, setEditingReflection] = useState<Event | null>(null);
   const params = useLocalSearchParams<{ action?: string }>();
   const router = useRouter();
   const navigation = useNavigation();
@@ -54,17 +56,29 @@ export default function TimelineHomeScreen() {
 
   return (
     <View style={styles.container}>
-      <SentTimelineScreen />
+      <SentTimelineScreen
+        onEditReflection={(ev) => {
+          setEditingReflection(ev);
+          setCreationModalVisible(true);
+        }}
+      />
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => setCreationModalVisible(true)}
+        onPress={() => {
+          setEditingReflection(null);
+          setCreationModalVisible(true);
+        }}
         activeOpacity={0.7}
       >
         <FontAwesome name="plus" size={26} color="#fff" />
       </TouchableOpacity>
       <CreationModal
         visible={creationModalVisible}
-        onClose={() => setCreationModalVisible(false)}
+        editEvent={editingReflection}
+        onClose={() => {
+          setCreationModalVisible(false);
+          setEditingReflection(null);
+        }}
         initialAction={initialAction}
         onActionTriggered={() => setInitialAction(null)}
       />

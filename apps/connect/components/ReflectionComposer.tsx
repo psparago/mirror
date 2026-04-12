@@ -40,6 +40,8 @@ interface ReflectionComposerProps {
   onSend: (data: { caption: string; audioUri: string | null; deepDive: string | null }) => void;
   onTriggerMagic: (targetCaption?: string) => Promise<void>;
   isSending: boolean;
+  /** Shown on Replay preview header when editing an existing reflection (CreationModal). */
+  onReplaceMediaFromPreview?: () => void;
   
   // Audio Recorder (passed from parent or hook)
   audioRecorder?: any; 
@@ -59,6 +61,7 @@ export default function ReflectionComposer({
   onSend,
   onTriggerMagic,
   isSending,
+  onReplaceMediaFromPreview,
   audioRecorder,
   onStartRecording,
   onStopRecording
@@ -596,6 +599,8 @@ export default function ReflectionComposer({
           setIsPreviewOpen(false);
           setPreviewEvent(null);
         }}
+        onReplaceMedia={onReplaceMediaFromPreview}
+        preferRecordedAudioOnly
         onSend={() => {
           onSend({
             caption,

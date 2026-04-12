@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useAuth, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
@@ -63,6 +63,11 @@ function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMet
   if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
   if (shortCaption) meta.short_caption = shortCaption;
   if (typeof o.deep_dive === 'string' && o.deep_dive) meta.deep_dive = o.deep_dive;
+  if (typeof o.companion_in_reflection === 'boolean') meta.companion_in_reflection = o.companion_in_reflection;
+  if (typeof o.explorer_in_reflection === 'boolean') meta.explorer_in_reflection = o.explorer_in_reflection;
+  if (typeof o.people_context === 'string' && o.people_context.trim()) meta.people_context = o.people_context;
+  if (typeof o.search_query === 'string' && o.search_query.trim()) meta.search_query = o.search_query;
+  if (typeof o.search_canonical_name === 'string' && o.search_canonical_name.trim()) meta.search_canonical_name = o.search_canonical_name;
   return meta;
 }
 
@@ -93,7 +98,12 @@ function reflectionSenderLabel(item: SentReflection): string | undefined {
   return item.metadata?.sender || item.sender;
 }
 
-export default function SentTimelineScreen() {
+type SentTimelineScreenProps = {
+  /** Open CreationModal in edit mode for this reflection (same Explorer). */
+  onEditReflection?: (event: Event) => void;
+};
+
+export default function SentTimelineScreen({ onEditReflection }: SentTimelineScreenProps) {
   const [reflections, setReflections] = useState<SentReflection[]>([]);
   const [loading, setLoading] = useState(true);
   const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
@@ -137,8 +147,8 @@ export default function SentTimelineScreen() {
   const countRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
+  const { user: authUser } = useAuth();
   const currentIdentity = activeRelationship?.companionName || null;
-  const currentUserId = activeRelationship?.userId || null;
   const snapshotGenRef = useRef(0);
 
   // Companion avatar filter
@@ -592,6 +602,62 @@ export default function SentTimelineScreen() {
     }
   }, [currentExplorerId, responseEventIdMap]);
 
+  const resolveEventForEdit = useCallback(
+    async (item: SentReflection): Promise<Event | null> => {
+      if (!currentExplorerId) return null;
+      const tsToISO = (ts: any): string => {
+        if (!ts) return new Date().toISOString();
+        if (ts.toDate) return ts.toDate().toISOString();
+        if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
+        if (typeof ts === 'number') return new Date(ts).toISOString();
+        if (typeof ts === 'string') return ts;
+        return new Date(ts).toISOString();
+      };
+
+      let fullEvent = eventObjectsMap.get(item.event_id);
+      if (!fullEvent) {
+        try {
+          const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
+          if (eventsResponse.ok) {
+            const eventsData = await eventsResponse.json();
+            const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
+            if (matchingEvent) {
+              fullEvent = matchingEvent;
+              setEventObjectsMap((prev) => new Map(prev).set(item.event_id, matchingEvent));
+            }
+          }
+        } catch (err) {
+          console.error('Error fetching event for edit:', err);
+        }
+      }
+
+      const metadata =
+        (item.metadata as EventMetadata | undefined) ??
+        (fullEvent?.metadata as EventMetadata | undefined);
+      const imageUrl = fullEvent?.image_url || item.reflectionImageUrl || '';
+      if (!imageUrl) {
+        Alert.alert('Cannot edit', 'Image URL is not available for this reflection yet.');
+        return null;
+      }
+
+      return {
+        event_id: item.event_id,
+        image_url: imageUrl,
+        audio_url: fullEvent?.audio_url,
+        video_url: fullEvent?.video_url,
+        deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
+        metadata: metadata || {
+          description: item.description || 'Reflection',
+          sender: reflectionSenderLabel(item) || 'Companion',
+          timestamp: tsToISO(item.sentTimestamp || item.timestamp),
+          event_id: item.event_id,
+          short_caption: item.description || 'Reflection',
+        },
+      };
+    },
+    [currentExplorerId, eventObjectsMap]
+  );
+
   const getStatusText = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
     if (status === 'deleted') return 'Deleted';
     if (status === 'replayed') return 'Replayed';
@@ -942,22 +1008,35 @@ export default function SentTimelineScreen() {
                     </View>
                   ) : null}
                   <View style={styles.reflectionInfo}>
-                    <View style={styles.reflectionContent}>
-                      <View style={styles.statusBadge}>
-                        <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
-                        <Text style={styles.statusText} numberOfLines={1}>
-                          {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                    {/* ROW 1 — Caption (full width) */}
+                    {reflectionBlurb(item) ? (
+                      <View style={styles.captionRow}>
+                        {item.metadata?.content_type === 'video' ? (
+                          <FontAwesome name="video-camera" size={13} color="#e0e0e0" />
+                        ) : (
+                          <FontAwesome name="image" size={13} color="#e0e0e0" />
+                        )}
+                        <Text style={styles.description} numberOfLines={2}>
+                          {reflectionBlurb(item)}
                         </Text>
-                        {item.status === 'deleted' && item.deletedAt ? (
-                          <Text style={styles.engagementDate} numberOfLines={1}>
-                            {formatEngagementDate(item.deletedAt)}
-                          </Text>
-                        ) : engagementTimestamp && item.status !== 'ready' ? (
-                          <Text style={styles.engagementDate} numberOfLines={1}>
-                            {formatEngagementDate(engagementTimestamp)}
-                          </Text>
-                        ) : null}
                       </View>
+                    ) : null}
+
+                    {/* ROW 2 — Status + selfie badge */}
+                    <View style={styles.statusRow}>
+                      <View style={[styles.statusDot, { backgroundColor: getStatusColor(item.status, !!engagementTimestamp, hasSelfie) }]} />
+                      <Text style={styles.statusText} numberOfLines={1}>
+                        {getStatusText(item.status, !!engagementTimestamp, hasSelfie)}
+                      </Text>
+                      {item.status === 'deleted' && item.deletedAt ? (
+                        <Text style={styles.engagementDate} numberOfLines={1}>
+                          {formatEngagementDate(item.deletedAt)}
+                        </Text>
+                      ) : engagementTimestamp && item.status !== 'ready' ? (
+                        <Text style={styles.engagementDate} numberOfLines={1}>
+                          {formatEngagementDate(engagementTimestamp)}
+                        </Text>
+                      ) : null}
                       {item.hasResponse && (
                         <TouchableOpacity
                           style={styles.responseBadge}
@@ -973,14 +1052,12 @@ export default function SentTimelineScreen() {
                             setSelfieImageUrl(null);
 
                             try {
-                              // Get presigned GET URL for the selfie image (method=GET for viewing)
                               const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`;
                               const imageResponse = await fetch(url);
                               if (imageResponse.ok) {
                                 const data = await imageResponse.json();
-                                const imageUrl = data.url;
-                                if (imageUrl) {
-                                  setSelfieImageUrl(imageUrl);
+                                if (data.url) {
+                                  setSelfieImageUrl(data.url);
                                 } else {
                                   console.error('No URL in response:', data);
                                 }
@@ -996,52 +1073,13 @@ export default function SentTimelineScreen() {
                           }}
                           activeOpacity={0.7}
                         >
-                          <FontAwesome name="camera" size={16} color="#4ade80" />
+                          <FontAwesome name="camera" size={12} color="#4ade80" />
                           <Text style={styles.responseText}>Selfie</Text>
-                        </TouchableOpacity>
-                      )}
-                      {currentIdentity &&
-                        reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase() && (
-                        <TouchableOpacity
-                          style={styles.deleteReflectionButton}
-                          onPress={() => {
-                            Alert.alert(
-                              'Delete Reflection',
-                              'Are you sure you want to permanently delete this reflection?',
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                {
-                                  text: 'Delete',
-                                  style: 'destructive',
-                                  onPress: () => deleteReflection(item),
-                                },
-                              ]
-                            );
-                          }}
-                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        >
-                          <FontAwesome name="trash-o" size={16} color="#ef5350" />
                         </TouchableOpacity>
                       )}
                     </View>
 
-                    {reflectionBlurb(item) && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        {(reflectionBlurb(item) === 'Voice message' ||
-                          item.metadata?.content_type === 'audio') && (
-                          <FontAwesome name="microphone" size={14} color="#e0e0e0" />
-                        )}
-                        <Text style={styles.description} numberOfLines={2}>
-                          {reflectionBlurb(item)}
-                        </Text>
-                      </View>
-                    )}
-                    {/* Viewed date on its own line */}
-                    {hasSelfie && engagementTimestamp && (
-                      <Text style={styles.viewedDate}>
-                        Viewed: {formatEngagementDate(engagementTimestamp)}
-                      </Text>
-                    )}
+                    {/* ROW 3 — Engagement metrics */}
                     {(engagementCount > 0 || impactScore > 0) && (
                       <View style={styles.engagementMetaRow}>
                         {engagementCount > 0 && (
@@ -1056,27 +1094,66 @@ export default function SentTimelineScreen() {
                         )}
                       </View>
                     )}
-                    {/* Sent date */}
-                    <View style={styles.timestampRow}>
-                      <Text style={styles.sentDate}>
-                        {reflectionSenderLabel(item) ? (
-                          <>
-                            Sent by{' '}
-                            <Text style={styles.senderName}>{reflectionSenderLabel(item)}</Text> •{' '}
-                            {formatEngagementDate(
-                              item.sentTimestamp ||
-                              (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
-                            )}
-                          </>
-                        ) : (
-                          <>Sent • {formatEngagementDate(
+
+                    {/* ROW 4 — Sent by / date */}
+                    <Text style={styles.sentDate}>
+                      {reflectionSenderLabel(item) ? (
+                        <>
+                          Sent by{' '}
+                          <Text style={styles.senderName}>{reflectionSenderLabel(item)}</Text> •{' '}
+                          {formatEngagementDate(
                             item.sentTimestamp ||
-                            (item.status === 'ready' ? item.timestamp : null) // Only use timestamp if status is 'ready' (original sent)
-                          )}</>
+                            (item.status === 'ready' ? item.timestamp : null)
+                          )}
+                        </>
+                      ) : (
+                        <>Sent • {formatEngagementDate(
+                          item.sentTimestamp ||
+                          (item.status === 'ready' ? item.timestamp : null)
+                        )}</>
+                      )}
+                    </Text>
+
+                    {/* ACTION ICONS — pinned top-right of card info area */}
+                    <View style={styles.cardActions}>
+                      {onEditReflection &&
+                        authUser?.uid &&
+                        item.sender_id === authUser.uid && (
+                          <TouchableOpacity
+                            style={styles.cardActionButton}
+                            onPress={async () => {
+                              const ev = await resolveEventForEdit(item);
+                              if (ev) onEditReflection(ev);
+                            }}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          >
+                            <FontAwesome name="pencil" size={14} color="#4FC3F7" />
+                          </TouchableOpacity>
                         )}
-                      </Text>
+                      {currentIdentity &&
+                        reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase() && (
+                        <TouchableOpacity
+                          style={styles.cardActionButton}
+                          onPress={() => {
+                            Alert.alert(
+                              'Delete Reflection',
+                              'Are you sure you want to permanently delete this reflection?',
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                {
+                                  text: 'Delete',
+                                  style: 'destructive',
+                                  onPress: () => deleteReflection(item),
+                                },
+                              ]
+                            );
+                          }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <FontAwesome name="trash-o" size={14} color="#ef5350" />
+                        </TouchableOpacity>
+                      )}
                     </View>
-                    <Text style={styles.eventId}>Reflection ID: {item.event_id}</Text>
                   </View>
                 </View>
               </TouchableOpacity>
@@ -1165,29 +1242,25 @@ const styles = StyleSheet.create({
   },
   reflectionInfo: {
     flex: 1,
+    position: 'relative',
   },
-  reflectionContent: {
+  captionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
-    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 6,
+    paddingRight: 56,
   },
   description: {
     fontSize: 14,
     color: '#fff',
-    marginBottom: 4,
+    flex: 1,
   },
-  statusBadge: {
+  statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    flexShrink: 1,
-    minWidth: 0,
-  },
-  deleteReflectionButton: {
-    padding: 4,
-    flexShrink: 0,
+    marginBottom: 4,
   },
   statusDot: {
     width: 8,
@@ -1195,14 +1268,13 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   statusText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#ccc',
     fontWeight: '600',
   },
   engagementDate: {
     fontSize: 12,
     color: '#aaa',
-    marginLeft: 8,
     fontStyle: 'italic',
   },
   responseBadge: {
@@ -1210,30 +1282,36 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 4,
     backgroundColor: 'rgba(74, 222, 128, 0.25)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    flexShrink: 0,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 10,
+    marginLeft: 4,
   },
   responseText: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#4ade80',
     fontWeight: '600',
   },
   sentDate: {
     fontSize: 12,
     color: '#aaa',
-    marginTop: 4,
+    marginTop: 2,
   },
   senderName: {
     fontSize: 12,
     color: '#fff',
     fontWeight: '600',
   },
-  eventId: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.5)',
-    fontFamily: 'monospace',
+  cardActions: {
+    position: 'absolute',
+    top: -2,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  cardActionButton: {
+    padding: 8,
   },
 
   loadingText: {
@@ -1330,11 +1408,6 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   timestampRow: {
-    marginTop: 4,
-  },
-  viewedDate: {
-    fontSize: 12,
-    color: '#22d3ee',
     marginTop: 4,
   },
   engagementCount: {

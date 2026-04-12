@@ -4,6 +4,8 @@ export type PendingMedia = {
   uri: string;
   type: 'photo' | 'video';
   source: 'camera' | 'gallery' | 'search';
+  searchQuery?: string;
+  searchCanonicalName?: string;
 };
 
 type ReflectionMediaContextType = {

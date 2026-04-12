@@ -21,6 +21,10 @@ interface ReplayModalProps {
   isSending?: boolean;
   /** Extra disable reasons (e.g. empty caption); does not replace `isSending`. */
   isSendDisabled?: boolean;
+  /** Edit flow: replace underlying media without closing the composer. */
+  onReplaceMedia?: () => void;
+  /** Preview mode: never synthesize TTS fallback; use recorded files only. */
+  preferRecordedAudioOnly?: boolean;
 }
 
 export function ReplayModal({
@@ -30,6 +34,8 @@ export function ReplayModal({
   onSend,
   isSending = false,
   isSendDisabled = false,
+  onReplaceMedia,
+  preferRecordedAudioOnly = false,
 }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -176,7 +182,7 @@ export function ReplayModal({
         } else if (eventRef.current?.audio_url) {
           console.warn('⚠️ [speakCaption] Invalid audio URL, falling back to TTS. Raw:', eventRef.current.audio_url, 'Normalized:', audioUrl);
           sendRef.current({ type: 'NARRATION_FINISHED' });
-        } else if (eventRef.current?.metadata?.short_caption || eventRef.current?.metadata?.description) {
+        } else if (!preferRecordedAudioOnly && (eventRef.current?.metadata?.short_caption || eventRef.current?.metadata?.description)) {
           const textToSpeak = eventRef.current.metadata.short_caption || eventRef.current.metadata.description;
           Speech.speak(textToSpeak, {
             volume: 1.0,
@@ -285,7 +291,7 @@ export function ReplayModal({
             console.warn('Deep dive error, fallback to TTS');
             sendRef.current({ type: 'NARRATION_FINISHED' });
           }
-        } else if (eventRef.current?.metadata?.deep_dive) {
+        } else if (!preferRecordedAudioOnly && eventRef.current?.metadata?.deep_dive) {
            Speech.speak(eventRef.current.metadata.deep_dive, {
              onDone: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
              onError: () => sendRef.current({ type: 'NARRATION_FINISHED' }),
@@ -295,7 +301,7 @@ export function ReplayModal({
         }
       },
     }
-  }), [event, videoPlayer]);
+  }), [event, videoPlayer, preferRecordedAudioOnly]);
 
   const [state, send] = useMachine(machine);
 
@@ -381,7 +387,7 @@ export function ReplayModal({
           }
         });
       } catch {
-        if (eventRef.current?.metadata?.deep_dive) {
+        if (!preferRecordedAudioOnly && eventRef.current?.metadata?.deep_dive) {
           Speech.speak(eventRef.current.metadata.deep_dive, {
             volume: 1.0,
             onDone: () => setIsDirectDeepDivePlaying(false),
@@ -392,7 +398,7 @@ export function ReplayModal({
           setIsDirectDeepDivePlaying(false);
         }
       }
-    } else if (eventRef.current?.metadata?.deep_dive) {
+    } else if (!preferRecordedAudioOnly && eventRef.current?.metadata?.deep_dive) {
       Speech.speak(eventRef.current.metadata.deep_dive, {
         volume: 1.0,
         onDone: () => setIsDirectDeepDivePlaying(false),
@@ -402,7 +408,7 @@ export function ReplayModal({
     } else {
       setIsDirectDeepDivePlaying(false);
     }
-  }, []);
+  }, [preferRecordedAudioOnly]);
 
   // LOGIC FOR SPARKLE / CO-HOST
   const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
@@ -528,17 +534,17 @@ export function ReplayModal({
         });
       } catch (e) {
         console.error('❌ [handlePlayCaption] Audio load error:', e);
-        // Fall back to TTS
-        if (event?.metadata?.description) {
+        // Fall back to TTS only when enabled.
+        if (!preferRecordedAudioOnly && event?.metadata?.description) {
           Speech.speak(event.metadata.description, { volume: 1.0 });
         }
       }
     } else if (event?.audio_url) {
       console.warn('⚠️ [handlePlayCaption] Invalid audio URL, using TTS. Raw:', event.audio_url, 'Normalized:', audioUrl);
-      if (event?.metadata?.description) {
+      if (!preferRecordedAudioOnly && event?.metadata?.description) {
         Speech.speak(event.metadata.description, { volume: 1.0 });
       }
-    } else if (event?.metadata?.description) {
+    } else if (!preferRecordedAudioOnly && event?.metadata?.description) {
       Speech.speak(event.metadata.description, { volume: 1.0 });
     }
   };
@@ -650,11 +656,11 @@ export function ReplayModal({
                               }
                             });
                           }).catch(() => {
-                            if (event?.metadata?.deep_dive) {
+                            if (!preferRecordedAudioOnly && event?.metadata?.deep_dive) {
                               Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
                             }
                           });
-                        } else if (event?.metadata?.deep_dive) {
+                        } else if (!preferRecordedAudioOnly && event?.metadata?.deep_dive) {
                           Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
                         }
                       }
@@ -677,6 +683,18 @@ export function ReplayModal({
           {/* TOP CONTROLS - Rendered last to appear on top */}
           <View style={[styles.topControls, { top: insets.top - 15 }]}>
             <View style={{ flex: 1 }} />
+            {onReplaceMedia ? (
+              <TouchableOpacity
+                style={[styles.replacePreviewButton, isSending && styles.replacePreviewButtonDisabled]}
+                onPress={onReplaceMedia}
+                disabled={isSending}
+                activeOpacity={0.85}
+              >
+                <FontAwesome name="image" size={14} color="#fff" />
+                <Text style={styles.replacePreviewButtonText}>Replace Media</Text>
+              </TouchableOpacity>
+            ) : null}
+            {onReplaceMedia ? <View style={styles.topControlGap} /> : null}
             {onSend ? (
               <TouchableOpacity
                 style={[
@@ -731,6 +749,28 @@ const styles = StyleSheet.create({
   },
   topControlGap: {
     width: 10,
+  },
+  replacePreviewButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+    zIndex: 1001,
+    elevation: 1001,
+  },
+  replacePreviewButtonDisabled: {
+    opacity: 0.45,
+  },
+  replacePreviewButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   sendPreviewButton: {
     flexDirection: 'row',

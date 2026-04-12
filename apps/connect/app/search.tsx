@@ -50,11 +50,17 @@ export default function SearchScreen() {
     searchUnsplash(term);
   };
 
-  const handleImageSelect = async (imageUrl: string) => {
+  const handleImageSelect = async (imageUrl: string, canonicalName?: string) => {
     try {
       setIsLoadingImage(true);
       const optimizedUri = await prepareImageForUpload(imageUrl);
-      setPendingMedia({ uri: optimizedUri, type: 'photo', source: 'search' });
+      setPendingMedia({
+        uri: optimizedUri,
+        type: 'photo',
+        source: 'search',
+        searchQuery: searchQuery.trim() || undefined,
+        searchCanonicalName: canonicalName?.trim() || undefined,
+      });
       router.back();
     } catch (error: any) {
       console.error('handleImageSelect error:', error);
@@ -139,7 +145,12 @@ export default function SearchScreen() {
             renderItem={({ item }) => (
               <TouchableOpacity
                 style={styles.resultItem}
-                onPress={() => handleImageSelect(item.urls.regular || item.urls.small)}
+                onPress={() =>
+                  handleImageSelect(
+                    item.urls.regular || item.urls.small,
+                    item.alt_description || item.description || undefined
+                  )
+                }
                 activeOpacity={0.8}
               >
                 <Image
