@@ -68,6 +68,9 @@ function formatEventDateFromId(eventId: string): string {
   return `${EVENT_DATE_MONTHS[date.getMonth()]} ${date.getDate()}`;
 }
 
+/** Rough row height when `getItemLayout` is absent; used for scrollToOffset fallbacks. */
+const UP_NEXT_FALLBACK_ITEM_HEIGHT = 200;
+
 function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
   const mCap = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
   const emb = event?.metadata;
@@ -702,6 +705,63 @@ export default function MainStageView({
 
   const lastTapRef = useRef<number>(0);
 
+  /** Cole-Guard: suppress duplicate autoscroll for the same (eventId, list length) within 800ms (orientation / layout churn). */
+  const lastUpNextAutoscrollDedupeRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
+
+  const scrollFlatListToDataIndex = useCallback((index: number, animated: boolean) => {
+    const list = flatListRef.current;
+    if (!list) return;
+    const len = eventsRef.current.length;
+    if (index < 0 || index >= len) return;
+    try {
+      list.scrollToIndex({ index, animated, viewPosition: 0.5 });
+    } catch (e) {
+      console.warn('Up Next scrollToIndex failed, using offset fallback', e);
+      try {
+        list.scrollToOffset({
+          offset: Math.max(0, index * UP_NEXT_FALLBACK_ITEM_HEIGHT),
+          animated,
+        });
+      } catch (e2) {
+        console.warn('Up Next scrollToOffset fallback failed', e2);
+      }
+    }
+  }, []);
+
+  const performUpNextAutoscrollToEvent = useCallback(
+    (eventId: string, opts?: { bypassDedupe?: boolean }) => {
+      const evs = eventsRef.current;
+      const len = evs.length;
+      const index = evs.findIndex(e => e.event_id === eventId);
+      if (index < 0 || index >= len) return;
+
+      const key = `${eventId}:${len}`;
+      const now = Date.now();
+      const prev = lastUpNextAutoscrollDedupeRef.current;
+      if (!opts?.bypassDedupe && prev.key === key && now - prev.at < 800) {
+        return;
+      }
+      lastUpNextAutoscrollDedupeRef.current = { key, at: now };
+
+      scrollFlatListToDataIndex(index, true);
+    },
+    [scrollFlatListToDataIndex]
+  );
+
+  const throttledOrientationUpNextRescroll = useThrottledCallback(() => {
+    const id = selectedEventRef.current?.event_id;
+    if (id) performUpNextAutoscrollToEvent(id, { bypassDedupe: true });
+  }, 800);
+
+  const prevUpNextLayoutDimsRef = useRef<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    const prev = prevUpNextLayoutDimsRef.current;
+    prevUpNextLayoutDimsRef.current = { w: width, h: height };
+    if (prev == null) return;
+    if (prev.w === width && prev.h === height) return;
+    throttledOrientationUpNextRescroll();
+  }, [width, height, throttledOrientationUpNextRescroll]);
+
   // Helper functions to handle gestures (must be on JS thread, not worklets)
   const handleHorizontalSwipe = useCallback((translationX: number) => {
     const currentEvents = eventsRef.current;
@@ -717,9 +777,7 @@ export default function MainStageView({
       } else if (configRef.current?.loopFeed && currentEvents.length > 0) {
         debugLog('↩️ Wrapped to start');
         onEventSelectRef.current(currentEvents[0]);
-        try {
-          flatListRef.current?.scrollToIndex({ index: 0, animated: true, viewPosition: 0.5 });
-        } catch { }
+        scrollFlatListToDataIndex(0, true);
       }
     } else if (translationX > 50) {
       debugLog('👉 Swiped Right (Previous)');
@@ -728,12 +786,10 @@ export default function MainStageView({
       } else if (configRef.current?.loopFeed && currentEvents.length > 0) {
         debugLog('↪️ Wrapped to end');
         onEventSelectRef.current(currentEvents[currentEvents.length - 1]);
-        try {
-          flatListRef.current?.scrollToIndex({ index: currentEvents.length - 1, animated: true, viewPosition: 0.5 });
-        } catch { }
+        scrollFlatListToDataIndex(currentEvents.length - 1, true);
       }
     }
-  }, []);
+  }, [scrollFlatListToDataIndex]);
 
   // Handle swipe-down dismiss - stops all media before closing
   const handleSwipeDismiss = useCallback(() => {
@@ -1307,24 +1363,10 @@ export default function MainStageView({
       scale.value = 1;
       opacity.value = 1;
 
-      // Auto-scroll the list to show the selected item
-      if (flatListRef.current) {
-        const index = events.findIndex(e => e.event_id === currentEventId);
-        if (index !== -1) {
-          try {
-            flatListRef.current.scrollToIndex({
-              index,
-              animated: true,
-              viewPosition: 0.5 // Center the item in the list
-            });
-          } catch (err) {
-            // scrollToOffset as fallback if scrollToIndex fails (common in early renders)
-            console.warn('Scroll to index failed, using fallback');
-          }
-        }
-      }
+      // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
+      performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, events, translateY, scale, opacity, config?.instantVideoPlayback]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -1692,26 +1734,14 @@ export default function MainStageView({
   const scrollToNewestArrival = () => {
     if (recentlyArrivedIds.length === 0 || !flatListRef.current) return;
 
-    // Find the first (newest) event in the list that is currently marked as a recent arrival
-    const newestIndex = events.findIndex(e => recentlyArrivedIds.includes(e.event_id));
+    const evs = eventsRef.current;
+    const newestIndex = evs.findIndex(e => recentlyArrivedIds.includes(e.event_id));
+    if (newestIndex < 0 || newestIndex >= evs.length) return;
 
-    if (newestIndex !== -1) {
-      debugLog(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
+    debugLog(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
 
-      // 1. Select the event (Auto-play)
-      onEventSelect(events[newestIndex]);
-
-      // 2. Scroll to it
-      try {
-        flatListRef.current.scrollToIndex({
-          index: newestIndex,
-          animated: true,
-          viewPosition: 0.5 // Center it
-        });
-      } catch (err) {
-        console.warn('Scroll to newest arrival failed');
-      }
-    }
+    onEventSelect(evs[newestIndex]);
+    scrollFlatListToDataIndex(newestIndex, true);
   };
 
   const renderUpNextItem = ({ item }: { item: Event }) => {
@@ -2157,10 +2187,18 @@ export default function MainStageView({
                 numColumns={isLandscape ? 1 : 2}
                 columnWrapperStyle={!isLandscape ? { gap: 8 } : undefined}
                 onScrollToIndexFailed={(info) => {
-                  const wait = new Promise(resolve => setTimeout(resolve, 500));
-                  wait.then(() => {
-                    flatListRef.current?.scrollToIndex({ index: info.index, animated: true });
-                  });
+                  const list = flatListRef.current;
+                  if (!list) return;
+                  const len = eventsRef.current.length;
+                  const h =
+                    info.averageItemLength > 1 ? info.averageItemLength : UP_NEXT_FALLBACK_ITEM_HEIGHT;
+                  const clampedIndex = Math.max(0, Math.min(info.index, Math.max(0, len - 1)));
+                  const offset = Math.max(0, clampedIndex * h);
+                  try {
+                    list.scrollToOffset({ offset, animated: true });
+                  } catch (e) {
+                    console.warn('Up Next onScrollToIndexFailed offset fallback failed', e);
+                  }
                 }}
               />
 
