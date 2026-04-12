@@ -1,4 +1,4 @@
-import { FontAwesome } from '@expo/vector-icons';
+import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { Event, EventMetadata, playerMachine } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
@@ -16,9 +16,21 @@ interface ReplayModalProps {
   visible: boolean;
   event: Event | null;
   onClose: () => void;
+  /** When set, shows a Send control in the header (Reflections Companion preview). */
+  onSend?: () => void;
+  isSending?: boolean;
+  /** Extra disable reasons (e.g. empty caption); does not replace `isSending`. */
+  isSendDisabled?: boolean;
 }
 
-export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
+export function ReplayModal({
+  visible,
+  event,
+  onClose,
+  onSend,
+  isSending = false,
+  isSendDisabled = false,
+}: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
 
@@ -665,6 +677,21 @@ export function ReplayModal({ visible, event, onClose }: ReplayModalProps) {
           {/* TOP CONTROLS - Rendered last to appear on top */}
           <View style={[styles.topControls, { top: insets.top - 15 }]}>
             <View style={{ flex: 1 }} />
+            {onSend ? (
+              <TouchableOpacity
+                style={[
+                  styles.sendPreviewButton,
+                  (isSending || isSendDisabled) && styles.sendPreviewButtonDisabled,
+                ]}
+                onPress={onSend}
+                disabled={isSending || isSendDisabled}
+                activeOpacity={0.85}
+              >
+                <FontAwesome5 name="paper-plane" size={14} color="#fff" solid />
+                <Text style={styles.sendPreviewButtonText}>Send</Text>
+              </TouchableOpacity>
+            ) : null}
+            {onSend ? <View style={styles.topControlGap} /> : null}
             <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
               <FontAwesome name="times" size={18} color="#fff" />
             </TouchableOpacity>
@@ -701,6 +728,29 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.4)',
     zIndex: 1001,
     elevation: 1001,
+  },
+  topControlGap: {
+    width: 10,
+  },
+  sendPreviewButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: '#2e78b7',
+    zIndex: 1001,
+    elevation: 1001,
+  },
+  sendPreviewButtonDisabled: {
+    opacity: 0.45,
+  },
+  sendPreviewButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
   mediaContainer: {
     flex: 1,

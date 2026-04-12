@@ -589,13 +589,24 @@ export default function ReflectionComposer({
       </BottomSheet>
 
       {/* REPLAY PREVIEW MODAL */}
-      <ReplayModal 
+      <ReplayModal
         visible={isPreviewOpen}
         event={previewEvent}
         onClose={() => {
           setIsPreviewOpen(false);
           setPreviewEvent(null);
         }}
+        onSend={() => {
+          onSend({
+            caption,
+            audioUri: audioUri || null,
+            deepDive: aiArtifacts?.deepDive || null,
+          });
+          setIsPreviewOpen(false);
+          setPreviewEvent(null);
+        }}
+        isSending={isSending}
+        isSendDisabled={isBlockedByAi || (!caption && !hasRecordedAudio)}
       />
     </GestureHandlerRootView>
   );
