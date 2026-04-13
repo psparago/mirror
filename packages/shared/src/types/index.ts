@@ -51,6 +51,12 @@ export interface EventMetadata {
   people_context_hints?: string;
   /** ISO timestamp when a Companion last saved edits to this reflection (metadata and/or media). */
   last_edited_at?: string;
+  /** Playback trim: inclusive start time in milliseconds (video). */
+  video_start_ms?: number;
+  /** Playback trim: exclusive or inclusive end boundary in milliseconds (video); pair with `video_start_ms`. */
+  video_end_ms?: number;
+  /** Poster frame position within the source video, in milliseconds. */
+  thumbnail_time_ms?: number;
 }
 
 export interface Event {

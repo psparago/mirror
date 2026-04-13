@@ -5,7 +5,18 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Keyboard, KeyboardAvoidingView, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Keyboard,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
@@ -19,6 +30,12 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ReplayModal } from './ReplayModal';
+
+export type ComposerVideoMeta = {
+  video_start_ms: number;
+  video_end_ms: number;
+  thumbnail_time_ms: number | null;
+};
 
 // --- TYPES ---
 interface ReflectionComposerProps {
@@ -37,7 +54,16 @@ interface ReflectionComposerProps {
   // Actions
   onCancel: () => void;
   onReplaceMedia: () => void;
-  onSend: (data: { caption: string; audioUri: string | null; deepDive: string | null }) => void;
+  onSend: (data: {
+    caption: string;
+    audioUri: string | null;
+    deepDive: string | null;
+    videoMeta?: ComposerVideoMeta | null;
+  }) => void;
+  /** Hydrate trim / thumbnail when editing an existing video reflection. */
+  initialVideoMeta?: Partial<ComposerVideoMeta> | null;
+  /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
+  onVideoMetaChange?: (meta: ComposerVideoMeta) => void;
   onTriggerMagic: (targetCaption?: string) => Promise<void>;
   isSending: boolean;
   /** Shown on Replay preview header when editing an existing reflection (CreationModal). */
@@ -64,7 +90,9 @@ export default function ReflectionComposer({
   onReplaceMediaFromPreview,
   audioRecorder,
   onStartRecording,
-  onStopRecording
+  onStopRecording,
+  initialVideoMeta,
+  onVideoMetaChange,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
@@ -73,6 +101,12 @@ export default function ReflectionComposer({
   const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [videoEnded, setVideoEnded] = useState(false);
+  const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
+  const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
+  const [trimModalOpen, setTrimModalOpen] = useState(false);
+  const [trimStartDraft, setTrimStartDraft] = useState('0');
+  const [trimEndDraft, setTrimEndDraft] = useState('0');
+  const lastSendAtRef = useRef(0);
   
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -256,6 +290,18 @@ export default function ReflectionComposer({
     typeof mediaUri === 'string' &&
     (mediaUri.startsWith('http://') || mediaUri.startsWith('https://'));
 
+  useEffect(() => {
+    if (mediaType !== 'video' || !initialVideoMeta) return;
+    const s = initialVideoMeta.video_start_ms;
+    const e = initialVideoMeta.video_end_ms;
+    if (typeof s === 'number' && typeof e === 'number' && e > s) {
+      setVideoRangeMs({ start: s, end: e });
+    }
+    if (typeof initialVideoMeta.thumbnail_time_ms === 'number') {
+      setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
+    }
+  }, [mediaType, mediaUri, initialVideoMeta]);
+
   // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
   const player = useVideoPlayer(mediaUri, (p) => {
     p.loop = false;
@@ -285,7 +331,72 @@ export default function ReflectionComposer({
     return () => sub.remove();
   }, [player]);
 
+  useEffect(() => {
+    if (mediaType !== 'video' || !player) return;
+    if (!(player.duration > 0)) return;
+    setVideoRangeMs((prev) => {
+      if (prev) return prev;
+      return { start: 0, end: Math.round(player.duration * 1000) };
+    });
+  }, [mediaType, mediaUri, player]);
+
+  useEffect(() => {
+    if (!videoRangeMs || !onVideoMetaChange) return;
+    onVideoMetaChange({
+      video_start_ms: videoRangeMs.start,
+      video_end_ms: videoRangeMs.end,
+      thumbnail_time_ms: thumbnailTimeMs,
+    });
+  }, [videoRangeMs, thumbnailTimeMs, onVideoMetaChange]);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || !player || !videoRangeMs) return;
+    player.timeUpdateEventInterval = 0.25;
+    const sub = player.addListener('timeUpdate', () => {
+      const curMs = player.currentTime * 1000;
+      if (curMs > videoRangeMs.end - 50) {
+        player.currentTime = videoRangeMs.start / 1000;
+      } else if (curMs < videoRangeMs.start - 50) {
+        player.currentTime = videoRangeMs.start / 1000;
+      }
+    });
+    return () => {
+      try {
+        player.timeUpdateEventInterval = 0;
+      } catch {
+        /* ignore */
+      }
+      sub.remove();
+    };
+  }, [mediaType, player, videoRangeMs]);
+
   // --- HANDLERS ---
+
+  const buildSendPayload = useCallback(() => {
+    const base = {
+      caption,
+      audioUri: audioUri || null,
+      deepDive: aiArtifacts?.deepDive || null,
+    };
+    if (mediaType === 'video' && videoRangeMs && videoRangeMs.end > videoRangeMs.start) {
+      return {
+        ...base,
+        videoMeta: {
+          video_start_ms: videoRangeMs.start,
+          video_end_ms: videoRangeMs.end,
+          thumbnail_time_ms: thumbnailTimeMs,
+        } as ComposerVideoMeta,
+      };
+    }
+    return { ...base, videoMeta: null };
+  }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
+
+  const handleSendWithThrottle = useCallback(() => {
+    const now = Date.now();
+    if (now - lastSendAtRef.current < 800) return;
+    lastSendAtRef.current = now;
+    onSend(buildSendPayload());
+  }, [buildSendPayload, onSend]);
 
   const handleSheetChange = useCallback((index: number) => {
     if (index < 2) {
@@ -364,9 +475,13 @@ export default function ReflectionComposer({
 
   const handleReplay = useCallback(() => {
     setVideoEnded(false);
-    player.currentTime = 0;
+    if (mediaType === 'video' && videoRangeMs) {
+      player.currentTime = videoRangeMs.start / 1000;
+    } else {
+      player.currentTime = 0;
+    }
     player.play();
-  }, [player]);
+  }, [player, mediaType, videoRangeMs]);
 
   /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
   const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
@@ -385,6 +500,42 @@ export default function ReflectionComposer({
         />
       )}
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
+
+      {mediaType === 'video' ? (
+        <View style={[styles.videoToolsRow, { bottom: insets.bottom + 72 }]}>
+          <TouchableOpacity
+            style={[styles.trimButton, isBlockedByAi && { opacity: 0.35 }]}
+            onPress={() => {
+              if (videoRangeMs) {
+                setTrimStartDraft(String(videoRangeMs.start));
+                setTrimEndDraft(String(videoRangeMs.end));
+              } else if (player.duration > 0) {
+                setTrimStartDraft('0');
+                setTrimEndDraft(String(Math.round(player.duration * 1000)));
+              } else {
+                setTrimStartDraft('0');
+                setTrimEndDraft('0');
+              }
+              setTrimModalOpen(true);
+            }}
+            disabled={isSending || isBlockedByAi}
+          >
+            <FontAwesome name="scissors" size={14} color="#fff" />
+            <Text style={styles.trimButtonText}>Trim</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.trimButton, isBlockedByAi && { opacity: 0.35 }]}
+            onPress={() => {
+              const ms = Math.max(0, Math.round(player.currentTime * 1000));
+              setThumbnailTimeMs(ms);
+            }}
+            disabled={isSending || isBlockedByAi}
+          >
+            <FontAwesome name="image" size={14} color="#fff" />
+            <Text style={styles.trimButtonText}>Set Thumbnail</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       {/* REPLAY OVERLAY — shown when video finishes */}
       {mediaType === 'video' && videoEnded && (
@@ -481,7 +632,7 @@ export default function ReflectionComposer({
               isSending && styles.chipDisabled,
               (!caption && !hasRecordedAudio) && styles.chipDisabled
             ]}
-            onPress={() => onSend({ caption, audioUri: audioUri || null, deepDive: aiArtifacts?.deepDive || null })}
+            onPress={handleSendWithThrottle}
             disabled={isSending || (!caption && !hasRecordedAudio)}
           >
             {isSending ? (
@@ -628,17 +779,60 @@ export default function ReflectionComposer({
         onReplaceMedia={onReplaceMediaFromPreview}
         preferRecordedAudioOnly
         onSend={() => {
-          onSend({
-            caption,
-            audioUri: audioUri || null,
-            deepDive: aiArtifacts?.deepDive || null,
-          });
+          handleSendWithThrottle();
           setIsPreviewOpen(false);
           setPreviewEvent(null);
         }}
         isSending={isSending}
         isSendDisabled={isBlockedByAi || (!caption && !hasRecordedAudio)}
       />
+
+      <Modal visible={trimModalOpen} transparent animationType="fade" onRequestClose={() => setTrimModalOpen(false)}>
+        <View style={styles.trimModalOverlay}>
+          <View style={styles.trimModalCard}>
+            <Text style={styles.trimModalTitle}>Trim video (ms)</Text>
+            <Text style={styles.trimModalHint}>Start and end times in milliseconds from the start of the file.</Text>
+            <Text style={styles.trimFieldLabel}>Start ms</Text>
+            <TextInput
+              style={styles.trimInput}
+              keyboardType="number-pad"
+              value={trimStartDraft}
+              onChangeText={setTrimStartDraft}
+            />
+            <Text style={styles.trimFieldLabel}>End ms</Text>
+            <TextInput
+              style={styles.trimInput}
+              keyboardType="number-pad"
+              value={trimEndDraft}
+              onChangeText={setTrimEndDraft}
+            />
+            <View style={styles.trimModalActions}>
+              <TouchableOpacity style={styles.trimModalCancel} onPress={() => setTrimModalOpen(false)}>
+                <Text style={styles.trimModalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.trimModalApply}
+                onPress={() => {
+                  const start = Math.round(parseFloat(trimStartDraft) || 0);
+                  const end = Math.round(parseFloat(trimEndDraft) || 0);
+                  const maxEnd = player.duration > 0 ? Math.round(player.duration * 1000) : end;
+                  const clampedStart = Math.max(0, Math.min(start, maxEnd - 1));
+                  const clampedEnd = Math.max(clampedStart + 1, Math.min(end, maxEnd));
+                  setVideoRangeMs({ start: clampedStart, end: clampedEnd });
+                  try {
+                    player.currentTime = clampedStart / 1000;
+                  } catch {
+                    /* ignore */
+                  }
+                  setTrimModalOpen(false);
+                }}
+              >
+                <Text style={styles.trimModalApplyText}>Apply</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </GestureHandlerRootView>
   );
 }
@@ -662,6 +856,99 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     height: 350,
+  },
+  videoToolsRow: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    flexDirection: 'row',
+    gap: 10,
+    zIndex: 6,
+  },
+  trimButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  trimButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  trimModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  trimModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  trimModalTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  trimModalHint: {
+    color: '#aaa',
+    fontSize: 12,
+    marginBottom: 14,
+  },
+  trimFieldLabel: {
+    color: '#ccc',
+    fontSize: 13,
+    marginBottom: 4,
+  },
+  trimInput: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    color: '#fff',
+    fontSize: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  trimModalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 8,
+  },
+  trimModalCancel: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  trimModalCancelText: {
+    color: '#aaa',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  trimModalApply: {
+    backgroundColor: '#2E78B7',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+  },
+  trimModalApplyText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   topControls: {
     position: 'absolute',

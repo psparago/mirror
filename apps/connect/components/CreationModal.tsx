@@ -1,6 +1,6 @@
-import ReflectionComposer from '@/components/ReflectionComposer';
+import ReflectionComposer, { type ComposerVideoMeta } from '@/components/ReflectionComposer';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { prepareImageForUpload } from '@/utils/mediaProcessor';
+import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
@@ -178,6 +178,8 @@ export default function CreationModal({
   const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
   const sheetRef = useRef<BottomSheet>(null);
   const detailsSheetRef = useRef<BottomSheet>(null);
+  /** Latest video trim / thumbnail choices from ReflectionComposer (ms). */
+  const composerVideoMetaRef = useRef<ComposerVideoMeta | null>(null);
 
   const beginSourceFlow = useCallback((route: '/camera' | '/gallery' | '/search') => {
     lastSourceForRecoveryRef.current = route;
@@ -193,6 +195,7 @@ export default function CreationModal({
       lastSourceForRecoveryRef.current = null;
       editSourceEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
+      composerVideoMetaRef.current = null;
       setIsEditingExistingReflection(false);
       setShowDescriptionInput(false);
       return;
@@ -248,10 +251,25 @@ export default function CreationModal({
         setMediaType('video');
         setVideoUri(editEvent.video_url);
         setPhoto({ uri: editEvent.image_url });
+        if (
+          typeof m?.video_start_ms === 'number' &&
+          typeof m?.video_end_ms === 'number' &&
+          m.video_end_ms > m.video_start_ms
+        ) {
+          composerVideoMetaRef.current = {
+            video_start_ms: m.video_start_ms,
+            video_end_ms: m.video_end_ms,
+            thumbnail_time_ms:
+              typeof m.thumbnail_time_ms === 'number' ? m.thumbnail_time_ms : null,
+          };
+        } else {
+          composerVideoMetaRef.current = null;
+        }
       } else {
         setMediaType('photo');
         setVideoUri(null);
         setPhoto({ uri: editEvent.image_url });
+        composerVideoMetaRef.current = null;
       }
       setImageSourceType(
         m?.image_source === 'search'
@@ -695,8 +713,17 @@ export default function CreationModal({
     }
   };
 
-  const uploadEventBundle = async (overrides?: { caption?: string, audioUri?: string | null, deepDive?: string | null }) => {
+  const uploadEventBundle = async (overrides?: {
+    caption?: string;
+    audioUri?: string | null;
+    deepDive?: string | null;
+    videoMeta?: ComposerVideoMeta | null;
+  }) => {
     if (!photo) return;
+
+    if (overrides?.videoMeta !== undefined) {
+      composerVideoMetaRef.current = overrides.videoMeta;
+    }
 
     // 1. Resolve Data (Prefer overrides from Composer, fall back to State)
     const activeAudioUri = overrides?.audioUri !== undefined ? overrides.audioUri : audioUri;
@@ -770,6 +797,16 @@ export default function CreationModal({
         } else {
           patch['metadata.deep_dive'] = deleteField();
         }
+        const vm = composerVideoMetaRef.current;
+        if (mediaType === 'video' && vm && vm.video_end_ms > vm.video_start_ms) {
+          patch['metadata.video_start_ms'] = vm.video_start_ms;
+          patch['metadata.video_end_ms'] = vm.video_end_ms;
+          if (typeof vm.thumbnail_time_ms === 'number' && vm.thumbnail_time_ms >= 0) {
+            patch['metadata.thumbnail_time_ms'] = vm.thumbnail_time_ms;
+          } else {
+            patch['metadata.thumbnail_time_ms'] = deleteField();
+          }
+        }
         patch['metadata.last_edited_at'] = new Date().toISOString();
         await updateDoc(ref, patch as Record<string, string | ReturnType<typeof deleteField>>);
         showToast('✅ Reflection updated');
@@ -800,6 +837,7 @@ export default function CreationModal({
         editSourceEventIdRef.current = null;
         mediaReplacedDuringEditRef.current = false;
         setIsEditingExistingReflection(false);
+        composerVideoMetaRef.current = null;
         sheetRef.current?.close();
         onClose();
         if (audioRecorder.isRecording) {
@@ -815,6 +853,7 @@ export default function CreationModal({
     }
 
     let tempThumbnail: string | null = null;
+    let tempCompressedVideo: string | null = null;
     let tempGatekeptImage: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
@@ -938,13 +977,23 @@ export default function CreationModal({
       debugLog('📡 uploadEventBundle: Received presigned URLs for:', Object.keys(urls));
       const uploadPromises: Promise<any>[] = [];
 
+      const vmThumb = composerVideoMetaRef.current;
+      const thumbnailFrameMs = Math.max(
+        0,
+        vmThumb &&
+          typeof vmThumb.thumbnail_time_ms === 'number' &&
+          vmThumb.thumbnail_time_ms >= 0
+          ? vmThumb.thumbnail_time_ms
+          : 0
+      );
+
       // 3. Prepare Image Source
       let imageSource = photo.uri;
 
       if (mediaType === 'video' && videoUri) {
         // Generate thumbnail
         const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
-          time: 0,
+          time: thumbnailFrameMs,
           quality: 0.5,
         });
         imageSource = uri;
@@ -985,8 +1034,30 @@ export default function CreationModal({
 
       // 5. Queue Video Upload
       if (mediaType === 'video' && videoUri && urls['video.mp4']) {
+        const vmTrim = composerVideoMetaRef.current;
+        const isLocalVideo =
+          !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
+        let uploadUri: string = videoUri;
+        if (
+          isLocalVideo &&
+          vmTrim &&
+          vmTrim.video_end_ms > vmTrim.video_start_ms
+        ) {
+          try {
+            const compressed = await prepareVideoForUpload(videoUri, {
+              startTime: vmTrim.video_start_ms,
+              endTime: vmTrim.video_end_ms,
+            });
+            if (compressed && compressed !== videoUri) {
+              tempCompressedVideo = compressed;
+              uploadUri = compressed;
+            }
+          } catch (compressErr) {
+            console.warn('Video compress/trim failed; uploading original file:', compressErr);
+          }
+        }
         uploadPromises.push(
-          FileSystem.uploadAsync(urls['video.mp4'], videoUri, {
+          FileSystem.uploadAsync(urls['video.mp4'], uploadUri, {
             httpMethod: 'PUT',
             headers: { 'Content-Type': 'video/mp4' },
           }).then(res => {
@@ -1049,6 +1120,15 @@ export default function CreationModal({
         ...(searchCanonicalName.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
         ...(lastEditedAtIso ? { last_edited_at: lastEditedAtIso } : {}),
       };
+
+      const vmMeta = composerVideoMetaRef.current;
+      if (mediaType === 'video' && vmMeta && vmMeta.video_end_ms > vmMeta.video_start_ms) {
+        eventMetadata.video_start_ms = vmMeta.video_start_ms;
+        eventMetadata.video_end_ms = vmMeta.video_end_ms;
+        if (typeof vmMeta.thumbnail_time_ms === 'number' && vmMeta.thumbnail_time_ms >= 0) {
+          eventMetadata.thumbnail_time_ms = vmMeta.thumbnail_time_ms;
+        }
+      }
 
       debugLog('📄 Final metadata (Firestore):', JSON.stringify(eventMetadata, null, 2));
 
@@ -1118,6 +1198,7 @@ export default function CreationModal({
       editSourceEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(false);
+      composerVideoMetaRef.current = null;
       sheetRef.current?.close();
       onClose();
       if (audioRecorder.isRecording) {
@@ -1151,6 +1232,9 @@ export default function CreationModal({
       }
       if (tempGatekeptImage) {
         safeDeleteCacheFile(tempGatekeptImage).catch(() => { });
+      }
+      if (tempCompressedVideo) {
+        safeDeleteCacheFile(tempCompressedVideo).catch(() => { });
       }
       setUploading(false);
     }
@@ -1210,6 +1294,7 @@ export default function CreationModal({
     editSourceEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
+    composerVideoMetaRef.current = null;
   };
 
   const retakePhoto = async () => {
@@ -1249,6 +1334,7 @@ export default function CreationModal({
     editSourceEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
+    composerVideoMetaRef.current = null;
   };
 
   const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
@@ -1277,8 +1363,17 @@ export default function CreationModal({
         // If it's a video, generate a thumbnail to use for AI description
         if (mediaType === 'video' && videoUri) {
           try {
+            const vmAi = composerVideoMetaRef.current;
+            const thumbMs = Math.max(
+              0,
+              vmAi &&
+                typeof vmAi.thumbnail_time_ms === 'number' &&
+                vmAi.thumbnail_time_ms >= 0
+                ? vmAi.thumbnail_time_ms
+                : 0
+            );
             const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
-              time: 0,
+              time: thumbMs,
               quality: 0.5,
             });
             uriToUpload = uri;
@@ -1389,6 +1484,7 @@ export default function CreationModal({
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
+    composerVideoMetaRef.current = null;
     setPhase('picker');
     setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
   };
@@ -1427,6 +1523,7 @@ export default function CreationModal({
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
     setIsSelfie(false);
+    composerVideoMetaRef.current = null;
 
     if (mediaSource) {
       beginSourceFlow(mediaSource);
@@ -1568,6 +1665,26 @@ export default function CreationModal({
     const u = photo?.uri;
     return typeof u === 'string' && (u.startsWith('http://') || u.startsWith('https://'));
   }, [photo?.uri]);
+
+  const initialVideoMetaForComposer = useMemo((): Partial<ComposerVideoMeta> | null => {
+    if (!isEditingExistingReflection || mediaType !== 'video' || !editEvent?.metadata) {
+      return null;
+    }
+    const m = editEvent.metadata;
+    const partial: Partial<ComposerVideoMeta> = {};
+    if (
+      typeof m.video_start_ms === 'number' &&
+      typeof m.video_end_ms === 'number' &&
+      m.video_end_ms > m.video_start_ms
+    ) {
+      partial.video_start_ms = m.video_start_ms;
+      partial.video_end_ms = m.video_end_ms;
+    }
+    if (typeof m.thumbnail_time_ms === 'number') {
+      partial.thumbnail_time_ms = m.thumbnail_time_ms;
+    }
+    return Object.keys(partial).length > 0 ? partial : null;
+  }, [isEditingExistingReflection, mediaType, editEvent]);
 
   return (
     <>
@@ -1840,6 +1957,10 @@ export default function CreationModal({
                 mediaUri={photo.uri}
                 mediaType={mediaType}
                 initialCaption={description}
+                initialVideoMeta={initialVideoMetaForComposer}
+                onVideoMetaChange={(meta) => {
+                  composerVideoMetaRef.current = meta;
+                }}
                 audioUri={audioUri}
                 aiArtifacts={{
                   caption: shortCaption,
@@ -1864,7 +1985,8 @@ export default function CreationModal({
                   uploadEventBundle({
                     caption: data.caption,
                     audioUri: data.audioUri,
-                    deepDive: data.deepDive
+                    deepDive: data.deepDive,
+                    videoMeta: data.videoMeta,
                   });
                 }}
                 audioRecorder={audioRecorder}

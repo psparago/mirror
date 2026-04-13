@@ -86,6 +86,15 @@ function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMet
   if (typeof o.last_edited_at === 'string' && o.last_edited_at.trim()) {
     meta.last_edited_at = o.last_edited_at.trim();
   }
+  if (typeof o.video_start_ms === 'number' && Number.isFinite(o.video_start_ms)) {
+    meta.video_start_ms = o.video_start_ms;
+  }
+  if (typeof o.video_end_ms === 'number' && Number.isFinite(o.video_end_ms)) {
+    meta.video_end_ms = o.video_end_ms;
+  }
+  if (typeof o.thumbnail_time_ms === 'number' && Number.isFinite(o.thumbnail_time_ms)) {
+    meta.thumbnail_time_ms = o.thumbnail_time_ms;
+  }
   return meta;
 }
 
@@ -1145,7 +1154,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                     <View style={styles.cardActions}>
                       {onEditReflection &&
                         authUser?.uid &&
-                        item.sender_id === authUser.uid && (
+                        item.sender_id === authUser.uid &&
+                        item.metadata?.people_context_hints !== undefined && (
                           <TouchableOpacity
                             style={styles.editReflectionButton}
                             onPress={async () => {
