@@ -23,18 +23,34 @@ export interface EventMetadata {
   // Note: audio_url/video_url are NOT stored in metadata.json (presigned URLs expire)
   // The backend ListMirrorEvents generates fresh presigned GET URLs in the Event object
   content_type?: 'text' | 'audio' | 'video';
-  image_source?: 'camera' | 'search'; // Where the image came from
+  image_source?: 'camera' | 'search' | 'gallery'; // Where the image came from (legacy UI)
   // AI-generated dual-story fields
   short_caption?: string; // Brief greeting - auto-played on load
   deep_dive?: string; // Detailed story - played when ✨ is tapped
   deep_dive_audio_url?: string; // Optional TTS for deep dive
-  // Narrative context captured during creation/edit flow
+  // Narrative context captured during creation/edit flow (legacy mirrors below)
   companion_in_reflection?: boolean;
   explorer_in_reflection?: boolean;
   people_context?: string;
   // Search provenance for image reflections
   search_query?: string;
   search_canonical_name?: string;
+  /** Library asset id (e.g. Unsplash photo id). */
+  library_id?: string;
+  /** Where the media was chosen from (canonical provenance). */
+  library_source?: 'unsplash' | 'camera' | 'gallery';
+  /** Search term used when picking from a library (e.g. Unsplash query). */
+  library_search_term?: string;
+  /** Companion visible in the reflection (default false when absent). */
+  is_companion_present?: boolean;
+  /** Explorer visible in the reflection (default false when absent). */
+  is_explorer_present?: boolean;
+  /** True when this reflection is primarily an Explorer selfie capture. */
+  is_selfie?: boolean;
+  /** Free-form people / scene hints (preferred over legacy `people_context` when both exist). */
+  people_context_hints?: string;
+  /** ISO timestamp when a Companion last saved edits to this reflection (metadata and/or media). */
+  last_edited_at?: string;
 }
 
 export interface Event {

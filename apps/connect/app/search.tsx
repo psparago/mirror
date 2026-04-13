@@ -50,16 +50,19 @@ export default function SearchScreen() {
     searchUnsplash(term);
   };
 
-  const handleImageSelect = async (imageUrl: string, canonicalName?: string) => {
+  const handleImageSelect = async (imageUrl: string, unsplashId: string, canonicalName?: string) => {
     try {
       setIsLoadingImage(true);
       const optimizedUri = await prepareImageForUpload(imageUrl);
+      const term = searchQuery.trim();
       setPendingMedia({
         uri: optimizedUri,
         type: 'photo',
         source: 'search',
-        searchQuery: searchQuery.trim() || undefined,
+        searchQuery: term || undefined,
         searchCanonicalName: canonicalName?.trim() || undefined,
+        libraryId: unsplashId,
+        librarySearchTerm: term || undefined,
       });
       router.back();
     } catch (error: any) {
@@ -148,6 +151,7 @@ export default function SearchScreen() {
                 onPress={() =>
                   handleImageSelect(
                     item.urls.regular || item.urls.small,
+                    item.id,
                     item.alt_description || item.description || undefined
                   )
                 }

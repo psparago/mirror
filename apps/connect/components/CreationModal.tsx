@@ -29,6 +29,17 @@ const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
 const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
 const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 
+type LibrarySourceKind = 'unsplash' | 'camera' | 'gallery';
+
+function resolveLibrarySource(
+  kind: LibrarySourceKind | null | undefined,
+  imageSource: 'camera' | 'search' | 'gallery'
+): LibrarySourceKind {
+  if (kind) return kind;
+  if (imageSource === 'search') return 'unsplash';
+  return imageSource === 'gallery' ? 'gallery' : 'camera';
+}
+
 // Helper to upload securely using FileSystem
 const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
   debugLog(`📡 safeUploadToS3: Starting upload. Source: ${localUri.substring(0, 50)}... Target: ${presignedUrl.substring(0, 50)}...`);
@@ -142,12 +153,16 @@ export default function CreationModal({
   // Video support state
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
-  const [imageSourceType, setImageSourceType] = useState<'camera' | 'search'>('camera');
+  const [imageSourceType, setImageSourceType] = useState<'camera' | 'search' | 'gallery'>('camera');
   const [isCompanionInReflection, setIsCompanionInReflection] = useState(false);
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
+  const [isSelfie, setIsSelfie] = useState(false);
   const [peopleContext, setPeopleContext] = useState('');
   const [searchQueryContext, setSearchQueryContext] = useState<string>('');
   const [searchCanonicalName, setSearchCanonicalName] = useState<string>('');
+  const [libraryId, setLibraryId] = useState('');
+  const [librarySearchTerm, setLibrarySearchTerm] = useState('');
+  const [librarySourceKind, setLibrarySourceKind] = useState<LibrarySourceKind | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmVideoEnded, setConfirmVideoEnded] = useState(false);
   const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
@@ -179,6 +194,7 @@ export default function CreationModal({
       editSourceEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(false);
+      setShowDescriptionInput(false);
       return;
     }
 
@@ -195,13 +211,34 @@ export default function CreationModal({
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(true);
 
-      setPhase('picker');
-      setConfirming(true);
-      setIsCompanionInReflection(!!m?.companion_in_reflection);
-      setIsExplorerInReflection(!!m?.explorer_in_reflection);
-      setPeopleContext(typeof m?.people_context === 'string' ? m.people_context : '');
+      setPhase('creating');
+      setConfirming(false);
+      setShowDescriptionInput(true);
+      setStagingEventId(editEvent.event_id);
+      stagingEventIdRef.current = editEvent.event_id;
+      setIsCompanionInReflection(!!(m?.is_companion_present ?? m?.companion_in_reflection));
+      setIsExplorerInReflection(!!(m?.is_explorer_present ?? m?.explorer_in_reflection));
+      setIsSelfie(!!m?.is_selfie);
+      setPeopleContext(
+        typeof m?.people_context_hints === 'string' && m.people_context_hints.trim()
+          ? m.people_context_hints
+          : typeof m?.people_context === 'string'
+            ? m.people_context
+            : ''
+      );
       setSearchQueryContext(typeof m?.search_query === 'string' ? m.search_query : '');
       setSearchCanonicalName(typeof m?.search_canonical_name === 'string' ? m.search_canonical_name : '');
+      setLibrarySearchTerm(typeof m?.library_search_term === 'string' ? m.library_search_term : '');
+      setLibraryId(typeof m?.library_id === 'string' ? m.library_id : '');
+      setLibrarySourceKind(
+        m?.library_source === 'unsplash' || m?.library_source === 'camera' || m?.library_source === 'gallery'
+          ? m.library_source
+          : m?.image_source === 'search'
+            ? 'unsplash'
+            : m?.image_source === 'gallery'
+              ? 'gallery'
+              : 'camera'
+      );
       sourceTransitionLockRef.current = false;
       suppressPickerRecoveryRef.current = false;
       lastSourceForRecoveryRef.current = null;
@@ -216,16 +253,19 @@ export default function CreationModal({
         setVideoUri(null);
         setPhoto({ uri: editEvent.image_url });
       }
-      setImageSourceType(m?.image_source === 'search' ? 'search' : 'camera');
+      setImageSourceType(
+        m?.image_source === 'search'
+          ? 'search'
+          : m?.image_source === 'gallery'
+            ? 'gallery'
+            : 'camera'
+      );
       setDescription(desc);
-      setShowDescriptionInput(false);
       setShortCaption(shortCap);
       setDeepDive(dd);
       setIntent('none');
       setAudioUri(null);
       lastProcessedUriRef.current = null;
-      setStagingEventId(null);
-      stagingEventIdRef.current = null;
       setAiAudioUrl(editEvent.audio_url || null);
       setAiDeepDiveAudioUrl(editEvent.deep_dive_audio_url || null);
       setAiAudioS3Key(null);
@@ -241,13 +281,16 @@ export default function CreationModal({
 
     setPhase('picker');
     setConfirming(false);
+    setShowDescriptionInput(false);
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
+    setIsSelfie(false);
     setPeopleContext('');
     setSearchQueryContext('');
     setSearchCanonicalName('');
-    setSearchQueryContext('');
-    setSearchCanonicalName('');
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
     sourceTransitionLockRef.current = false;
     suppressPickerRecoveryRef.current = false;
     lastSourceForRecoveryRef.current = null;
@@ -439,9 +482,18 @@ export default function CreationModal({
         setVideoUri(null);
         setPhoto({ uri: media.uri });
       }
-      setImageSourceType(media.source === 'search' ? 'search' : 'camera');
+      setImageSourceType(
+        media.source === 'search' ? 'search' : media.source === 'gallery' ? 'gallery' : 'camera'
+      );
       setSearchQueryContext(media.searchQuery || '');
       setSearchCanonicalName(media.searchCanonicalName || '');
+      setLibraryId((media.libraryId || '').trim());
+      setLibrarySearchTerm(
+        ((media.librarySearchTerm || media.searchQuery || '') as string).trim()
+      );
+      setLibrarySourceKind(
+        media.source === 'search' ? 'unsplash' : media.source === 'gallery' ? 'gallery' : 'camera'
+      );
       setMediaSource(`/${media.source}` as '/camera' | '/gallery' | '/search');
       setConfirming(true);
       setDescription('');
@@ -661,11 +713,17 @@ export default function CreationModal({
     const replacedMeta = mediaReplacedDuringEditRef.current;
     const hasNewLocalVoiceMeta = !!(activeAudioUri && activeAudioUri.startsWith('file'));
     const photoUriMeta = photo.uri;
-    const remoteMediaMeta =
+    const remotePoster =
       typeof photoUriMeta === 'string' &&
       (photoUriMeta.startsWith('http://') || photoUriMeta.startsWith('https://'));
+    const remoteVideo =
+      mediaType === 'video' &&
+      typeof videoUri === 'string' &&
+      !!videoUri &&
+      (videoUri.startsWith('http://') || videoUri.startsWith('https://'));
+    const remoteMediaUnchanged = remotePoster || remoteVideo;
 
-    if (editIdMeta && !replacedMeta && remoteMediaMeta && !hasNewLocalVoiceMeta) {
+    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged) {
       try {
         setUploading(true);
         const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
@@ -674,20 +732,45 @@ export default function CreationModal({
           throw new Error('Reflection not found');
         }
         const prevMeta = (snap.data()?.metadata as EventMetadata | undefined) || ({} as EventMetadata);
+        const resolvedLib = resolveLibrarySource(librarySourceKind, imageSourceType);
+        const libSearchStored = (librarySearchTerm.trim() || searchQueryContext.trim()) || '';
+        const libIdStored = libraryId.trim();
+        const peopleTrim = peopleContext.trim();
         const patch: Record<string, unknown> = {
           'metadata.description': finalCaption || prevMeta.description || 'Reflection',
           'metadata.short_caption': finalCaption || prevMeta.short_caption || finalCaption || 'Reflection',
           'metadata.companion_in_reflection': isCompanionInReflection,
           'metadata.explorer_in_reflection': isExplorerInReflection,
-          'metadata.people_context': peopleContext.trim() || deleteField(),
+          'metadata.is_companion_present': isCompanionInReflection,
+          'metadata.is_explorer_present': isExplorerInReflection,
+          'metadata.is_selfie': isSelfie,
+          'metadata.library_source': resolvedLib,
           'metadata.search_query': searchQueryContext.trim() || deleteField(),
           'metadata.search_canonical_name': searchCanonicalName.trim() || deleteField(),
         };
+        if (peopleTrim) {
+          patch['metadata.people_context'] = peopleTrim;
+          patch['metadata.people_context_hints'] = peopleTrim;
+        } else {
+          patch['metadata.people_context'] = deleteField();
+          patch['metadata.people_context_hints'] = deleteField();
+        }
+        if (libIdStored) {
+          patch['metadata.library_id'] = libIdStored;
+        } else {
+          patch['metadata.library_id'] = deleteField();
+        }
+        if (libSearchStored) {
+          patch['metadata.library_search_term'] = libSearchStored;
+        } else {
+          patch['metadata.library_search_term'] = deleteField();
+        }
         if (finalDeepDive?.trim()) {
           patch['metadata.deep_dive'] = finalDeepDive;
         } else {
           patch['metadata.deep_dive'] = deleteField();
         }
+        patch['metadata.last_edited_at'] = new Date().toISOString();
         await updateDoc(ref, patch as Record<string, string | ReturnType<typeof deleteField>>);
         showToast('✅ Reflection updated');
         suppressPickerRecoveryRef.current = true;
@@ -706,9 +789,13 @@ export default function CreationModal({
         setAiDeepDiveS3Key(null);
         setIsCompanionInReflection(false);
         setIsExplorerInReflection(false);
+        setIsSelfie(false);
         setPeopleContext('');
         setSearchQueryContext('');
         setSearchCanonicalName('');
+        setLibraryId('');
+        setLibrarySearchTerm('');
+        setLibrarySourceKind(null);
         setConfirming(false);
         editSourceEventIdRef.current = null;
         mediaReplacedDuringEditRef.current = false;
@@ -796,6 +883,7 @@ export default function CreationModal({
 
       const eventID = editSourceEventIdRef.current || Date.now().toString();
       const startedAsEditBundle = !!editSourceEventIdRef.current;
+      const lastEditedAtIso = startedAsEditBundle ? new Date().toISOString() : undefined;
       debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
@@ -861,7 +949,7 @@ export default function CreationModal({
         });
         imageSource = uri;
         tempThumbnail = uri; // Mark for cleanup
-      } else if (stagingEventId) {
+      } else if (stagingEventId && stagingEventId !== editSourceEventIdRef.current) {
         // If Staging exists, fetch the READ URL for the staging image
         // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
         const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
@@ -932,6 +1020,10 @@ export default function CreationModal({
       // 7. Build metadata for Firestore (not uploaded to S3)
       const contentType: NonNullable<EventMetadata['content_type']> =
         mediaType === 'video' ? 'video' : hasAudio ? 'audio' : 'text';
+      const resolvedLib = resolveLibrarySource(librarySourceKind, imageSourceType);
+      const libSearchStored = (librarySearchTerm.trim() || searchQueryContext.trim()) || undefined;
+      const libIdStored = libraryId.trim() || undefined;
+      const peopleTrim = peopleContext.trim();
       const eventMetadata: EventMetadata = {
         description:
           finalCaption ||
@@ -946,9 +1038,16 @@ export default function CreationModal({
         ...(finalDeepDive?.trim() ? { deep_dive: finalDeepDive } : {}),
         companion_in_reflection: isCompanionInReflection,
         explorer_in_reflection: isExplorerInReflection,
-        ...(peopleContext.trim() ? { people_context: peopleContext.trim() } : {}),
+        is_companion_present: isCompanionInReflection,
+        is_explorer_present: isExplorerInReflection,
+        is_selfie: isSelfie,
+        library_source: resolvedLib,
+        ...(libIdStored ? { library_id: libIdStored } : {}),
+        ...(libSearchStored ? { library_search_term: libSearchStored } : {}),
+        ...(peopleTrim ? { people_context: peopleTrim, people_context_hints: peopleTrim } : {}),
         ...(searchQueryContext.trim() ? { search_query: searchQueryContext.trim() } : {}),
         ...(searchCanonicalName.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
+        ...(lastEditedAtIso ? { last_edited_at: lastEditedAtIso } : {}),
       };
 
       debugLog('📄 Final metadata (Firestore):', JSON.stringify(eventMetadata, null, 2));
@@ -1008,9 +1107,13 @@ export default function CreationModal({
       setAiDeepDiveS3Key(null);
       setIsCompanionInReflection(false);
       setIsExplorerInReflection(false);
+      setIsSelfie(false);
       setPeopleContext('');
       setSearchQueryContext('');
       setSearchCanonicalName('');
+      setLibraryId('');
+      setLibrarySearchTerm('');
+      setLibrarySourceKind(null);
       setConfirming(false);
       editSourceEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
@@ -1096,9 +1199,13 @@ export default function CreationModal({
     setAiDeepDiveS3Key(null);
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
+    setIsSelfie(false);
     setPeopleContext('');
     setSearchQueryContext('');
     setSearchCanonicalName('');
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
     setConfirming(false);
     editSourceEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
@@ -1130,9 +1237,13 @@ export default function CreationModal({
     setAiDeepDiveS3Key(null);
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
+    setIsSelfie(false);
     setPeopleContext('');
     setSearchQueryContext('');
     setSearchCanonicalName('');
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
     setConfirming(false);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     editSourceEventIdRef.current = null;
@@ -1148,8 +1259,13 @@ export default function CreationModal({
         setIsAiThinking(true);
         setIsAiGenerated(false);
       }
-      // Generate staging event_id and upload image if not already uploaded
+      // Generate staging event_id and upload image if not already uploaded.
+      // When editing, `stagingEventId` may be the production `event_id` (update key); never use that as an S3 staging prefix.
       let stagingId = stagingEventId;
+      const editingProdId = editSourceEventIdRef.current;
+      if (editingProdId && stagingId === editingProdId) {
+        stagingId = null;
+      }
       if (!stagingId) {
         stagingId = Date.now().toString();
         setStagingEventId(stagingId);
@@ -1270,6 +1386,9 @@ export default function CreationModal({
     setAiAudioUrl(null);
     setAiDeepDiveAudioUrl(null);
     setIsAiThinking(false);
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
     setPhase('picker');
     setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
   };
@@ -1304,6 +1423,10 @@ export default function CreationModal({
     setIntent('none');
     setAudioUri(null);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
+    setIsSelfie(false);
 
     if (mediaSource) {
       beginSourceFlow(mediaSource);
@@ -1441,6 +1564,10 @@ export default function CreationModal({
   const showFullScreenOverlay = visible && isFocused && (showComposer || showCreatingWait || showConfirmation);
   const showPicker = visible && phase === 'picker' && !showFullScreenOverlay;
 
+  const confirmationPosterRemote = useMemo(() => {
+    const u = photo?.uri;
+    return typeof u === 'string' && (u.startsWith('http://') || u.startsWith('https://'));
+  }, [photo?.uri]);
 
   return (
     <>
@@ -1559,6 +1686,8 @@ export default function CreationModal({
                     source={{ uri: photo.uri }}
                     style={StyleSheet.absoluteFill}
                     contentFit="contain"
+                    cachePolicy={confirmationPosterRemote ? 'memory-disk' : 'disk'}
+                    transition={confirmationPosterRemote ? 200 : 0}
                   />
                 )}
               </View>

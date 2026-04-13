@@ -60,14 +60,32 @@ function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMet
   if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
     meta.content_type = o.content_type;
   }
-  if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
+  if (o.image_source === 'camera' || o.image_source === 'search' || o.image_source === 'gallery') {
+    meta.image_source = o.image_source;
+  }
   if (shortCaption) meta.short_caption = shortCaption;
   if (typeof o.deep_dive === 'string' && o.deep_dive) meta.deep_dive = o.deep_dive;
   if (typeof o.companion_in_reflection === 'boolean') meta.companion_in_reflection = o.companion_in_reflection;
   if (typeof o.explorer_in_reflection === 'boolean') meta.explorer_in_reflection = o.explorer_in_reflection;
+  if (typeof o.is_companion_present === 'boolean') meta.is_companion_present = o.is_companion_present;
+  if (typeof o.is_explorer_present === 'boolean') meta.is_explorer_present = o.is_explorer_present;
+  if (typeof o.is_selfie === 'boolean') meta.is_selfie = o.is_selfie;
   if (typeof o.people_context === 'string' && o.people_context.trim()) meta.people_context = o.people_context;
+  if (typeof o.people_context_hints === 'string' && o.people_context_hints.trim()) {
+    meta.people_context_hints = o.people_context_hints;
+  }
   if (typeof o.search_query === 'string' && o.search_query.trim()) meta.search_query = o.search_query;
   if (typeof o.search_canonical_name === 'string' && o.search_canonical_name.trim()) meta.search_canonical_name = o.search_canonical_name;
+  if (typeof o.library_id === 'string' && o.library_id.trim()) meta.library_id = o.library_id.trim();
+  if (o.library_source === 'unsplash' || o.library_source === 'camera' || o.library_source === 'gallery') {
+    meta.library_source = o.library_source;
+  }
+  if (typeof o.library_search_term === 'string' && o.library_search_term.trim()) {
+    meta.library_search_term = o.library_search_term.trim();
+  }
+  if (typeof o.last_edited_at === 'string' && o.last_edited_at.trim()) {
+    meta.last_edited_at = o.last_edited_at.trim();
+  }
   return meta;
 }
 
@@ -1105,12 +1123,21 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                             item.sentTimestamp ||
                             (item.status === 'ready' ? item.timestamp : null)
                           )}
+                          {item.metadata?.last_edited_at ? (
+                            <Text style={styles.sentDateEdited}> • (Edited)</Text>
+                          ) : null}
                         </>
                       ) : (
-                        <>Sent • {formatEngagementDate(
-                          item.sentTimestamp ||
-                          (item.status === 'ready' ? item.timestamp : null)
-                        )}</>
+                        <>
+                          Sent •{' '}
+                          {formatEngagementDate(
+                            item.sentTimestamp ||
+                            (item.status === 'ready' ? item.timestamp : null)
+                          )}
+                          {item.metadata?.last_edited_at ? (
+                            <Text style={styles.sentDateEdited}> • (Edited)</Text>
+                          ) : null}
+                        </>
                       )}
                     </Text>
 
@@ -1120,20 +1147,20 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                         authUser?.uid &&
                         item.sender_id === authUser.uid && (
                           <TouchableOpacity
-                            style={styles.cardActionButton}
+                            style={styles.editReflectionButton}
                             onPress={async () => {
-                              const ev = await resolveEventForEdit(item);
-                              if (ev) onEditReflection(ev);
+                              const event = await resolveEventForEdit(item);
+                              if (event) onEditReflection?.(event);
                             }}
                             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                           >
-                            <FontAwesome name="pencil" size={14} color="#4FC3F7" />
+                            <FontAwesome name="pencil" size={16} color="#4FC3F7" />
                           </TouchableOpacity>
                         )}
                       {currentIdentity &&
                         reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase() && (
                         <TouchableOpacity
-                          style={styles.cardActionButton}
+                          style={styles.deleteReflectionButton}
                           onPress={() => {
                             Alert.alert(
                               'Delete Reflection',
@@ -1150,7 +1177,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                           }}
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                         >
-                          <FontAwesome name="trash-o" size={14} color="#ef5350" />
+                          <FontAwesome name="trash-o" size={16} color="#ef5350" />
                         </TouchableOpacity>
                       )}
                     </View>
@@ -1297,6 +1324,10 @@ const styles = StyleSheet.create({
     color: '#aaa',
     marginTop: 2,
   },
+  sentDateEdited: {
+    fontSize: 12,
+    color: '#aaa',
+  },
   senderName: {
     fontSize: 12,
     color: '#fff',
@@ -1308,10 +1339,23 @@ const styles = StyleSheet.create({
     right: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 6,
   },
-  cardActionButton: {
-    padding: 8,
+  editReflectionButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(79, 195, 247, 0.55)',
+    backgroundColor: 'rgba(79, 195, 247, 0.12)',
+  },
+  deleteReflectionButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(239, 83, 80, 0.55)',
+    backgroundColor: 'rgba(239, 83, 80, 0.12)',
   },
 
   loadingText: {

@@ -248,7 +248,9 @@ export default function MainStageView({
         ...(m.content_type === 'text' || m.content_type === 'audio' || m.content_type === 'video'
           ? { content_type: m.content_type }
           : {}),
-        ...(m.image_source === 'camera' || m.image_source === 'search' ? { image_source: m.image_source } : {}),
+        ...(m.image_source === 'camera' || m.image_source === 'search' || m.image_source === 'gallery'
+          ? { image_source: m.image_source }
+          : {}),
         ...(typeof m.deep_dive === 'string' ? { deep_dive: m.deep_dive } : {}),
         ...(typeof m.deep_dive_audio_url === 'string' ? { deep_dive_audio_url: m.deep_dive_audio_url } : {}),
       };

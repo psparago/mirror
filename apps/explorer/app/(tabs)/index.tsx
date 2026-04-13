@@ -76,7 +76,9 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
     meta.content_type = o.content_type;
   }
-  if (o.image_source === 'camera' || o.image_source === 'search') meta.image_source = o.image_source;
+  if (o.image_source === 'camera' || o.image_source === 'search' || o.image_source === 'gallery') {
+    meta.image_source = o.image_source;
+  }
   if (shortCaption) meta.short_caption = shortCaption;
   else if (description) meta.short_caption = description;
   else if (deepDive.trim()) meta.short_caption = captionSeed;

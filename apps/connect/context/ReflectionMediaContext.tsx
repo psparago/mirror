@@ -6,6 +6,10 @@ export type PendingMedia = {
   source: 'camera' | 'gallery' | 'search';
   searchQuery?: string;
   searchCanonicalName?: string;
+  /** Library asset id (e.g. Unsplash `id`). */
+  libraryId?: string;
+  /** Search query used to find the asset (e.g. current Unsplash search bar). */
+  librarySearchTerm?: string;
 };
 
 type ReflectionMediaContextType = {

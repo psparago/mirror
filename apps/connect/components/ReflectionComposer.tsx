@@ -252,7 +252,11 @@ export default function ReflectionComposer({
     return () => clearTimeout(timeoutId);
   }, [activeTab, snapPoints, keyboardHeight]);
 
-  // Video Player
+  const isRemoteMediaUri =
+    typeof mediaUri === 'string' &&
+    (mediaUri.startsWith('http://') || mediaUri.startsWith('https://'));
+
+  // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
   const player = useVideoPlayer(mediaUri, (p) => {
     p.loop = false;
     p.play();
@@ -262,6 +266,17 @@ export default function ReflectionComposer({
     if (mediaType !== 'video') return;
     player.loop = false;
   }, [player, mediaType, mediaUri]);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || !player) return;
+    try {
+      player.replace(mediaUri);
+      player.loop = false;
+      player.play();
+    } catch {
+      // player may be tearing down
+    }
+  }, [mediaType, mediaUri, player]);
 
   useEffect(() => {
     const sub = player.addListener('playToEnd', () => {
@@ -353,12 +368,21 @@ export default function ReflectionComposer({
     player.play();
   }, [player]);
 
+  /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
+  const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
+
   const renderBackground = () => (
     <View style={styles.backgroundContainer}>
       {mediaType === 'video' ? (
         <VideoView player={player} style={styles.media} contentFit="contain" nativeControls={false} />
       ) : (
-        <Image source={{ uri: mediaUri }} style={styles.media} contentFit="contain" />
+        <Image
+          source={{ uri: mediaUri }}
+          style={styles.media}
+          contentFit="contain"
+          cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
+          transition={isRemoteMediaUri ? 200 : 0}
+        />
       )}
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
 
@@ -375,6 +399,7 @@ export default function ReflectionComposer({
       {/* TOP CONTROLS */}
       <View style={[styles.topControls, { top: insets.top + 6 }]}>
         <View style={styles.topControlsLeft}>
+          {showTopMediaEdit ? (
           <TouchableOpacity
             style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
             onPress={onReplaceMedia}
@@ -384,6 +409,7 @@ export default function ReflectionComposer({
             <FontAwesome name="pencil" size={14} color="#fff" />
             <Text style={styles.replaceMediaText}>Edit</Text>
           </TouchableOpacity>
+          ) : null}
           {mediaType === 'video' ? (
             <TouchableOpacity
               style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
