@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import BottomSheet, { BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -125,6 +125,7 @@ export default function ReflectionComposer({
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
   const sparkleSheetRef = useRef<BottomSheet>(null);
+  const infoSheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
   const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -659,10 +660,21 @@ export default function ReflectionComposer({
     setIsPosterMode(true);
   }, [player, thumbnailTimeMs]);
 
+  const FRAME_STEP_MS = 33;
+
   const handlePosterSet = useCallback(() => {
-    const ms = Math.max(0, Math.round(player.currentTime * 1000));
-    setThumbnailTimeMs(ms);
-  }, [player]);
+    const curMs = Math.round(player.currentTime * 1000);
+    const rangeEnd = videoRangeMs?.end ?? Math.round(player.duration * 1000);
+
+    if (thumbnailTimeMs !== null && Math.abs(curMs - thumbnailTimeMs) < FRAME_STEP_MS * 2) {
+      const nextMs = Math.min(thumbnailTimeMs + FRAME_STEP_MS, rangeEnd);
+      try { player.currentTime = nextMs / 1000; } catch { /* ignore */ }
+      setThumbnailTimeMs(nextMs);
+    } else {
+      const ms = Math.max(0, curMs);
+      setThumbnailTimeMs(ms);
+    }
+  }, [player, thumbnailTimeMs, videoRangeMs]);
 
   const handlePosterClear = useCallback(() => {
     setThumbnailTimeMs(null);
@@ -744,7 +756,7 @@ export default function ReflectionComposer({
 
       {/* REPLAY OVERLAY — shown when video finishes, below toolbar */}
       {mediaType === 'video' && videoEnded && (
-        <View style={[styles.replayOverlay, { top: insets.top + 62 }]}>
+        <View style={styles.replayOverlay}>
           <TouchableOpacity style={styles.replayButton} onPress={handleReplay} activeOpacity={0.8}>
             <FontAwesome name="repeat" size={28} color="#fff" />
             <Text style={styles.replayText}>Replay</Text>
@@ -948,6 +960,14 @@ export default function ReflectionComposer({
           </TouchableOpacity>
         )}
       </View>
+      <TouchableOpacity
+        style={styles.infoBtn}
+        onPress={() => infoSheetRef.current?.snapToIndex(0)}
+        activeOpacity={0.7}
+      >
+        <FontAwesome name="info-circle" size={15} color="#4a90d9" />
+        <Text style={styles.infoBtnText}>How this works</Text>
+      </TouchableOpacity>
     </Animated.View>
   );
 
@@ -1166,6 +1186,112 @@ export default function ReflectionComposer({
             </TouchableOpacity>
           </View>
         </BottomSheetView>
+      </BottomSheet>
+
+      {/* 5. EDITOR GUIDE SHEET */}
+      <BottomSheet
+        ref={infoSheetRef}
+        index={-1}
+        snapPoints={['70%']}
+        enablePanDownToClose
+        backgroundStyle={styles.infoSheetBg}
+        handleIndicatorStyle={styles.sheetHandle}
+      >
+        <BottomSheetScrollView contentContainerStyle={styles.infoSheetScroll}>
+          <Text style={styles.infoTitle}>Your Creative Workbench</Text>
+          <Text style={styles.infoSubtitle}>
+            Everything here helps the Explorer understand and connect with what you're sharing. Use any tool in any order, as many times as you like.
+          </Text>
+
+          {mediaType === 'video' ? (
+            <>
+              <View style={styles.infoRow}>
+                <View style={styles.infoIconWrap}>
+                  <FontAwesome name="scissors" size={14} color="#4FC3F7" />
+                </View>
+                <View style={styles.infoTextWrap}>
+                  <Text style={styles.infoLabel}>Trim</Text>
+                  <Text style={styles.infoDesc}>
+                    Choose the moment. Drag the handles to frame exactly what matters — the rest stays safe on the server.
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.infoRow}>
+                <View style={styles.infoIconWrap}>
+                  <FontAwesome name="image" size={14} color="#4ade80" />
+                </View>
+                <View style={styles.infoTextWrap}>
+                  <Text style={styles.infoLabel}>Poster</Text>
+                  <Text style={styles.infoDesc}>
+                    Choose the frame that represents your content — this is the image AI uses to understand the Reflection. Tap to freeze, swipe or tap Set to step through frames. If you skip this, the trim start frame is used.
+                  </Text>
+                </View>
+              </View>
+            </>
+          ) : (
+            <View style={styles.infoRow}>
+              <View style={styles.infoIconWrap}>
+                <FontAwesome name="adjust" size={14} color="#f39c12" />
+              </View>
+              <View style={styles.infoTextWrap}>
+                <Text style={styles.infoLabel}>Look</Text>
+                <Text style={styles.infoDesc}>
+                  Set the mood. Black & white can make a moment feel timeless. The filter is baked into the final image.
+                </Text>
+              </View>
+            </View>
+          )}
+
+          <View style={styles.infoRow}>
+            <View style={styles.infoIconWrap}>
+              <FontAwesome name="microphone" size={14} color="#2e78b7" />
+            </View>
+            <View style={styles.infoTextWrap}>
+              <Text style={styles.infoLabel}>Voice</Text>
+              <Text style={styles.infoDesc}>
+                Say it in your own words. This plays before the content so the Explorer knows what's coming and who it's from.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.infoRow}>
+            <View style={styles.infoIconWrap}>
+              <FontAwesome name="pencil" size={14} color="#8e44ad" />
+            </View>
+            <View style={styles.infoTextWrap}>
+              <Text style={styles.infoLabel}>Text</Text>
+              <Text style={styles.infoDesc}>
+                Add a caption. Keep it short — the Explorer reads this alongside your voice intro.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.infoRow}>
+            <View style={styles.infoIconWrap}>
+              <FontAwesome name="magic" size={14} color="#f5c842" />
+            </View>
+            <View style={styles.infoTextWrap}>
+              <Text style={styles.infoLabel}>Sparkle</Text>
+              <Text style={styles.infoDesc}>
+                Let AI help. It writes a caption and generates audio from what it sees. Give it hints — like who's in the shot — for better results. You can run it as many times as you want.
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.infoDivider} />
+
+          <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
+          <Text style={styles.infoProTip}>
+            You can go back and forth between any of these as many times as you need. Experiment freely — nothing is sent until you say so.
+          </Text>
+          <Text style={styles.infoProTip}>
+            If you change something after running Sparkle, you'll be asked whether AI should take another look before you send.
+          </Text>
+          <Text style={styles.infoProTip}>
+            The Explorer sees your poster frame first, hears your voice or AI intro, then the content plays. Think of it as setting a stage.
+          </Text>
+        </BottomSheetScrollView>
       </BottomSheet>
 
       {/* REPLAY PREVIEW MODAL */}
@@ -1580,9 +1706,10 @@ sendButtonText: {
 },
 replayOverlay: {
   position: 'absolute',
+  top: 0,
   left: 0,
   right: 0,
-  bottom: 0,
+  bottom: '25%',
   backgroundColor: 'rgba(0,0,0,0.5)',
   alignItems: 'center',
   justifyContent: 'center',
@@ -1684,5 +1811,84 @@ sparkleCancelBtn: {
 sparkleCancelText: {
   color: 'rgba(255,255,255,0.5)',
   fontSize: 15,
+},
+infoBtn: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 6,
+  paddingVertical: 4,
+},
+infoBtnText: {
+  color: '#4a90d9',
+  fontSize: 12,
+  fontWeight: '500',
+},
+infoSheetBg: {
+  backgroundColor: '#1a1a1a',
+  borderTopLeftRadius: 20,
+  borderTopRightRadius: 20,
+},
+infoSheetScroll: {
+  paddingHorizontal: 24,
+  paddingBottom: 40,
+},
+infoTitle: {
+  color: '#fff',
+  fontSize: 20,
+  fontWeight: '700',
+  marginBottom: 6,
+},
+infoSubtitle: {
+  color: 'rgba(255,255,255,0.55)',
+  fontSize: 14,
+  lineHeight: 20,
+  marginBottom: 18,
+},
+infoRow: {
+  flexDirection: 'row',
+  alignItems: 'flex-start',
+  gap: 12,
+  marginBottom: 16,
+},
+infoIconWrap: {
+  width: 28,
+  height: 28,
+  borderRadius: 8,
+  backgroundColor: 'rgba(255,255,255,0.08)',
+  alignItems: 'center',
+  justifyContent: 'center',
+  marginTop: 1,
+},
+infoTextWrap: {
+  flex: 1,
+},
+infoLabel: {
+  color: '#fff',
+  fontSize: 15,
+  fontWeight: '600',
+  marginBottom: 2,
+},
+infoDesc: {
+  color: 'rgba(255,255,255,0.55)',
+  fontSize: 13,
+  lineHeight: 19,
+},
+infoDivider: {
+  height: StyleSheet.hairlineWidth,
+  backgroundColor: 'rgba(255,255,255,0.12)',
+  marginVertical: 16,
+},
+infoProTipHeader: {
+  color: 'rgba(255,255,255,0.7)',
+  fontSize: 14,
+  fontWeight: '600',
+  marginBottom: 10,
+},
+infoProTip: {
+  color: 'rgba(255,255,255,0.45)',
+  fontSize: 13,
+  lineHeight: 19,
+  marginBottom: 10,
 },
 });
