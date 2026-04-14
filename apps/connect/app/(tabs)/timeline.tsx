@@ -983,9 +983,6 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
               ? responseTimestampMap.get(item.event_id)
               : item.engagementTimestamp;
 
-            // Impact score (used for Impact sorting): engagement count + selfie bonus
-            const impactScore = rawEngagementCount + (hasSelfie ? 1 : 0);
-
             const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
             const rankColor = isTopRanked ? '#facc15' : '#cbd5e1';
 
@@ -1165,18 +1162,11 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                     </View>
 
                     {/* ROW 3 — Engagement metrics */}
-                    {(engagementCount > 0 || impactScore > 0) && (
+                    {engagementCount > 0 && (
                       <View style={styles.engagementMetaRow}>
-                        {engagementCount > 0 && (
-                          <Text style={styles.engagementMetaText}>
-                            Engagements: {engagementCount}
-                          </Text>
-                        )}
-                        {impactScore > 0 && (
-                          <Text style={styles.engagementMetaText}>
-                            Score: {impactScore}
-                          </Text>
-                        )}
+                        <Text style={styles.engagementMetaText}>
+                          Engagements: {engagementCount}
+                        </Text>
                       </View>
                     )}
 
@@ -1222,6 +1212,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                       accessibilityLabel={`Reflection ID ${item.event_id}`}
                       accessibilityHint="Copies the reflection ID to the clipboard"
                     >
+                      <Text style={styles.eventIdLabel}>Reflection ID: </Text>
                       <Text style={styles.eventIdText}>{item.event_id}</Text>
                     </Pressable>
                   </View>
@@ -1387,7 +1378,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 8,
-    marginBottom: 6,
+    marginBottom: 2,
   },
   captionRow: {
     flex: 1,
@@ -1414,7 +1405,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginBottom: 4,
+    marginBottom: 1,
   },
   statusDot: {
     width: 8,
@@ -1453,13 +1444,20 @@ const styles = StyleSheet.create({
   },
   eventIdPressable: {
     alignSelf: 'flex-start',
-    marginTop: 8,
-    paddingVertical: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    paddingVertical: 1,
     paddingRight: 4,
     borderRadius: 4,
   },
   eventIdPressablePressed: {
     backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  eventIdLabel: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(160, 170, 180, 0.7)',
   },
   eventIdText: {
     fontSize: 11,

@@ -795,9 +795,24 @@ export default function CreationModal({
       remotePoster &&
       !!(composerFilteredPhotoUriRef.current || composerFilteredPhotoUri);
 
+    // Detect if the poster frame changed for a video edit — requires re-extracting and re-uploading image.jpg.
+    const origThumbMs = editEvent?.metadata?.thumbnail_time_ms;
+    const currThumbMs = composerVideoMetaRef.current?.thumbnail_time_ms;
+    const origStartMs = editEvent?.metadata?.video_start_ms;
+    const currStartMs = composerVideoMetaRef.current?.video_start_ms;
+    const videoThumbNeedsPosterUpload =
+      mediaType === 'video' &&
+      remoteVideo &&
+      editIdMeta != null &&
+      (
+        (typeof currThumbMs === 'number' && currThumbMs !== origThumbMs) ||
+        (currThumbMs == null && typeof currStartMs === 'number' && currStartMs !== origStartMs)
+      );
+
     // Cloud master: remote poster and/or remote video unchanged — no S3 media re-upload; Firestore-only (incl. trim/thumbnail).
     // Photo + Look (baked extract): must re-upload image.jpg so Explorer sees the filtered poster.
-    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoLookNeedsBinaryUpload) {
+    // Video + changed poster frame: must re-extract thumbnail and re-upload image.jpg.
+    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoLookNeedsBinaryUpload && !videoThumbNeedsPosterUpload) {
       try {
         setUploading(true);
         const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
@@ -1047,7 +1062,7 @@ export default function CreationModal({
           typeof vmThumb.thumbnail_time_ms === 'number' &&
           vmThumb.thumbnail_time_ms >= 0
           ? vmThumb.thumbnail_time_ms
-          : 0
+          : vmThumb?.video_start_ms ?? 0
       );
 
       // 3. Prepare Image Source
@@ -1446,7 +1461,7 @@ export default function CreationModal({
                 typeof vmAi.thumbnail_time_ms === 'number' &&
                 vmAi.thumbnail_time_ms >= 0
                 ? vmAi.thumbnail_time_ms
-                : 0
+                : vmAi?.video_start_ms ?? 0
             );
             const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
               time: thumbMs,
@@ -2052,9 +2067,11 @@ export default function CreationModal({
                   isEditingExistingReflection ? handleReplaceMediaInEdit : undefined
                 }
                 onTriggerMagic={async (targetCaption?: string) => {
-                  const result = await generateDeepDiveBackground({
+                  setStagingEventId(null);
+                  stagingEventIdRef.current = null;
+                  await generateDeepDiveBackground({
                     silent: false,
-                    targetCaption: targetCaption || description || undefined
+                    targetCaption: targetCaption || description || undefined,
                   });
                 }}
                 onFilteredUriChange={setComposerFilteredPhotoUri}
@@ -2070,6 +2087,13 @@ export default function CreationModal({
                 audioRecorder={audioRecorder}
                 onStartRecording={startRecording}
                 onStopRecording={stopRecording}
+                companionInReflection={isCompanionInReflection}
+                onCompanionInReflectionChange={setIsCompanionInReflection}
+                explorerInReflection={isExplorerInReflection}
+                onExplorerInReflectionChange={setIsExplorerInReflection}
+                peopleContext={peopleContext}
+                onPeopleContextChange={setPeopleContext}
+                explorerName={explorerName || 'Explorer'}
               />
             </View>
           ) : (

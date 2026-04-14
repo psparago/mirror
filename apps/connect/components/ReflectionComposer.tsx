@@ -7,23 +7,23 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image as RNImage,
   Keyboard,
-  Modal,
   NativeSyntheticEvent,
   Platform,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View,
 } from 'react-native';
 import { Grayscale } from 'react-native-image-filter-kit';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
   FadeOut,
+  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -34,6 +34,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { deleteScratchMediaFile } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
+import { VideoTrimSlider } from '@projectmirror/shared';
 
 export type ComposerVideoMeta = {
   video_start_ms: number;
@@ -83,6 +84,14 @@ interface ReflectionComposerProps {
   audioRecorder?: any; 
   onStartRecording?: () => void;
   onStopRecording?: () => void;
+  // AI Hint controls (surfaced in Sparkle Hints sheet)
+  companionInReflection?: boolean;
+  onCompanionInReflectionChange?: (v: boolean) => void;
+  explorerInReflection?: boolean;
+  onExplorerInReflectionChange?: (v: boolean) => void;
+  peopleContext?: string;
+  onPeopleContextChange?: (v: string) => void;
+  explorerName?: string;
 }
 
 export default function ReflectionComposer({
@@ -104,23 +113,30 @@ export default function ReflectionComposer({
   onStopRecording,
   initialVideoMeta,
   onVideoMetaChange,
+  companionInReflection,
+  onCompanionInReflectionChange,
+  explorerInReflection,
+  onExplorerInReflectionChange,
+  peopleContext,
+  onPeopleContextChange,
+  explorerName,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
+  const sparkleSheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
   const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
-  const [trimModalOpen, setTrimModalOpen] = useState(false);
-  const [trimStartDraft, setTrimStartDraft] = useState('0');
-  const [trimEndDraft, setTrimEndDraft] = useState('0');
+  const [trimmerVisible, setTrimmerVisible] = useState(false);
+  const [isPosterMode, setIsPosterMode] = useState(false);
+  const [playheadMs, setPlayheadMs] = useState(0);
   const [isFilterActive, setIsFilterActive] = useState(false);
   const [extractImageEnabled, setExtractImageEnabled] = useState(false);
   const [lookExtractBusy, setLookExtractBusy] = useState(false);
-  const grayscaleFilterRef = useRef<Grayscale | null>(null);
   const lastFilteredExtractUriRef = useRef<string | null>(null);
   const pendingExtractResolveRef = useRef<((uri: string | null) => void) | null>(null);
   const extractTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -180,12 +196,46 @@ export default function ReflectionComposer({
     opacity: textOpacity.value,
   }));
 
-  // Track last AI caption to detect edits
+  // Track last AI caption for display (no auto-regen)
   const lastAiCaptionRef = useRef<string | null>(null);
-  const hasTriggeredRegenForCurrentEditRef = useRef(false);
 
-  // Get screen dimensions
-  const { height: screenHeight } = useWindowDimensions();
+  // --- Stale-AI tracking ---
+  // Snapshot of editor state when AI last completed. null = AI has never run.
+  const aiSnapshotRef = useRef<{
+    trimStart: number | null;
+    trimEnd: number | null;
+    thumbMs: number | null;
+    caption: string;
+    filterActive: boolean;
+  } | null>(null);
+  const prevAiThinkingRef = useRef(isAiThinking);
+
+  useEffect(() => {
+    const wasThinking = prevAiThinkingRef.current;
+    prevAiThinkingRef.current = isAiThinking;
+    if (wasThinking && !isAiThinking && !isAiCancelled) {
+      aiSnapshotRef.current = {
+        trimStart: videoRangeMs?.start ?? null,
+        trimEnd: videoRangeMs?.end ?? null,
+        thumbMs: thumbnailTimeMs,
+        caption,
+        filterActive: isFilterActive,
+      };
+    }
+  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, isFilterActive]);
+
+  const isAiStale = useCallback((): boolean => {
+    const snap = aiSnapshotRef.current;
+    if (!snap) return false;
+    if (caption.trim() !== snap.caption.trim()) return true;
+    if (isFilterActive !== snap.filterActive) return true;
+    if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
+    if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
+    if (thumbnailTimeMs !== snap.thumbMs) return true;
+    return false;
+  }, [caption, isFilterActive, videoRangeMs, thumbnailTimeMs]);
+
+  const { height: screenHeight, width: screenWidth } = useWindowDimensions();
 
   const pulseExtractOnce = useCallback(() => {
     setExtractImageEnabled(false);
@@ -255,15 +305,10 @@ export default function ReflectionComposer({
     return () => clearTimeout(t);
   }, [isFilterActive, mediaUri, mediaType, pulseExtractOnce]);
 
-  // TRIGGER AI ON MOUNT
+  // AUTO-OPEN SPARKLE HINTS ON MOUNT (when caption is empty — new content fast path)
   useEffect(() => {
-    // Only fire if:
-    // 1. We don't have a caption yet.
-    // 2. The parent isn't already thinking (prevent double-fire).
-    // 3. The user hasn't explicitly cancelled it.
     if (!caption && !isAiThinking && !isAiCancelled) {
-      // Fire and forget (errors handled in parent) - no target caption on initial trigger
-      onTriggerMagic().catch(() => console.log("Auto-magic failed"));
+      requestAnimationFrame(() => sparkleSheetRef.current?.snapToIndex(0));
     }
   }, []);
 
@@ -272,51 +317,10 @@ export default function ReflectionComposer({
     if (aiArtifacts?.caption && !caption) {
       setCaption(aiArtifacts.caption);
     }
-    // Track the AI caption for comparison (always update when AI provides a caption)
-    // This ensures that after regeneration, we don't trigger again for the same text
     if (aiArtifacts?.caption) {
       lastAiCaptionRef.current = aiArtifacts.caption;
-      // If the current caption matches the AI caption (regeneration completed), reset the flag
-      if (caption && caption.trim() === aiArtifacts.caption.trim()) {
-        hasTriggeredRegenForCurrentEditRef.current = false;
-      }
     }
   }, [aiArtifacts?.caption, caption]);
-
-  // Function to check and trigger AI audio regeneration when editing is "done"
-  const checkAndRegenerateAudio = useCallback(() => {
-    // Only regenerate if:
-    // 1. Caption exists and is different from AI-generated caption
-    // 2. User hasn't recorded their own audio (voice takes priority)
-    // 3. Not currently thinking
-    // 4. Caption has actually changed from the AI version
-    // 5. We haven't already triggered regeneration for this edit
-    if (
-      caption &&
-      caption.trim() &&
-      lastAiCaptionRef.current &&
-      caption.trim() !== lastAiCaptionRef.current.trim() &&
-      !hasRecordedAudio &&
-      !isAiThinking &&
-      !isAiCancelled &&
-      !hasTriggeredRegenForCurrentEditRef.current
-    ) {
-      console.log("📝 Caption edited, regenerating AI audio...");
-      hasTriggeredRegenForCurrentEditRef.current = true;
-      // Trigger AI with the edited caption as target
-      onTriggerMagic(caption.trim()).catch((err) => {
-        console.error("Failed to regenerate AI audio:", err);
-        hasTriggeredRegenForCurrentEditRef.current = false; // Allow retry on error
-      });
-    }
-  }, [caption, hasRecordedAudio, isAiThinking, isAiCancelled, onTriggerMagic]);
-
-  // Reset regeneration flag when caption changes (new edit started)
-  useEffect(() => {
-    if (caption && lastAiCaptionRef.current && caption.trim() !== lastAiCaptionRef.current.trim()) {
-      hasTriggeredRegenForCurrentEditRef.current = false;
-    }
-  }, [caption]);
 
   // Track keyboard height
   useEffect(() => {
@@ -330,8 +334,6 @@ export default function ReflectionComposer({
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
       () => {
         setKeyboardHeight(0);
-        // Trigger regeneration when keyboard is dismissed (user is "done" editing)
-        checkAndRegenerateAudio();
       }
     );
 
@@ -339,7 +341,7 @@ export default function ReflectionComposer({
       showSubscription.remove();
       hideSubscription.remove();
     };
-  }, [checkAndRegenerateAudio]);
+  }, []);
 
   // Calculate snap points dynamically based on screen height and keyboard
   const snapPoints = useMemo(() => {
@@ -380,6 +382,7 @@ export default function ReflectionComposer({
     if (mediaType !== 'video') return;
     setVideoRangeMs(null);
     setThumbnailTimeMs(null);
+    setIsPosterMode(false);
   }, [mediaUri, mediaType]);
 
   // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
@@ -387,6 +390,7 @@ export default function ReflectionComposer({
     p.loop = false;
     p.play();
   });
+  const trimAppliedRef = useRef(false);
 
   useEffect(() => {
     if (mediaType !== 'video') return;
@@ -411,37 +415,50 @@ export default function ReflectionComposer({
     return () => sub.remove();
   }, [player]);
 
-  // Once duration is known: `video_start_ms` / `video_end_ms` are ms into the same master as `mediaUri` (local file or S3 URL).
+  // Once duration is known: apply initial trim and seek. Uses a statusChange listener
+  // because player.duration is not reactive — it's 0 until the player is ready.
   useEffect(() => {
     if (mediaType !== 'video' || !player) return;
-    if (!(player.duration > 0)) return;
+    trimAppliedRef.current = false;
 
-    const durationMs = Math.round(player.duration * 1000);
-    const s = initialVideoMeta?.video_start_ms;
-    const e = initialVideoMeta?.video_end_ms;
-    const hasInitialTrim =
-      typeof s === 'number' &&
-      typeof e === 'number' &&
-      e > s &&
-      s >= 0;
+    const applyTrim = () => {
+      if (trimAppliedRef.current) return;
+      if (!(player.duration > 0)) return;
+      trimAppliedRef.current = true;
 
-    if (typeof initialVideoMeta?.thumbnail_time_ms === 'number') {
-      setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
-    }
+      const durationMs = Math.round(player.duration * 1000);
+      const s = initialVideoMeta?.video_start_ms;
+      const e = initialVideoMeta?.video_end_ms;
+      const hasInitialTrim =
+        typeof s === 'number' &&
+        typeof e === 'number' &&
+        e > s &&
+        s >= 0;
 
-    setVideoRangeMs(() => {
+      if (typeof initialVideoMeta?.thumbnail_time_ms === 'number') {
+        setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
+      }
+
       if (hasInitialTrim) {
         const clampedEnd = Math.min(e, durationMs);
         const clampedStart = Math.max(0, Math.min(s, clampedEnd - 1));
-        return { start: clampedStart, end: Math.max(clampedStart + 1, clampedEnd) };
+        setVideoRangeMs({ start: clampedStart, end: Math.max(clampedStart + 1, clampedEnd) });
+        try { player.currentTime = clampedStart / 1000; } catch { /* ignore */ }
+      } else {
+        setVideoRangeMs({ start: 0, end: durationMs });
       }
-      return { start: 0, end: durationMs };
-    });
+    };
+
+    // Try immediately (duration may already be known)
+    applyTrim();
+
+    // Also listen for status changes so we catch the moment duration becomes available
+    const sub = player.addListener('statusChange', () => applyTrim());
+    return () => sub.remove();
   }, [
     mediaType,
     mediaUri,
     player,
-    player.duration,
     initialVideoMeta?.video_start_ms,
     initialVideoMeta?.video_end_ms,
     initialVideoMeta?.thumbnail_time_ms,
@@ -457,10 +474,18 @@ export default function ReflectionComposer({
   }, [videoRangeMs, thumbnailTimeMs, onVideoMetaChange]);
 
   useEffect(() => {
+    if (!videoRangeMs || thumbnailTimeMs === null) return;
+    if (thumbnailTimeMs < videoRangeMs.start || thumbnailTimeMs > videoRangeMs.end) {
+      setThumbnailTimeMs(videoRangeMs.start);
+    }
+  }, [videoRangeMs, thumbnailTimeMs]);
+
+  useEffect(() => {
     if (mediaType !== 'video' || !player || !videoRangeMs) return;
     player.timeUpdateEventInterval = 0.25;
     const sub = player.addListener('timeUpdate', () => {
       const curMs = player.currentTime * 1000;
+      setPlayheadMs(curMs);
       if (curMs > videoRangeMs.end - 50) {
         player.currentTime = videoRangeMs.start / 1000;
       } else if (curMs < videoRangeMs.start - 50) {
@@ -498,7 +523,7 @@ export default function ReflectionComposer({
     return { ...base, videoMeta: null };
   }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
 
-  const handleSendWithThrottle = useCallback(async () => {
+  const doSendNow = useCallback(async () => {
     const now = Date.now();
     if (now - lastSendAtRef.current < 800) return;
     lastSendAtRef.current = now;
@@ -512,55 +537,69 @@ export default function ReflectionComposer({
     onSend({ ...buildSendPayload(), filteredPhotoUri });
   }, [buildSendPayload, onSend, mediaType, isFilterActive, extractFilteredImage]);
 
+  const handleSendWithThrottle = useCallback(async () => {
+    if (isAiStale()) {
+      Alert.alert(
+        'Re-run Sparkle?',
+        'You\'ve made changes since the last AI pass. Re-run Sparkle before sending?',
+        [
+          { text: 'Send Anyway', style: 'destructive', onPress: () => { doSendNow(); } },
+          { text: 'Sparkle First', onPress: openSparkleSheet },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+    doSendNow();
+  }, [isAiStale, doSendNow, openSparkleSheet]);
+
   const handleSheetChange = useCallback((index: number) => {
     if (index < 2) {
       Keyboard.dismiss();
-      // Trigger regeneration when sheet changes away from text tab
-      if (activeTab === 'text' && index !== 2) {
-        checkAndRegenerateAudio();
-      }
     }
-  }, [activeTab, checkAndRegenerateAudio]);
+  }, []);
 
-  const handlePreview = () => {
+  const doPreviewNow = useCallback(() => {
     const previewId = 'preview-temp';
     const now = new Date();
 
-    // Get audio URL - prioritize user voice over AI voice
-    // Pass through if it exists - ReplayModal will handle validation
-    const audioUrl = audioUri || aiArtifacts?.audioUrl || undefined;
-
-    // 1. Construct the Mock Event
     const mockEvent: Event = {
       event_id: previewId,
       image_url: mediaUri,
       video_url: mediaType === 'video' ? mediaUri : undefined,
-      
-      // PRIORITY: User Voice > AI Voice > None (only if valid URL)
       audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
-      
       metadata: {
         description: caption || "No description yet",
         short_caption: caption || "No caption",
         sender: 'You (Preview)',
-        
-        // --- REQUIRED FIELDS ADDED HERE ---
         event_id: previewId,
-        timestamp: now.toISOString(), 
+        timestamp: now.toISOString(),
         content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
-        image_source: 'camera', // Default for preview
-        
-        // Include Deep Dive data if available
+        image_source: 'camera',
         deep_dive: aiArtifacts?.deepDive,
       },
-      
-      // Pass the deep dive audio URL directly if we have it
-      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined
+      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined,
     };
 
     setPreviewEvent(mockEvent);
     setIsPreviewOpen(true);
-  };
+  }, [mediaUri, mediaType, audioUri, aiArtifacts, caption]);
+
+  const handlePreview = useCallback(() => {
+    if (isAiStale()) {
+      Alert.alert(
+        'Re-run Sparkle?',
+        'You\'ve made changes since the last AI pass. Re-run Sparkle before previewing?',
+        [
+          { text: 'Preview Anyway', onPress: () => { doPreviewNow(); } },
+          { text: 'Sparkle First', onPress: openSparkleSheet },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+    doPreviewNow();
+  }, [isAiStale, doPreviewNow, openSparkleSheet]);
 
   // --- TABS SWITCHERS ---
   const switchToVoice = () => { 
@@ -575,20 +614,32 @@ export default function ReflectionComposer({
       sheetRef.current?.snapToIndex(2);
     });
   };
-  const resetToMain = () => { 
-    // Trigger regeneration before dismissing (user is "done" editing)
-    checkAndRegenerateAudio();
-    setActiveTab('main'); 
+  const resetToMain = () => {
+    setActiveTab('main');
     requestAnimationFrame(() => {
       sheetRef.current?.snapToIndex(0);
     });
     Keyboard.dismiss(); 
   };
 
+  // --- SPARKLE HINTS SHEET ---
+  const openSparkleSheet = useCallback(() => {
+    setTrimmerVisible(false);
+    setIsPosterMode(false);
+    sparkleSheetRef.current?.snapToIndex(0);
+  }, []);
+
+  const handleRunSparkle = useCallback(() => {
+    sparkleSheetRef.current?.close();
+    setIsAiCancelled(false);
+    onTriggerMagic(caption || undefined).catch(() => {});
+  }, [onTriggerMagic, caption]);
+
   // --- RENDERERS ---
 
   const handleReplay = useCallback(() => {
     setVideoEnded(false);
+    setIsPosterMode(false);
     if (mediaType === 'video' && videoRangeMs) {
       player.currentTime = videoRangeMs.start / 1000;
     } else {
@@ -597,16 +648,81 @@ export default function ReflectionComposer({
     player.play();
   }, [player, mediaType, videoRangeMs]);
 
+  // --- POSTER MODE ---
+
+  const enterPosterMode = useCallback(() => {
+    player.pause();
+    setTrimmerVisible(false);
+    if (thumbnailTimeMs !== null) {
+      try { player.currentTime = thumbnailTimeMs / 1000; } catch { /* ignore */ }
+    }
+    setIsPosterMode(true);
+  }, [player, thumbnailTimeMs]);
+
+  const handlePosterSet = useCallback(() => {
+    const ms = Math.max(0, Math.round(player.currentTime * 1000));
+    setThumbnailTimeMs(ms);
+  }, [player]);
+
+  const handlePosterClear = useCallback(() => {
+    setThumbnailTimeMs(null);
+  }, []);
+
+  const exitPosterMode = useCallback(() => {
+    setIsPosterMode(false);
+    player.play();
+  }, [player]);
+
+  const posterScrubOriginMs = useSharedValue(0);
+  const videoDurationMs = useSharedValue(0);
+
+  useEffect(() => {
+    if (player.duration > 0) {
+      videoDurationMs.value = player.duration * 1000;
+    }
+  }, [player.duration, videoDurationMs]);
+
+  const seekToMs = useCallback((ms: number) => {
+    try { player.currentTime = ms / 1000; } catch { /* ignore */ }
+  }, [player]);
+
+  const posterScrubGesture = useMemo(() =>
+    Gesture.Pan()
+      .enabled(isPosterMode)
+      .onBegin(() => {
+        posterScrubOriginMs.value = Math.round(player.currentTime * 1000);
+      })
+      .onUpdate((e) => {
+        const rangeStart = videoRangeMs?.start ?? 0;
+        const rangeEnd = videoRangeMs?.end ?? videoDurationMs.value;
+        const rangeDuration = rangeEnd - rangeStart;
+        if (rangeDuration <= 0) return;
+        const pxToMs = rangeDuration / screenWidth;
+        const deltaMs = e.translationX * pxToMs;
+        const targetMs = Math.max(rangeStart, Math.min(rangeEnd, posterScrubOriginMs.value + deltaMs));
+        runOnJS(seekToMs)(targetMs);
+      }),
+    [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs],
+  );
+
   /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
   const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
 
   const renderBackground = () => (
-    <View style={styles.backgroundContainer}>
+    <View style={[styles.backgroundContainer, { top: insets.top + 62 }]}>
       {mediaType === 'video' ? (
-        <VideoView player={player} style={styles.media} contentFit="contain" nativeControls={false} />
+        <GestureDetector gesture={posterScrubGesture}>
+          <View style={styles.media}>
+            <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
+            {isPosterMode && (
+              <View style={styles.posterModeIndicator} pointerEvents="none">
+                <Text style={styles.posterModeText}>Swipe to scrub</Text>
+              </View>
+            )}
+          </View>
+        </GestureDetector>
       ) : isFilterActive ? (
         <Grayscale
-          ref={grayscaleFilterRef}
           amount={1}
           style={styles.media}
           extractImageEnabled={extractImageEnabled}
@@ -626,80 +742,114 @@ export default function ReflectionComposer({
       )}
       <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
 
-      {mediaType === 'video' ? (
-        <View style={[styles.videoToolsRow, { bottom: insets.bottom + 72 }]}>
-          <TouchableOpacity
-            style={[styles.trimButton, isBlockedByAi && { opacity: 0.35 }]}
-            onPress={() => {
-              if (videoRangeMs) {
-                setTrimStartDraft(String(videoRangeMs.start));
-                setTrimEndDraft(String(videoRangeMs.end));
-              } else if (player.duration > 0) {
-                setTrimStartDraft('0');
-                setTrimEndDraft(String(Math.round(player.duration * 1000)));
-              } else {
-                setTrimStartDraft('0');
-                setTrimEndDraft('0');
-              }
-              setTrimModalOpen(true);
-            }}
-            disabled={isSending || isBlockedByAi}
-          >
-            <FontAwesome name="scissors" size={14} color="#fff" />
-            <Text style={styles.trimButtonText}>Trim</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.trimButton, isBlockedByAi && { opacity: 0.35 }]}
-            onPress={() => {
-              const ms = Math.max(0, Math.round(player.currentTime * 1000));
-              setThumbnailTimeMs(ms);
-            }}
-            disabled={isSending || isBlockedByAi}
-          >
-            <FontAwesome name="image" size={14} color="#fff" />
-            <Text style={styles.trimButtonText}>Set Thumbnail</Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
-
-      {/* REPLAY OVERLAY — shown when video finishes */}
+      {/* REPLAY OVERLAY — shown when video finishes, below toolbar */}
       {mediaType === 'video' && videoEnded && (
-        <View style={styles.replayOverlay}>
+        <View style={[styles.replayOverlay, { top: insets.top + 62 }]}>
           <TouchableOpacity style={styles.replayButton} onPress={handleReplay} activeOpacity={0.8}>
             <FontAwesome name="repeat" size={28} color="#fff" />
             <Text style={styles.replayText}>Replay</Text>
           </TouchableOpacity>
         </View>
       )}
+    </View>
+  );
 
-      {/* TOP CONTROLS */}
-      <View style={[styles.topControls, { top: 8 }]}>
-        <View style={styles.topControlsLeft}>
+  const renderPosterToolbar = () => (
+    <View style={[styles.topToolbar, { top: insets.top }]}>
+      <View style={styles.topToolbarRow}>
+        <TouchableOpacity
+          style={[styles.toolbarChip, { backgroundColor: 'rgba(30, 80, 50, 0.9)', borderColor: 'rgba(74, 222, 128, 0.4)' }]}
+          onPress={handlePosterSet}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="check" size={16} color="#4ade80" />
+          <Text style={[styles.toolbarChipText, { color: '#4ade80' }]}>Set</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.toolbarChip}
+          onPress={handlePosterClear}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="eraser" size={16} color="#fff" />
+          <Text style={styles.toolbarChipText}>Clear</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.toolbarChip, { backgroundColor: 'rgba(40, 70, 100, 0.9)', borderColor: 'rgba(79, 195, 247, 0.4)' }]}
+          onPress={exitPosterMode}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="check-circle" size={16} color="#4FC3F7" />
+          <Text style={[styles.toolbarChipText, { color: '#4FC3F7' }]}>Done</Text>
+        </TouchableOpacity>
+      </View>
+      {thumbnailTimeMs !== null && (
+        <Text style={styles.posterTimestamp}>{(thumbnailTimeMs / 1000).toFixed(1)}s</Text>
+      )}
+    </View>
+  );
+
+  const renderTopControls = () => {
+    if (isPosterMode) return renderPosterToolbar();
+
+    return (
+      <View style={[styles.topToolbar, { top: insets.top }]}>
+        <View style={styles.topToolbarRow}>
           {showTopMediaEdit ? (
           <TouchableOpacity
-            style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
+            style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
             onPress={onReplaceMedia}
             disabled={isSending || isBlockedByAi}
             activeOpacity={0.7}
           >
-            <FontAwesome name="pencil" size={14} color="#fff" />
-            <Text style={styles.replaceMediaText}>Edit</Text>
+            <FontAwesome name="pencil" size={16} color="#fff" />
+            <Text style={styles.toolbarChipText}>Edit</Text>
           </TouchableOpacity>
           ) : null}
           {mediaType === 'video' ? (
             <TouchableOpacity
-              style={[styles.replaceMediaButton, isBlockedByAi && { opacity: 0.35 }]}
+              style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
               onPress={handleReplay}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
             >
-              <FontAwesome name="repeat" size={14} color="#fff" />
-              <Text style={styles.replaceMediaText}>Replay</Text>
+              <FontAwesome name="repeat" size={16} color="#fff" />
+              <Text style={styles.toolbarChipText}>Replay</Text>
             </TouchableOpacity>
           ) : null}
+          {mediaType === 'video' ? (
+            <TouchableOpacity
+              style={[styles.toolbarChip, trimmerVisible && styles.toolbarChipActive, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={() => setTrimmerVisible((v) => !v)}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="scissors" size={16} color={trimmerVisible ? '#4FC3F7' : '#fff'} />
+              <Text style={[styles.toolbarChipText, trimmerVisible && { color: '#4FC3F7' }]}>Trim</Text>
+            </TouchableOpacity>
+          ) : null}
+          {mediaType === 'video' ? (
+            <TouchableOpacity
+              style={[styles.toolbarChip, thumbnailTimeMs !== null && styles.toolbarChipActive, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={enterPosterMode}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
+              <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity
+            style={[styles.toolbarChip, styles.toolbarSparkleChip, isBlockedByAi && { opacity: 0.35 }]}
+            onPress={openSparkleSheet}
+            disabled={isSending || isBlockedByAi}
+            activeOpacity={0.7}
+          >
+            <FontAwesome name="magic" size={16} color={isBlockedByAi ? '#f39c12' : '#f5c842'} />
+            <Text style={[styles.toolbarChipText, { color: '#f5c842' }]}>Sparkle</Text>
+          </TouchableOpacity>
           {mediaType === 'photo' ? (
             <TouchableOpacity
-              style={[styles.replaceMediaButton, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              style={[styles.toolbarChip, isFilterActive && styles.toolbarChipActive, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
               onPress={() => {
                 if (isBlockedByAi || lookExtractBusy) return;
                 if (isFilterActive) {
@@ -722,24 +872,22 @@ export default function ReflectionComposer({
               activeOpacity={0.7}
               accessibilityLabel={isFilterActive ? 'Turn off sparkle look' : 'Turn on sparkle look'}
             >
-              <FontAwesome name="magic" size={14} color={isFilterActive ? '#f39c12' : '#fff'} />
-              <Text style={styles.replaceMediaText}>{isFilterActive ? 'Look on' : 'Look'}</Text>
+              <FontAwesome name="adjust" size={16} color={isFilterActive ? '#f39c12' : '#fff'} />
+              <Text style={[styles.toolbarChipText, isFilterActive && { color: '#f39c12' }]}>Look</Text>
             </TouchableOpacity>
           ) : null}
         </View>
-        <View style={{ flex: 1 }} />
-
-        {/* CIRCLED X CANCEL BUTTON */}
         <TouchableOpacity 
-          style={[styles.circledCancelButton, isBlockedByAi && { opacity: 0.35 }]} 
+          style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]} 
           onPress={onRetake} 
           disabled={isSending || isBlockedByAi}
+          activeOpacity={0.7}
         >
-          <FontAwesome name="times" size={18} color="#fff" />
+          <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
         </TouchableOpacity>
       </View>
-    </View>
-  );
+    );
+  };
 
   const renderMainTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
@@ -870,17 +1018,19 @@ export default function ReflectionComposer({
           sheetRef.current?.snapToIndex(2);
         }}
         onBlur={() => {
-          // Trigger regeneration when text input loses focus (user is "done" editing)
-          checkAndRegenerateAudio();
+          Keyboard.dismiss();
         }}
       />
     </Animated.View>
   );
 
   return (
-    <GestureHandlerRootView style={[styles.container, { paddingTop: insets.top }]}>
-      {/* 1. IMMERSIVE MEDIA */}
+    <GestureHandlerRootView style={styles.container}>
+      {/* 1. IMMERSIVE MEDIA (below status bar) */}
       {renderBackground()}
+
+      {/* 1b. TOP CONTROLS (over media, below status bar) */}
+      {renderTopControls()}
 
       {/* 2. AI SPARKLE OVERLAY — rendered outside the bottom sheet */}
       {isBlockedByAi && (
@@ -902,14 +1052,26 @@ export default function ReflectionComposer({
         </Animated.View>
       )}
 
+      {/* 2b. INLINE VIDEO TRIMMER */}
+      {mediaType === 'video' && trimmerVisible && videoRangeMs && player.duration > 0 && (
+        <View style={styles.trimSliderOverlay}>
+          <VideoTrimSlider
+            durationMs={Math.round(player.duration * 1000)}
+            startMs={videoRangeMs.start}
+            endMs={videoRangeMs.end}
+            currentTimeMs={playheadMs}
+            onChange={(s, e) => setVideoRangeMs({ start: s, end: e })}
+            onSeek={(ms) => { try { player.currentTime = ms / 1000; } catch { /* ignore */ } }}
+          />
+        </View>
+      )}
+
       {/* 3. BOTTOM SHEET TOOLKIT */}
       <BottomSheet
         ref={sheetRef}
         index={0}
         snapPoints={snapPoints}
         onChange={handleSheetChange}
-        topInset={insets.top}
-        bottomInset={insets.bottom}
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
         keyboardBehavior="interactive"
@@ -917,10 +1079,92 @@ export default function ReflectionComposer({
         enablePanDownToClose={false}
         enableOverDrag={false}
       >
-        <BottomSheetView style={[styles.sheetContent, { paddingBottom: insets.bottom + 8 }]}>
+        <BottomSheetView style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]}>
           {activeTab === 'main' && renderMainTab()}
           {activeTab === 'voice' && renderVoiceTab()}
           {activeTab === 'text' && renderTextTab()}
+        </BottomSheetView>
+      </BottomSheet>
+
+      {/* 4. SPARKLE HINTS SHEET */}
+      <BottomSheet
+        ref={sparkleSheetRef}
+        index={-1}
+        snapPoints={[380]}
+        enablePanDownToClose
+        backgroundStyle={styles.sparkleSheetBg}
+        handleIndicatorStyle={styles.sheetHandle}
+      >
+        <BottomSheetView style={styles.sparkleSheetContent}>
+          <View style={styles.sparkleSheetHeader}>
+            <FontAwesome name="magic" size={18} color="#f39c12" />
+            <Text style={styles.sparkleSheetTitle}>Sparkle Hints</Text>
+          </View>
+          <Text style={styles.sparkleSheetSubtitle}>
+            Help AI understand this Reflection before it runs.
+          </Text>
+
+          <TouchableOpacity
+            style={styles.sparkleHintToggle}
+            onPress={() => onCompanionInReflectionChange?.(!companionInReflection)}
+            activeOpacity={0.7}
+          >
+            <FontAwesome
+              name={companionInReflection ? 'check-square-o' : 'square-o'}
+              size={18}
+              color={companionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.5)'}
+            />
+            <Text style={[styles.sparkleHintLabel, companionInReflection && styles.sparkleHintLabelActive]}>
+              I'm in this
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.sparkleHintToggle}
+            onPress={() => onExplorerInReflectionChange?.(!explorerInReflection)}
+            activeOpacity={0.7}
+          >
+            <FontAwesome
+              name={explorerInReflection ? 'check-square-o' : 'square-o'}
+              size={18}
+              color={explorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.5)'}
+            />
+            <Text style={[styles.sparkleHintLabel, explorerInReflection && styles.sparkleHintLabelActive]}>
+              {explorerName || 'Explorer'} is in this
+            </Text>
+          </TouchableOpacity>
+
+          <View style={styles.sparkleHintInputRow}>
+            <FontAwesome name="users" size={14} color="rgba(255,255,255,0.4)" style={{ marginTop: 4 }} />
+            <BottomSheetTextInput
+              style={styles.sparkleHintInput}
+              placeholder="e.g. Nona, dog Dalton, baby Dante, at Nona's house"
+              placeholderTextColor="rgba(255,255,255,0.3)"
+              value={peopleContext ?? ''}
+              onChangeText={(t) => onPeopleContextChange?.(t)}
+              returnKeyType="done"
+              autoCorrect={false}
+              autoCapitalize="words"
+            />
+          </View>
+
+          <View style={styles.sparkleSheetActions}>
+            <TouchableOpacity
+              style={styles.sparkleRunBtn}
+              onPress={handleRunSparkle}
+              activeOpacity={0.8}
+            >
+              <FontAwesome name="magic" size={16} color="#fff" />
+              <Text style={styles.sparkleRunText}>Run Sparkle</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.sparkleCancelBtn}
+              onPress={() => sparkleSheetRef.current?.close()}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.sparkleCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
         </BottomSheetView>
       </BottomSheet>
 
@@ -943,52 +1187,6 @@ export default function ReflectionComposer({
         isSendDisabled={isBlockedByAi || lookExtractBusy || (!caption && !hasRecordedAudio)}
       />
 
-      <Modal visible={trimModalOpen} transparent animationType="fade" onRequestClose={() => setTrimModalOpen(false)}>
-        <View style={styles.trimModalOverlay}>
-          <View style={styles.trimModalCard}>
-            <Text style={styles.trimModalTitle}>Trim video (ms)</Text>
-            <Text style={styles.trimModalHint}>Start and end times in milliseconds from the start of the file.</Text>
-            <Text style={styles.trimFieldLabel}>Start ms</Text>
-            <TextInput
-              style={styles.trimInput}
-              keyboardType="number-pad"
-              value={trimStartDraft}
-              onChangeText={setTrimStartDraft}
-            />
-            <Text style={styles.trimFieldLabel}>End ms</Text>
-            <TextInput
-              style={styles.trimInput}
-              keyboardType="number-pad"
-              value={trimEndDraft}
-              onChangeText={setTrimEndDraft}
-            />
-            <View style={styles.trimModalActions}>
-              <TouchableOpacity style={styles.trimModalCancel} onPress={() => setTrimModalOpen(false)}>
-                <Text style={styles.trimModalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.trimModalApply}
-                onPress={() => {
-                  const start = Math.round(parseFloat(trimStartDraft) || 0);
-                  const end = Math.round(parseFloat(trimEndDraft) || 0);
-                  const maxEnd = player.duration > 0 ? Math.round(player.duration * 1000) : end;
-                  const clampedStart = Math.max(0, Math.min(start, maxEnd - 1));
-                  const clampedEnd = Math.max(clampedStart + 1, Math.min(end, maxEnd));
-                  setVideoRangeMs({ start: clampedStart, end: clampedEnd });
-                  try {
-                    player.currentTime = clampedStart / 1000;
-                  } catch {
-                    /* ignore */
-                  }
-                  setTrimModalOpen(false);
-                }}
-              >
-                <Text style={styles.trimModalApplyText}>Apply</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </GestureHandlerRootView>
   );
 }
@@ -999,7 +1197,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   backgroundContainer: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
     zIndex: 0,
   },
   media: {
@@ -1014,138 +1215,89 @@ const styles = StyleSheet.create({
     height: 350,
     zIndex: 1,
   },
-  videoToolsRow: {
+  trimSliderOverlay: {
     position: 'absolute',
-    left: 12,
-    right: 12,
-    flexDirection: 'row',
-    gap: 10,
-    zIndex: 6,
+    left: 0,
+    right: 0,
+    bottom: '19%',
+    zIndex: 25,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12,
+    marginHorizontal: 8,
   },
-  trimButton: {
+  topToolbar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-  },
-  trimButtonText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  trimModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  trimModalCard: {
-    width: '100%',
-    maxWidth: 360,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 14,
-    padding: 18,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-  },
-  trimModalTitle: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  trimModalHint: {
-    color: '#aaa',
-    fontSize: 12,
-    marginBottom: 14,
-  },
-  trimFieldLabel: {
-    color: '#ccc',
-    fontSize: 13,
-    marginBottom: 4,
-  },
-  trimInput: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#fff',
-    fontSize: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
-  },
-  trimModalActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 12,
-    marginTop: 8,
-  },
-  trimModalCancel: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-  },
-  trimModalCancelText: {
-    color: '#aaa',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  trimModalApply: {
-    backgroundColor: '#2E78B7',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-  },
-  trimModalApplyText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  topControls: {
-    position: 'absolute',
-    left: 10,
-    right: 10,
-    flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 18,
     zIndex: 30,
   },
-  topControlsLeft: {
+  topToolbarRow: {
+    flex: 1,
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+    justifyContent: 'space-evenly',
+    gap: 6,
+    marginRight: 12,
   },
-  circledCancelButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+  toolbarChip: {
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.3)',
-  },
-  replaceMediaButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 18,
+    gap: 3,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
-  replaceMediaText: {
-    color: '#fff',
-    fontSize: 13,
+  toolbarChipActive: {
+    backgroundColor: 'rgba(40, 70, 100, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(79, 195, 247, 0.4)',
+  },
+  toolbarSparkleChip: {
+    backgroundColor: 'rgba(50, 40, 20, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 200, 66, 0.3)',
+  },
+  toolbarChipText: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 10,
     fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  toolbarCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(60, 60, 60, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  posterTimestamp: {
+    color: '#4ade80',
+    fontSize: 11,
+    fontWeight: '700',
+    marginLeft: 4,
+  },
+  posterModeIndicator: {
+    position: 'absolute',
+    bottom: 12,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  posterModeText: {
+    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 12,
+    fontWeight: '500',
   },
   previewButton: {
     flexDirection: 'row',
@@ -1186,23 +1338,26 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 14,
     fontWeight: '600',
-    marginBottom: 16,
+    marginBottom: 8,
     textAlign: 'center',
   },
   quickActionsRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 20,
+    marginBottom: 8,
     gap: 10,
   },
   actionChip: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    padding: 12,
-    borderRadius: 16,
-    backgroundColor: '#2a2a2a', // Dark background for chips
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    backgroundColor: '#2a2a2a',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
     position: 'relative',
   },
   chipDisabled: {
@@ -1424,7 +1579,10 @@ sendButtonText: {
   fontWeight: 'bold',
 },
 replayOverlay: {
-  ...StyleSheet.absoluteFillObject,
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  bottom: 0,
   backgroundColor: 'rgba(0,0,0,0.5)',
   alignItems: 'center',
   justifyContent: 'center',
@@ -1445,5 +1603,86 @@ replayText: {
   color: '#fff',
   fontSize: 14,
   fontWeight: '600',
+},
+sparkleSheetBg: {
+  backgroundColor: '#1a1a2e',
+  borderTopLeftRadius: 20,
+  borderTopRightRadius: 20,
+},
+sparkleSheetContent: {
+  paddingHorizontal: 20,
+  paddingBottom: 24,
+  gap: 10,
+},
+sparkleSheetHeader: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 10,
+},
+sparkleSheetTitle: {
+  color: '#fff',
+  fontSize: 18,
+  fontWeight: '700',
+},
+sparkleSheetSubtitle: {
+  color: 'rgba(255,255,255,0.5)',
+  fontSize: 13,
+  marginBottom: 4,
+},
+sparkleHintToggle: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 10,
+  paddingVertical: 6,
+},
+sparkleHintLabel: {
+  color: 'rgba(255,255,255,0.6)',
+  fontSize: 15,
+},
+sparkleHintLabelActive: {
+  color: '#4FC3F7',
+},
+sparkleHintInputRow: {
+  flexDirection: 'row',
+  alignItems: 'flex-start',
+  gap: 10,
+  marginTop: 2,
+},
+sparkleHintInput: {
+  flex: 1,
+  color: '#fff',
+  fontSize: 14,
+  borderBottomWidth: StyleSheet.hairlineWidth,
+  borderBottomColor: 'rgba(255,255,255,0.2)',
+  paddingVertical: 6,
+},
+sparkleSheetActions: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 12,
+  marginTop: 12,
+},
+sparkleRunBtn: {
+  flex: 1,
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 8,
+  backgroundColor: '#f39c12',
+  paddingVertical: 14,
+  borderRadius: 12,
+},
+sparkleRunText: {
+  color: '#fff',
+  fontSize: 16,
+  fontWeight: '700',
+},
+sparkleCancelBtn: {
+  paddingVertical: 14,
+  paddingHorizontal: 20,
+},
+sparkleCancelText: {
+  color: 'rgba(255,255,255,0.5)',
+  fontSize: 15,
 },
 });

@@ -37,3 +37,5 @@ export * from './machines/playerMachine';
 
 // Video (cloud master / expo-video helpers)
 export * from './video/cloudMasterVideo';
+export { default as VideoTrimSlider } from './video/VideoTrimSlider';
+export type { VideoTrimSliderProps } from './video/VideoTrimSlider';
