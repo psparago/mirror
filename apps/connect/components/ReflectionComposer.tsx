@@ -7,8 +7,10 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Image as RNImage,
   Keyboard,
   Modal,
+  NativeSyntheticEvent,
   Platform,
   StyleSheet,
   Text,
@@ -17,6 +19,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Grayscale } from 'react-native-image-filter-kit';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
@@ -29,12 +32,22 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { deleteScratchMediaFile } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
 
 export type ComposerVideoMeta = {
   video_start_ms: number;
   video_end_ms: number;
   thumbnail_time_ms: number | null;
+};
+
+export type ComposerSendPayload = {
+  caption: string;
+  audioUri: string | null;
+  deepDive: string | null;
+  videoMeta?: ComposerVideoMeta | null;
+  /** Local file URI from image-filter-kit extract when Look (B&W) is on; JPEG gatekeeper runs in CreationModal. */
+  filteredPhotoUri?: string | null;
 };
 
 // --- TYPES ---
@@ -54,12 +67,9 @@ interface ReflectionComposerProps {
   // Actions
   onCancel: () => void;
   onReplaceMedia: () => void;
-  onSend: (data: {
-    caption: string;
-    audioUri: string | null;
-    deepDive: string | null;
-    videoMeta?: ComposerVideoMeta | null;
-  }) => void;
+  onSend: (data: ComposerSendPayload) => void;
+  /** Fired when Look filter extract completes or clears (toggle off / new media). */
+  onFilteredUriChange?: (uri: string | null) => void;
   /** Hydrate trim / thumbnail when editing an existing video reflection. */
   initialVideoMeta?: Partial<ComposerVideoMeta> | null;
   /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
@@ -85,6 +95,7 @@ export default function ReflectionComposer({
   onCancel: onRetake,
   onReplaceMedia,
   onSend,
+  onFilteredUriChange,
   onTriggerMagic,
   isSending,
   onReplaceMediaFromPreview,
@@ -106,6 +117,13 @@ export default function ReflectionComposer({
   const [trimModalOpen, setTrimModalOpen] = useState(false);
   const [trimStartDraft, setTrimStartDraft] = useState('0');
   const [trimEndDraft, setTrimEndDraft] = useState('0');
+  const [isFilterActive, setIsFilterActive] = useState(false);
+  const [extractImageEnabled, setExtractImageEnabled] = useState(false);
+  const [lookExtractBusy, setLookExtractBusy] = useState(false);
+  const grayscaleFilterRef = useRef<Grayscale | null>(null);
+  const lastFilteredExtractUriRef = useRef<string | null>(null);
+  const pendingExtractResolveRef = useRef<((uri: string | null) => void) | null>(null);
+  const extractTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSendAtRef = useRef(0);
   
   // Preview State
@@ -168,6 +186,74 @@ export default function ReflectionComposer({
 
   // Get screen dimensions
   const { height: screenHeight } = useWindowDimensions();
+
+  const pulseExtractOnce = useCallback(() => {
+    setExtractImageEnabled(false);
+    requestAnimationFrame(() => setExtractImageEnabled(true));
+  }, []);
+
+  const handleExtractImage = useCallback(
+    (e: NativeSyntheticEvent<{ uri: string }>) => {
+      const raw = e.nativeEvent?.uri;
+      if (!raw) return;
+      const uri = raw.startsWith('file://') ? raw : `file://${raw}`;
+      void (async () => {
+        if (lastFilteredExtractUriRef.current && lastFilteredExtractUriRef.current !== uri) {
+          await deleteScratchMediaFile(lastFilteredExtractUriRef.current);
+        }
+        lastFilteredExtractUriRef.current = uri;
+        onFilteredUriChange?.(uri);
+        setLookExtractBusy(false);
+        setExtractImageEnabled(false);
+        if (extractTimeoutRef.current) {
+          clearTimeout(extractTimeoutRef.current);
+          extractTimeoutRef.current = null;
+        }
+        const r = pendingExtractResolveRef.current;
+        pendingExtractResolveRef.current = null;
+        r?.(uri);
+      })();
+    },
+    [onFilteredUriChange]
+  );
+
+  const extractFilteredImage = useCallback((): Promise<string | null> => {
+    if (mediaType !== 'photo' || !isFilterActive) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      setLookExtractBusy(true);
+      pendingExtractResolveRef.current = resolve;
+      if (extractTimeoutRef.current) clearTimeout(extractTimeoutRef.current);
+      extractTimeoutRef.current = setTimeout(() => {
+        extractTimeoutRef.current = null;
+        if (pendingExtractResolveRef.current) {
+          pendingExtractResolveRef.current(lastFilteredExtractUriRef.current);
+          pendingExtractResolveRef.current = null;
+        }
+        setLookExtractBusy(false);
+      }, 12000);
+      pulseExtractOnce();
+    });
+  }, [mediaType, isFilterActive, pulseExtractOnce]);
+
+  useEffect(() => {
+    setIsFilterActive(false);
+    setExtractImageEnabled(false);
+    pendingExtractResolveRef.current?.(null);
+    pendingExtractResolveRef.current = null;
+    if (extractTimeoutRef.current) {
+      clearTimeout(extractTimeoutRef.current);
+      extractTimeoutRef.current = null;
+    }
+    onFilteredUriChange?.(null);
+    void deleteScratchMediaFile(lastFilteredExtractUriRef.current);
+    lastFilteredExtractUriRef.current = null;
+  }, [mediaUri, mediaType, onFilteredUriChange]);
+
+  useEffect(() => {
+    if (!isFilterActive || mediaType !== 'photo') return;
+    const t = setTimeout(() => pulseExtractOnce(), 450);
+    return () => clearTimeout(t);
+  }, [isFilterActive, mediaUri, mediaType, pulseExtractOnce]);
 
   // TRIGGER AI ON MOUNT
   useEffect(() => {
@@ -263,15 +349,14 @@ export default function ReflectionComposer({
     // For text tab: fill the space above the keyboard
     if (keyboardHeight > 0) {
       // When keyboard is visible: sheet should fill from keyboard to near top of screen
-      // Leave small top margin (~60px) for status bar and some breathing room
-      const topMargin = 60;
+      const topMargin = Math.max(48, insets.top + 12);
       const textHeight = screenHeight - keyboardHeight - topMargin;
       return [mainHeight, voiceHeight, textHeight];
     } else {
       // When keyboard is not visible: use 92% of screen
       return [mainHeight, voiceHeight, screenHeight * 0.92];
     }
-  }, [screenHeight, keyboardHeight]);
+  }, [screenHeight, keyboardHeight, insets.top]);
 
   // Ensure sheet snaps to correct position when tab changes or keyboard shows/hides
   useEffect(() => {
@@ -290,17 +375,12 @@ export default function ReflectionComposer({
     typeof mediaUri === 'string' &&
     (mediaUri.startsWith('http://') || mediaUri.startsWith('https://'));
 
+  // New asset: clear trim state so duration-based init is not mixed with a previous clip.
   useEffect(() => {
-    if (mediaType !== 'video' || !initialVideoMeta) return;
-    const s = initialVideoMeta.video_start_ms;
-    const e = initialVideoMeta.video_end_ms;
-    if (typeof s === 'number' && typeof e === 'number' && e > s) {
-      setVideoRangeMs({ start: s, end: e });
-    }
-    if (typeof initialVideoMeta.thumbnail_time_ms === 'number') {
-      setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
-    }
-  }, [mediaType, mediaUri, initialVideoMeta]);
+    if (mediaType !== 'video') return;
+    setVideoRangeMs(null);
+    setThumbnailTimeMs(null);
+  }, [mediaUri, mediaType]);
 
   // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
   const player = useVideoPlayer(mediaUri, (p) => {
@@ -331,14 +411,41 @@ export default function ReflectionComposer({
     return () => sub.remove();
   }, [player]);
 
+  // Once duration is known: `video_start_ms` / `video_end_ms` are ms into the same master as `mediaUri` (local file or S3 URL).
   useEffect(() => {
     if (mediaType !== 'video' || !player) return;
     if (!(player.duration > 0)) return;
-    setVideoRangeMs((prev) => {
-      if (prev) return prev;
-      return { start: 0, end: Math.round(player.duration * 1000) };
+
+    const durationMs = Math.round(player.duration * 1000);
+    const s = initialVideoMeta?.video_start_ms;
+    const e = initialVideoMeta?.video_end_ms;
+    const hasInitialTrim =
+      typeof s === 'number' &&
+      typeof e === 'number' &&
+      e > s &&
+      s >= 0;
+
+    if (typeof initialVideoMeta?.thumbnail_time_ms === 'number') {
+      setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
+    }
+
+    setVideoRangeMs(() => {
+      if (hasInitialTrim) {
+        const clampedEnd = Math.min(e, durationMs);
+        const clampedStart = Math.max(0, Math.min(s, clampedEnd - 1));
+        return { start: clampedStart, end: Math.max(clampedStart + 1, clampedEnd) };
+      }
+      return { start: 0, end: durationMs };
     });
-  }, [mediaType, mediaUri, player]);
+  }, [
+    mediaType,
+    mediaUri,
+    player,
+    player.duration,
+    initialVideoMeta?.video_start_ms,
+    initialVideoMeta?.video_end_ms,
+    initialVideoMeta?.thumbnail_time_ms,
+  ]);
 
   useEffect(() => {
     if (!videoRangeMs || !onVideoMetaChange) return;
@@ -391,12 +498,19 @@ export default function ReflectionComposer({
     return { ...base, videoMeta: null };
   }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
 
-  const handleSendWithThrottle = useCallback(() => {
+  const handleSendWithThrottle = useCallback(async () => {
     const now = Date.now();
     if (now - lastSendAtRef.current < 800) return;
     lastSendAtRef.current = now;
-    onSend(buildSendPayload());
-  }, [buildSendPayload, onSend]);
+    let filteredPhotoUri: string | null = null;
+    if (mediaType === 'photo' && isFilterActive) {
+      filteredPhotoUri = await extractFilteredImage();
+      if (!filteredPhotoUri) {
+        filteredPhotoUri = lastFilteredExtractUriRef.current;
+      }
+    }
+    onSend({ ...buildSendPayload(), filteredPhotoUri });
+  }, [buildSendPayload, onSend, mediaType, isFilterActive, extractFilteredImage]);
 
   const handleSheetChange = useCallback((index: number) => {
     if (index < 2) {
@@ -490,6 +604,17 @@ export default function ReflectionComposer({
     <View style={styles.backgroundContainer}>
       {mediaType === 'video' ? (
         <VideoView player={player} style={styles.media} contentFit="contain" nativeControls={false} />
+      ) : isFilterActive ? (
+        <Grayscale
+          ref={grayscaleFilterRef}
+          amount={1}
+          style={styles.media}
+          extractImageEnabled={extractImageEnabled}
+          onExtractImage={handleExtractImage}
+          image={
+            <RNImage source={{ uri: mediaUri }} style={styles.media} resizeMode="contain" accessibilityIgnoresInvertColors />
+          }
+        />
       ) : (
         <Image
           source={{ uri: mediaUri }}
@@ -548,7 +673,7 @@ export default function ReflectionComposer({
       )}
 
       {/* TOP CONTROLS */}
-      <View style={[styles.topControls, { top: insets.top + 6 }]}>
+      <View style={[styles.topControls, { top: 8 }]}>
         <View style={styles.topControlsLeft}>
           {showTopMediaEdit ? (
           <TouchableOpacity
@@ -570,6 +695,35 @@ export default function ReflectionComposer({
             >
               <FontAwesome name="repeat" size={14} color="#fff" />
               <Text style={styles.replaceMediaText}>Replay</Text>
+            </TouchableOpacity>
+          ) : null}
+          {mediaType === 'photo' ? (
+            <TouchableOpacity
+              style={[styles.replaceMediaButton, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              onPress={() => {
+                if (isBlockedByAi || lookExtractBusy) return;
+                if (isFilterActive) {
+                  setIsFilterActive(false);
+                  onFilteredUriChange?.(null);
+                  void deleteScratchMediaFile(lastFilteredExtractUriRef.current);
+                  lastFilteredExtractUriRef.current = null;
+                  setExtractImageEnabled(false);
+                  pendingExtractResolveRef.current?.(null);
+                  pendingExtractResolveRef.current = null;
+                  if (extractTimeoutRef.current) {
+                    clearTimeout(extractTimeoutRef.current);
+                    extractTimeoutRef.current = null;
+                  }
+                } else {
+                  setIsFilterActive(true);
+                }
+              }}
+              disabled={isSending || isBlockedByAi || lookExtractBusy}
+              activeOpacity={0.7}
+              accessibilityLabel={isFilterActive ? 'Turn off sparkle look' : 'Turn on sparkle look'}
+            >
+              <FontAwesome name="magic" size={14} color={isFilterActive ? '#f39c12' : '#fff'} />
+              <Text style={styles.replaceMediaText}>{isFilterActive ? 'Look on' : 'Look'}</Text>
             </TouchableOpacity>
           ) : null}
         </View>
@@ -616,7 +770,7 @@ export default function ReflectionComposer({
               (isSending || isAiThinking) && styles.chipDisabled
             ]} 
             onPress={handlePreview}
-            disabled={isSending || isAiThinking}
+            disabled={isSending || isAiThinking || lookExtractBusy}
           >
             <FontAwesome name="eye" size={20} color="#fff" />
             <Text style={styles.actionChipText}>Preview</Text>
@@ -633,9 +787,9 @@ export default function ReflectionComposer({
               (!caption && !hasRecordedAudio) && styles.chipDisabled
             ]}
             onPress={handleSendWithThrottle}
-            disabled={isSending || (!caption && !hasRecordedAudio)}
+            disabled={isSending || lookExtractBusy || (!caption && !hasRecordedAudio)}
           >
-            {isSending ? (
+            {isSending || lookExtractBusy ? (
               <ActivityIndicator color="#fff" size="small" />
             ) : (
               <>
@@ -724,7 +878,7 @@ export default function ReflectionComposer({
   );
 
   return (
-    <GestureHandlerRootView style={styles.container}>
+    <GestureHandlerRootView style={[styles.container, { paddingTop: insets.top }]}>
       {/* 1. IMMERSIVE MEDIA */}
       {renderBackground()}
 
@@ -754,6 +908,8 @@ export default function ReflectionComposer({
         index={0}
         snapPoints={snapPoints}
         onChange={handleSheetChange}
+        topInset={insets.top}
+        bottomInset={insets.bottom}
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.sheetHandle}
         keyboardBehavior="interactive"
@@ -761,7 +917,7 @@ export default function ReflectionComposer({
         enablePanDownToClose={false}
         enableOverDrag={false}
       >
-        <BottomSheetView style={styles.sheetContent}>
+        <BottomSheetView style={[styles.sheetContent, { paddingBottom: insets.bottom + 8 }]}>
           {activeTab === 'main' && renderMainTab()}
           {activeTab === 'voice' && renderVoiceTab()}
           {activeTab === 'text' && renderTextTab()}
@@ -784,7 +940,7 @@ export default function ReflectionComposer({
           setPreviewEvent(null);
         }}
         isSending={isSending}
-        isSendDisabled={isBlockedByAi || (!caption && !hasRecordedAudio)}
+        isSendDisabled={isBlockedByAi || lookExtractBusy || (!caption && !hasRecordedAudio)}
       />
 
       <Modal visible={trimModalOpen} transparent animationType="fade" onRequestClose={() => setTrimModalOpen(false)}>
@@ -856,6 +1012,7 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     height: 350,
+    zIndex: 1,
   },
   videoToolsRow: {
     position: 'absolute',
@@ -957,7 +1114,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    zIndex: 10,
+    zIndex: 30,
   },
   topControlsLeft: {
     flexDirection: 'row',

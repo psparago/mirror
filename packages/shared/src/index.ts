@@ -34,3 +34,6 @@ export * from './utils/avatarDefaults';
 
 // State machines
 export * from './machines/playerMachine';
+
+// Video (cloud master / expo-video helpers)
+export * from './video/cloudMasterVideo';

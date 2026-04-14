@@ -1,5 +1,5 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
-import { Event, EventMetadata, playerMachine } from '@projectmirror/shared';
+import { Event, EventMetadata, getCloudMasterTrimWindow, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
@@ -144,7 +144,8 @@ export function ReplayModal({
         
         try {
           videoPlayer.pause();
-          videoPlayer.currentTime = 0;
+          const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
+          seekVideoToSeconds(videoPlayer, trim.active ? trim.startSec : 0);
         } catch (e) {}
       },
 
@@ -196,7 +197,15 @@ export function ReplayModal({
       },
 
       playVideo: () => {
-        videoPlayer.play();
+        try {
+          const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
+          if (trim.active) {
+            seekVideoToSeconds(videoPlayer, trim.startSec);
+          }
+          videoPlayer.play();
+        } catch (e) {
+          console.warn('[ReplayModal] playVideo failed:', e);
+        }
       },
 
       playAudio: async () => {
@@ -245,7 +254,18 @@ export function ReplayModal({
       },
       
       resumeMedia: () => {
-        videoPlayer.play();
+        try {
+          const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
+          if (trim.active) {
+            const t = videoPlayer.currentTime;
+            if (t >= trim.endSec - 0.05 || t < trim.startSec - 0.05) {
+              seekVideoToSeconds(videoPlayer, trim.startSec);
+            }
+          }
+          videoPlayer.play();
+        } catch (e) {
+          console.warn('[ReplayModal] resumeMedia video failed:', e);
+        }
         if (soundRef.current) soundRef.current.playAsync();
         if (captionSoundRef.current) captionSoundRef.current.playAsync();
       },
@@ -328,6 +348,54 @@ export function ReplayModal({
     });
     return () => subscription.remove();
   }, [videoPlayer, send]);
+
+  // Cloud master: pause at metadata end and finish the video state (full file may extend past window).
+  useEffect(() => {
+    if (!visible) {
+      try {
+        videoPlayer.timeUpdateEventInterval = 0;
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    const trim = getCloudMasterTrimWindow(event?.metadata);
+    if (!trim.active || !event?.video_url) {
+      try {
+        videoPlayer.timeUpdateEventInterval = 0;
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    const endSec = trim.endSec;
+    videoPlayer.timeUpdateEventInterval = 0.1;
+    const sub = videoPlayer.addListener('timeUpdate', () => {
+      if (videoPlayer.currentTime >= endSec - 0.03) {
+        try {
+          videoPlayer.pause();
+        } catch {
+          /* ignore */
+        }
+        sendRef.current({ type: 'VIDEO_FINISHED' });
+      }
+    });
+    return () => {
+      try {
+        videoPlayer.timeUpdateEventInterval = 0;
+      } catch {
+        /* ignore */
+      }
+      sub.remove();
+    };
+  }, [
+    visible,
+    event?.event_id,
+    event?.video_url,
+    event?.metadata?.video_start_ms,
+    event?.metadata?.video_end_ms,
+    videoPlayer,
+  ]);
 
 
   // Helper to normalize audio URLs

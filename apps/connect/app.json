@@ -24,8 +24,8 @@
         "CFBundleName": "Reflections Connect V2",
         "CFBundleAllowMixedLocalizations": true,
         "NSMicrophoneUsageDescription": "Allow access to the microphone to record audio for your Reflections.",
-        "NSCameraUsageDescription": "Allow access to the camera to record video Reflections.",
-        "NSPhotoLibraryUsageDescription": "Allow access to your photo library to save or upload videos for your Reflections."
+        "NSCameraUsageDescription": "Allow Reflections Connect to access your camera to capture photos and videos for your Reflections.",
+        "NSPhotoLibraryUsageDescription": "Allow Reflections Connect to access your photo library to choose images and videos for your Reflections."
       }
     },
     "config": {
@@ -60,16 +60,25 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow Reflection Companion to access your camera to send video responses.",
-          "microphonePermission": "Allow Reflection Companion to access your microphone for video and audio features."
+          "cameraPermission": "Allow Reflections Connect to access your camera to send video responses.",
+          "microphonePermission": "Allow Reflections Connect to access your microphone for video and audio features."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Reflection Companion to access your photos."
+          "photosPermission": "Allow Reflections Connect to access your photos to create Reflections."
         }
       ],
+      [
+        "with-rn-image-crop-picker",
+        {
+          "PhotoLibraryUsageDescription": "Allow Reflections Connect to access your photo library to choose images and videos for your Reflections.",
+          "CameraUsageDescription": "Allow Reflections Connect to access your camera to capture photos and videos for your Reflections.",
+          "MicrophoneUsageDescription": "Allow Reflections Connect to access your microphone when recording video Reflections."
+        }
+      ],
+      "./plugins/reactNativeImageFilterKit",
       [
         "expo-build-properties",
         {

@@ -1,5 +1,12 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { Event, EventMetadata, playerMachine, useThrottledCallback } from '@projectmirror/shared';
+import {
+  Event,
+  EventMetadata,
+  getCloudMasterTrimWindow,
+  playerMachine,
+  seekVideoToSeconds,
+  useThrottledCallback,
+} from '@projectmirror/shared';
 
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
@@ -366,7 +373,8 @@ export default function MainStageView({
         if (playerRef.current) {
           try {
             playerRef.current.pause();
-            playerRef.current.currentTime = 0;
+            const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+            seekVideoToSeconds(playerRef.current, trim.active ? trim.startSec : 0);
           } catch (err) {
             console.warn('Silent failure stopping player:', err);
           }
@@ -502,8 +510,8 @@ export default function MainStageView({
 
         debugLog(`🎬 playVideo called: status=${playerRef.current.status}`);
 
-        // Reset to start
-        playerRef.current.currentTime = 0;
+        const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+        seekVideoToSeconds(playerRef.current, trim.active ? trim.startSec : 0);
 
         // Trigger bubble animation
         selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
@@ -686,6 +694,13 @@ export default function MainStageView({
 
       resumeMedia: async () => {
         if (playerRef.current && stateRef.current?.hasTag('video_mode')) {
+          const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+          if (trim.active) {
+            const t = playerRef.current.currentTime;
+            if (t >= trim.endSec - 0.05 || t < trim.startSec - 0.05) {
+              seekVideoToSeconds(playerRef.current, trim.startSec);
+            }
+          }
           playerRef.current.play();
         }
         if (soundRef.current) await soundRef.current.playAsync();
@@ -1053,14 +1068,21 @@ export default function MainStageView({
         const currentState = stateRef.current;
         const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
-        if (isInPlayingState && player.duration > 0 && player.currentTime >= player.duration - 0.5) {
-          debugLog('🏁 Video finished (detected via playingChange near end)');
-          sendRef.current({ type: 'VIDEO_FINISHED' });
+        const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+        if (isInPlayingState && player.duration > 0) {
+          if (trim.active) {
+            // Trim window end is handled by the cloud-master `timeUpdate` listener.
+            return;
+          }
+          if (player.currentTime >= player.duration - 0.5) {
+            debugLog('🏁 Video finished (detected via playingChange near end)');
+            sendRef.current({ type: 'VIDEO_FINISHED' });
 
-          const currentEventId = selectedEventRef.current?.event_id || null;
-          if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
-            lastVideoFinishedEventIdRef.current = currentEventId;
-            onPlaybackIdleRef.current?.();
+            const currentEventId = selectedEventRef.current?.event_id || null;
+            if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
+              lastVideoFinishedEventIdRef.current = currentEventId;
+              onPlaybackIdleRef.current?.();
+            }
           }
         }
       }
@@ -1229,6 +1251,13 @@ export default function MainStageView({
     if (isMachinePlayingVideo && !isFinished) {
       if (!isVideoPlaying) {
         debugLog('⚡ Hardware Sync: Playing Video');
+        const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+        if (trim.active) {
+          const t = player.currentTime;
+          if (t >= trim.endSec - 0.05 || t < trim.startSec - 0.05) {
+            seekVideoToSeconds(player, trim.startSec);
+          }
+        }
         player.play();
       }
     }
@@ -1406,12 +1435,59 @@ export default function MainStageView({
     };
   }, [player, send]);
 
+  // Cloud master: pause at metadata end (full file may extend past the visible window).
+  useEffect(() => {
+    if (!player || !selectedEvent?.video_url) return;
+    const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+    if (!trim.active) {
+      return;
+    }
+    const endSec = trim.endSec;
+    player.timeUpdateEventInterval = 0.1;
+    const sub = player.addListener('timeUpdate', () => {
+      const currentState = stateRef.current;
+      const isInPlayingState =
+        currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+        currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+      if (!isInPlayingState) return;
+      if (player.currentTime >= endSec - 0.03) {
+        try {
+          player.pause();
+        } catch {
+          /* ignore */
+        }
+        debugLog('🏁 Cloud master: trim window end (timeUpdate)');
+        sendRef.current({ type: 'VIDEO_FINISHED' });
+        const currentEventId = selectedEventRef.current?.event_id || null;
+        if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
+          lastVideoFinishedEventIdRef.current = currentEventId;
+          onPlaybackIdleRef.current?.();
+        }
+      }
+    });
+    return () => {
+      sub.remove();
+      try {
+        player.timeUpdateEventInterval = 0.25;
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [
+    player,
+    selectedEvent?.event_id,
+    selectedEvent?.video_url,
+    selectedMetadata?.video_start_ms,
+    selectedMetadata?.video_end_ms,
+  ]);
+
   // 3. Rewind video on completion for deep dive context
   useEffect(() => {
     if (state?.matches('finished') && player && (selectedMetadata?.content_type === 'video' || !!selectedEvent?.video_url)) {
       debugLog('🏁 Rewinding video to start for deep dive context');
       player.pause();
-      player.currentTime = 0;
+      const trim = getCloudMasterTrimWindow(selectedMetadata);
+      seekVideoToSeconds(player, trim.active ? trim.startSec : 0);
     }
   }, [state?.matches('finished'), player, selectedMetadata, selectedEvent]);
 

@@ -1,6 +1,10 @@
 import ReflectionComposer, { type ComposerVideoMeta } from '@/components/ReflectionComposer';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
+import {
+  deleteScratchMediaFile,
+  prepareImageForUpload,
+  prepareVideoForUpload,
+} from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
@@ -154,6 +158,12 @@ export default function CreationModal({
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search' | 'gallery'>('camera');
+  /** Local extract from Look (B&W); forces photo binary re-upload when editing a remote poster. */
+  const [composerFilteredPhotoUri, setComposerFilteredPhotoUri] = useState<string | null>(null);
+  const composerFilteredPhotoUriRef = useRef<string | null>(null);
+  useEffect(() => {
+    composerFilteredPhotoUriRef.current = composerFilteredPhotoUri;
+  }, [composerFilteredPhotoUri]);
   const [isCompanionInReflection, setIsCompanionInReflection] = useState(false);
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
   const [isSelfie, setIsSelfie] = useState(false);
@@ -198,6 +208,9 @@ export default function CreationModal({
       composerVideoMetaRef.current = null;
       setIsEditingExistingReflection(false);
       setShowDescriptionInput(false);
+      void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
+      composerFilteredPhotoUriRef.current = null;
+      setComposerFilteredPhotoUri(null);
       return;
     }
 
@@ -718,6 +731,7 @@ export default function CreationModal({
     audioUri?: string | null;
     deepDive?: string | null;
     videoMeta?: ComposerVideoMeta | null;
+    filteredPhotoUri?: string | null;
   }) => {
     if (!photo) return;
 
@@ -736,6 +750,29 @@ export default function CreationModal({
       return;
     }
 
+    const MAX_SOURCE_VIDEO_SECONDS = 60;
+    if (mediaType === 'video' && videoUri) {
+      const isLocalVideo =
+        !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
+      if (isLocalVideo) {
+        let durSec = videoPlayer.duration > 0 ? videoPlayer.duration : 0;
+        if (durSec <= 0) {
+          for (let i = 0; i < 50; i++) {
+            await new Promise((r) => setTimeout(r, 80));
+            durSec = videoPlayer.duration > 0 ? videoPlayer.duration : 0;
+            if (durSec > 0) break;
+          }
+        }
+        if (durSec > MAX_SOURCE_VIDEO_SECONDS) {
+          Alert.alert(
+            'Video too long',
+            `Source videos must be ${MAX_SOURCE_VIDEO_SECONDS} seconds or less. Use Trim to choose a shorter segment before sending.`
+          );
+          return;
+        }
+      }
+    }
+
     const editIdMeta = editSourceEventIdRef.current;
     const replacedMeta = mediaReplacedDuringEditRef.current;
     const hasNewLocalVoiceMeta = !!(activeAudioUri && activeAudioUri.startsWith('file'));
@@ -749,8 +786,18 @@ export default function CreationModal({
       !!videoUri &&
       (videoUri.startsWith('http://') || videoUri.startsWith('https://'));
     const remoteMediaUnchanged = remotePoster || remoteVideo;
+    const filteredForUpload =
+      overrides?.filteredPhotoUri != null && overrides.filteredPhotoUri.length > 0
+        ? overrides.filteredPhotoUri
+        : null;
+    const photoLookNeedsBinaryUpload =
+      mediaType === 'photo' &&
+      remotePoster &&
+      !!(composerFilteredPhotoUriRef.current || composerFilteredPhotoUri);
 
-    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged) {
+    // Cloud master: remote poster and/or remote video unchanged — no S3 media re-upload; Firestore-only (incl. trim/thumbnail).
+    // Photo + Look (baked extract): must re-upload image.jpg so Explorer sees the filtered poster.
+    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoLookNeedsBinaryUpload) {
       try {
         setUploading(true);
         const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
@@ -808,7 +855,12 @@ export default function CreationModal({
           }
         }
         patch['metadata.last_edited_at'] = new Date().toISOString();
-        await updateDoc(ref, patch as Record<string, string | ReturnType<typeof deleteField>>);
+        // Root `timestamp` drives Explorer `orderBy('timestamp','desc')` so edits surface as newest.
+        patch['timestamp'] = serverTimestamp();
+        await updateDoc(
+          ref,
+          patch as Record<string, string | ReturnType<typeof deleteField> | ReturnType<typeof serverTimestamp>>
+        );
         showToast('✅ Reflection updated');
         suppressPickerRecoveryRef.current = true;
         setPhoto(null);
@@ -838,6 +890,9 @@ export default function CreationModal({
         mediaReplacedDuringEditRef.current = false;
         setIsEditingExistingReflection(false);
         composerVideoMetaRef.current = null;
+        void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
+        composerFilteredPhotoUriRef.current = null;
+        setComposerFilteredPhotoUri(null);
         sheetRef.current?.close();
         onClose();
         if (audioRecorder.isRecording) {
@@ -855,6 +910,7 @@ export default function CreationModal({
     let tempThumbnail: string | null = null;
     let tempCompressedVideo: string | null = null;
     let tempGatekeptImage: string | null = null;
+    let tempFilteredExtractPng: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
     let finalDeepDiveAudio = aiDeepDiveAudioUrl;
       const stagingTtsKeysToDelete: string[] = [];
@@ -923,12 +979,19 @@ export default function CreationModal({
       const eventID = editSourceEventIdRef.current || Date.now().toString();
       const startedAsEditBundle = !!editSourceEventIdRef.current;
       const lastEditedAtIso = startedAsEditBundle ? new Date().toISOString() : undefined;
+      /** Cloud master: do not re-upload the S3 master when editing trim/thumbnail on an existing remote video. */
+      const skipVideoMasterReupload =
+        startedAsEditBundle &&
+        !replacedMeta &&
+        mediaType === 'video' &&
+        typeof videoUri === 'string' &&
+        (videoUri.startsWith('http://') || videoUri.startsWith('https://'));
       debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
       // 1. Prepare list of files to upload (media only; metadata lives on Firestore)
       const filesToSign = ['image.jpg'];
-      if (mediaType === 'video' && videoUri) {
+      if (mediaType === 'video' && videoUri && !skipVideoMasterReupload) {
         filesToSign.push('video.mp4');
       }
 
@@ -989,6 +1052,10 @@ export default function CreationModal({
 
       // 3. Prepare Image Source
       let imageSource = photo.uri;
+      if (mediaType === 'photo' && filteredForUpload) {
+        imageSource = filteredForUpload;
+        tempFilteredExtractPng = filteredForUpload;
+      }
 
       if (mediaType === 'video' && videoUri) {
         // Generate thumbnail
@@ -998,7 +1065,11 @@ export default function CreationModal({
         });
         imageSource = uri;
         tempThumbnail = uri; // Mark for cleanup
-      } else if (stagingEventId && stagingEventId !== editSourceEventIdRef.current) {
+      } else if (
+        !filteredForUpload &&
+        stagingEventId &&
+        stagingEventId !== editSourceEventIdRef.current
+      ) {
         // If Staging exists, fetch the READ URL for the staging image
         // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
         const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
@@ -1015,10 +1086,11 @@ export default function CreationModal({
         // - remote (staging GET URL) needs download + resize
         // - video thumbnails may be >1080 and must be resized
         // All photo flows already go through Gatekeeper on selection/capture.
-        const gatekeptImageUri =
-          imageSource.startsWith('http') || mediaType === 'video'
-            ? await prepareImageForUpload(imageSource)
-            : imageSource;
+        const needsImageGatekeeper =
+          imageSource.startsWith('http') || mediaType === 'video' || !!filteredForUpload;
+        const gatekeptImageUri = needsImageGatekeeper
+          ? await prepareImageForUpload(imageSource)
+          : imageSource;
 
         if (gatekeptImageUri !== imageSource) {
           tempGatekeptImage = gatekeptImageUri;
@@ -1032,28 +1104,20 @@ export default function CreationModal({
         console.error('❌ uploadEventBundle: Missing image.jpg presigned URL');
       }
 
-      // 5. Queue Video Upload
-      if (mediaType === 'video' && videoUri && urls['video.mp4']) {
-        const vmTrim = composerVideoMetaRef.current;
+      // 5. Queue Video Upload (full master only; trim is metadata — skip when editing existing remote master)
+      if (mediaType === 'video' && videoUri && urls['video.mp4'] && !skipVideoMasterReupload) {
         const isLocalVideo =
           !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
         let uploadUri: string = videoUri;
-        if (
-          isLocalVideo &&
-          vmTrim &&
-          vmTrim.video_end_ms > vmTrim.video_start_ms
-        ) {
+        if (isLocalVideo) {
           try {
-            const compressed = await prepareVideoForUpload(videoUri, {
-              startTime: vmTrim.video_start_ms,
-              endTime: vmTrim.video_end_ms,
-            });
+            const compressed = await prepareVideoForUpload(videoUri);
             if (compressed && compressed !== videoUri) {
               tempCompressedVideo = compressed;
               uploadUri = compressed;
             }
           } catch (compressErr) {
-            console.warn('Video compress/trim failed; uploading original file:', compressErr);
+            console.warn('Video compress failed; uploading original file:', compressErr);
           }
         }
         uploadPromises.push(
@@ -1233,9 +1297,15 @@ export default function CreationModal({
       if (tempGatekeptImage) {
         safeDeleteCacheFile(tempGatekeptImage).catch(() => { });
       }
+      if (tempFilteredExtractPng) {
+        void deleteScratchMediaFile(tempFilteredExtractPng);
+      }
       if (tempCompressedVideo) {
         safeDeleteCacheFile(tempCompressedVideo).catch(() => { });
       }
+      void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
+      composerFilteredPhotoUriRef.current = null;
+      setComposerFilteredPhotoUri(null);
       setUploading(false);
     }
   };
@@ -1295,6 +1365,9 @@ export default function CreationModal({
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
+    void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
+    composerFilteredPhotoUriRef.current = null;
+    setComposerFilteredPhotoUri(null);
   };
 
   const retakePhoto = async () => {
@@ -1335,6 +1408,9 @@ export default function CreationModal({
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
+    void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
+    composerFilteredPhotoUriRef.current = null;
+    setComposerFilteredPhotoUri(null);
   };
 
   const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
@@ -1954,7 +2030,7 @@ export default function CreationModal({
           ) : showComposer && photo ? (
             <View style={styles.composerContainer}>
               <ReflectionComposer
-                mediaUri={photo.uri}
+                mediaUri={mediaType === 'video' && videoUri ? videoUri : photo.uri}
                 mediaType={mediaType}
                 initialCaption={description}
                 initialVideoMeta={initialVideoMetaForComposer}
@@ -1981,12 +2057,14 @@ export default function CreationModal({
                     targetCaption: targetCaption || description || undefined
                   });
                 }}
+                onFilteredUriChange={setComposerFilteredPhotoUri}
                 onSend={(data) => {
                   uploadEventBundle({
                     caption: data.caption,
                     audioUri: data.audioUri,
                     deepDive: data.deepDive,
                     videoMeta: data.videoMeta,
+                    filteredPhotoUri: data.filteredPhotoUri,
                   });
                 }}
                 audioRecorder={audioRecorder}

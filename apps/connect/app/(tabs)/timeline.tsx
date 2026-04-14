@@ -2,12 +2,26 @@ import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useAuth, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, FlatList, Modal, SafeAreaView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  AppState,
+  FlatList,
+  Modal,
+  Pressable,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
 import { ReplayModal } from '@/components/ReplayModal';
 import { Event, EventMetadata } from '@projectmirror/shared';
@@ -125,6 +139,25 @@ function reflectionSenderLabel(item: SentReflection): string | undefined {
   return item.metadata?.sender || item.sender;
 }
 
+/**
+ * Whether this row is the current Companion's own reflection (for showing Edit).
+ * Firestore often has `metadata.sender_id` but omits root `sender_id`; older rows may only match by display name.
+ */
+function timelineRowIsOwnedByCurrentCompanion(
+  item: SentReflection,
+  authUid: string | undefined,
+  currentIdentity: string | null
+): boolean {
+  if (!authUid) return false;
+  if (item.sender_id === authUid) return true;
+  if (item.metadata?.sender_id === authUid) return true;
+  if (currentIdentity) {
+    const label = reflectionSenderLabel(item);
+    if (label?.toLowerCase() === currentIdentity.toLowerCase()) return true;
+  }
+  return false;
+}
+
 type SentTimelineScreenProps = {
   /** Open CreationModal in edit mode for this reflection (same Explorer). */
   onEditReflection?: (event: Event) => void;
@@ -168,6 +201,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
     AsyncStorage.setItem(FILTER_STORAGE_KEY, val).catch(() => {});
   }, []);
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
+  /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
+  const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
   /** True total Firestore reflection signals for this Explorer (list query is capped at 100). */
   const [totalReflectionCount, setTotalReflectionCount] = useState<number | null>(null);
@@ -1035,19 +1070,42 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                     </View>
                   ) : null}
                   <View style={styles.reflectionInfo}>
-                    {/* ROW 1 — Caption (full width) */}
-                    {reflectionBlurb(item) ? (
-                      <View style={styles.captionRow}>
-                        {item.metadata?.content_type === 'video' ? (
-                          <FontAwesome name="video-camera" size={13} color="#e0e0e0" />
-                        ) : (
-                          <FontAwesome name="image" size={13} color="#e0e0e0" />
-                        )}
-                        <Text style={styles.description} numberOfLines={2}>
-                          {reflectionBlurb(item)}
-                        </Text>
-                      </View>
-                    ) : null}
+                    {/* ROW 1 — Caption + overflow (⋮); caption flexes so it never sits under actions */}
+                    <View style={styles.infoTopRow}>
+                      {reflectionBlurb(item) ? (
+                        <View style={styles.captionRow}>
+                          {item.metadata?.content_type === 'video' ? (
+                            <FontAwesome name="video-camera" size={13} color="#e0e0e0" />
+                          ) : (
+                            <FontAwesome name="image" size={13} color="#e0e0e0" />
+                          )}
+                          <Text style={styles.description} numberOfLines={2} ellipsizeMode="tail">
+                            {reflectionBlurb(item)}
+                          </Text>
+                        </View>
+                      ) : (
+                        <View style={styles.captionRowSpacer} />
+                      )}
+                      {(() => {
+                        const canEditRow =
+                          !!onEditReflection &&
+                          timelineRowIsOwnedByCurrentCompanion(item, authUser?.uid, currentIdentity);
+                        const canDeleteRow =
+                          !!currentIdentity &&
+                          reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase();
+                        if (!canEditRow && !canDeleteRow) return null;
+                        return (
+                          <TouchableOpacity
+                            style={styles.overflowMenuButton}
+                            onPress={() => setReflectionActionMenu(item)}
+                            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                            accessibilityLabel="Reflection actions"
+                          >
+                            <FontAwesome name="ellipsis-v" size={18} color="rgba(255,255,255,0.75)" />
+                          </TouchableOpacity>
+                        );
+                      })()}
+                    </View>
 
                     {/* ROW 2 — Status + selfie badge */}
                     <View style={styles.statusRow}>
@@ -1150,47 +1208,22 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                       )}
                     </Text>
 
-                    {/* ACTION ICONS — pinned top-right of card info area */}
-                    <View style={styles.cardActions}>
-                      {onEditReflection &&
-                        authUser?.uid &&
-                        item.sender_id === authUser.uid &&
-                        item.metadata?.people_context_hints !== undefined && (
-                          <TouchableOpacity
-                            style={styles.editReflectionButton}
-                            onPress={async () => {
-                              const event = await resolveEventForEdit(item);
-                              if (event) onEditReflection?.(event);
-                            }}
-                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          >
-                            <FontAwesome name="pencil" size={16} color="#4FC3F7" />
-                          </TouchableOpacity>
-                        )}
-                      {currentIdentity &&
-                        reflectionSenderLabel(item)?.toLowerCase() === currentIdentity.toLowerCase() && (
-                        <TouchableOpacity
-                          style={styles.deleteReflectionButton}
-                          onPress={() => {
-                            Alert.alert(
-                              'Delete Reflection',
-                              'Are you sure you want to permanently delete this reflection?',
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                {
-                                  text: 'Delete',
-                                  style: 'destructive',
-                                  onPress: () => deleteReflection(item),
-                                },
-                              ]
-                            );
-                          }}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                        >
-                          <FontAwesome name="trash-o" size={16} color="#ef5350" />
-                        </TouchableOpacity>
-                      )}
-                    </View>
+                    <Pressable
+                      onPress={async () => {
+                        try {
+                          await Clipboard.setStringAsync(item.event_id);
+                          showToast('Copied reflection ID');
+                        } catch {
+                          showToast('Could not copy');
+                        }
+                      }}
+                      style={({ pressed }) => [styles.eventIdPressable, pressed && styles.eventIdPressablePressed]}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Reflection ID ${item.event_id}`}
+                      accessibilityHint="Copies the reflection ID to the clipboard"
+                    >
+                      <Text style={styles.eventIdText}>{item.event_id}</Text>
+                    </Pressable>
                   </View>
                 </View>
               </TouchableOpacity>
@@ -1208,6 +1241,75 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         event={selectedReflection}
         onClose={() => setSelectedReflection(null)}
       />
+
+      <Modal
+        visible={!!reflectionActionMenu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReflectionActionMenu(null)}
+      >
+        <View style={styles.actionMenuOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setReflectionActionMenu(null)} />
+          <View style={styles.actionMenuSheet}>
+            {reflectionActionMenu &&
+              (() => {
+                const row = reflectionActionMenu;
+                const menuCanEdit =
+                  !!onEditReflection &&
+                  timelineRowIsOwnedByCurrentCompanion(row, authUser?.uid, currentIdentity);
+                const menuCanDelete =
+                  !!currentIdentity &&
+                  reflectionSenderLabel(row)?.toLowerCase() === currentIdentity.toLowerCase();
+                return (
+                  <>
+                    {menuCanEdit && (
+                      <TouchableOpacity
+                        style={[styles.actionMenuRow, !menuCanDelete && styles.actionMenuRowLast]}
+                        activeOpacity={0.75}
+                        onPress={async () => {
+                          setReflectionActionMenu(null);
+                          const event = await resolveEventForEdit(row);
+                          if (event) onEditReflection?.(event);
+                        }}
+                      >
+                        <View style={styles.editReflectionButton}>
+                          <FontAwesome name="pencil" size={16} color="#4FC3F7" />
+                        </View>
+                        <Text style={styles.actionMenuLabel}>Edit reflection</Text>
+                      </TouchableOpacity>
+                    )}
+                    {menuCanDelete && (
+                      <TouchableOpacity
+                        style={[styles.actionMenuRow, styles.actionMenuRowLast]}
+                        activeOpacity={0.75}
+                        onPress={() => {
+                          setReflectionActionMenu(null);
+                          Alert.alert(
+                            'Delete Reflection',
+                            'Are you sure you want to permanently delete this reflection?',
+                            [
+                              { text: 'Cancel', style: 'cancel' },
+                              {
+                                text: 'Delete',
+                                style: 'destructive',
+                                onPress: () => deleteReflection(row),
+                              },
+                            ]
+                          );
+                        }}
+                      >
+                        <View style={styles.deleteReflectionButton}>
+                          <FontAwesome name="trash-o" size={16} color="#ef5350" />
+                        </View>
+                        <Text style={styles.actionMenuLabel}>Delete reflection</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
+                );
+              })()}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1279,19 +1381,34 @@ const styles = StyleSheet.create({
   },
   reflectionInfo: {
     flex: 1,
-    position: 'relative',
+    minWidth: 0,
+  },
+  infoTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginBottom: 6,
   },
   captionRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginBottom: 6,
-    paddingRight: 56,
+    minWidth: 0,
+  },
+  captionRowSpacer: {
+    flex: 1,
+  },
+  overflowMenuButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    marginTop: -2,
   },
   description: {
     fontSize: 14,
     color: '#fff',
     flex: 1,
+    minWidth: 0,
   },
   statusRow: {
     flexDirection: 'row',
@@ -1334,6 +1451,22 @@ const styles = StyleSheet.create({
     color: '#aaa',
     marginTop: 2,
   },
+  eventIdPressable: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
+    paddingVertical: 4,
+    paddingRight: 4,
+    borderRadius: 4,
+  },
+  eventIdPressablePressed: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  eventIdText: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(200, 210, 220, 0.85)',
+    fontVariant: ['tabular-nums'],
+  },
   sentDateEdited: {
     fontSize: 12,
     color: '#aaa',
@@ -1343,13 +1476,38 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
   },
-  cardActions: {
-    position: 'absolute',
-    top: -2,
-    right: 0,
+  actionMenuOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  actionMenuSheet: {
+    minWidth: 260,
+    maxWidth: '88%',
+    borderRadius: 14,
+    backgroundColor: 'rgba(34, 34, 34, 0.98)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+    zIndex: 1,
+  },
+  actionMenuRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.12)',
+  },
+  actionMenuRowLast: {
+    borderBottomWidth: 0,
+  },
+  actionMenuLabel: {
+    fontSize: 16,
+    color: '#fff',
+    fontWeight: '600',
   },
   editReflectionButton: {
     paddingVertical: 8,

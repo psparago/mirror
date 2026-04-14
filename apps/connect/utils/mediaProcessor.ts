@@ -4,16 +4,8 @@ import { Image as RNImage } from 'react-native';
 import { Video } from 'react-native-compressor';
 
 const MAX_UPLOAD_WIDTH_PX = 1080;
-const MAX_IMAGE_WIDTH = 1080;
 const VIDEO_BITRATE = 5 * 1000 * 1000; // 5 Mbps
 const MAX_VIDEO_RESOLUTION = 1080; // 1080p
-
-export type PrepareVideoForUploadOptions = {
-  /** Trim start in milliseconds (passed through to native compressor on iOS). */
-  startTime?: number;
-  /** Trim end in milliseconds. */
-  endTime?: number;
-};
 
 function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
@@ -69,14 +61,17 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
     }
 
     const size = await getImageSizeAsync(localUri);
+    // Native crop (e.g. react-native-image-crop-picker at 1080×1080) is already ≤ 1080 wide; only resize when wider.
     const shouldDownscale = !size ? true : size.width > MAX_UPLOAD_WIDTH_PX;
 
-    const actions = shouldDownscale ? [{ resize: { width: MAX_UPLOAD_WIDTH_PX } }] : [];
-
-    const result = await ImageManipulator.manipulateAsync(localUri, actions, {
-      compress: 0.8,
-      format: ImageManipulator.SaveFormat.JPEG,
-    });
+    const result = await ImageManipulator.manipulateAsync(
+      localUri,
+      shouldDownscale ? [{ resize: { width: MAX_UPLOAD_WIDTH_PX } }] : [],
+      {
+        compress: 0.8,
+        format: ImageManipulator.SaveFormat.JPEG,
+      }
+    );
 
     // Best-effort cleanup of intermediate downloaded file (cache only).
     if (downloadedUri && downloadedUri !== result.uri) {
@@ -91,16 +86,10 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
 }
 
 /**
- * Gatekeeper for Videos
- * - Compresses to H.264
- * - Downscales to 1080p
- * - Caps bitrate at 5Mbps
- * - Optional trim: `startTime` / `endTime` in **milliseconds** (iOS native path; Android may ignore trim until supported).
+ * Gatekeeper for videos: compress the **full** source file (no physical trim).
+ * Playback windows (`video_start_ms` / `video_end_ms`) are metadata-only (cloud master).
  */
-export async function prepareVideoForUpload(
-  uri: string,
-  options?: PrepareVideoForUploadOptions
-): Promise<string> {
+export async function prepareVideoForUpload(uri: string): Promise<string> {
   try {
     console.log(`🎬 Compressing video: ${uri}`);
 
@@ -111,16 +100,6 @@ export async function prepareVideoForUpload(
       minimumFileSizeForCompress: 2,
     };
 
-    if (
-      options &&
-      typeof options.startTime === 'number' &&
-      typeof options.endTime === 'number' &&
-      options.endTime > options.startTime
-    ) {
-      compressOptions.startTime = options.startTime;
-      compressOptions.endTime = options.endTime;
-    }
-
     const result = await Video.compress(uri, compressOptions as never, () => {});
 
     const finalUri = result.startsWith('file://') ? result : `file://${result}`;
@@ -130,5 +109,15 @@ export async function prepareVideoForUpload(
   } catch (error) {
     console.error('[prepareVideoForUpload] failed:', error);
     return uri;
+  }
+}
+
+/** Best-effort delete of a local scratch file (e.g. filter-kit extract PNG, gatekeeper JPEG). */
+export async function deleteScratchMediaFile(uri: string | null | undefined): Promise<void> {
+  if (!uri || isRemoteUri(uri)) return;
+  try {
+    await FileSystem.deleteAsync(uri, { idempotent: true });
+  } catch {
+    /* ignore */
   }
 }
