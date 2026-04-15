@@ -244,16 +244,20 @@ export default function ReflectionComposer({
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
 
-  const looksBarBottom = useMemo(
-    () => screenHeight * 0.18 + Math.max(insets.bottom, 12) + 6,
-    [screenHeight, insets.bottom],
-  );
+  /** Top toolbar stack height (must match `topToolbar` padding + chip row). */
+  const TOP_TOOLBAR_BLOCK_PX = 62;
+  /** Photo Looks strip sits directly under the toolbar; media starts below this. */
+  const PHOTO_LOOKS_STRIP_PX = 70;
 
-  const LOOK_OPTIONS: { id: ReflectionFilterType; label: string }[] = [
-    { id: 'original', label: 'Original' },
-    { id: 'clarity', label: 'Clarity' },
-    { id: 'classic', label: 'Classic' },
-    { id: 'warm', label: 'Warm' },
+  const LOOK_OPTIONS: {
+    id: ReflectionFilterType;
+    label: string;
+    icon: React.ComponentProps<typeof FontAwesome>['name'];
+  }[] = [
+    { id: 'original', label: 'Original', icon: 'image' },
+    { id: 'clarity', label: 'Clarity', icon: 'bolt' },
+    { id: 'classic', label: 'Classic', icon: 'adjust' },
+    { id: 'warm', label: 'Warm', icon: 'fire' },
   ];
 
   // AUTO-OPEN SPARKLE HINTS ON MOUNT (when caption is empty — new content fast path)
@@ -679,8 +683,21 @@ export default function ReflectionComposer({
   /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
   const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
 
+  /** Photo: optional Edit-only row above Looks; Sparkle + Close live on the Looks row. */
+  const photoEditBarPx = mediaType === 'photo' && showTopMediaEdit ? TOP_TOOLBAR_BLOCK_PX : 0;
+
   const renderBackground = () => (
-    <View style={[styles.backgroundContainer, { top: insets.top + 62 }]}>
+    <View
+      style={[
+        styles.backgroundContainer,
+        {
+          top:
+            insets.top +
+            (mediaType === 'photo' ? photoEditBarPx : TOP_TOOLBAR_BLOCK_PX) +
+            (mediaType === 'photo' ? PHOTO_LOOKS_STRIP_PX : 0),
+        },
+      ]}
+    >
       {mediaType === 'video' ? (
         <GestureDetector gesture={posterScrubGesture}>
           <View style={styles.media}>
@@ -759,6 +776,25 @@ export default function ReflectionComposer({
 
   const renderTopControls = () => {
     if (isPosterMode) return renderPosterToolbar();
+
+    if (mediaType === 'photo') {
+      if (!showTopMediaEdit) return null;
+      return (
+        <View style={[styles.topToolbar, { top: insets.top }]}>
+          <View style={[styles.topToolbarRow, styles.photoTopToolbarRow]}>
+            <TouchableOpacity
+              style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onReplaceMedia}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="pencil" size={16} color="#fff" />
+              <Text style={styles.toolbarChipText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
 
     return (
       <View style={[styles.topToolbar, { top: insets.top }]}>
@@ -1018,31 +1054,67 @@ export default function ReflectionComposer({
       )}
 
       {mediaType === 'photo' && (
-        <View style={[styles.looksBarWrap, { bottom: looksBarBottom }]} pointerEvents="box-none">
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.looksBarScroll}
-            keyboardShouldPersistTaps="handled"
-          >
-            {LOOK_OPTIONS.map((opt) => {
-              const selected = currentFilterType === opt.id;
-              return (
-                <TouchableOpacity
-                  key={opt.id}
-                  style={[styles.lookChip, selected && styles.lookChipSelected]}
-                  onPress={() => {
-                    if (isBlockedByAi || lookExtractBusy) return;
-                    setCurrentFilterType(opt.id);
-                  }}
-                  disabled={isSending || isBlockedByAi || lookExtractBusy}
-                  activeOpacity={0.75}
-                >
-                  <Text style={[styles.lookChipText, selected && styles.lookChipTextSelected]}>{opt.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
+        <View
+          style={[
+            styles.looksBarWrap,
+            { top: insets.top + photoEditBarPx, height: PHOTO_LOOKS_STRIP_PX },
+          ]}
+          pointerEvents="box-none"
+        >
+          <View style={styles.looksToolbar}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.photoLooksScroll}
+              contentContainerStyle={styles.photoLooksScrollContent}
+            >
+              {LOOK_OPTIONS.map((opt) => {
+                const selected = currentFilterType === opt.id;
+                return (
+                  <TouchableOpacity
+                    key={opt.id}
+                    style={[
+                      styles.toolbarChip,
+                      styles.photoLookChip,
+                      selected && styles.toolbarChipActive,
+                      (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 },
+                    ]}
+                    onPress={() => {
+                      if (isBlockedByAi || lookExtractBusy) return;
+                      setCurrentFilterType(opt.id);
+                    }}
+                    disabled={isSending || isBlockedByAi || lookExtractBusy}
+                    activeOpacity={0.7}
+                  >
+                    <FontAwesome
+                      name={opt.icon}
+                      size={16}
+                      color={selected ? '#4FC3F7' : '#fff'}
+                    />
+                    <Text style={[styles.toolbarChipText, selected && { color: '#4FC3F7' }]}>{opt.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.looksToolbarDivider} />
+            <TouchableOpacity
+              style={[styles.toolbarChip, styles.toolbarSparkleChip, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={openSparkleSheet}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="magic" size={16} color={isBlockedByAi ? '#f39c12' : '#f5c842'} />
+              <Text style={[styles.toolbarChipText, { color: '#f5c842' }]}>Sparkle</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onRetake}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
@@ -1321,34 +1393,39 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     zIndex: 26,
-    paddingHorizontal: 12,
-    paddingTop: 6,
   },
-  looksBarScroll: {
+  looksToolbar: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingVertical: 4,
-  },
-  lookChip: {
+    paddingHorizontal: 10,
     paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    backgroundColor: 'rgba(35, 35, 35, 0.92)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.22)',
   },
-  lookChipSelected: {
-    backgroundColor: 'rgba(46, 120, 183, 0.35)',
-    borderColor: 'rgba(79, 195, 247, 0.55)',
+  photoLooksScroll: {
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
   },
-  lookChipText: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 13,
-    fontWeight: '600',
+  photoLooksScrollContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingRight: 4,
   },
-  lookChipTextSelected: {
-    color: '#4FC3F7',
+  photoLookChip: {
+    flexShrink: 0,
+  },
+  looksToolbarDivider: {
+    width: StyleSheet.hairlineWidth * 2,
+    alignSelf: 'stretch',
+    minHeight: 28,
+    marginVertical: 4,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  photoTopToolbarRow: {
+    justifyContent: 'flex-start',
+    marginRight: 0,
   },
   topToolbar: {
     position: 'absolute',
