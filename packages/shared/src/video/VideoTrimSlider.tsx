@@ -1,3 +1,4 @@
+import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
@@ -21,6 +22,7 @@ export interface VideoTrimSliderProps {
 const HANDLE_WIDTH = 24;
 const MIN_RANGE_MS = 500;
 const TRACK_HEIGHT = 44;
+const ZOOM_WINDOW_MS = 4000;
 
 function formatTime(ms: number): string {
   const totalSec = ms / 1000;
@@ -31,19 +33,39 @@ function formatTime(ms: number): string {
 
 export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTimeMs, onChange, onSeek }: VideoTrimSliderProps) {
   const trackWidth = useSharedValue(0);
+  const durationSv = useSharedValue(durationMs);
 
-  // Shared values that drive all visuals on the UI thread
   const startVal = useSharedValue(startMs);
   const endVal = useSharedValue(endMs);
   const playheadMs = useSharedValue(currentTimeMs);
 
-  // Keep shared values in sync with props (for external changes)
-  useEffect(() => { startVal.value = startMs; }, [startMs]);
-  useEffect(() => { endVal.value = endMs; }, [endMs]);
-  useEffect(() => { playheadMs.value = currentTimeMs; }, [currentTimeMs]);
-
-  // Captured at gesture begin so translationX math is always relative to the origin
   const originMs = useSharedValue(0);
+  const isZoomedStart = useSharedValue(false);
+  const isZoomedEnd = useSharedValue(false);
+  /** When zoomed, track maps linearly to [zoom*Ws, zoom*We] (±2s around handle, clipped). */
+  const zoomStartWs = useSharedValue(0);
+  const zoomStartWe = useSharedValue(0);
+  const zoomEndWs = useSharedValue(0);
+  const zoomEndWe = useSharedValue(0);
+
+  const prevStartClamped = useSharedValue(startMs);
+  const prevEndClamped = useSharedValue(endMs);
+
+  useEffect(() => {
+    durationSv.value = durationMs;
+  }, [durationMs, durationSv]);
+
+  useEffect(() => {
+    startVal.value = startMs;
+    prevStartClamped.value = startMs;
+  }, [startMs, startVal]);
+  useEffect(() => {
+    endVal.value = endMs;
+    prevEndClamped.value = endMs;
+  }, [endMs, endVal]);
+  useEffect(() => {
+    playheadMs.value = currentTimeMs;
+  }, [currentTimeMs, playheadMs]);
 
   const emitChange = useCallback(
     (s: number, e: number) => onChange(Math.round(s), Math.round(e)),
@@ -55,69 +77,152 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
     [onSeek],
   );
 
-  const startGesture = Gesture.Pan()
+  const hapticLight = useCallback(() => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }, []);
+
+  const startPan = Gesture.Pan()
     .hitSlop({ top: 20, bottom: 20, left: 16, right: 16 })
     .onBegin(() => {
       'worklet';
       originMs.value = startVal.value;
+      prevStartClamped.value = startVal.value;
     })
     .onUpdate((e) => {
       'worklet';
-      if (trackWidth.value <= 0 || durationMs <= 0) return;
-      const pxPerMs = trackWidth.value / durationMs;
+      const dur = durationSv.value;
+      if (trackWidth.value <= 0 || dur <= 0) return;
+      const tw = trackWidth.value;
+      const winMs = isZoomedStart.value
+        ? Math.max(1, zoomStartWe.value - zoomStartWs.value)
+        : dur;
+      const pxPerMs = tw / winMs;
       const newStart = originMs.value + e.translationX / pxPerMs;
       const clamped = Math.max(0, Math.min(newStart, endVal.value - MIN_RANGE_MS));
+
+      const hitZero = clamped <= 0.5;
+      const hitMinRange = clamped >= endVal.value - MIN_RANGE_MS - 0.5;
+      const wasZero = prevStartClamped.value <= 0.5;
+      const wasMinRange = prevStartClamped.value >= endVal.value - MIN_RANGE_MS - 0.5;
+      if ((hitZero && !wasZero) || (hitMinRange && !wasMinRange)) {
+        runOnJS(hapticLight)();
+      }
+      prevStartClamped.value = clamped;
+
       startVal.value = clamped;
       runOnJS(emitChange)(clamped, endVal.value);
       runOnJS(emitSeek)(clamped);
     });
 
-  const endGesture = Gesture.Pan()
+  const startLongPress = Gesture.LongPress()
+    .minDuration(420)
+    .onStart(() => {
+      'worklet';
+      const d = durationSv.value;
+      const c = startVal.value;
+      const win = Math.min(ZOOM_WINDOW_MS, d);
+      let ws = c - win / 2;
+      if (ws < 0) ws = 0;
+      if (ws + win > d) ws = Math.max(0, d - win);
+      const we = Math.min(d, ws + win);
+      zoomStartWs.value = ws;
+      zoomStartWe.value = we;
+      isZoomedStart.value = true;
+    })
+    .onFinalize(() => {
+      'worklet';
+      isZoomedStart.value = false;
+    });
+
+  const startGesture = Gesture.Simultaneous(startLongPress, startPan);
+
+  const endPan = Gesture.Pan()
     .hitSlop({ top: 20, bottom: 20, left: 16, right: 16 })
     .onBegin(() => {
       'worklet';
       originMs.value = endVal.value;
+      prevEndClamped.value = endVal.value;
     })
     .onUpdate((e) => {
       'worklet';
-      if (trackWidth.value <= 0 || durationMs <= 0) return;
-      const pxPerMs = trackWidth.value / durationMs;
+      const dur = durationSv.value;
+      if (trackWidth.value <= 0 || dur <= 0) return;
+      const tw = trackWidth.value;
+      const winMs = isZoomedEnd.value ? Math.max(1, zoomEndWe.value - zoomEndWs.value) : dur;
+      const pxPerMs = tw / winMs;
       const newEnd = originMs.value + e.translationX / pxPerMs;
-      const clamped = Math.min(durationMs, Math.max(newEnd, startVal.value + MIN_RANGE_MS));
+      const clamped = Math.min(dur, Math.max(newEnd, startVal.value + MIN_RANGE_MS));
+
+      const hitDuration = clamped >= dur - 0.5;
+      const hitMinRange = clamped <= startVal.value + MIN_RANGE_MS + 0.5;
+      const wasDuration = prevEndClamped.value >= dur - 0.5;
+      const wasMinRange = prevEndClamped.value <= startVal.value + MIN_RANGE_MS + 0.5;
+      if ((hitDuration && !wasDuration) || (hitMinRange && !wasMinRange)) {
+        runOnJS(hapticLight)();
+      }
+      prevEndClamped.value = clamped;
+
       endVal.value = clamped;
       runOnJS(emitChange)(startVal.value, clamped);
       runOnJS(emitSeek)(clamped);
     });
 
-  // Animated styles driven by shared values for smooth 60fps updates
+  const endLongPress = Gesture.LongPress()
+    .minDuration(420)
+    .onStart(() => {
+      'worklet';
+      const d = durationSv.value;
+      const c = endVal.value;
+      const win = Math.min(ZOOM_WINDOW_MS, d);
+      let ws = c - win / 2;
+      if (ws < 0) ws = 0;
+      if (ws + win > d) ws = Math.max(0, d - win);
+      const we = Math.min(d, ws + win);
+      zoomEndWs.value = ws;
+      zoomEndWe.value = we;
+      isZoomedEnd.value = true;
+    })
+    .onFinalize(() => {
+      'worklet';
+      isZoomedEnd.value = false;
+    });
+
+  const endGesture = Gesture.Simultaneous(endLongPress, endPan);
+
   const startHandleStyle = useAnimatedStyle(() => {
-    const frac = durationMs > 0 ? startVal.value / durationMs : 0;
+    const dur = durationSv.value;
+    const frac = dur > 0 ? startVal.value / dur : 0;
     return { left: frac * trackWidth.value - HANDLE_WIDTH / 2 };
   });
 
   const endHandleStyle = useAnimatedStyle(() => {
-    const frac = durationMs > 0 ? endVal.value / durationMs : 1;
+    const dur = durationSv.value;
+    const frac = dur > 0 ? endVal.value / dur : 1;
     return { left: frac * trackWidth.value - HANDLE_WIDTH / 2 };
   });
 
   const activeRegionStyle = useAnimatedStyle(() => {
-    const sf = durationMs > 0 ? startVal.value / durationMs : 0;
-    const ef = durationMs > 0 ? endVal.value / durationMs : 1;
+    const dur = durationSv.value;
+    const sf = dur > 0 ? startVal.value / dur : 0;
+    const ef = dur > 0 ? endVal.value / dur : 1;
     return { left: sf * trackWidth.value, width: (ef - sf) * trackWidth.value };
   });
 
   const leftInactiveStyle = useAnimatedStyle(() => {
-    const sf = durationMs > 0 ? startVal.value / durationMs : 0;
+    const dur = durationSv.value;
+    const sf = dur > 0 ? startVal.value / dur : 0;
     return { width: sf * trackWidth.value };
   });
 
   const rightInactiveStyle = useAnimatedStyle(() => {
-    const ef = durationMs > 0 ? endVal.value / durationMs : 1;
+    const dur = durationSv.value;
+    const ef = dur > 0 ? endVal.value / dur : 1;
     return { width: (1 - ef) * trackWidth.value };
   });
 
   const playheadStyle = useAnimatedStyle(() => {
-    const frac = durationMs > 0 ? playheadMs.value / durationMs : 0;
+    const dur = durationSv.value;
+    const frac = dur > 0 ? playheadMs.value / dur : 0;
     return { left: frac * trackWidth.value - StyleSheet.hairlineWidth / 2 };
   });
 
@@ -128,9 +233,12 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
         <Text style={styles.durationText}>{formatTime(endMs - startMs)}</Text>
         <Text style={styles.labelText}>{formatTime(endMs)}</Text>
       </View>
+      <Text style={styles.zoomHint}>Hold a handle — track maps to ±2s around it for fine edits</Text>
       <View
         style={styles.track}
-        onLayout={(e) => { trackWidth.value = e.nativeEvent.layout.width; }}
+        onLayout={(e) => {
+          trackWidth.value = e.nativeEvent.layout.width;
+        }}
       >
         <Animated.View style={[styles.inactive, styles.inactiveLeft, leftInactiveStyle]} />
         <Animated.View style={[styles.active, activeRegionStyle]} />
@@ -169,6 +277,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: 4,
+  },
+  zoomHint: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 11,
+    textAlign: 'center',
     marginBottom: 6,
   },
   labelText: {

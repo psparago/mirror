@@ -20,6 +20,7 @@
     "react-native": "0.76.6"
   },
   "peerDependencies": {
+    "expo-haptics": "*",
     "react-native-gesture-handler": "*",
     "react-native-reanimated": "*"
   },

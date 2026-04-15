@@ -20,7 +20,21 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import BottomSheet, { BottomSheetBackdrop, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Animated, AppState, AppStateStatus, KeyboardAvoidingView, Modal, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import {
+  Alert,
+  Animated,
+  AppState,
+  AppStateStatus,
+  BackHandler,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // Keep debug logging opt-in (Metro logs are noisy and can affect perf during testing).
@@ -538,6 +552,9 @@ export default function CreationModal({
       lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
       if (editSourceEventIdRef.current) {
         mediaReplacedDuringEditRef.current = true;
+        if (media.type === 'video') {
+          composerVideoMetaRef.current = null;
+        }
       }
     }
   }, [isFocused, pendingMedia]);
@@ -1641,6 +1658,41 @@ export default function CreationModal({
     onClose();
   };
 
+  useEffect(() => {
+    if (!visible || !isFocused || Platform.OS !== 'android') return undefined;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (showNameModal) {
+        setShowNameModal(false);
+        return true;
+      }
+      const showConfirmation = confirming && !!photo;
+      const showComposer = showDescriptionInput && !!photo && !confirming;
+      const showCreatingWait = phase === 'creating' && !showComposer && !showConfirmation;
+      const showFullScreenOverlay = showComposer || showCreatingWait || showConfirmation;
+      if (showFullScreenOverlay) {
+        handleClose();
+        return true;
+      }
+      if (phase === 'picker') {
+        sheetRef.current?.close();
+        onClose();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [
+    visible,
+    isFocused,
+    showNameModal,
+    phase,
+    confirming,
+    photo,
+    showDescriptionInput,
+    handleClose,
+    onClose,
+  ]);
+
   const createSnapPoints = useMemo(() => ['44%'], []);
   const renderBackdrop = useCallback(
     (props: any) => (
@@ -1779,6 +1831,9 @@ export default function CreationModal({
 
   return (
     <>
+      {Platform.OS === 'android' && visible ? (
+        <StatusBar style="light" translucent backgroundColor="transparent" />
+      ) : null}
       {/* Bottom sheet picker — always in the tree, ref for imperative close */}
       <BottomSheet
         ref={sheetRef}

@@ -2,23 +2,23 @@ import { FontAwesome } from '@expo/vector-icons';
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
+import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Image as RNImage,
+  BackHandler,
   Keyboard,
-  NativeSyntheticEvent,
   Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   useWindowDimensions,
   View,
 } from 'react-native';
-import { Grayscale } from 'react-native-image-filter-kit';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
@@ -32,7 +32,8 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { deleteScratchMediaFile } from '@/utils/mediaProcessor';
+import { ReflectionFilteredPhoto } from '@/hooks/ReflectionFilteredPhoto';
+import { useReflectionFilters, type ReflectionFilterType } from '@/hooks/useReflectionFilters';
 import { ReplayModal } from './ReplayModal';
 import { VideoTrimSlider } from '@projectmirror/shared';
 
@@ -135,13 +136,18 @@ export default function ReflectionComposer({
   const [trimmerVisible, setTrimmerVisible] = useState(false);
   const [isPosterMode, setIsPosterMode] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
-  const [isFilterActive, setIsFilterActive] = useState(false);
-  const [extractImageEnabled, setExtractImageEnabled] = useState(false);
-  const [lookExtractBusy, setLookExtractBusy] = useState(false);
-  const lastFilteredExtractUriRef = useRef<string | null>(null);
-  const pendingExtractResolveRef = useRef<((uri: string | null) => void) | null>(null);
-  const extractTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSendAtRef = useRef(0);
+
+  const {
+    currentFilterType,
+    setCurrentFilterType,
+    isFilterActive,
+    extractImageEnabled,
+    lookExtractBusy,
+    handleExtractImage,
+    extractFilteredImage,
+    lastFilteredExtractUriRef,
+  } = useReflectionFilters({ mediaUri, mediaType, onFilteredUriChange });
   
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -207,7 +213,7 @@ export default function ReflectionComposer({
     trimEnd: number | null;
     thumbMs: number | null;
     caption: string;
-    filterActive: boolean;
+    currentFilterType: ReflectionFilterType;
   } | null>(null);
   const prevAiThinkingRef = useRef(isAiThinking);
 
@@ -220,91 +226,35 @@ export default function ReflectionComposer({
         trimEnd: videoRangeMs?.end ?? null,
         thumbMs: thumbnailTimeMs,
         caption,
-        filterActive: isFilterActive,
+        currentFilterType,
       };
     }
-  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, isFilterActive]);
+  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, currentFilterType]);
 
   const isAiStale = useCallback((): boolean => {
     const snap = aiSnapshotRef.current;
     if (!snap) return false;
     if (caption.trim() !== snap.caption.trim()) return true;
-    if (isFilterActive !== snap.filterActive) return true;
+    if (currentFilterType !== snap.currentFilterType) return true;
     if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
     if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
     if (thumbnailTimeMs !== snap.thumbMs) return true;
     return false;
-  }, [caption, isFilterActive, videoRangeMs, thumbnailTimeMs]);
+  }, [caption, currentFilterType, videoRangeMs, thumbnailTimeMs]);
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
 
-  const pulseExtractOnce = useCallback(() => {
-    setExtractImageEnabled(false);
-    requestAnimationFrame(() => setExtractImageEnabled(true));
-  }, []);
-
-  const handleExtractImage = useCallback(
-    (e: NativeSyntheticEvent<{ uri: string }>) => {
-      const raw = e.nativeEvent?.uri;
-      if (!raw) return;
-      const uri = raw.startsWith('file://') ? raw : `file://${raw}`;
-      void (async () => {
-        if (lastFilteredExtractUriRef.current && lastFilteredExtractUriRef.current !== uri) {
-          await deleteScratchMediaFile(lastFilteredExtractUriRef.current);
-        }
-        lastFilteredExtractUriRef.current = uri;
-        onFilteredUriChange?.(uri);
-        setLookExtractBusy(false);
-        setExtractImageEnabled(false);
-        if (extractTimeoutRef.current) {
-          clearTimeout(extractTimeoutRef.current);
-          extractTimeoutRef.current = null;
-        }
-        const r = pendingExtractResolveRef.current;
-        pendingExtractResolveRef.current = null;
-        r?.(uri);
-      })();
-    },
-    [onFilteredUriChange]
+  const looksBarBottom = useMemo(
+    () => screenHeight * 0.18 + Math.max(insets.bottom, 12) + 6,
+    [screenHeight, insets.bottom],
   );
 
-  const extractFilteredImage = useCallback((): Promise<string | null> => {
-    if (mediaType !== 'photo' || !isFilterActive) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      setLookExtractBusy(true);
-      pendingExtractResolveRef.current = resolve;
-      if (extractTimeoutRef.current) clearTimeout(extractTimeoutRef.current);
-      extractTimeoutRef.current = setTimeout(() => {
-        extractTimeoutRef.current = null;
-        if (pendingExtractResolveRef.current) {
-          pendingExtractResolveRef.current(lastFilteredExtractUriRef.current);
-          pendingExtractResolveRef.current = null;
-        }
-        setLookExtractBusy(false);
-      }, 12000);
-      pulseExtractOnce();
-    });
-  }, [mediaType, isFilterActive, pulseExtractOnce]);
-
-  useEffect(() => {
-    setIsFilterActive(false);
-    setExtractImageEnabled(false);
-    pendingExtractResolveRef.current?.(null);
-    pendingExtractResolveRef.current = null;
-    if (extractTimeoutRef.current) {
-      clearTimeout(extractTimeoutRef.current);
-      extractTimeoutRef.current = null;
-    }
-    onFilteredUriChange?.(null);
-    void deleteScratchMediaFile(lastFilteredExtractUriRef.current);
-    lastFilteredExtractUriRef.current = null;
-  }, [mediaUri, mediaType, onFilteredUriChange]);
-
-  useEffect(() => {
-    if (!isFilterActive || mediaType !== 'photo') return;
-    const t = setTimeout(() => pulseExtractOnce(), 450);
-    return () => clearTimeout(t);
-  }, [isFilterActive, mediaUri, mediaType, pulseExtractOnce]);
+  const LOOK_OPTIONS: { id: ReflectionFilterType; label: string }[] = [
+    { id: 'original', label: 'Original' },
+    { id: 'clarity', label: 'Clarity' },
+    { id: 'classic', label: 'Classic' },
+    { id: 'warm', label: 'Warm' },
+  ];
 
   // AUTO-OPEN SPARKLE HINTS ON MOUNT (when caption is empty — new content fast path)
   useEffect(() => {
@@ -312,6 +262,15 @@ export default function ReflectionComposer({
       requestAnimationFrame(() => sparkleSheetRef.current?.snapToIndex(0));
     }
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onRetake();
+      return true;
+    });
+    return () => sub.remove();
+  }, [onRetake]);
 
   // Sync AI Caption if user hasn't typed yet
   useEffect(() => {
@@ -524,6 +483,12 @@ export default function ReflectionComposer({
     return { ...base, videoMeta: null };
   }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
 
+  const openSparkleSheet = useCallback(() => {
+    setTrimmerVisible(false);
+    setIsPosterMode(false);
+    sparkleSheetRef.current?.snapToIndex(0);
+  }, []);
+
   const doSendNow = useCallback(async () => {
     const now = Date.now();
     if (now - lastSendAtRef.current < 800) return;
@@ -624,12 +589,6 @@ export default function ReflectionComposer({
   };
 
   // --- SPARKLE HINTS SHEET ---
-  const openSparkleSheet = useCallback(() => {
-    setTrimmerVisible(false);
-    setIsPosterMode(false);
-    sparkleSheetRef.current?.snapToIndex(0);
-  }, []);
-
   const handleRunSparkle = useCallback(() => {
     sparkleSheetRef.current?.close();
     setIsAiCancelled(false);
@@ -733,15 +692,13 @@ export default function ReflectionComposer({
             )}
           </View>
         </GestureDetector>
-      ) : isFilterActive ? (
-        <Grayscale
-          amount={1}
-          style={styles.media}
+      ) : currentFilterType !== 'original' ? (
+        <ReflectionFilteredPhoto
+          mediaUri={mediaUri}
+          currentFilterType={currentFilterType}
           extractImageEnabled={extractImageEnabled}
           onExtractImage={handleExtractImage}
-          image={
-            <RNImage source={{ uri: mediaUri }} style={styles.media} resizeMode="contain" accessibilityIgnoresInvertColors />
-          }
+          style={styles.media}
         />
       ) : (
         <Image
@@ -859,35 +816,6 @@ export default function ReflectionComposer({
             <FontAwesome name="magic" size={16} color={isBlockedByAi ? '#f39c12' : '#f5c842'} />
             <Text style={[styles.toolbarChipText, { color: '#f5c842' }]}>Sparkle</Text>
           </TouchableOpacity>
-          {mediaType === 'photo' ? (
-            <TouchableOpacity
-              style={[styles.toolbarChip, isFilterActive && styles.toolbarChipActive, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
-              onPress={() => {
-                if (isBlockedByAi || lookExtractBusy) return;
-                if (isFilterActive) {
-                  setIsFilterActive(false);
-                  onFilteredUriChange?.(null);
-                  void deleteScratchMediaFile(lastFilteredExtractUriRef.current);
-                  lastFilteredExtractUriRef.current = null;
-                  setExtractImageEnabled(false);
-                  pendingExtractResolveRef.current?.(null);
-                  pendingExtractResolveRef.current = null;
-                  if (extractTimeoutRef.current) {
-                    clearTimeout(extractTimeoutRef.current);
-                    extractTimeoutRef.current = null;
-                  }
-                } else {
-                  setIsFilterActive(true);
-                }
-              }}
-              disabled={isSending || isBlockedByAi || lookExtractBusy}
-              activeOpacity={0.7}
-              accessibilityLabel={isFilterActive ? 'Turn off sparkle look' : 'Turn on sparkle look'}
-            >
-              <FontAwesome name="adjust" size={16} color={isFilterActive ? '#f39c12' : '#fff'} />
-              <Text style={[styles.toolbarChipText, isFilterActive && { color: '#f39c12' }]}>Look</Text>
-            </TouchableOpacity>
-          ) : null}
         </View>
         <TouchableOpacity 
           style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]} 
@@ -1046,6 +974,9 @@ export default function ReflectionComposer({
 
   return (
     <GestureHandlerRootView style={styles.container}>
+      {Platform.OS === 'android' ? (
+        <StatusBar style="light" translucent backgroundColor="transparent" />
+      ) : null}
       {/* 1. IMMERSIVE MEDIA (below status bar) */}
       {renderBackground()}
 
@@ -1083,6 +1014,35 @@ export default function ReflectionComposer({
             onChange={(s, e) => setVideoRangeMs({ start: s, end: e })}
             onSeek={(ms) => { try { player.currentTime = ms / 1000; } catch { /* ignore */ } }}
           />
+        </View>
+      )}
+
+      {mediaType === 'photo' && (
+        <View style={[styles.looksBarWrap, { bottom: looksBarBottom }]} pointerEvents="box-none">
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.looksBarScroll}
+            keyboardShouldPersistTaps="handled"
+          >
+            {LOOK_OPTIONS.map((opt) => {
+              const selected = currentFilterType === opt.id;
+              return (
+                <TouchableOpacity
+                  key={opt.id}
+                  style={[styles.lookChip, selected && styles.lookChipSelected]}
+                  onPress={() => {
+                    if (isBlockedByAi || lookExtractBusy) return;
+                    setCurrentFilterType(opt.id);
+                  }}
+                  disabled={isSending || isBlockedByAi || lookExtractBusy}
+                  activeOpacity={0.75}
+                >
+                  <Text style={[styles.lookChipText, selected && styles.lookChipTextSelected]}>{opt.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
         </View>
       )}
 
@@ -1200,7 +1160,7 @@ export default function ReflectionComposer({
         <BottomSheetScrollView contentContainerStyle={styles.infoSheetScroll}>
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
-            Everything here helps the Explorer understand and connect with what you're sharing. Use any tool in any order, as many times as you like.
+            Everything here helps the Explorer understand and connect with what you're sharing. Top bar: edit the clip. Bottom sheet: voice, text, preview, and send. Use any tool in any order, as many times as you like.
           </Text>
 
           {mediaType === 'video' ? (
@@ -1212,7 +1172,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Trim</Text>
                   <Text style={styles.infoDesc}>
-                    Choose the moment. Drag the handles to frame exactly what matters — the rest stays safe on the server.
+                    Open Trim, then drag the handles to choose the moment — the full file stays on the server. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
                   </Text>
                 </View>
               </View>
@@ -1224,7 +1184,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Poster</Text>
                   <Text style={styles.infoDesc}>
-                    Choose the frame that represents your content — this is the image AI uses to understand the Reflection. Tap to freeze, swipe or tap Set to step through frames. If you skip this, the trim start frame is used.
+                    Tap Poster to enter poster mode: the video pauses, the top bar switches to Set, Clear, and Done. Swipe on the video to scrub, tap Set to lock the frame AI will use (and the poster the Explorer sees first). Tap Set again to advance frame-by-frame. Clear drops back to the trim start frame. Done exits and resumes playback. If you trim so the poster time falls outside the new range, it snaps to the trim start automatically.
                   </Text>
                 </View>
               </View>
@@ -1235,9 +1195,9 @@ export default function ReflectionComposer({
                 <FontAwesome name="adjust" size={14} color="#f39c12" />
               </View>
               <View style={styles.infoTextWrap}>
-                <Text style={styles.infoLabel}>Look</Text>
+                <Text style={styles.infoLabel}>Looks</Text>
                 <Text style={styles.infoDesc}>
-                  Set the mood. Black & white can make a moment feel timeless. The filter is baked into the final image.
+                  The horizontal chips above the bottom sheet (Original, Clarity, Classic, Warm) set how the photo is processed before upload. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden. Your choice is baked into the file the Explorer receives — not just a preview.
                 </Text>
               </View>
             </View>
@@ -1274,7 +1234,7 @@ export default function ReflectionComposer({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Sparkle</Text>
               <Text style={styles.infoDesc}>
-                Let AI help. It writes a caption and generates audio from what it sees. Give it hints — like who's in the shot — for better results. You can run it as many times as you want.
+                Tap Sparkle to open the hints sheet: mark if you're in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.
               </Text>
             </View>
           </View>
@@ -1283,13 +1243,18 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            You can go back and forth between any of these as many times as you need. Experiment freely — nothing is sent until you say so.
+            You can go back and forth between any of these as many times as you need. Experiment freely — nothing is sent until you tap Send.
           </Text>
           <Text style={styles.infoProTip}>
-            If you change something after running Sparkle, you'll be asked whether AI should take another look before you send.
+            If you change trim, poster, caption, or a photo Look after Sparkle, you may be prompted to run Sparkle again before preview or send so AI stays in sync with what you changed.
           </Text>
           <Text style={styles.infoProTip}>
-            The Explorer sees your poster frame first, hears your voice or AI intro, then the content plays. Think of it as setting a stage.
+            {mediaType === 'video'
+              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage.'
+              : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
+          </Text>
+          <Text style={styles.infoProTip}>
+            On Android, the system back key backs out of this flow (same idea as Close) so you are less likely to leave the app by accident while editing.
           </Text>
         </BottomSheetScrollView>
       </BottomSheet>
@@ -1350,6 +1315,40 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     borderRadius: 12,
     marginHorizontal: 8,
+  },
+  looksBarWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 26,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  looksBarScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 4,
+  },
+  lookChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    backgroundColor: 'rgba(35, 35, 35, 0.92)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  lookChipSelected: {
+    backgroundColor: 'rgba(46, 120, 183, 0.35)',
+    borderColor: 'rgba(79, 195, 247, 0.55)',
+  },
+  lookChipText: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  lookChipTextSelected: {
+    color: '#4FC3F7',
   },
   topToolbar: {
     position: 'absolute',
