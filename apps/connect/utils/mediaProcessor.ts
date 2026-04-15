@@ -11,6 +11,19 @@ function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
 }
 
+/**
+ * Normalize local media paths for RN / Expo (`file://`), including Expo ImagePicker URIs and
+ * react-native-image-crop-picker `path` values. Remote `http(s)` URIs are returned unchanged.
+ */
+export function ensureFileUri(path: string): string {
+  if (!path) return path;
+  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('file://')) {
+    return path;
+  }
+  const stripped = path.replace(/^file:\/\//, '');
+  return `file://${stripped}`;
+}
+
 function guessFileExtensionFromUri(uri: string): string {
   // Best-effort: used only to name the downloaded temp file.
   // The output of this utility is always JPEG.
@@ -61,7 +74,7 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
     }
 
     const size = await getImageSizeAsync(localUri);
-    // Native crop (e.g. react-native-image-crop-picker at 1080×1080) is already ≤ 1080 wide; only resize when wider.
+    // Gallery flow uses react-native-image-crop-picker at 1080×1080; only resize when still wider than cap.
     const shouldDownscale = !size ? true : size.width > MAX_UPLOAD_WIDTH_PX;
 
     const result = await ImageManipulator.manipulateAsync(

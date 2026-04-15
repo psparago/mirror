@@ -1,12 +1,93 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
-import * as ImagePicker from 'expo-image-picker';
+import {
+  ensureFileUri,
+  prepareImageForUpload,
+  prepareVideoForUpload,
+} from '@/utils/mediaProcessor';
+import * as ExpoImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import ImagePicker from 'react-native-image-crop-picker';
 import { useNavigation, useRouter } from 'expo-router';
 import React, { useEffect, useRef } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  PermissionsAndroid,
+  Platform,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 
 const MAX_VIDEO_DURATION_SECONDS = 60;
-const MAX_VIDEO_DURATION_MS = MAX_VIDEO_DURATION_SECONDS * 1000;
+
+const PHOTO_CROP_SIZE = 1080;
+
+/** Square stage crop (after Expo system pick / trim). */
+const squarePhotoCrop = {
+  width: PHOTO_CROP_SIZE,
+  height: PHOTO_CROP_SIZE,
+  cropping: true as const,
+  avoidEmptySpaceAroundImage: true,
+  freeStyleCropEnabled: true,
+  enableRotationGesture: true,
+  forceJpg: true,
+  compressImageQuality: 0.92,
+};
+
+/** uCrop / cropper chrome (Android-focused; harmless extras on iOS). */
+const reflectionCropperChrome = {
+  cropperToolbarTitle: 'Edit Reflection',
+  cropperActiveWidgetColor: '#2e78b7',
+  cropperToolbarColor: '#1a1a1a',
+  cropperToolbarWidgetColor: 'rgba(255,255,255,0.92)',
+  cropperStatusBarLight: false,
+  cropperNavigationBarLight: false,
+};
+
+async function ensureAndroidGalleryPermissions(): Promise<boolean> {
+  if (Platform.OS !== 'android') return true;
+  const api = Platform.Version;
+  if (typeof api !== 'number') return true;
+
+  if (api >= 33) {
+    const images = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+    );
+    const video = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO
+    );
+    return (
+      images === PermissionsAndroid.RESULTS.GRANTED &&
+      video === PermissionsAndroid.RESULTS.GRANTED
+    );
+  }
+
+  if (api <= 32 && api >= 23) {
+    const legacy = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE
+    );
+    return legacy === PermissionsAndroid.RESULTS.GRANTED;
+  }
+
+  return true;
+}
+
+/**
+ * `react-native-image-crop-picker` expects a filesystem path; Expo may return `content://` on Android.
+ */
+async function pathForOpenCropper(uri: string): Promise<string> {
+  const normalized = ensureFileUri(uri);
+  if (normalized.startsWith('content://')) {
+    if (!FileSystem.cacheDirectory) {
+      throw new Error('cacheDirectory unavailable');
+    }
+    const dest = `${FileSystem.cacheDirectory}gallery_crop_in_${Date.now()}.jpg`;
+    await FileSystem.copyAsync({ from: uri, to: dest });
+    return dest.replace(/^file:\/\//, '');
+  }
+  return normalized.replace(/^file:\/\//, '');
+}
 
 export default function GalleryScreen() {
   const router = useRouter();
@@ -39,18 +120,32 @@ export default function GalleryScreen() {
     hasLaunched.current = false;
 
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'We need access to your photos to select media for your Reflections.');
-        router.back();
+      const granted = await ensureAndroidGalleryPermissions();
+      if (!granted) {
+        Alert.alert(
+          'Permission Required',
+          'Reflections Connect needs access to your photos and videos to pick from the gallery.',
+          [{ text: 'OK', onPress: () => router.back() }]
+        );
         return;
       }
 
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
+      const libPerm = await ExpoImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!libPerm.granted) {
+        Alert.alert(
+          'Permission Required',
+          'We need access to your photo library to choose images and videos for your Reflections.',
+          [{ text: 'OK', onPress: () => router.back() }]
+        );
+        return;
+      }
+
+      const result = await ExpoImagePicker.launchImageLibraryAsync({
+        // SDK 52: use `MediaTypeOptions.All` for images + videos (same intent as legacy `['all']`).
+        mediaTypes: ExpoImagePicker.MediaTypeOptions.All,
         allowsEditing: true,
-        quality: 0.85,
         videoMaxDuration: MAX_VIDEO_DURATION_SECONDS,
+        quality: 1,
       });
 
       if (result.canceled || !result.assets?.[0]) {
@@ -59,27 +154,43 @@ export default function GalleryScreen() {
       }
 
       const asset = result.assets[0];
+      const expoUri = ensureFileUri(asset.uri);
+      const isVideo =
+        asset.type === 'video' || (asset.mimeType?.startsWith('video/') ?? false);
 
-      if (asset.type === 'video') {
-        if (asset.duration && asset.duration > MAX_VIDEO_DURATION_MS) {
-          Alert.alert(
-            'Video Too Long',
-            `The selected video is ${Math.round(asset.duration / 1000)} seconds. Please select a video shorter than ${MAX_VIDEO_DURATION_SECONDS} seconds.`,
-            [{ text: 'OK', onPress: () => router.back() }]
-          );
-          return;
-        }
-        const compressedUri = await prepareVideoForUpload(asset.uri);
-        setPendingMedia({ uri: compressedUri, type: 'video', source: 'gallery' });
+      if (isVideo) {
+        const compressedUri = await prepareVideoForUpload(expoUri);
+        setPendingMedia({
+          uri: ensureFileUri(compressedUri),
+          type: 'video',
+          source: 'gallery',
+        });
       } else {
-        const optimizedUri = await prepareImageForUpload(asset.uri);
-        setPendingMedia({ uri: optimizedUri, type: 'photo', source: 'gallery' });
+        const cropInPath = await pathForOpenCropper(asset.uri);
+        const cropped = await ImagePicker.openCropper({
+          mediaType: 'photo',
+          path: cropInPath,
+          ...squarePhotoCrop,
+          ...reflectionCropperChrome,
+        });
+        const croppedUri = ensureFileUri(cropped.path);
+        const optimizedUri = await prepareImageForUpload(croppedUri);
+        setPendingMedia({
+          uri: ensureFileUri(optimizedUri),
+          type: 'photo',
+          source: 'gallery',
+        });
       }
 
       router.back();
     } catch (error: unknown) {
       const err = error as { code?: string; message?: string };
-      if (err?.code === 'ERR_CANCELED') {
+      if (err?.code === 'E_PICKER_CANCELLED') {
+        router.back();
+        return;
+      }
+      if (err?.code === 'E_NO_LIBRARY_PERMISSION') {
+        Alert.alert('Permission Required', 'We need access to your photos to select media for your Reflections.');
         router.back();
         return;
       }

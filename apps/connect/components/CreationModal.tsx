@@ -2,6 +2,7 @@ import ReflectionComposer, { type ComposerVideoMeta } from '@/components/Reflect
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
   deleteScratchMediaFile,
+  ensureFileUri,
   prepareImageForUpload,
   prepareVideoForUpload,
 } from '@/utils/mediaProcessor';
@@ -518,14 +519,15 @@ export default function CreationModal({
     if (media) {
       lastSourceForRecoveryRef.current = null;
       setPhase('creating');
+      const normalizedUri = ensureFileUri(media.uri);
       if (media.type === 'video') {
         setMediaType('video');
-        setVideoUri(media.uri);
-        setPhoto({ uri: media.uri });
+        setVideoUri(normalizedUri);
+        setPhoto({ uri: normalizedUri });
       } else {
         setMediaType('photo');
         setVideoUri(null);
-        setPhoto({ uri: media.uri });
+        setPhoto({ uri: normalizedUri });
       }
       setImageSourceType(
         media.source === 'search' ? 'search' : media.source === 'gallery' ? 'gallery' : 'camera'
@@ -1217,7 +1219,22 @@ export default function CreationModal({
         ...(lastEditedAtIso ? { last_edited_at: lastEditedAtIso } : {}),
       };
 
-      const vmMeta = composerVideoMetaRef.current;
+      let vmMeta = composerVideoMetaRef.current;
+      if (
+        mediaType === 'video' &&
+        (!vmMeta || vmMeta.video_end_ms <= vmMeta.video_start_ms) &&
+        videoPlayer.duration > 0
+      ) {
+        const endMs = Math.round(videoPlayer.duration * 1000);
+        if (endMs > 0) {
+          vmMeta = {
+            video_start_ms: 0,
+            video_end_ms: endMs,
+            thumbnail_time_ms: vmMeta?.thumbnail_time_ms ?? null,
+          };
+          composerVideoMetaRef.current = vmMeta;
+        }
+      }
       if (mediaType === 'video' && vmMeta && vmMeta.video_end_ms > vmMeta.video_start_ms) {
         eventMetadata.video_start_ms = vmMeta.video_start_ms;
         eventMetadata.video_end_ms = vmMeta.video_end_ms;
@@ -1948,7 +1965,7 @@ export default function CreationModal({
                   <Image
                     source={{ uri: photo.uri }}
                     style={StyleSheet.absoluteFill}
-                    contentFit="contain"
+                    contentFit={mediaType === 'photo' ? 'cover' : 'contain'}
                     cachePolicy={confirmationPosterRemote ? 'memory-disk' : 'disk'}
                     transition={confirmationPosterRemote ? 200 : 0}
                   />

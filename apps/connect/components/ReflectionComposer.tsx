@@ -133,7 +133,6 @@ export default function ReflectionComposer({
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
-  const [trimmerVisible, setTrimmerVisible] = useState(false);
   const [isPosterMode, setIsPosterMode] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
   const lastSendAtRef = useRef(0);
@@ -488,7 +487,6 @@ export default function ReflectionComposer({
   }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
 
   const openSparkleSheet = useCallback(() => {
-    setTrimmerVisible(false);
     setIsPosterMode(false);
     sparkleSheetRef.current?.snapToIndex(0);
   }, []);
@@ -616,7 +614,6 @@ export default function ReflectionComposer({
 
   const enterPosterMode = useCallback(() => {
     player.pause();
-    setTrimmerVisible(false);
     if (thumbnailTimeMs !== null) {
       try { player.currentTime = thumbnailTimeMs / 1000; } catch { /* ignore */ }
     }
@@ -721,7 +718,7 @@ export default function ReflectionComposer({
         <Image
           source={{ uri: mediaUri }}
           style={styles.media}
-          contentFit="contain"
+          contentFit="cover"
           cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
           transition={isRemoteMediaUri ? 200 : 0}
         />
@@ -819,17 +816,6 @@ export default function ReflectionComposer({
             >
               <FontAwesome name="repeat" size={16} color="#fff" />
               <Text style={styles.toolbarChipText}>Replay</Text>
-            </TouchableOpacity>
-          ) : null}
-          {mediaType === 'video' ? (
-            <TouchableOpacity
-              style={[styles.toolbarChip, trimmerVisible && styles.toolbarChipActive, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={() => setTrimmerVisible((v) => !v)}
-              disabled={isSending || isBlockedByAi}
-              activeOpacity={0.7}
-            >
-              <FontAwesome name="scissors" size={16} color={trimmerVisible ? '#4FC3F7' : '#fff'} />
-              <Text style={[styles.toolbarChipText, trimmerVisible && { color: '#4FC3F7' }]}>Trim</Text>
             </TouchableOpacity>
           ) : null}
           {mediaType === 'video' ? (
@@ -1040,7 +1026,7 @@ export default function ReflectionComposer({
       )}
 
       {/* 2b. INLINE VIDEO TRIMMER */}
-      {mediaType === 'video' && trimmerVisible && videoRangeMs && player.duration > 0 && (
+      {mediaType === 'video' && videoRangeMs && player.duration > 0 && (
         <View style={styles.trimSliderOverlay}>
           <VideoTrimSlider
             durationMs={Math.round(player.duration * 1000)}
@@ -1232,7 +1218,9 @@ export default function ReflectionComposer({
         <BottomSheetScrollView contentContainerStyle={styles.infoSheetScroll}>
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
-            Everything here helps the Explorer understand and connect with what you're sharing. Top bar: edit the clip. Bottom sheet: voice, text, preview, and send. Use any tool in any order, as many times as you like.
+            {mediaType === 'video'
+              ? 'Everything here helps the Explorer understand and connect with what you are sharing. The top bar replaces or adjusts the clip (Edit, Replay, Poster), runs Sparkle, or closes to start over. From the gallery you trim to at most 60 seconds; that clip is the master file you upload. The trim bar here chooses the playback window inside that master (metadata only, no second upload). The bottom sheet has voice, text, preview, and send. Use any tool in any order, as many times as you like.'
+              : `Everything here helps the Explorer understand and connect with what you are sharing.${showTopMediaEdit ? ' Edit at the very top replaces your photo when you need a different shot.' : ''} The row above your image sets Looks, runs Sparkle, and closes to start over. The bottom sheet has voice, text, preview, and send. Use any tool in any order, as many times as you like.`}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1244,7 +1232,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Trim</Text>
                   <Text style={styles.infoDesc}>
-                    Open Trim, then drag the handles to choose the moment — the full file stays on the server. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
+                    In the gallery you already trimmed to a 60 second (or shorter) master. The strip here sits over the bottom of the video so you can pick the exact playback window inside that master — for example a 15 second highlight — without uploading a new file; start and end times are saved as metadata only. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
                   </Text>
                 </View>
               </View>
@@ -1269,7 +1257,7 @@ export default function ReflectionComposer({
               <View style={styles.infoTextWrap}>
                 <Text style={styles.infoLabel}>Looks</Text>
                 <Text style={styles.infoDesc}>
-                  The horizontal chips above the bottom sheet (Original, Clarity, Classic, Warm) set how the photo is processed before upload. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden. Your choice is baked into the file the Explorer receives — not just a preview.
+                  Original, Clarity, Classic, and Warm live in the bar directly above your photo (you can scroll that section sideways on a narrow screen). They set how the image is processed before upload. A slim divider separates them from Sparkle and Close on the same row so picture style stays visually grouped. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden. Your choice is baked into the file the Explorer receives — not just a preview.
                 </Text>
               </View>
             </View>
@@ -1306,7 +1294,9 @@ export default function ReflectionComposer({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Sparkle</Text>
               <Text style={styles.infoDesc}>
-                Tap Sparkle to open the hints sheet: mark if you're in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.
+                {mediaType === 'video'
+                  ? 'Tap Sparkle in the top bar to open the hints sheet: mark if you are in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.'
+                  : 'Tap the gold Sparkle chip on the right side of the bar above your photo (next to Close) to open the hints sheet: mark if you are in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1326,7 +1316,9 @@ export default function ReflectionComposer({
               : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>
-            On Android, the system back key backs out of this flow (same idea as Close) so you are less likely to leave the app by accident while editing.
+            {mediaType === 'video'
+              ? 'On Android, the system back key backs out of this flow (same idea as the X in the top bar) so you are less likely to leave the app by accident while editing.'
+              : 'On Android, the system back key backs out of this flow (same idea as Close on the right end of the bar above your photo) so you are less likely to leave the app by accident while editing.'}
           </Text>
         </BottomSheetScrollView>
       </BottomSheet>

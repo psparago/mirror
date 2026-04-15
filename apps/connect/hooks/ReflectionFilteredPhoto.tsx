@@ -33,7 +33,7 @@ export function ReflectionFilteredPhoto({
     <RNImage
       source={{ uri: mediaUri }}
       style={style as StyleProp<ImageStyle>}
-      resizeMode="contain"
+      resizeMode="cover"
       accessibilityIgnoresInvertColors
     />
   );
