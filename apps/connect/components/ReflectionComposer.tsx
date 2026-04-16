@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import BottomSheet, { BottomSheetScrollView, BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
@@ -169,11 +169,9 @@ export default function ReflectionComposer({
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
-  const sheetRef = useRef<BottomSheet>(null);
   const infoSheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const [sheetIndex, setSheetIndex] = useState(0);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
@@ -360,16 +358,17 @@ export default function ReflectionComposer({
   );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
-  const workbenchCollapsedHeight = screenHeight * 0.16;
-  const workbenchExpandedHeight = screenHeight * 0.26;
-  const aiStageHeight = screenHeight * 0.62;
-  const sendSheetHeight = 80;
+  const FOOTER_HEIGHT_PX = 36;
 
   /** Utility bar block height used for media top offset. */
   const TOP_TOOLBAR_BLOCK_PX = 38;
+  /** Video action strip (Replay/Poster) below back/close row. */
+  const VIDEO_TOOLBAR_STRIP_PX = 44;
+  /** Compact trim bar height below action strip. */
+  const VIDEO_TRIM_BAR_PX = 56;
   /** Photo Looks bar block height used for media top offset. */
   const PHOTO_LOOKS_STRIP_PX = 48;
-  /** Visual breathing room between photo utility bar and Looks bar. */
+  /** Visual breathing room between bars. */
   const PHOTO_BARS_GAP_PX = 8;
 
   const LOOK_OPTIONS: {
@@ -603,28 +602,6 @@ export default function ReflectionComposer({
     };
   }, []);
 
-  // Calculate snap points dynamically based on screen height and keyboard
-  const snapPoints = useMemo(() => {
-    return [workbenchCollapsedHeight, workbenchExpandedHeight, sendSheetHeight];
-  }, [workbenchCollapsedHeight, workbenchExpandedHeight, sendSheetHeight]);
-
-  useEffect(() => {
-    if (!sheetRef.current) return;
-
-    const timeoutId = setTimeout(() => {
-      if (stage === 'ai') {
-        sheetRef.current?.close();
-        return;
-      }
-      if (stage === 'send') {
-        sheetRef.current?.snapToIndex(2);
-        return;
-      }
-      sheetRef.current?.snapToIndex(0);
-    }, 100);
-
-    return () => clearTimeout(timeoutId);
-  }, [stage, snapPoints]);
 
   const isRemoteMediaUri =
     typeof mediaUri === 'string' &&
@@ -713,7 +690,16 @@ export default function ReflectionComposer({
       }
       applyTrim();
     });
-    return () => sub.remove();
+
+    // Polling fallback — statusChange may not fire on all platforms
+    const poll = setInterval(() => {
+      if (player.duration > 0) {
+        applyTrim();
+        clearInterval(poll);
+      }
+    }, 250);
+
+    return () => { sub.remove(); clearInterval(poll); };
   }, [
     mediaType,
     mediaUri,
@@ -822,12 +808,6 @@ export default function ReflectionComposer({
     doSendNow();
   }, [ensureAiCurrent, doSendNow]);
 
-  const handleSheetChange = useCallback((index: number) => {
-    setSheetIndex(index);
-    if (index < 2) {
-      Keyboard.dismiss();
-    }
-  }, []);
 
   const doPreviewNow = useCallback(async () => {
     const previewId = 'preview-temp';
@@ -867,6 +847,9 @@ export default function ReflectionComposer({
     Keyboard.dismiss();
   };
   const goToAi = () => {
+    if (mediaType === 'video') {
+      try { player.pause(); } catch { /* tearing down */ }
+    }
     onStageChange('ai');
   };
   const goToSend = () => {
@@ -987,23 +970,30 @@ export default function ReflectionComposer({
     setIsPosterMode(true);
   }, [player, thumbnailTimeMs]);
 
-  const FRAME_STEP_MS = 33;
+  const COVER_STEP_MS = 250;
 
-  const handlePosterSet = useCallback(() => {
+  const handleCoverSet = useCallback(() => {
     const curMs = Math.round(player.currentTime * 1000);
-    const rangeEnd = videoRangeMs?.end ?? Math.round(player.duration * 1000);
+    setThumbnailTimeMs(Math.max(0, curMs));
+  }, [player]);
 
-    if (thumbnailTimeMs !== null && Math.abs(curMs - thumbnailTimeMs) < FRAME_STEP_MS * 2) {
-      const nextMs = Math.min(thumbnailTimeMs + FRAME_STEP_MS, rangeEnd);
-      try { player.currentTime = nextMs / 1000; } catch { /* ignore */ }
-      setThumbnailTimeMs(nextMs);
-    } else {
-      const ms = Math.max(0, curMs);
-      setThumbnailTimeMs(ms);
-    }
+  const handleCoverStepBack = useCallback(() => {
+    const rangeStart = videoRangeMs?.start ?? 0;
+    const curMs = thumbnailTimeMs ?? Math.round(player.currentTime * 1000);
+    const targetMs = Math.max(rangeStart, curMs - COVER_STEP_MS);
+    try { player.currentTime = targetMs / 1000; } catch { /* ignore */ }
+    setThumbnailTimeMs(targetMs);
   }, [player, thumbnailTimeMs, videoRangeMs]);
 
-  const handlePosterClear = useCallback(() => {
+  const handleCoverStepForward = useCallback(() => {
+    const rangeEnd = videoRangeMs?.end ?? Math.round(player.duration * 1000);
+    const curMs = thumbnailTimeMs ?? Math.round(player.currentTime * 1000);
+    const targetMs = Math.min(rangeEnd, curMs + COVER_STEP_MS);
+    try { player.currentTime = targetMs / 1000; } catch { /* ignore */ }
+    setThumbnailTimeMs(targetMs);
+  }, [player, thumbnailTimeMs, videoRangeMs]);
+
+  const handleCoverClear = useCallback(() => {
     setThumbnailTimeMs(null);
   }, []);
 
@@ -1044,16 +1034,14 @@ export default function ReflectionComposer({
     [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs],
   );
 
-  /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
-  const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
   const isWorkbenchStage = stage === 'workbench';
 
-  /** Photo utility row always exists (Back/Close). */
   const photoEditBarPx = mediaType === 'photo' && isWorkbenchStage ? TOP_TOOLBAR_BLOCK_PX : 0;
-  const photoWorkbenchSheetHeightPx =
-    sheetIndex <= 0 ? workbenchCollapsedHeight : workbenchExpandedHeight;
-  const photoWorkbenchBottomInsetPx =
-    mediaType === 'photo' && isWorkbenchStage ? Math.ceil(photoWorkbenchSheetHeightPx + 8) : 0;
+  const footerBottomInsetPx = isWorkbenchStage || stage === 'send'
+    ? FOOTER_HEIGHT_PX + Math.max(insets.bottom, 8)
+    : 0;
+  const videoTopBarsPx = TOP_TOOLBAR_BLOCK_PX + PHOTO_BARS_GAP_PX + VIDEO_TOOLBAR_STRIP_PX + VIDEO_TRIM_BAR_PX + 8;
+  const videoTrimTopPx = insets.top + TOP_TOOLBAR_BLOCK_PX + PHOTO_BARS_GAP_PX + VIDEO_TOOLBAR_STRIP_PX + 4;
 
   const renderBackground = () => (
     <View
@@ -1062,9 +1050,13 @@ export default function ReflectionComposer({
         {
           top:
             insets.top +
-            (isWorkbenchStage ? (mediaType === 'photo' ? photoEditBarPx : TOP_TOOLBAR_BLOCK_PX) : 0) +
-            (isWorkbenchStage && mediaType === 'photo' ? PHOTO_LOOKS_STRIP_PX + PHOTO_BARS_GAP_PX : 0),
-          bottom: photoWorkbenchBottomInsetPx,
+            (isWorkbenchStage && mediaType === 'photo'
+              ? photoEditBarPx + PHOTO_LOOKS_STRIP_PX + PHOTO_BARS_GAP_PX
+              : 0) +
+            (isWorkbenchStage && mediaType === 'video'
+              ? videoTopBarsPx
+              : 0),
+          bottom: footerBottomInsetPx,
         },
       ]}
     >
@@ -1074,7 +1066,7 @@ export default function ReflectionComposer({
             <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
             {isPosterMode && (
               <View style={styles.posterModeIndicator} pointerEvents="none">
-                <Text style={styles.posterModeText}>Swipe to scrub</Text>
+                <Text style={styles.posterModeText}>Use arrows or swipe to find your frame</Text>
               </View>
             )}
           </View>
@@ -1118,8 +1110,8 @@ export default function ReflectionComposer({
         style={styles.gradientOverlay}
       />
 
-      {/* REPLAY OVERLAY — shown when video finishes, below toolbar */}
-      {mediaType === 'video' && videoEnded && (
+      {/* REPLAY OVERLAY — shown when video finishes, hidden during poster mode */}
+      {mediaType === 'video' && videoEnded && !isPosterMode && (
         <View style={styles.replayOverlay}>
           <TouchableOpacity style={styles.replayButton} onPress={handleReplay} activeOpacity={0.8}>
             <FontAwesome name="repeat" size={28} color="#fff" />
@@ -1132,30 +1124,54 @@ export default function ReflectionComposer({
 
   const renderPosterToolbar = () => (
     <View style={[styles.topToolbar, { top: insets.top }]}>
-      <View style={styles.topToolbarRow}>
+      <View style={styles.coverToolbarRow}>
+        <View style={styles.coverArrowPair}>
+          <TouchableOpacity
+            style={styles.coverArrowBtn}
+            onPress={handleCoverStepBack}
+            activeOpacity={0.6}
+          >
+            <FontAwesome name="backward" size={16} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.coverArrowBtn}
+            onPress={handleCoverStepForward}
+            activeOpacity={0.6}
+          >
+            <FontAwesome name="forward" size={16} color="#fff" />
+          </TouchableOpacity>
+        </View>
         <TouchableOpacity
-          style={[styles.toolbarChip, { backgroundColor: 'rgba(30, 80, 50, 0.9)', borderColor: 'rgba(74, 222, 128, 0.4)' }]}
-          onPress={handlePosterSet}
+          style={[styles.coverActionBtn, { borderColor: 'rgba(74, 222, 128, 0.4)' }]}
+          onPress={handleCoverSet}
           activeOpacity={0.7}
         >
           <FontAwesome name="check" size={16} color="#4ade80" />
-          <Text style={[styles.toolbarChipText, { color: '#4ade80' }]}>Set</Text>
+          <Text style={[styles.coverActionBtnText, { color: '#4ade80' }]}>Set</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={styles.toolbarChip}
-          onPress={handlePosterClear}
+          style={styles.coverActionBtn}
+          onPress={handleReplay}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="repeat" size={16} color="#fff" />
+          <Text style={styles.coverActionBtnText}>Replay</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.coverActionBtn}
+          onPress={handleCoverClear}
           activeOpacity={0.7}
         >
           <FontAwesome name="eraser" size={16} color="#fff" />
-          <Text style={styles.toolbarChipText}>Clear</Text>
+          <Text style={styles.coverActionBtnText}>Clear</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.toolbarChip, { backgroundColor: 'rgba(40, 70, 100, 0.9)', borderColor: 'rgba(79, 195, 247, 0.4)' }]}
+          style={[styles.coverActionBtn, { borderColor: 'rgba(79, 195, 247, 0.4)' }]}
           onPress={exitPosterMode}
           activeOpacity={0.7}
         >
           <FontAwesome name="check-circle" size={16} color="#4FC3F7" />
-          <Text style={[styles.toolbarChipText, { color: '#4FC3F7' }]}>Done</Text>
+          <Text style={[styles.coverActionBtnText, { color: '#4FC3F7' }]}>Done</Text>
         </TouchableOpacity>
       </View>
       {thumbnailTimeMs !== null && (
@@ -1210,65 +1226,101 @@ export default function ReflectionComposer({
                 <FontAwesome name="arrow-left" size={16} color="#fff" />
               </TouchableOpacity>
             </View>
-            <TouchableOpacity
-              style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onRetake}
-              disabled={isSending || isBlockedByAi}
-              activeOpacity={0.7}
-            >
-              <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
-            </TouchableOpacity>
+            <View style={styles.topBarRight}>
+              <TouchableOpacity
+                style={[styles.topBarNextBtn, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                onPress={goToAi}
+                disabled={isSending || isAiThinking || lookExtractBusy}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.topBarNextText}>Next</Text>
+                <FontAwesome name="arrow-right" size={12} color="#fff" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+                onPress={onRetake}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+              >
+                <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       );
     }
 
     return (
-      <View style={[styles.topToolbar, { top: insets.top }]}>
-        <View style={styles.topToolbarRow}>
-          {showTopMediaEdit ? (
-          <TouchableOpacity
-            style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
-            onPress={onReplaceMedia}
-            disabled={isSending || isBlockedByAi}
-            activeOpacity={0.7}
-          >
-            <FontAwesome name="pencil" size={16} color="#fff" />
-            <Text style={styles.toolbarChipText}>Edit</Text>
-          </TouchableOpacity>
-          ) : null}
-          {mediaType === 'video' ? (
+      <>
+        <View style={[styles.topToolbar, { top: insets.top }]}>
+          <View style={styles.videoUtilityRow}>
             <TouchableOpacity
-              style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={handleReplay}
+              style={[styles.androidBackBtn, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onReplaceMedia}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Back to media picker"
             >
-              <FontAwesome name="repeat" size={16} color="#fff" />
-              <Text style={styles.toolbarChipText}>Replay</Text>
+              <FontAwesome name="arrow-left" size={16} color="#fff" />
             </TouchableOpacity>
-          ) : null}
-          {mediaType === 'video' ? (
-            <TouchableOpacity
-              style={[styles.toolbarChip, thumbnailTimeMs !== null && styles.toolbarChipActive, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={enterPosterMode}
-              disabled={isSending || isBlockedByAi}
-              activeOpacity={0.7}
-            >
-              <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
-              <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
-            </TouchableOpacity>
-          ) : null}
+            <View style={styles.topBarRight}>
+              <TouchableOpacity
+                style={[styles.topBarNextBtn, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                onPress={goToAi}
+                disabled={isSending || isAiThinking || lookExtractBusy}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.topBarNextText}>Next</Text>
+                <FontAwesome name="arrow-right" size={12} color="#fff" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+                onPress={onRetake}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+              >
+                <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-        <TouchableOpacity 
-          style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]} 
-          onPress={onRetake} 
-          disabled={isSending || isBlockedByAi}
-          activeOpacity={0.7}
+        <View
+          style={[
+            styles.videoActionsWrap,
+            { top: insets.top + TOP_TOOLBAR_BLOCK_PX + PHOTO_BARS_GAP_PX, height: VIDEO_TOOLBAR_STRIP_PX },
+          ]}
+          pointerEvents="box-none"
         >
-          <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
-        </TouchableOpacity>
-      </View>
+          <View style={styles.looksToolbar}>
+            <View style={styles.videoActionsRow}>
+              <TouchableOpacity
+                style={[styles.toolbarChip, styles.videoActionChip, isBlockedByAi && { opacity: 0.35 }]}
+                onPress={handleReplay}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+              >
+                <FontAwesome name="repeat" size={16} color="#fff" />
+                <Text style={styles.toolbarChipText}>Replay</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.toolbarChip,
+                  styles.videoActionChip,
+                  thumbnailTimeMs !== null && styles.toolbarChipActive,
+                  isBlockedByAi && { opacity: 0.35 },
+                ]}
+                onPress={enterPosterMode}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+              >
+                <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
+                <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </>
     );
   };
 
@@ -1278,20 +1330,10 @@ export default function ReflectionComposer({
         <View style={styles.videoGuidanceBanner}>
           <FontAwesome name="clock-o" size={14} color="#f5c842" />
           <Text style={styles.videoGuidanceText}>
-            Best under 60s for the Explorer. Current playback window: {currentPlaybackWindowSeconds}s.
+            Best under 60s for the Explorer. Current: {currentPlaybackWindowSeconds}s.
           </Text>
         </View>
       ) : null}
-      <View style={styles.quickActionsRow}>
-        <TouchableOpacity
-          style={[styles.actionChip, styles.previewChip, (isSending || isAiThinking) && styles.chipDisabled]}
-          onPress={goToAi}
-          disabled={isSending || isAiThinking || lookExtractBusy}
-        >
-          <FontAwesome name="arrow-right" size={20} color="#fff" />
-          <Text style={styles.actionChipText}>Next: AI & Caption</Text>
-        </TouchableOpacity>
-      </View>
       <TouchableOpacity
         style={styles.infoBtn}
         onPress={() => infoSheetRef.current?.snapToIndex(0)}
@@ -1578,9 +1620,9 @@ export default function ReflectionComposer({
         </Animated.View>
       )}
 
-      {/* 2b. INLINE VIDEO TRIMMER */}
+      {/* 2b. INLINE VIDEO TRIMMER — below action buttons, above video */}
       {isWorkbenchStage && mediaType === 'video' && videoRangeMs && player.duration > 0 && (
-        <View style={styles.trimSliderOverlay}>
+        <View style={[styles.trimSliderOverlay, { top: videoTrimTopPx }]}>
           <VideoTrimSlider
             durationMs={Math.round(player.duration * 1000)}
             startMs={videoRangeMs.start}
@@ -1652,25 +1694,12 @@ export default function ReflectionComposer({
         </View>
       )}
 
-      {/* 3. BOTTOM SHEET TOOLKIT */}
+      {/* 3. FIXED FOOTER */}
       {stage !== 'ai' ? (
-        <BottomSheet
-          ref={sheetRef}
-          index={0}
-          snapPoints={snapPoints}
-          onChange={handleSheetChange}
-          backgroundStyle={styles.sheetBackground}
-          handleIndicatorStyle={styles.sheetHandle}
-          keyboardBehavior="interactive"
-          android_keyboardInputMode="adjustResize"
-          enablePanDownToClose={false}
-          enableOverDrag={false}
-        >
-          <BottomSheetView style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-            {stage === 'workbench' && renderWorkbenchTab()}
-            {stage === 'send' && renderSendTab()}
-          </BottomSheetView>
-        </BottomSheet>
+        <View style={[styles.footerBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+          {stage === 'workbench' && renderWorkbenchTab()}
+          {stage === 'send' && renderSendTab()}
+        </View>
       ) : null}
 
       {/* 5. EDITOR GUIDE SHEET */}
@@ -1686,8 +1715,8 @@ export default function ReflectionComposer({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? 'This flow always runs in three stages: Workbench, AI/Hints, then Preview/Send. In Workbench, use Edit/Replay/Poster and trim to shape the video. In AI/Hints, add people hints, record voice, and type the caption. In Preview/Send, check it and send. Videos can be longer now, but Reflections work best under 60 seconds and 5 minutes is the hard cap.'
-              : 'This flow always runs in three stages: Workbench, AI/Hints, then Preview/Send. In Workbench, use Back to pick a different photo if needed, then drag and pinch in the square and choose Looks. In AI/Hints, add people hints, record voice, and type the caption. In Preview/Send, check it and send.'}
+              ? 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench you trim, replay, and set a poster frame. Tap Next at the top-right to move to AI & Caption where you add hints, record voice, and write the caption. Then Preview & Send to review and deliver. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
+              : 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. Tap Next at the top-right to move to AI & Caption where you add hints, record voice, and write the caption. Then Preview & Send to review and deliver.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1699,7 +1728,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Trim</Text>
                   <Text style={styles.infoDesc}>
-                    The strip sits over the bottom of the video so you can pick the exact playback window the Explorer will experience — for example a 15 second highlight — without uploading a new file; start and end times are saved as metadata only. Reflections work best under 60 seconds, but you can bring in a longer source video as long as it stays under 5 minutes total. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
+                    The gold trim bar sits below the top controls. Drag the handles to set the playback window the Explorer will experience — start and end times are saved as metadata only, the full source video is uploaded. The selected duration shows inside the bar. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom in: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
                   </Text>
                 </View>
               </View>
@@ -1711,7 +1740,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Poster</Text>
                   <Text style={styles.infoDesc}>
-                    Tap Poster to enter poster mode: the video pauses, the top bar switches to Set, Clear, and Done. Swipe on the video to scrub, tap Set to lock the frame AI will use (and the poster the Explorer sees first). Tap Set again to advance frame-by-frame. Clear drops back to the trim start frame. Done exits and resumes playback. If you trim so the poster time falls outside the new range, it snaps to the trim start automatically.
+                    The poster is the frame the Explorer sees first, before the video plays — think of it like a movie poster. Tap Poster to enter poster mode. The video pauses and the top bar shows arrow buttons to step backward and forward in quarter-second jumps. Tap Set to lock the current frame. You can also swipe on the video to scrub freely. Clear drops back to the default frame, and Done exits and resumes playback. If you trim so the poster time falls outside the new range, it snaps to the trim start automatically.
                   </Text>
                 </View>
               </View>
@@ -1724,7 +1753,7 @@ export default function ReflectionComposer({
               <View style={styles.infoTextWrap}>
                 <Text style={styles.infoLabel}>Looks</Text>
                 <Text style={styles.infoDesc}>
-                  First, frame the photo inside the square by dragging and pinching, and rotate with a two-finger twist or the Rotate chip. Reset returns to the original framing. Then choose Original, Clarity, Classic, or Warm from the Looks bar above your photo. That same square composition is what gets baked and uploaded for the Explorer. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden.
+                  Frame the photo inside the square by dragging and pinching, and rotate with a two-finger twist or the Rotate chip. Reset returns to the original framing. Choose Original, Clarity, Classic, or Warm from the Looks bar. That square composition is what gets baked and uploaded for the Explorer. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden.
                 </Text>
               </View>
             </View>
@@ -1772,20 +1801,18 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            Use Back and Next to move between stages as many times as needed. Nothing sends until you tap Send.
+            Use the Back arrow (top-left) and Next (top-right) to move between stages freely. Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            If you change trim, poster, caption, or a photo Look after Sparkle, you may be prompted to run Sparkle again before preview or send so AI stays in sync with what you changed.
+            If you change trim, poster, caption, or a photo Look after running Sparkle, you will be prompted to run it again before preview or send so AI stays in sync.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
-              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage.'
+              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Video pauses immediately when you tap Next.'
               : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>
-            {mediaType === 'video'
-              ? 'On Android, the system back key backs out of this flow (same idea as the X in the top bar) so you are less likely to leave the app by accident while editing.'
-              : 'On Android, the system back key backs out of this flow (same idea as Close on the right end of the bar above your photo) so you are less likely to leave the app by accident while editing.'}
+            On Android, the system back key works the same as the close button (X) in the top bar.
           </Text>
         </BottomSheetScrollView>
       </BottomSheet>
@@ -1918,11 +1945,13 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: '19%',
-    zIndex: 25,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    borderRadius: 12,
-    marginHorizontal: 8,
+    zIndex: 28,
+  },
+  videoActionsWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    zIndex: 29,
   },
   looksBarWrap: {
     position: 'absolute',
@@ -1959,6 +1988,22 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginRight: 0,
   },
+  videoUtilityRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  videoActionsRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  videoActionChip: {
+    flex: 1,
+    minWidth: 0,
+  },
   photoUtilityLeft: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1973,6 +2018,25 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 30, 0.88)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.22)',
+  },
+  topBarRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  topBarNextBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 18,
+    backgroundColor: '#2e78b7',
+  },
+  topBarNextText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   topToolbar: {
     position: 'absolute',
@@ -1992,6 +2056,42 @@ const styles = StyleSheet.create({
     justifyContent: 'space-evenly',
     gap: 6,
     marginRight: 12,
+  },
+  coverToolbarRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-evenly',
+  },
+  coverArrowPair: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  coverArrowBtn: {
+    width: 48,
+    height: 54,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+  },
+  coverActionBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+    width: 54,
+    height: 54,
+    borderRadius: 12,
+    backgroundColor: 'rgba(30, 30, 30, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  coverActionBtnText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
   },
   toolbarChip: {
     alignItems: 'center',
@@ -2062,22 +2162,18 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 14,
   },
-  // Sheet
-  sheetBackground: {
-    backgroundColor: '#1a1a1a', // Dark background
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    elevation: 5,
+  footerBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    zIndex: 30,
   },
   sheetHandle: {
-    backgroundColor: '#666', // Lighter gray for dark background
+    backgroundColor: '#666',
     width: 40,
-  },
-  sheetContent: {
-    flex: 1,
-    paddingHorizontal: 20,
   },
   aiScreen: {
     ...StyleSheet.absoluteFillObject,
@@ -2312,20 +2408,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
-    paddingTop: 8,
-    paddingBottom: 2,
+    paddingTop: 12,
+    paddingBottom: 4,
   },
   aiInfoLinkText: {
     color: '#4a90d9',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '500',
   },
   tabContainer: {
-    flex: 1,
-    paddingTop: 10,
   },
   sendTabContainer: {
-    paddingTop: 6,
   },
   sendBtnRow: {
     flexDirection: 'row',
@@ -2369,46 +2462,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 8,
     textAlign: 'center',
-  },
-  quickActionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-    gap: 10,
-  },
-  actionChip: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    borderRadius: 14,
-    backgroundColor: '#2a2a2a',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    position: 'relative',
-  },
-  chipDisabled: {
-    opacity: 0.5,
-  },
-  previewChip: {
-    backgroundColor: '#4a4a4a', // Muted gray for preview button
-  },
-  sendChip: {
-    backgroundColor: '#2e78b7', // Bright blue for send button (dominant)
-    borderWidth: 2,
-    borderColor: '#4a9bd9', // Lighter blue border for emphasis
-    shadowColor: "#2e78b7",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  actionChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#fff', // White text for dark background
   },
   badge: {
     position: 'absolute',
@@ -2563,11 +2616,7 @@ sendButtonText: {
   fontWeight: 'bold',
 },
 replayOverlay: {
-  position: 'absolute',
-  top: 0,
-  left: 0,
-  right: 0,
-  bottom: '25%',
+  ...StyleSheet.absoluteFillObject,
   backgroundColor: 'rgba(0,0,0,0.5)',
   alignItems: 'center',
   justifyContent: 'center',
@@ -2626,7 +2675,7 @@ infoBtn: {
 },
 infoBtnText: {
   color: '#4a90d9',
-  fontSize: 12,
+  fontSize: 14,
   fontWeight: '500',
 },
 infoSheetBg: {

@@ -19,9 +19,9 @@ export interface VideoTrimSliderProps {
   onSeek?: (ms: number) => void;
 }
 
-const HANDLE_WIDTH = 24;
+const HANDLE_WIDTH = 18;
 const MIN_RANGE_MS = 500;
-const TRACK_HEIGHT = 44;
+const TRACK_HEIGHT = 28;
 const ZOOM_WINDOW_MS = 4000;
 
 function formatTime(ms: number): string {
@@ -226,14 +226,10 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
     return { left: frac * trackWidth.value - StyleSheet.hairlineWidth / 2 };
   });
 
+  const selectedDuration = formatTime(endMs - startMs);
+
   return (
     <View style={styles.container}>
-      <View style={styles.labels}>
-        <Text style={styles.labelText}>{formatTime(startMs)}</Text>
-        <Text style={styles.durationText}>{formatTime(endMs - startMs)}</Text>
-        <Text style={styles.labelText}>{formatTime(endMs)}</Text>
-      </View>
-      <Text style={styles.zoomHint}>Hold a handle — track maps to ±2s around it for fine edits</Text>
       <View
         style={styles.track}
         onLayout={(e) => {
@@ -241,7 +237,9 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
         }}
       >
         <Animated.View style={[styles.inactive, styles.inactiveLeft, leftInactiveStyle]} />
-        <Animated.View style={[styles.active, activeRegionStyle]} />
+        <Animated.View style={[styles.active, activeRegionStyle]}>
+          <Text style={styles.durationBadge}>{selectedDuration}</Text>
+        </Animated.View>
         <Animated.View style={[styles.inactive, styles.inactiveRight, rightInactiveStyle]} />
 
         <GestureDetector gesture={startGesture}>
@@ -270,36 +268,13 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
 
 const styles = StyleSheet.create({
   container: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  labels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  zoomHint: {
-    color: 'rgba(255,255,255,0.35)',
-    fontSize: 11,
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  labelText: {
-    color: '#ccc',
-    fontSize: 12,
-    fontVariant: ['tabular-nums'],
-  },
-  durationText: {
-    color: '#4FC3F7',
-    fontSize: 13,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
+    paddingHorizontal: 12,
+    paddingVertical: 2,
   },
   track: {
     height: TRACK_HEIGHT,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 5,
+    backgroundColor: 'rgba(255,255,255,0.15)',
     position: 'relative',
     overflow: 'visible',
   },
@@ -307,60 +282,64 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
   inactiveLeft: {
     left: 0,
-    borderTopLeftRadius: 6,
-    borderBottomLeftRadius: 6,
+    borderTopLeftRadius: 5,
+    borderBottomLeftRadius: 5,
   },
   inactiveRight: {
     right: 0,
-    borderTopRightRadius: 6,
-    borderBottomRightRadius: 6,
+    borderTopRightRadius: 5,
+    borderBottomRightRadius: 5,
   },
   active: {
     position: 'absolute',
     top: 0,
     bottom: 0,
-    backgroundColor: 'rgba(46, 120, 183, 0.35)',
+    backgroundColor: 'rgba(255, 214, 10, 0.15)',
     borderTopWidth: 2,
     borderBottomWidth: 2,
-    borderColor: '#4FC3F7',
+    borderColor: '#FFD60A',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  durationBadge: {
+    color: '#FFD60A',
+    fontSize: 10,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    opacity: 0.9,
   },
   handle: {
     position: 'absolute',
-    top: -6,
+    top: -3,
     width: HANDLE_WIDTH,
-    height: TRACK_HEIGHT + 12,
+    height: TRACK_HEIGHT + 6,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 10,
   },
   handleGrip: {
-    width: 16,
-    height: 34,
-    borderRadius: 5,
-    backgroundColor: '#4FC3F7',
+    width: 10,
+    height: TRACK_HEIGHT + 2,
+    borderRadius: 3,
+    backgroundColor: '#FFD60A',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.4,
-    shadowRadius: 3,
-    elevation: 4,
+    gap: 2,
   },
   gripLine: {
-    width: 8,
-    height: 2,
+    width: 5,
+    height: 1.5,
     borderRadius: 1,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.4)',
   },
   playhead: {
     position: 'absolute',
-    top: -2,
-    bottom: -2,
+    top: -1,
+    bottom: -1,
     width: StyleSheet.hairlineWidth * 2,
     backgroundColor: '#fff',
     zIndex: 5,
