@@ -5,8 +5,6 @@ import {
   prepareVideoForUpload,
 } from '@/utils/mediaProcessor';
 import * as ExpoImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
-import ImagePicker from 'react-native-image-crop-picker';
 import { useNavigation, useRouter } from 'expo-router';
 import React, { useEffect, useRef } from 'react';
 import {
@@ -18,32 +16,6 @@ import {
   Text,
   View,
 } from 'react-native';
-
-const MAX_VIDEO_DURATION_SECONDS = 60;
-
-const PHOTO_CROP_SIZE = 1080;
-
-/** Square stage crop (after Expo system pick / trim). */
-const squarePhotoCrop = {
-  width: PHOTO_CROP_SIZE,
-  height: PHOTO_CROP_SIZE,
-  cropping: true as const,
-  avoidEmptySpaceAroundImage: true,
-  freeStyleCropEnabled: true,
-  enableRotationGesture: true,
-  forceJpg: true,
-  compressImageQuality: 0.92,
-};
-
-/** uCrop / cropper chrome (Android-focused; harmless extras on iOS). */
-const reflectionCropperChrome = {
-  cropperToolbarTitle: 'Edit Reflection',
-  cropperActiveWidgetColor: '#2e78b7',
-  cropperToolbarColor: '#1a1a1a',
-  cropperToolbarWidgetColor: 'rgba(255,255,255,0.92)',
-  cropperStatusBarLight: false,
-  cropperNavigationBarLight: false,
-};
 
 async function ensureAndroidGalleryPermissions(): Promise<boolean> {
   if (Platform.OS !== 'android') return true;
@@ -71,22 +43,6 @@ async function ensureAndroidGalleryPermissions(): Promise<boolean> {
   }
 
   return true;
-}
-
-/**
- * `react-native-image-crop-picker` expects a filesystem path; Expo may return `content://` on Android.
- */
-async function pathForOpenCropper(uri: string): Promise<string> {
-  const normalized = ensureFileUri(uri);
-  if (normalized.startsWith('content://')) {
-    if (!FileSystem.cacheDirectory) {
-      throw new Error('cacheDirectory unavailable');
-    }
-    const dest = `${FileSystem.cacheDirectory}gallery_crop_in_${Date.now()}.jpg`;
-    await FileSystem.copyAsync({ from: uri, to: dest });
-    return dest.replace(/^file:\/\//, '');
-  }
-  return normalized.replace(/^file:\/\//, '');
 }
 
 export default function GalleryScreen() {
@@ -141,10 +97,8 @@ export default function GalleryScreen() {
       }
 
       const result = await ExpoImagePicker.launchImageLibraryAsync({
-        // SDK 52: use `MediaTypeOptions.All` for images + videos (same intent as legacy `['all']`).
-        mediaTypes: ExpoImagePicker.MediaTypeOptions.All,
-        allowsEditing: true,
-        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS,
+        mediaTypes: ['images', 'videos'],
+        allowsEditing: false,
         quality: 1,
       });
 
@@ -166,15 +120,7 @@ export default function GalleryScreen() {
           source: 'gallery',
         });
       } else {
-        const cropInPath = await pathForOpenCropper(asset.uri);
-        const cropped = await ImagePicker.openCropper({
-          mediaType: 'photo',
-          path: cropInPath,
-          ...squarePhotoCrop,
-          ...reflectionCropperChrome,
-        });
-        const croppedUri = ensureFileUri(cropped.path);
-        const optimizedUri = await prepareImageForUpload(croppedUri);
+        const optimizedUri = await prepareImageForUpload(expoUri);
         setPendingMedia({
           uri: ensureFileUri(optimizedUri),
           type: 'photo',

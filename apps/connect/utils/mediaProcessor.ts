@@ -6,14 +6,15 @@ import { Video } from 'react-native-compressor';
 const MAX_UPLOAD_WIDTH_PX = 1080;
 const VIDEO_BITRATE = 5 * 1000 * 1000; // 5 Mbps
 const MAX_VIDEO_RESOLUTION = 1080; // 1080p
+export const PHOTO_EXPORT_SIZE_PX = 1080;
 
 function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
 }
 
 /**
- * Normalize local media paths for RN / Expo (`file://`), including Expo ImagePicker URIs and
- * react-native-image-crop-picker `path` values. Remote `http(s)` URIs are returned unchanged.
+ * Normalize local media paths for RN / Expo (`file://`), including Expo ImagePicker URIs.
+ * Remote `http(s)` URIs are returned unchanged.
  */
 export function ensureFileUri(path: string): string {
   if (!path) return path;
@@ -48,6 +49,37 @@ async function getImageSizeAsync(uri: string): Promise<{ width: number; height: 
   });
 }
 
+export type ContainedPhotoMetrics = {
+  fittedWidth: number;
+  fittedHeight: number;
+  maxOffsetX: number;
+  maxOffsetY: number;
+};
+
+/**
+ * Computes how a source photo fits into a square stage at the current scale.
+ * Translation can then be clamped to +/- `maxOffsetX` / `maxOffsetY`.
+ */
+export function getContainedPhotoMetrics(
+  sourceWidth: number,
+  sourceHeight: number,
+  stageSize: number,
+  scale: number,
+): ContainedPhotoMetrics {
+  const safeWidth = Math.max(1, sourceWidth);
+  const safeHeight = Math.max(1, sourceHeight);
+  const safeStage = Math.max(1, stageSize);
+  const aspect = safeWidth / safeHeight;
+  const fittedWidth = aspect >= 1 ? safeStage : safeStage * aspect;
+  const fittedHeight = aspect >= 1 ? safeStage / aspect : safeStage;
+  return {
+    fittedWidth,
+    fittedHeight,
+    maxOffsetX: Math.max(0, (fittedWidth * scale - safeStage) / 2),
+    maxOffsetY: Math.max(0, (fittedHeight * scale - safeStage) / 2),
+  };
+}
+
 /**
  * Gatekeeper: Returns a local, cache-based JPEG URI that is guaranteed to be <= 1080px wide.
  * - Remote URIs are downloaded to cache first.
@@ -74,7 +106,7 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
     }
 
     const size = await getImageSizeAsync(localUri);
-    // Gallery flow uses react-native-image-crop-picker at 1080×1080; only resize when still wider than cap.
+    // Photo editing now exports a square stage separately; gatekeeper still caps width and JPEG-encodes.
     const shouldDownscale = !size ? true : size.width > MAX_UPLOAD_WIDTH_PX;
 
     const result = await ImageManipulator.manipulateAsync(

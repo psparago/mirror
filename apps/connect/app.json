@@ -72,14 +72,6 @@
           "photosPermission": "Allow Reflections Connect to access your photos to create Reflections."
         }
       ],
-      [
-        "with-rn-image-crop-picker",
-        {
-          "PhotoLibraryUsageDescription": "Allow Reflections Connect to access your photo library to choose images and videos for your Reflections.",
-          "CameraUsageDescription": "Allow Reflections Connect to access your camera to capture photos and videos for your Reflections.",
-          "MicrophoneUsageDescription": "Allow Reflections Connect to access your microphone when recording video Reflections."
-        }
-      ],
       "./plugins/reactNativeImageFilterKit",
       [
         "expo-build-properties",

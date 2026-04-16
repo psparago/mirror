@@ -55,7 +55,7 @@ export function useReflectionFilters({ mediaUri, mediaType, onFilteredUriChange 
   );
 
   const extractFilteredImage = useCallback((): Promise<string | null> => {
-    if (mediaType !== 'photo' || currentFilterType === 'original') return Promise.resolve(null);
+    if (mediaType !== 'photo') return Promise.resolve(null);
     return new Promise((resolve) => {
       setLookExtractBusy(true);
       pendingExtractResolveRef.current = resolve;

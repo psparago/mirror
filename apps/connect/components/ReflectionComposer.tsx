@@ -1,7 +1,8 @@
 import { FontAwesome } from '@expo/vector-icons';
-import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetScrollView, BottomSheetView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
+import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -11,10 +12,13 @@ import {
   Alert,
   BackHandler,
   Keyboard,
+  LayoutChangeEvent,
+  Image as NativeImage,
   Platform,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View,
@@ -24,6 +28,7 @@ import Animated, {
   FadeIn,
   FadeOut,
   runOnJS,
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -34,6 +39,7 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ReflectionFilteredPhoto } from '@/hooks/ReflectionFilteredPhoto';
 import { useReflectionFilters, type ReflectionFilterType } from '@/hooks/useReflectionFilters';
+import { PHOTO_EXPORT_SIZE_PX } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
 import { VideoTrimSlider } from '@projectmirror/shared';
 
@@ -48,9 +54,11 @@ export type ComposerSendPayload = {
   audioUri: string | null;
   deepDive: string | null;
   videoMeta?: ComposerVideoMeta | null;
-  /** Local file URI from image-filter-kit extract when Look (B&W) is on; JPEG gatekeeper runs in CreationModal. */
+  /** Final square photo export (original or Look-baked) to upload instead of the raw source photo. */
   filteredPhotoUri?: string | null;
 };
+
+export type ComposerStage = 'workbench' | 'ai' | 'send';
 
 // --- TYPES ---
 interface ReflectionComposerProps {
@@ -93,6 +101,41 @@ interface ReflectionComposerProps {
   peopleContext?: string;
   onPeopleContextChange?: (v: string) => void;
   explorerName?: string;
+  stage: ComposerStage;
+  onStageChange: (next: ComposerStage) => void;
+}
+
+const MIN_PHOTO_SCALE = 0.35;
+const MAX_PHOTO_SCALE = 4;
+const SOFT_VIDEO_RECOMMENDED_SECONDS = 60;
+const HARD_VIDEO_MAX_SECONDS = 5 * 60;
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function clampNumberWorklet(value: number, min: number, max: number): number {
+  'worklet';
+  return Math.min(Math.max(value, min), max);
+}
+
+function getContainedPhotoMetricsWorklet(
+  sourceWidth: number,
+  sourceHeight: number,
+  stageSize: number,
+  scale: number,
+): { maxOffsetX: number; maxOffsetY: number } {
+  'worklet';
+  const safeWidth = Math.max(1, sourceWidth);
+  const safeHeight = Math.max(1, sourceHeight);
+  const safeStage = Math.max(1, stageSize);
+  const aspect = safeWidth / safeHeight;
+  const fittedWidth = aspect >= 1 ? safeStage : safeStage * aspect;
+  const fittedHeight = aspect >= 1 ? safeStage / aspect : safeStage;
+  return {
+    maxOffsetX: Math.max(0, (fittedWidth * scale - safeStage) / 2),
+    maxOffsetY: Math.max(0, (fittedHeight * scale - safeStage) / 2),
+  };
 }
 
 export default function ReflectionComposer({
@@ -121,20 +164,22 @@ export default function ReflectionComposer({
   peopleContext,
   onPeopleContextChange,
   explorerName,
+  stage,
+  onStageChange,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
-  const sparkleSheetRef = useRef<BottomSheet>(null);
   const infoSheetRef = useRef<BottomSheet>(null);
   const [caption, setCaption] = useState(initialCaption);
-  const [activeTab, setActiveTab] = useState<'main' | 'voice' | 'text'>('main');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [sheetIndex, setSheetIndex] = useState(0);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
   const [isPosterMode, setIsPosterMode] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
+  const [sourceVideoDurationMs, setSourceVideoDurationMs] = useState(0);
   const lastSendAtRef = useRef(0);
 
   const {
@@ -147,6 +192,21 @@ export default function ReflectionComposer({
     extractFilteredImage,
     lastFilteredExtractUriRef,
   } = useReflectionFilters({ mediaUri, mediaType, onFilteredUriChange });
+
+  const noopExtractImage = useCallback(() => {}, []);
+  const [photoSourceSize, setPhotoSourceSize] = useState<{ width: number; height: number } | null>(null);
+  const [photoStageSize, setPhotoStageSize] = useState(0);
+  const [photoEditRevision, setPhotoEditRevision] = useState(0);
+  const [photoExportTransform, setPhotoExportTransform] = useState({ scale: 1, tx: 0, ty: 0, rotationDeg: 0 });
+  const photoScale = useSharedValue(1);
+  const photoTranslateX = useSharedValue(0);
+  const photoTranslateY = useSharedValue(0);
+  const photoRotation = useSharedValue(0);
+  const photoScaleStart = useSharedValue(1);
+  const photoPanStartX = useSharedValue(0);
+  const photoPanStartY = useSharedValue(0);
+  const photoRotationStart = useSharedValue(0);
+  const photoGestureRevision = useSharedValue(0);
   
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -213,6 +273,7 @@ export default function ReflectionComposer({
     thumbMs: number | null;
     caption: string;
     currentFilterType: ReflectionFilterType;
+    photoEditRevision: number;
   } | null>(null);
   const prevAiThinkingRef = useRef(isAiThinking);
 
@@ -226,27 +287,90 @@ export default function ReflectionComposer({
         thumbMs: thumbnailTimeMs,
         caption,
         currentFilterType,
+        photoEditRevision,
       };
+      if (wantsAutoPlayRef.current) {
+        wantsAutoPlayRef.current = false;
+        setTimeout(() => playAiPreview(), 400);
+      }
     }
-  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, currentFilterType]);
+  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, currentFilterType, photoEditRevision, playAiPreview]);
 
   const isAiStale = useCallback((): boolean => {
     const snap = aiSnapshotRef.current;
     if (!snap) return false;
     if (caption.trim() !== snap.caption.trim()) return true;
     if (currentFilterType !== snap.currentFilterType) return true;
+    if (photoEditRevision !== snap.photoEditRevision) return true;
     if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
     if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
     if (thumbnailTimeMs !== snap.thumbMs) return true;
     return false;
-  }, [caption, currentFilterType, videoRangeMs, thumbnailTimeMs]);
+  }, [caption, currentFilterType, photoEditRevision, videoRangeMs, thumbnailTimeMs]);
+
+  const hasAnyAiArtifacts = useMemo(
+    () =>
+      !!(
+        aiArtifacts?.caption ||
+        aiArtifacts?.deepDive ||
+        aiArtifacts?.audioUrl ||
+        aiArtifacts?.deepDiveAudioUrl
+      ),
+    [aiArtifacts],
+  );
+
+  useEffect(() => {
+    if (!hasAnyAiArtifacts) return;
+    if (aiSnapshotRef.current) return;
+    aiSnapshotRef.current = {
+      trimStart: videoRangeMs?.start ?? null,
+      trimEnd: videoRangeMs?.end ?? null,
+      thumbMs: thumbnailTimeMs,
+      caption,
+      currentFilterType,
+      photoEditRevision,
+    };
+  }, [
+    hasAnyAiArtifacts,
+    videoRangeMs,
+    thumbnailTimeMs,
+    caption,
+    currentFilterType,
+    photoEditRevision,
+  ]);
+
+  const ensureAiCurrent = useCallback(
+    (purpose: 'preview' | 'send'): boolean => {
+      const requiresInitialAiRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
+      const requiresAiRerun = isAiStale();
+      if (!requiresInitialAiRun && !requiresAiRerun) return true;
+
+      const title = requiresInitialAiRun ? 'Run Sparkle first' : 'Re-run Sparkle';
+      const message = requiresInitialAiRun
+        ? 'Run Sparkle once before preview/send so AI is generated from your current reflection.'
+        : `You've changed content that affects AI. Re-run Sparkle before ${purpose}.`;
+
+      Alert.alert(title, message, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Run Sparkle', onPress: openSparkleSheet },
+      ]);
+      return false;
+    },
+    [hasAnyAiArtifacts, isAiStale, openSparkleSheet],
+  );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
+  const workbenchCollapsedHeight = screenHeight * 0.16;
+  const workbenchExpandedHeight = screenHeight * 0.26;
+  const aiStageHeight = screenHeight * 0.62;
+  const sendSheetHeight = 80;
 
-  /** Top toolbar stack height (must match `topToolbar` padding + chip row). */
-  const TOP_TOOLBAR_BLOCK_PX = 62;
-  /** Photo Looks strip sits directly under the toolbar; media starts below this. */
-  const PHOTO_LOOKS_STRIP_PX = 70;
+  /** Utility bar block height used for media top offset. */
+  const TOP_TOOLBAR_BLOCK_PX = 38;
+  /** Photo Looks bar block height used for media top offset. */
+  const PHOTO_LOOKS_STRIP_PX = 48;
+  /** Visual breathing room between photo utility bar and Looks bar. */
+  const PHOTO_BARS_GAP_PX = 8;
 
   const LOOK_OPTIONS: {
     id: ReflectionFilterType;
@@ -259,12 +383,185 @@ export default function ReflectionComposer({
     { id: 'warm', label: 'Warm', icon: 'fire' },
   ];
 
-  // AUTO-OPEN SPARKLE HINTS ON MOUNT (when caption is empty — new content fast path)
-  useEffect(() => {
-    if (!caption && !isAiThinking && !isAiCancelled) {
-      requestAnimationFrame(() => sparkleSheetRef.current?.snapToIndex(0));
+  const handlePhotoStageLayout = useCallback((e: LayoutChangeEvent) => {
+    const side = Math.min(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
+    if (side > 0) {
+      setPhotoStageSize(side);
     }
   }, []);
+
+  const markPhotoEdited = useCallback(() => {
+    setPhotoEditRevision((v) => v + 1);
+  }, []);
+
+  useAnimatedReaction(
+    () => photoGestureRevision.value,
+    (next, prev) => {
+      if (next !== prev) {
+        runOnJS(markPhotoEdited)();
+      }
+    },
+    [markPhotoEdited],
+  );
+
+  useEffect(() => {
+    if (mediaType !== 'photo') {
+      setPhotoSourceSize(null);
+      return;
+    }
+    let alive = true;
+    NativeImage.getSize(
+      mediaUri,
+      (width, height) => {
+        if (alive) {
+          setPhotoSourceSize({ width, height });
+        }
+      },
+      () => {
+        if (alive) {
+          setPhotoSourceSize({ width: PHOTO_EXPORT_SIZE_PX, height: PHOTO_EXPORT_SIZE_PX });
+        }
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [mediaType, mediaUri]);
+
+  useEffect(() => {
+    if (mediaType !== 'photo') return;
+    photoScale.value = 1;
+    photoTranslateX.value = 0;
+    photoTranslateY.value = 0;
+    photoRotation.value = 0;
+    setPhotoExportTransform({ scale: 1, tx: 0, ty: 0, rotationDeg: 0 });
+    setPhotoEditRevision(0);
+  }, [mediaType, mediaUri, photoScale, photoTranslateX, photoTranslateY, photoRotation]);
+
+  const syncPhotoExportTransform = useCallback(() => {
+    const previewSide = photoStageSize > 0 ? photoStageSize : PHOTO_EXPORT_SIZE_PX;
+    const ratio = PHOTO_EXPORT_SIZE_PX / previewSide;
+    setPhotoExportTransform({
+      scale: photoScale.value,
+      tx: photoTranslateX.value * ratio,
+      ty: photoTranslateY.value * ratio,
+      rotationDeg: photoRotation.value,
+    });
+  }, [photoScale, photoStageSize, photoTranslateX, photoTranslateY, photoRotation]);
+
+  const photoTransformStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: photoTranslateX.value },
+      { translateY: photoTranslateY.value },
+      { scale: photoScale.value },
+      { rotate: `${photoRotation.value}deg` },
+    ],
+  }));
+
+  const photoEditorGesture = useMemo(() => {
+    if (mediaType !== 'photo' || !photoSourceSize || !photoStageSize) {
+      return Gesture.Simultaneous(
+        Gesture.Pan().enabled(false),
+        Gesture.Pinch().enabled(false),
+        Gesture.Rotation().enabled(false),
+      );
+    }
+
+    const pinch = Gesture.Pinch()
+      .onBegin(() => {
+        photoScaleStart.value = photoScale.value;
+      })
+      .onUpdate((e) => {
+        const nextScale = clampNumberWorklet(photoScaleStart.value * e.scale, MIN_PHOTO_SCALE, MAX_PHOTO_SCALE);
+        const metrics = getContainedPhotoMetricsWorklet(
+          photoSourceSize.width,
+          photoSourceSize.height,
+          photoStageSize,
+          nextScale,
+        );
+        photoScale.value = nextScale;
+        photoTranslateX.value = clampNumberWorklet(
+          photoTranslateX.value,
+          -metrics.maxOffsetX,
+          metrics.maxOffsetX,
+        );
+        photoTranslateY.value = clampNumberWorklet(
+          photoTranslateY.value,
+          -metrics.maxOffsetY,
+          metrics.maxOffsetY,
+        );
+      })
+      .onEnd(() => {
+        photoGestureRevision.value += 1;
+      });
+
+    const pan = Gesture.Pan()
+      .onBegin(() => {
+        photoPanStartX.value = photoTranslateX.value;
+        photoPanStartY.value = photoTranslateY.value;
+      })
+      .onUpdate((e) => {
+        const metrics = getContainedPhotoMetricsWorklet(
+          photoSourceSize.width,
+          photoSourceSize.height,
+          photoStageSize,
+          photoScale.value,
+        );
+        photoTranslateX.value = clampNumberWorklet(
+          photoPanStartX.value + e.translationX,
+          -metrics.maxOffsetX,
+          metrics.maxOffsetX,
+        );
+        photoTranslateY.value = clampNumberWorklet(
+          photoPanStartY.value + e.translationY,
+          -metrics.maxOffsetY,
+          metrics.maxOffsetY,
+        );
+      })
+      .onEnd(() => {
+        photoGestureRevision.value += 1;
+      });
+
+    const rotate = Gesture.Rotation()
+      .onBegin(() => {
+        photoRotationStart.value = photoRotation.value;
+      })
+      .onUpdate((e) => {
+        const deltaDeg = (e.rotation * 180) / Math.PI;
+        photoRotation.value = photoRotationStart.value + deltaDeg;
+      })
+      .onEnd(() => {
+        photoGestureRevision.value += 1;
+      });
+
+    return Gesture.Simultaneous(pan, pinch, rotate);
+  }, [
+    mediaType,
+    photoSourceSize,
+    photoStageSize,
+    photoScale,
+    photoScaleStart,
+    photoTranslateX,
+    photoTranslateY,
+    photoPanStartX,
+    photoPanStartY,
+    photoRotation,
+    photoRotationStart,
+    photoGestureRevision,
+  ]);
+
+  const rotatePhotoBy = useCallback((deltaDeg: number) => {
+    photoRotation.value += deltaDeg;
+    markPhotoEdited();
+  }, [photoRotation, markPhotoEdited]);
+
+  const resetPhotoTransform = useCallback(() => {
+    photoScale.value = 1;
+    photoTranslateX.value = 0;
+    photoTranslateY.value = 0;
+    photoRotation.value = 0;
+    markPhotoEdited();
+  }, [photoScale, photoTranslateX, photoTranslateY, photoRotation, markPhotoEdited]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return undefined;
@@ -308,33 +605,26 @@ export default function ReflectionComposer({
 
   // Calculate snap points dynamically based on screen height and keyboard
   const snapPoints = useMemo(() => {
-    const mainHeight = screenHeight * 0.18; // 18% for main tab
-    const voiceHeight = screenHeight * 0.45; // 45% for voice tab
-    
-    // For text tab: fill the space above the keyboard
-    if (keyboardHeight > 0) {
-      // When keyboard is visible: sheet should fill from keyboard to near top of screen
-      const topMargin = Math.max(48, insets.top + 12);
-      const textHeight = screenHeight - keyboardHeight - topMargin;
-      return [mainHeight, voiceHeight, textHeight];
-    } else {
-      // When keyboard is not visible: use 92% of screen
-      return [mainHeight, voiceHeight, screenHeight * 0.92];
-    }
-  }, [screenHeight, keyboardHeight, insets.top]);
+    return [workbenchCollapsedHeight, workbenchExpandedHeight, sendSheetHeight];
+  }, [workbenchCollapsedHeight, workbenchExpandedHeight, sendSheetHeight]);
 
-  // Ensure sheet snaps to correct position when tab changes or keyboard shows/hides
   useEffect(() => {
     if (!sheetRef.current) return;
-    
-    // Small delay to ensure the tab content has rendered and snap points are updated
+
     const timeoutId = setTimeout(() => {
-      const targetIndex = activeTab === 'main' ? 0 : activeTab === 'voice' ? 1 : 2;
-      sheetRef.current?.snapToIndex(targetIndex);
+      if (stage === 'ai') {
+        sheetRef.current?.close();
+        return;
+      }
+      if (stage === 'send') {
+        sheetRef.current?.snapToIndex(2);
+        return;
+      }
+      sheetRef.current?.snapToIndex(0);
     }, 100);
-    
+
     return () => clearTimeout(timeoutId);
-  }, [activeTab, snapPoints, keyboardHeight]);
+  }, [stage, snapPoints]);
 
   const isRemoteMediaUri =
     typeof mediaUri === 'string' &&
@@ -390,6 +680,7 @@ export default function ReflectionComposer({
       trimAppliedRef.current = true;
 
       const durationMs = Math.round(player.duration * 1000);
+      setSourceVideoDurationMs(durationMs);
       const s = initialVideoMeta?.video_start_ms;
       const e = initialVideoMeta?.video_end_ms;
       const hasInitialTrim =
@@ -416,7 +707,12 @@ export default function ReflectionComposer({
     applyTrim();
 
     // Also listen for status changes so we catch the moment duration becomes available
-    const sub = player.addListener('statusChange', () => applyTrim());
+    const sub = player.addListener('statusChange', () => {
+      if (player.duration > 0) {
+        setSourceVideoDurationMs(Math.round(player.duration * 1000));
+      }
+      applyTrim();
+    });
     return () => sub.remove();
   }, [
     mediaType,
@@ -486,54 +782,62 @@ export default function ReflectionComposer({
     return { ...base, videoMeta: null };
   }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
 
+  const currentPlaybackWindowSeconds = useMemo(() => {
+    if (mediaType !== 'video' || !videoRangeMs) return 0;
+    return Math.round((videoRangeMs.end - videoRangeMs.start) / 1000);
+  }, [mediaType, videoRangeMs]);
+
+  const showSoftVideoWarning =
+    mediaType === 'video' && currentPlaybackWindowSeconds > SOFT_VIDEO_RECOMMENDED_SECONDS;
+
+  const exportCurrentPhoto = useCallback(async (): Promise<string | null> => {
+    if (mediaType !== 'photo') return null;
+    syncPhotoExportTransform();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    let uri = await extractFilteredImage();
+    if (!uri) {
+      uri = lastFilteredExtractUriRef.current;
+    }
+    return uri;
+  }, [mediaType, syncPhotoExportTransform, extractFilteredImage, lastFilteredExtractUriRef]);
+
   const openSparkleSheet = useCallback(() => {
     setIsPosterMode(false);
-    sparkleSheetRef.current?.snapToIndex(0);
-  }, []);
+    onStageChange('ai');
+  }, [onStageChange]);
 
   const doSendNow = useCallback(async () => {
     const now = Date.now();
     if (now - lastSendAtRef.current < 800) return;
     lastSendAtRef.current = now;
     let filteredPhotoUri: string | null = null;
-    if (mediaType === 'photo' && isFilterActive) {
-      filteredPhotoUri = await extractFilteredImage();
-      if (!filteredPhotoUri) {
-        filteredPhotoUri = lastFilteredExtractUriRef.current;
-      }
+    if (mediaType === 'photo') {
+      filteredPhotoUri = await exportCurrentPhoto();
     }
     onSend({ ...buildSendPayload(), filteredPhotoUri });
-  }, [buildSendPayload, onSend, mediaType, isFilterActive, extractFilteredImage]);
+  }, [buildSendPayload, onSend, mediaType, exportCurrentPhoto]);
 
   const handleSendWithThrottle = useCallback(async () => {
-    if (isAiStale()) {
-      Alert.alert(
-        'Re-run Sparkle?',
-        'You\'ve made changes since the last AI pass. Re-run Sparkle before sending?',
-        [
-          { text: 'Send Anyway', style: 'destructive', onPress: () => { doSendNow(); } },
-          { text: 'Sparkle First', onPress: openSparkleSheet },
-          { text: 'Cancel', style: 'cancel' },
-        ],
-      );
-      return;
-    }
+    if (!ensureAiCurrent('send')) return;
     doSendNow();
-  }, [isAiStale, doSendNow, openSparkleSheet]);
+  }, [ensureAiCurrent, doSendNow]);
 
   const handleSheetChange = useCallback((index: number) => {
+    setSheetIndex(index);
     if (index < 2) {
       Keyboard.dismiss();
     }
   }, []);
 
-  const doPreviewNow = useCallback(() => {
+  const doPreviewNow = useCallback(async () => {
     const previewId = 'preview-temp';
     const now = new Date();
+    const previewImageUri =
+      mediaType === 'photo' ? (await exportCurrentPhoto()) || mediaUri : mediaUri;
 
     const mockEvent: Event = {
       event_id: previewId,
-      image_url: mediaUri,
+      image_url: previewImageUri,
       video_url: mediaType === 'video' ? mediaUri : undefined,
       audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
       metadata: {
@@ -551,50 +855,113 @@ export default function ReflectionComposer({
 
     setPreviewEvent(mockEvent);
     setIsPreviewOpen(true);
-  }, [mediaUri, mediaType, audioUri, aiArtifacts, caption]);
+  }, [mediaUri, mediaType, audioUri, aiArtifacts, caption, exportCurrentPhoto]);
 
   const handlePreview = useCallback(() => {
-    if (isAiStale()) {
-      Alert.alert(
-        'Re-run Sparkle?',
-        'You\'ve made changes since the last AI pass. Re-run Sparkle before previewing?',
-        [
-          { text: 'Preview Anyway', onPress: () => { doPreviewNow(); } },
-          { text: 'Sparkle First', onPress: openSparkleSheet },
-          { text: 'Cancel', style: 'cancel' },
-        ],
-      );
-      return;
+    if (!ensureAiCurrent('preview')) return;
+    void doPreviewNow();
+  }, [ensureAiCurrent, doPreviewNow]);
+
+  const goToWorkbench = () => {
+    onStageChange('workbench');
+    Keyboard.dismiss();
+  };
+  const goToAi = () => {
+    onStageChange('ai');
+  };
+  const goToSend = () => {
+    onStageChange('send');
+    Keyboard.dismiss();
+  };
+
+  // AI audio preview playback — caption → pause → deep dive
+  type PreviewPhase = 'idle' | 'caption' | 'pause' | 'deep_dive';
+  const [previewSound, setPreviewSound] = useState<Audio.Sound | null>(null);
+  const [previewPhase, setPreviewPhase] = useState<PreviewPhase>('idle');
+  const previewAbortRef = useRef(false);
+
+  const isPlayingPreview = previewPhase !== 'idle';
+
+  useEffect(() => {
+    return () => { previewSound?.unloadAsync(); };
+  }, [previewSound]);
+
+  const ensureSpeakerMode = useCallback(async () => {
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: false,
+      playThroughEarpieceAndroid: false,
+    });
+  }, []);
+
+  const playOneClip = useCallback((uri: string): Promise<'finished' | 'stopped'> => {
+    return new Promise(async (resolve) => {
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri },
+          { shouldPlay: true, volume: 1.0 },
+        );
+        setPreviewSound(sound);
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            sound.unloadAsync();
+            setPreviewSound(null);
+            resolve('finished');
+          }
+        });
+      } catch {
+        resolve('stopped');
+      }
+    });
+  }, []);
+
+  const playAiPreview = useCallback(async () => {
+    previewAbortRef.current = false;
+
+    await ensureSpeakerMode();
+
+    const captionUrl = audioUri || aiArtifacts?.audioUrl;
+    const deepDiveUrl = aiArtifacts?.deepDiveAudioUrl;
+
+    if (captionUrl) {
+      setPreviewPhase('caption');
+      const result = await playOneClip(captionUrl);
+      if (result === 'stopped' || previewAbortRef.current) { setPreviewPhase('idle'); return; }
     }
-    doPreviewNow();
-  }, [isAiStale, doPreviewNow, openSparkleSheet]);
 
-  // --- TABS SWITCHERS ---
-  const switchToVoice = () => { 
-    setActiveTab('voice'); 
-    requestAnimationFrame(() => {
-      sheetRef.current?.snapToIndex(1);
-    });
-  };
-  const switchToText = () => { 
-    setActiveTab('text'); 
-    requestAnimationFrame(() => {
-      sheetRef.current?.snapToIndex(2);
-    });
-  };
-  const resetToMain = () => {
-    setActiveTab('main');
-    requestAnimationFrame(() => {
-      sheetRef.current?.snapToIndex(0);
-    });
-    Keyboard.dismiss(); 
-  };
+    if (deepDiveUrl && !previewAbortRef.current) {
+      setPreviewPhase('pause');
+      await new Promise<void>((r) => setTimeout(r, 800));
+      if (previewAbortRef.current) { setPreviewPhase('idle'); return; }
 
-  // --- SPARKLE HINTS SHEET ---
-  const handleRunSparkle = useCallback(() => {
-    sparkleSheetRef.current?.close();
+      setPreviewPhase('deep_dive');
+      const result = await playOneClip(deepDiveUrl);
+      if (result === 'stopped' || previewAbortRef.current) { setPreviewPhase('idle'); return; }
+    }
+
+    setPreviewPhase('idle');
+  }, [audioUri, aiArtifacts?.audioUrl, aiArtifacts?.deepDiveAudioUrl, ensureSpeakerMode, playOneClip]);
+
+  const stopAiPreview = useCallback(async () => {
+    previewAbortRef.current = true;
+    if (previewSound) {
+      await previewSound.stopAsync();
+      await previewSound.unloadAsync();
+      setPreviewSound(null);
+    }
+    setPreviewPhase('idle');
+  }, [previewSound]);
+
+  const wantsAutoPlayRef = useRef(false);
+
+  const handleRunSparkleAndPlay = useCallback(() => {
+    wantsAutoPlayRef.current = true;
     setIsAiCancelled(false);
-    onTriggerMagic(caption || undefined).catch(() => {});
+    onTriggerMagic(caption || undefined).catch(() => {
+      wantsAutoPlayRef.current = false;
+    });
   }, [onTriggerMagic, caption]);
 
   // --- RENDERERS ---
@@ -679,9 +1046,14 @@ export default function ReflectionComposer({
 
   /** Remote timeline edit: use Preview → Replace for media swap; keep top Edit for local / new captures. */
   const showTopMediaEdit = !isRemoteMediaUri || !onReplaceMediaFromPreview;
+  const isWorkbenchStage = stage === 'workbench';
 
-  /** Photo: optional Edit-only row above Looks; Sparkle + Close live on the Looks row. */
-  const photoEditBarPx = mediaType === 'photo' && showTopMediaEdit ? TOP_TOOLBAR_BLOCK_PX : 0;
+  /** Photo utility row always exists (Back/Close). */
+  const photoEditBarPx = mediaType === 'photo' && isWorkbenchStage ? TOP_TOOLBAR_BLOCK_PX : 0;
+  const photoWorkbenchSheetHeightPx =
+    sheetIndex <= 0 ? workbenchCollapsedHeight : workbenchExpandedHeight;
+  const photoWorkbenchBottomInsetPx =
+    mediaType === 'photo' && isWorkbenchStage ? Math.ceil(photoWorkbenchSheetHeightPx + 8) : 0;
 
   const renderBackground = () => (
     <View
@@ -690,8 +1062,9 @@ export default function ReflectionComposer({
         {
           top:
             insets.top +
-            (mediaType === 'photo' ? photoEditBarPx : TOP_TOOLBAR_BLOCK_PX) +
-            (mediaType === 'photo' ? PHOTO_LOOKS_STRIP_PX : 0),
+            (isWorkbenchStage ? (mediaType === 'photo' ? photoEditBarPx : TOP_TOOLBAR_BLOCK_PX) : 0) +
+            (isWorkbenchStage && mediaType === 'photo' ? PHOTO_LOOKS_STRIP_PX + PHOTO_BARS_GAP_PX : 0),
+          bottom: photoWorkbenchBottomInsetPx,
         },
       ]}
     >
@@ -706,24 +1079,44 @@ export default function ReflectionComposer({
             )}
           </View>
         </GestureDetector>
-      ) : currentFilterType !== 'original' ? (
-        <ReflectionFilteredPhoto
-          mediaUri={mediaUri}
-          currentFilterType={currentFilterType}
-          extractImageEnabled={extractImageEnabled}
-          onExtractImage={handleExtractImage}
-          style={styles.media}
-        />
       ) : (
-        <Image
-          source={{ uri: mediaUri }}
-          style={styles.media}
-          contentFit="cover"
-          cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
-          transition={isRemoteMediaUri ? 200 : 0}
-        />
+        <View style={styles.photoRoot}>
+          <View style={styles.photoStage} onLayout={handlePhotoStageLayout}>
+            <GestureDetector gesture={photoEditorGesture}>
+              <View style={styles.photoStageClip}>
+                <Animated.View style={[styles.photoStageFill, photoTransformStyle]}>
+                  {currentFilterType !== 'original' ? (
+                    <ReflectionFilteredPhoto
+                      mediaUri={mediaUri}
+                      currentFilterType={currentFilterType}
+                      extractImageEnabled={false}
+                      onExtractImage={noopExtractImage}
+                      style={styles.photoStageFill}
+                      imageStyle={styles.photoStageFill}
+                    />
+                  ) : (
+                    <Image
+                      source={{ uri: mediaUri }}
+                      style={styles.photoStageFill}
+                      contentFit="contain"
+                      cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
+                      transition={isRemoteMediaUri ? 200 : 0}
+                    />
+                  )}
+                </Animated.View>
+                <View pointerEvents="none" style={styles.photoFrameOverlay}>
+                  <Text style={styles.photoFrameLabel}>Explorer frame</Text>
+                </View>
+              </View>
+            </GestureDetector>
+          </View>
+        </View>
       )}
-      <LinearGradient colors={['transparent', 'rgba(0,0,0,0.5)']} style={styles.gradientOverlay} />
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', 'rgba(0,0,0,0.5)']}
+        style={styles.gradientOverlay}
+      />
 
       {/* REPLAY OVERLAY — shown when video finishes, below toolbar */}
       {mediaType === 'video' && videoEnded && (
@@ -772,21 +1165,58 @@ export default function ReflectionComposer({
   );
 
   const renderTopControls = () => {
-    if (isPosterMode) return renderPosterToolbar();
-
-    if (mediaType === 'photo') {
-      if (!showTopMediaEdit) return null;
+    if (stage === 'ai') return null;
+    if (!isWorkbenchStage) {
       return (
         <View style={[styles.topToolbar, { top: insets.top }]}>
-          <View style={[styles.topToolbarRow, styles.photoTopToolbarRow]}>
+          <View style={styles.sendTopBar}>
             <TouchableOpacity
-              style={[styles.toolbarChip, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onReplaceMedia}
+              style={styles.androidBackBtn}
+              onPress={goToAi}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Back to AI"
+            >
+              <FontAwesome name="arrow-left" size={16} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.sendStageTitle}>Preview & Send</Text>
+            <TouchableOpacity
+              style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onRetake}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
             >
-              <FontAwesome name="pencil" size={16} color="#fff" />
-              <Text style={styles.toolbarChipText}>Edit</Text>
+              <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+    if (isPosterMode) return renderPosterToolbar();
+
+    if (mediaType === 'photo') {
+      return (
+        <View style={[styles.topToolbar, { top: insets.top }]}>
+          <View style={styles.photoUtilityRow}>
+            <View style={styles.photoUtilityLeft}>
+              <TouchableOpacity
+                style={[styles.androidBackBtn, isBlockedByAi && { opacity: 0.35 }]}
+                onPress={onReplaceMedia}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Back to media picker"
+              >
+                <FontAwesome name="arrow-left" size={16} color="#fff" />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onRetake}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+            >
+              <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
             </TouchableOpacity>
           </View>
         </View>
@@ -829,15 +1259,6 @@ export default function ReflectionComposer({
               <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
             </TouchableOpacity>
           ) : null}
-          <TouchableOpacity
-            style={[styles.toolbarChip, styles.toolbarSparkleChip, isBlockedByAi && { opacity: 0.35 }]}
-            onPress={openSparkleSheet}
-            disabled={isSending || isBlockedByAi}
-            activeOpacity={0.7}
-          >
-            <FontAwesome name="magic" size={16} color={isBlockedByAi ? '#f39c12' : '#f5c842'} />
-            <Text style={[styles.toolbarChipText, { color: '#f5c842' }]}>Sparkle</Text>
-          </TouchableOpacity>
         </View>
         <TouchableOpacity 
           style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]} 
@@ -851,64 +1272,25 @@ export default function ReflectionComposer({
     );
   };
 
-  const renderMainTab = () => (
+  const renderWorkbenchTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
+      {showSoftVideoWarning ? (
+        <View style={styles.videoGuidanceBanner}>
+          <FontAwesome name="clock-o" size={14} color="#f5c842" />
+          <Text style={styles.videoGuidanceText}>
+            Best under 60s for the Explorer. Current playback window: {currentPlaybackWindowSeconds}s.
+          </Text>
+        </View>
+      ) : null}
       <View style={styles.quickActionsRow}>
-        
-        {/* VOICE CHIP */}
-        <TouchableOpacity style={styles.actionChip} onPress={switchToVoice}>
-          {hasRecordedAudio ? (
-             <View style={styles.badge} />
-          ) : null}
-          <FontAwesome name="microphone" size={20} color={hasRecordedAudio ? "#27ae60" : "#2e78b7"} />
-          <Text style={styles.actionChipText}>Voice</Text>
+        <TouchableOpacity
+          style={[styles.actionChip, styles.previewChip, (isSending || isAiThinking) && styles.chipDisabled]}
+          onPress={goToAi}
+          disabled={isSending || isAiThinking || lookExtractBusy}
+        >
+          <FontAwesome name="arrow-right" size={20} color="#fff" />
+          <Text style={styles.actionChipText}>Next: AI & Caption</Text>
         </TouchableOpacity>
-        
-        {/* TEXT CHIP */}
-        <TouchableOpacity style={styles.actionChip} onPress={switchToText}>
-          {caption ? <View style={styles.badge} /> : null}
-          <FontAwesome name="pencil" size={20} color={caption ? "#27ae60" : "#8e44ad"} />
-          <Text style={styles.actionChipText}>Text</Text>
-        </TouchableOpacity>
-
-        {/* PREVIEW BUTTON */}
-        {!isBlockedByAi && (
-          <TouchableOpacity 
-            style={[
-              styles.actionChip,
-              styles.previewChip,
-              (isSending || isAiThinking) && styles.chipDisabled
-            ]} 
-            onPress={handlePreview}
-            disabled={isSending || isAiThinking || lookExtractBusy}
-          >
-            <FontAwesome name="eye" size={20} color="#fff" />
-            <Text style={styles.actionChipText}>Preview</Text>
-          </TouchableOpacity>
-        )}
-
-        {/* SEND BUTTON */}
-        {!isBlockedByAi && (
-          <TouchableOpacity 
-            style={[
-              styles.actionChip,
-              styles.sendChip,
-              isSending && styles.chipDisabled,
-              (!caption && !hasRecordedAudio) && styles.chipDisabled
-            ]}
-            onPress={handleSendWithThrottle}
-            disabled={isSending || lookExtractBusy || (!caption && !hasRecordedAudio)}
-          >
-            {isSending || lookExtractBusy ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <>
-                <FontAwesome name="paper-plane" size={20} color="#fff" />
-                <Text style={styles.actionChipText}>Send</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        )}
       </View>
       <TouchableOpacity
         style={styles.infoBtn}
@@ -921,76 +1303,219 @@ export default function ReflectionComposer({
     </Animated.View>
   );
 
-  const renderVoiceTab = () => (
-    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
-      <View style={styles.tabHeader}>
-        <TouchableOpacity onPress={resetToMain} style={styles.backLink}>
-          <FontAwesome name="chevron-left" size={16} color="#666" />
-          <Text style={styles.backText}>Back</Text>
+  const hasAiAudio = !!(audioUri || aiArtifacts?.audioUrl);
+
+  const renderAiTab = () => (
+    <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
+      <View style={styles.aiNavBar}>
+        <TouchableOpacity onPress={goToWorkbench} style={styles.aiNavBackBtn} activeOpacity={0.7}>
+          <FontAwesome name="arrow-left" size={16} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.tabTitle}>Voice Message</Text>
-        <View style={{ width: 40 }} />
+        <Text style={styles.aiNavTitle}>AI & Caption</Text>
+        <TouchableOpacity onPress={goToSend} style={styles.aiNavNextBtn} activeOpacity={0.7}>
+          <Text style={styles.aiNavNextText}>Next</Text>
+          <FontAwesome name="arrow-right" size={12} color="#fff" />
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.recorderContainer}>
-        {hasRecordedAudio && !audioRecorder?.isRecording ? (
-           <View style={styles.playbackState}>
-             <FontAwesome name="check-circle" size={48} color="#27ae60" />
-             <Text style={styles.recordingStatus}>Voice Note Recorded</Text>
-             <TouchableOpacity onPress={() => { /* Logic to clear audio */ }}>
-                <Text style={styles.clearText}>Tap record to overwrite</Text>
-             </TouchableOpacity>
-           </View>
-        ) : null}
-
-        <TouchableOpacity 
-          style={[styles.recordButton, audioRecorder?.isRecording && styles.recordingActive]}
-          onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
-        >
-          <FontAwesome 
-            name={audioRecorder?.isRecording ? "stop" : "microphone"} 
-            size={32} 
-            color="#fff" 
-          />
-        </TouchableOpacity>
-        <Text style={styles.recordingStatus}>
-          {audioRecorder?.isRecording ? "Recording..." : (hasRecordedAudio ? "Record New" : "Tap to Record")}
+      <ScrollView
+        style={styles.aiScreenScroll}
+        contentContainerStyle={{ flexGrow: 1, paddingBottom: 8 }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        <Text style={styles.aiSubtitleText}>
+          No changes needed? Tap Next to keep your current draft as-is.
         </Text>
+
+        {/* SECTION: Sparkle Hints */}
+        <View style={[styles.aiCard, styles.aiCardProminent]}>
+          <View style={styles.aiCardHeader}>
+            <FontAwesome name="magic" size={15} color="#f5c842" />
+            <Text style={[styles.aiCardTitle, styles.aiCardTitleProminent]}>Sparkle Hints</Text>
+          </View>
+          <Text style={styles.aiCardDesc}>
+            Tell AI who and what is in this reflection.
+          </Text>
+          <View style={styles.aiTogglePair}>
+            <TouchableOpacity
+              style={styles.aiToggleRow}
+              onPress={() => onCompanionInReflectionChange?.(!companionInReflection)}
+              activeOpacity={0.7}
+            >
+              <FontAwesome
+                name={companionInReflection ? 'check-square-o' : 'square-o'}
+                size={16}
+                color={companionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.45)'}
+              />
+              <Text style={[styles.aiToggleLabel, companionInReflection && styles.aiToggleLabelActive]}>
+                I'm in this
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.aiToggleRow}
+              onPress={() => onExplorerInReflectionChange?.(!explorerInReflection)}
+              activeOpacity={0.7}
+            >
+              <FontAwesome
+                name={explorerInReflection ? 'check-square-o' : 'square-o'}
+                size={16}
+                color={explorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.45)'}
+              />
+              <Text style={[styles.aiToggleLabel, explorerInReflection && styles.aiToggleLabelActive]}>
+                {explorerName || 'Explorer'} is in this
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.aiHintLabel}>Context for AI</Text>
+          <View style={styles.aiInputRow}>
+            <FontAwesome name="users" size={13} color="rgba(255,255,255,0.35)" style={{ marginTop: 10 }} />
+            <TextInput
+              style={styles.aiHintInput}
+              placeholder="Names, pets, places, what's happening..."
+              placeholderTextColor="rgba(255,255,255,0.28)"
+              value={peopleContext ?? ''}
+              onChangeText={(t) => onPeopleContextChange?.(t)}
+              returnKeyType="done"
+              autoCorrect={false}
+              autoCapitalize="words"
+            />
+          </View>
+        </View>
+
+        {/* SECTION: Voice Intro */}
+        <View style={styles.aiCard}>
+          <View style={styles.aiCardHeader}>
+            <FontAwesome name="microphone" size={14} color="#2e78b7" />
+            <Text style={styles.aiCardTitle}>Voice Intro (Optional)</Text>
+          </View>
+          <Text style={styles.aiCardDesc}>
+            Record a short intro in your own voice.
+          </Text>
+          <View style={styles.aiVoiceCentered}>
+            <TouchableOpacity
+              style={[styles.aiRecordBtn, audioRecorder?.isRecording && styles.aiRecordBtnActive]}
+              onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
+              activeOpacity={0.7}
+            >
+              <FontAwesome
+                name={audioRecorder?.isRecording ? 'stop' : 'microphone'}
+                size={18}
+                color="#fff"
+              />
+            </TouchableOpacity>
+            {hasRecordedAudio && !audioRecorder?.isRecording ? (
+              <View style={styles.aiVoiceDoneCol}>
+                <View style={styles.aiVoiceBadgeRow}>
+                  <FontAwesome name="check-circle" size={14} color="#27ae60" />
+                  <Text style={styles.aiVoiceDoneText}>Recorded</Text>
+                </View>
+                <Text style={styles.aiVoiceHint}>Tap to overwrite</Text>
+              </View>
+            ) : (
+              <Text style={styles.aiVoicePrompt}>
+                {audioRecorder?.isRecording ? 'Recording...' : 'Tap to Record'}
+              </Text>
+            )}
+          </View>
+        </View>
+
+        {/* SECTION: Caption */}
+        <View style={[styles.aiCard, { flex: 1 }]}>
+          <View style={styles.aiCardHeader}>
+            <FontAwesome name="pencil" size={14} color="#8e44ad" />
+            <Text style={styles.aiCardTitle}>Caption (Optional)</Text>
+          </View>
+          <TextInput
+            style={styles.aiCaptionInput}
+            placeholder="Edit the AI caption or write your own..."
+            placeholderTextColor="rgba(255,255,255,0.28)"
+            value={caption}
+            onChangeText={setCaption}
+            multiline
+            textAlignVertical="top"
+          />
+        </View>
+      </ScrollView>
+
+      {/* FOOTER: Run Sparkle + Play + How this works */}
+      <View style={[styles.aiFooter, { paddingBottom: Math.max(insets.bottom + 8, 20) }]}>
+        <View style={styles.aiFooterBtnRow}>
+          <TouchableOpacity
+            style={[styles.aiSparkleBtn, isAiThinking && { opacity: 0.6 }]}
+            onPress={handleRunSparkleAndPlay}
+            disabled={isAiThinking}
+            activeOpacity={0.8}
+          >
+            <FontAwesome name="magic" size={14} color="#fff" />
+            <Text style={styles.aiSparkleBtnText}>
+              {isAiThinking ? 'Running...' : 'Run Sparkle'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.aiPlayBtn, !hasAiAudio && { opacity: 0.3 }]}
+            onPress={isPlayingPreview ? stopAiPreview : playAiPreview}
+            disabled={!hasAiAudio || isAiThinking}
+            activeOpacity={0.7}
+          >
+            <FontAwesome
+              name={isPlayingPreview ? 'stop' : 'play'}
+              size={13}
+              color="#fff"
+            />
+            {isPlayingPreview ? (
+              <Text style={styles.aiPlayBtnLabel}>
+                {previewPhase === 'caption' ? 'Caption' : previewPhase === 'deep_dive' ? 'Deep Dive' : '...'}
+              </Text>
+            ) : null}
+          </TouchableOpacity>
+        </View>
+        <TouchableOpacity
+          style={styles.aiInfoLink}
+          onPress={() => infoSheetRef.current?.snapToIndex(0)}
+          activeOpacity={0.7}
+        >
+          <FontAwesome name="info-circle" size={13} color="#4a90d9" />
+          <Text style={styles.aiInfoLinkText}>How this works</Text>
+        </TouchableOpacity>
       </View>
     </Animated.View>
   );
 
-  const renderTextTab = () => (
-    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.tabContainer}>
-      <View style={styles.tabHeader}>
-        <TouchableOpacity onPress={resetToMain} style={styles.backLink}>
-          <FontAwesome name="chevron-left" size={16} color="#666" />
-          <Text style={styles.backText}>Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.tabTitle}>Description</Text>
-        <TouchableOpacity onPress={resetToMain}>
-          <Text style={styles.doneText}>Done</Text>
-        </TouchableOpacity>
-      </View>
-
-      <BottomSheetTextInput
-        style={styles.input}
-        placeholder="What is happening in this reflection?"
-        placeholderTextColor="#666"
-        value={caption}
-        onChangeText={setCaption}
-        multiline
-        scrollEnabled
-        textAlignVertical="top"
-        autoFocus
-        onFocus={() => {
-          // Snap to highest point when text input is focused
-          sheetRef.current?.snapToIndex(2);
-        }}
-        onBlur={() => {
-          Keyboard.dismiss();
-        }}
-      />
+  const renderSendTab = () => (
+    <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.sendTabContainer}>
+      {!isBlockedByAi && (
+        <View style={styles.sendBtnRow}>
+          <TouchableOpacity
+            style={[styles.sendSlimBtn, styles.previewSlimBtn, (isSending || isAiThinking) && { opacity: 0.4 }]}
+            onPress={handlePreview}
+            disabled={isSending || isAiThinking || lookExtractBusy}
+            activeOpacity={0.7}
+          >
+            <FontAwesome name="eye" size={15} color="#fff" />
+            <Text style={styles.sendSlimBtnText}>Preview</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.sendSlimBtn,
+              styles.sendSlimBtnPrimary,
+              (isSending || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
+            ]}
+            onPress={handleSendWithThrottle}
+            disabled={isSending || lookExtractBusy || (!caption && !hasRecordedAudio)}
+            activeOpacity={0.7}
+          >
+            {isSending || lookExtractBusy ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <FontAwesome name="paper-plane" size={15} color="#fff" />
+                <Text style={styles.sendSlimBtnText}>Send</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
     </Animated.View>
   );
 
@@ -1004,6 +1529,34 @@ export default function ReflectionComposer({
 
       {/* 1b. TOP CONTROLS (over media, below status bar) */}
       {renderTopControls()}
+
+      {/* 1c. AI STAGE FULL SCREEN */}
+      {stage === 'ai' ? renderAiTab() : null}
+
+      {mediaType === 'photo' ? (
+        <View style={styles.photoExportHidden} pointerEvents="none">
+          <View style={styles.photoExportStage}>
+            <ReflectionFilteredPhoto
+              mediaUri={mediaUri}
+              currentFilterType={currentFilterType}
+              extractImageEnabled={extractImageEnabled}
+              onExtractImage={handleExtractImage}
+              style={[
+                styles.photoExportFill,
+                {
+                  transform: [
+                    { translateX: photoExportTransform.tx },
+                    { translateY: photoExportTransform.ty },
+                    { scale: photoExportTransform.scale },
+                    { rotate: `${photoExportTransform.rotationDeg}deg` },
+                  ],
+                },
+              ]}
+              imageStyle={styles.photoExportFill}
+            />
+          </View>
+        </View>
+      ) : null}
 
       {/* 2. AI SPARKLE OVERLAY — rendered outside the bottom sheet */}
       {isBlockedByAi && (
@@ -1026,7 +1579,7 @@ export default function ReflectionComposer({
       )}
 
       {/* 2b. INLINE VIDEO TRIMMER */}
-      {mediaType === 'video' && videoRangeMs && player.duration > 0 && (
+      {isWorkbenchStage && mediaType === 'video' && videoRangeMs && player.duration > 0 && (
         <View style={styles.trimSliderOverlay}>
           <VideoTrimSlider
             durationMs={Math.round(player.duration * 1000)}
@@ -1039,21 +1592,16 @@ export default function ReflectionComposer({
         </View>
       )}
 
-      {mediaType === 'photo' && (
+      {isWorkbenchStage && mediaType === 'photo' && (
         <View
           style={[
             styles.looksBarWrap,
-            { top: insets.top + photoEditBarPx, height: PHOTO_LOOKS_STRIP_PX },
+            { top: insets.top + photoEditBarPx + PHOTO_BARS_GAP_PX, height: PHOTO_LOOKS_STRIP_PX },
           ]}
           pointerEvents="box-none"
         >
           <View style={styles.looksToolbar}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.photoLooksScroll}
-              contentContainerStyle={styles.photoLooksScrollContent}
-            >
+            <View style={styles.photoLooksRow}>
               {LOOK_OPTIONS.map((opt) => {
                 const selected = currentFilterType === opt.id;
                 return (
@@ -1081,130 +1629,49 @@ export default function ReflectionComposer({
                   </TouchableOpacity>
                 );
               })}
-            </ScrollView>
-            <View style={styles.looksToolbarDivider} />
+            </View>
             <TouchableOpacity
-              style={[styles.toolbarChip, styles.toolbarSparkleChip, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={openSparkleSheet}
-              disabled={isSending || isBlockedByAi}
+              style={[styles.toolbarChip, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              onPress={() => rotatePhotoBy(-90)}
+              disabled={isSending || isBlockedByAi || lookExtractBusy}
               activeOpacity={0.7}
             >
-              <FontAwesome name="magic" size={16} color={isBlockedByAi ? '#f39c12' : '#f5c842'} />
-              <Text style={[styles.toolbarChipText, { color: '#f5c842' }]}>Sparkle</Text>
+              <FontAwesome name="undo" size={16} color="#fff" />
+              <Text style={styles.toolbarChipText}>Rotate</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onRetake}
-              disabled={isSending || isBlockedByAi}
+              style={[styles.toolbarChip, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              onPress={resetPhotoTransform}
+              disabled={isSending || isBlockedByAi || lookExtractBusy}
               activeOpacity={0.7}
             >
-              <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+              <FontAwesome name="refresh" size={16} color="#fff" />
+              <Text style={styles.toolbarChipText}>Reset</Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
       {/* 3. BOTTOM SHEET TOOLKIT */}
-      <BottomSheet
-        ref={sheetRef}
-        index={0}
-        snapPoints={snapPoints}
-        onChange={handleSheetChange}
-        backgroundStyle={styles.sheetBackground}
-        handleIndicatorStyle={styles.sheetHandle}
-        keyboardBehavior="interactive"
-        android_keyboardInputMode="adjustResize"
-        enablePanDownToClose={false}
-        enableOverDrag={false}
-      >
-        <BottomSheetView style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-          {activeTab === 'main' && renderMainTab()}
-          {activeTab === 'voice' && renderVoiceTab()}
-          {activeTab === 'text' && renderTextTab()}
-        </BottomSheetView>
-      </BottomSheet>
-
-      {/* 4. SPARKLE HINTS SHEET */}
-      <BottomSheet
-        ref={sparkleSheetRef}
-        index={-1}
-        snapPoints={[380]}
-        enablePanDownToClose
-        backgroundStyle={styles.sparkleSheetBg}
-        handleIndicatorStyle={styles.sheetHandle}
-      >
-        <BottomSheetView style={styles.sparkleSheetContent}>
-          <View style={styles.sparkleSheetHeader}>
-            <FontAwesome name="magic" size={18} color="#f39c12" />
-            <Text style={styles.sparkleSheetTitle}>Sparkle Hints</Text>
-          </View>
-          <Text style={styles.sparkleSheetSubtitle}>
-            Help AI understand this Reflection before it runs.
-          </Text>
-
-          <TouchableOpacity
-            style={styles.sparkleHintToggle}
-            onPress={() => onCompanionInReflectionChange?.(!companionInReflection)}
-            activeOpacity={0.7}
-          >
-            <FontAwesome
-              name={companionInReflection ? 'check-square-o' : 'square-o'}
-              size={18}
-              color={companionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.5)'}
-            />
-            <Text style={[styles.sparkleHintLabel, companionInReflection && styles.sparkleHintLabelActive]}>
-              I'm in this
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.sparkleHintToggle}
-            onPress={() => onExplorerInReflectionChange?.(!explorerInReflection)}
-            activeOpacity={0.7}
-          >
-            <FontAwesome
-              name={explorerInReflection ? 'check-square-o' : 'square-o'}
-              size={18}
-              color={explorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.5)'}
-            />
-            <Text style={[styles.sparkleHintLabel, explorerInReflection && styles.sparkleHintLabelActive]}>
-              {explorerName || 'Explorer'} is in this
-            </Text>
-          </TouchableOpacity>
-
-          <View style={styles.sparkleHintInputRow}>
-            <FontAwesome name="users" size={14} color="rgba(255,255,255,0.4)" style={{ marginTop: 4 }} />
-            <BottomSheetTextInput
-              style={styles.sparkleHintInput}
-              placeholder="e.g. Nona, dog Dalton, baby Dante, at Nona's house"
-              placeholderTextColor="rgba(255,255,255,0.3)"
-              value={peopleContext ?? ''}
-              onChangeText={(t) => onPeopleContextChange?.(t)}
-              returnKeyType="done"
-              autoCorrect={false}
-              autoCapitalize="words"
-            />
-          </View>
-
-          <View style={styles.sparkleSheetActions}>
-            <TouchableOpacity
-              style={styles.sparkleRunBtn}
-              onPress={handleRunSparkle}
-              activeOpacity={0.8}
-            >
-              <FontAwesome name="magic" size={16} color="#fff" />
-              <Text style={styles.sparkleRunText}>Run Sparkle</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.sparkleCancelBtn}
-              onPress={() => sparkleSheetRef.current?.close()}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.sparkleCancelText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        </BottomSheetView>
-      </BottomSheet>
+      {stage !== 'ai' ? (
+        <BottomSheet
+          ref={sheetRef}
+          index={0}
+          snapPoints={snapPoints}
+          onChange={handleSheetChange}
+          backgroundStyle={styles.sheetBackground}
+          handleIndicatorStyle={styles.sheetHandle}
+          keyboardBehavior="interactive"
+          android_keyboardInputMode="adjustResize"
+          enablePanDownToClose={false}
+          enableOverDrag={false}
+        >
+          <BottomSheetView style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+            {stage === 'workbench' && renderWorkbenchTab()}
+            {stage === 'send' && renderSendTab()}
+          </BottomSheetView>
+        </BottomSheet>
+      ) : null}
 
       {/* 5. EDITOR GUIDE SHEET */}
       <BottomSheet
@@ -1219,8 +1686,8 @@ export default function ReflectionComposer({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? 'Everything here helps the Explorer understand and connect with what you are sharing. The top bar replaces or adjusts the clip (Edit, Replay, Poster), runs Sparkle, or closes to start over. From the gallery you trim to at most 60 seconds; that clip is the master file you upload. The trim bar here chooses the playback window inside that master (metadata only, no second upload). The bottom sheet has voice, text, preview, and send. Use any tool in any order, as many times as you like.'
-              : `Everything here helps the Explorer understand and connect with what you are sharing.${showTopMediaEdit ? ' Edit at the very top replaces your photo when you need a different shot.' : ''} The row above your image sets Looks, runs Sparkle, and closes to start over. The bottom sheet has voice, text, preview, and send. Use any tool in any order, as many times as you like.`}
+              ? 'This flow always runs in three stages: Workbench, AI/Hints, then Preview/Send. In Workbench, use Edit/Replay/Poster and trim to shape the video. In AI/Hints, add people hints, record voice, and type the caption. In Preview/Send, check it and send. Videos can be longer now, but Reflections work best under 60 seconds and 5 minutes is the hard cap.'
+              : 'This flow always runs in three stages: Workbench, AI/Hints, then Preview/Send. In Workbench, use Back to pick a different photo if needed, then drag and pinch in the square and choose Looks. In AI/Hints, add people hints, record voice, and type the caption. In Preview/Send, check it and send.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1232,7 +1699,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Trim</Text>
                   <Text style={styles.infoDesc}>
-                    In the gallery you already trimmed to a 60 second (or shorter) master. The strip here sits over the bottom of the video so you can pick the exact playback window inside that master — for example a 15 second highlight — without uploading a new file; start and end times are saved as metadata only. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
+                    The strip sits over the bottom of the video so you can pick the exact playback window the Explorer will experience — for example a 15 second highlight — without uploading a new file; start and end times are saved as metadata only. Reflections work best under 60 seconds, but you can bring in a longer source video as long as it stays under 5 minutes total. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
                   </Text>
                 </View>
               </View>
@@ -1257,7 +1724,7 @@ export default function ReflectionComposer({
               <View style={styles.infoTextWrap}>
                 <Text style={styles.infoLabel}>Looks</Text>
                 <Text style={styles.infoDesc}>
-                  Original, Clarity, Classic, and Warm live in the bar directly above your photo (you can scroll that section sideways on a narrow screen). They set how the image is processed before upload. A slim divider separates them from Sparkle and Close on the same row so picture style stays visually grouped. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden. Your choice is baked into the file the Explorer receives — not just a preview.
+                  First, frame the photo inside the square by dragging and pinching, and rotate with a two-finger twist or the Rotate chip. Reset returns to the original framing. Then choose Original, Clarity, Classic, or Warm from the Looks bar above your photo. That same square composition is what gets baked and uploaded for the Explorer. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden.
                 </Text>
               </View>
             </View>
@@ -1268,9 +1735,9 @@ export default function ReflectionComposer({
               <FontAwesome name="microphone" size={14} color="#2e78b7" />
             </View>
             <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Voice</Text>
+              <Text style={styles.infoLabel}>Voice Intro</Text>
               <Text style={styles.infoDesc}>
-                Say it in your own words. This plays before the content so the Explorer knows what's coming and who it's from.
+                Optional. Record a short intro in your own voice on the AI & Caption screen. If you record one, this is what the Explorer hears before the content plays — your real voice takes priority over any AI-generated audio. If you skip it, Sparkle creates an AI voice from your caption instead. Either way, something always plays before the content.
               </Text>
             </View>
           </View>
@@ -1280,9 +1747,9 @@ export default function ReflectionComposer({
               <FontAwesome name="pencil" size={14} color="#8e44ad" />
             </View>
             <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Text</Text>
+              <Text style={styles.infoLabel}>Caption</Text>
               <Text style={styles.infoDesc}>
-                Add a caption. Keep it short — the Explorer reads this alongside your voice intro.
+                Sparkle writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the AI & Caption screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
               </Text>
             </View>
           </View>
@@ -1292,11 +1759,11 @@ export default function ReflectionComposer({
               <FontAwesome name="magic" size={14} color="#f5c842" />
             </View>
             <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Sparkle</Text>
+              <Text style={styles.infoLabel}>Sparkle & Play</Text>
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
-                  ? 'Tap Sparkle in the top bar to open the hints sheet: mark if you are in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.'
-                  : 'Tap the gold Sparkle chip on the right side of the bar above your photo (next to Close) to open the hints sheet: mark if you are in the shot, if the Explorer is, and add a short people or context line. Then run Sparkle. AI uses that plus your media to write caption copy and intro audio. You can run it as many times as you want.'}
+                  ? 'On the AI & Caption screen, mark who is in the clip, add names and context, then tap Run Sparkle. AI uses your hints and media to draft a caption and generate an AI voice intro. After Sparkle finishes it auto-plays what was generated — caption audio first, then the deep dive. If you already have a Sparkle result and just want to hear it again, tap the Play button without re-running. If you recorded your own voice, that always takes priority — the AI voice is the fallback when you skip recording. Run Sparkle as many times as you want.'
+                  : 'On the AI & Caption screen, mark who is in the photo, add names and context, then tap Run Sparkle. AI uses your hints and media to draft a caption and generate an AI voice intro. After Sparkle finishes it auto-plays what was generated — caption audio first, then the deep dive. If you already have a Sparkle result and just want to hear it again, tap the Play button without re-running. If you recorded your own voice, that always takes priority — the AI voice is the fallback when you skip recording. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1305,7 +1772,7 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            You can go back and forth between any of these as many times as you need. Experiment freely — nothing is sent until you tap Send.
+            Use Back and Next to move between stages as many times as needed. Nothing sends until you tap Send.
           </Text>
           <Text style={styles.infoProTip}>
             If you change trim, poster, caption, or a photo Look after Sparkle, you may be prompted to run Sparkle again before preview or send so AI stays in sync with what you changed.
@@ -1362,6 +1829,83 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  /** Centers the square stage in the media area (matches exported 1080×1080 letterboxing). */
+  photoRoot: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoStage: {
+    width: '100%',
+    aspectRatio: 1,
+    maxWidth: '100%',
+    maxHeight: '100%',
+    alignSelf: 'center',
+  },
+  photoStageClip: {
+    flex: 1,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  photoFrameOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 2,
+    borderColor: 'rgba(79,195,247,0.65)',
+  },
+  photoFrameLabel: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    backgroundColor: 'rgba(10,15,22,0.72)',
+    color: 'rgba(189,227,252,0.95)',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  photoStageFill: {
+    width: '100%',
+    height: '100%',
+  },
+  photoExportHidden: {
+    position: 'absolute',
+    left: -2000,
+    top: -2000,
+    opacity: 0,
+  },
+  photoExportStage: {
+    width: PHOTO_EXPORT_SIZE_PX,
+    height: PHOTO_EXPORT_SIZE_PX,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+  },
+  photoExportFill: {
+    width: PHOTO_EXPORT_SIZE_PX,
+    height: PHOTO_EXPORT_SIZE_PX,
+    backgroundColor: '#000',
+  },
+  videoGuidanceBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(63, 48, 18, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(245,200,66,0.28)',
+  },
+  videoGuidanceText: {
+    flex: 1,
+    color: 'rgba(255,255,255,0.86)',
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: '600',
+  },
   gradientOverlay: {
     position: 'absolute',
     left: 0,
@@ -1390,34 +1934,45 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
     paddingHorizontal: 10,
-    paddingVertical: 8,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(7,10,14,0.36)',
   },
-  photoLooksScroll: {
-    flexGrow: 1,
-    flexShrink: 1,
-    minWidth: 0,
-  },
-  photoLooksScrollContent: {
+  photoLooksRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingRight: 4,
+    justifyContent: 'flex-start',
+    gap: 4,
+    minWidth: 0,
   },
   photoLookChip: {
-    flexShrink: 0,
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 6,
   },
-  looksToolbarDivider: {
-    width: StyleSheet.hairlineWidth * 2,
-    alignSelf: 'stretch',
-    minHeight: 28,
-    marginVertical: 4,
-    backgroundColor: 'rgba(255,255,255,0.14)',
-  },
-  photoTopToolbarRow: {
-    justifyContent: 'flex-start',
+  photoUtilityRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginRight: 0,
+  },
+  photoUtilityLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  androidBackBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
   },
   topToolbar: {
     position: 'absolute',
@@ -1427,8 +1982,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 10,
-    paddingTop: 10,
-    paddingBottom: 18,
+    paddingTop: 4,
+    paddingBottom: 4,
     zIndex: 30,
   },
   topToolbarRow: {
@@ -1524,9 +2079,289 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
   },
+  aiScreen: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 35,
+    backgroundColor: '#0d1117',
+  },
+  aiNavBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.1)',
+  },
+  aiNavBackBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiNavTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#f2f6fb',
+    letterSpacing: 0.3,
+  },
+  aiNavNextBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#2e78b7',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 18,
+  },
+  aiNavNextText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  aiSubtitleText: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+    marginBottom: 10,
+    paddingHorizontal: 32,
+  },
+  aiScreenScroll: {
+    flex: 1,
+  },
+  aiCard: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 12,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+  },
+  aiCardProminent: {
+    borderColor: '#f5c842',
+    borderWidth: 1,
+    backgroundColor: 'rgba(245, 200, 66, 0.06)',
+  },
+  aiCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginBottom: 3,
+  },
+  aiCardTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#e8ecf2',
+  },
+  aiCardTitleProminent: {
+    fontSize: 15,
+    color: '#f5d670',
+  },
+  aiCardDesc: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.45)',
+    lineHeight: 16,
+    marginBottom: 8,
+  },
+  aiTogglePair: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 20,
+    marginBottom: 4,
+  },
+  aiToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  aiToggleLabel: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+  },
+  aiToggleLabelActive: {
+    color: '#4FC3F7',
+  },
+  aiHintLabel: {
+    color: '#f5d670',
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginTop: 6,
+    marginBottom: 2,
+  },
+  aiInputRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  aiHintInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.15)',
+    paddingVertical: 8,
+    marginBottom: 4,
+  },
+  aiSparkleBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    backgroundColor: '#f39c12',
+    paddingVertical: 9,
+    borderRadius: 9,
+  },
+  aiSparkleBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  aiVoiceCentered: {
+    alignItems: 'center',
+    gap: 6,
+  },
+  aiVoiceDoneCol: {
+    alignItems: 'center',
+    gap: 1,
+  },
+  aiRecordBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#e74c3c',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#e74c3c',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  aiRecordBtnActive: {
+    backgroundColor: '#c0392b',
+    transform: [{ scale: 1.08 }],
+  },
+  aiVoiceBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  aiVoiceDoneText: {
+    color: '#27ae60',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  aiVoiceHint: {
+    color: 'rgba(255,255,255,0.35)',
+    fontSize: 11,
+  },
+  aiVoicePrompt: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  aiCaptionInput: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 15,
+    lineHeight: 20,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  aiFooter: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.1)',
+    paddingTop: 10,
+    paddingHorizontal: 16,
+  },
+  aiFooterBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  aiPlayBtn: {
+    minWidth: 44,
+    height: 38,
+    borderRadius: 9,
+    backgroundColor: '#2e78b7',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    gap: 6,
+  },
+  aiPlayBtnLabel: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  aiInfoLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingTop: 8,
+    paddingBottom: 2,
+  },
+  aiInfoLinkText: {
+    color: '#4a90d9',
+    fontSize: 13,
+    fontWeight: '500',
+  },
   tabContainer: {
     flex: 1,
     paddingTop: 10,
+  },
+  sendTabContainer: {
+    paddingTop: 6,
+  },
+  sendBtnRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  sendSlimBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: '#3a3a3a',
+  },
+  previewSlimBtn: {
+    backgroundColor: '#3a3a3a',
+  },
+  sendSlimBtnPrimary: {
+    backgroundColor: '#2e78b7',
+  },
+  sendSlimBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  sendStageTitle: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  sendTopBar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   helperText: {
     color: '#666',
@@ -1609,51 +2444,6 @@ const styles = StyleSheet.create({
     color: '#2e78b7',
     fontWeight: '600',
     fontSize: 16,
-  },
-  input: {
-    fontSize: 18,
-    lineHeight: 24,
-    color: '#fff', // White text for dark background
-    minHeight: 150,
-    textAlignVertical: 'top',
-  },
-  // Voice
-  recorderContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 20,
-    gap: 20,
-  },
-  playbackState: {
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  recordButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: '#e74c3c',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: "#e74c3c",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-  },
-  recordingActive: {
-    backgroundColor: '#c0392b',
-    transform: [{ scale: 1.1 }],
-  },
-  recordingStatus: {
-    fontSize: 16,
-    color: '#999', // Lighter for dark background
-    fontWeight: '500',
-  },
-  clearText: {
-    fontSize: 12,
-    color: '#666',
-    textDecorationLine: 'underline',
   },
   // Footer
   footerContainer: {
@@ -1817,59 +2607,6 @@ sparkleSheetHeader: {
 sparkleSheetTitle: {
   color: '#fff',
   fontSize: 18,
-  fontWeight: '700',
-},
-sparkleSheetSubtitle: {
-  color: 'rgba(255,255,255,0.5)',
-  fontSize: 13,
-  marginBottom: 4,
-},
-sparkleHintToggle: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  gap: 10,
-  paddingVertical: 6,
-},
-sparkleHintLabel: {
-  color: 'rgba(255,255,255,0.6)',
-  fontSize: 15,
-},
-sparkleHintLabelActive: {
-  color: '#4FC3F7',
-},
-sparkleHintInputRow: {
-  flexDirection: 'row',
-  alignItems: 'flex-start',
-  gap: 10,
-  marginTop: 2,
-},
-sparkleHintInput: {
-  flex: 1,
-  color: '#fff',
-  fontSize: 14,
-  borderBottomWidth: StyleSheet.hairlineWidth,
-  borderBottomColor: 'rgba(255,255,255,0.2)',
-  paddingVertical: 6,
-},
-sparkleSheetActions: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  gap: 12,
-  marginTop: 12,
-},
-sparkleRunBtn: {
-  flex: 1,
-  flexDirection: 'row',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: 8,
-  backgroundColor: '#f39c12',
-  paddingVertical: 14,
-  borderRadius: 12,
-},
-sparkleRunText: {
-  color: '#fff',
-  fontSize: 16,
   fontWeight: '700',
 },
 sparkleCancelBtn: {

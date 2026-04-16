@@ -7,9 +7,6 @@ import { useRouter } from 'expo-router';
 import React, { useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
-const MAX_VIDEO_DURATION_SECONDS = 60;
-const MAX_VIDEO_DURATION_MS = MAX_VIDEO_DURATION_SECONDS * 1000;
-
 export default function CameraScreen() {
   const router = useRouter();
   const { setPendingMedia } = useReflectionMedia();
@@ -44,19 +41,14 @@ export default function CameraScreen() {
     try {
       setCapturing(true);
       const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+        mediaTypes: ['videos'],
         allowsEditing: false,
         quality: 0.8,
-        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS,
         cameraType: ImagePicker.CameraType.front,
       });
 
       if (!result.canceled && result.assets?.length) {
         const video = result.assets[0];
-        if (video.duration && video.duration > MAX_VIDEO_DURATION_MS) {
-          Alert.alert('Video Too Long', `Please record a video that's ${MAX_VIDEO_DURATION_SECONDS} seconds or less.`);
-          return;
-        }
         const compressedUri = await prepareVideoForUpload(video.uri);
         setPendingMedia({ uri: compressedUri, type: 'video', source: 'camera' });
         router.back();

@@ -1,4 +1,4 @@
-import ReflectionComposer, { type ComposerVideoMeta } from '@/components/ReflectionComposer';
+import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '@/components/ReflectionComposer';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
   deleteScratchMediaFile,
@@ -136,7 +136,6 @@ export default function CreationModal({
   onActionTriggered,
   editEvent = null,
 }: CreationModalProps) {
-  const MAX_VIDEO_DURATION_SECONDS = 60;
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
   const [description, setDescription] = useState('');
@@ -192,6 +191,7 @@ export default function CreationModal({
   const [confirmVideoEnded, setConfirmVideoEnded] = useState(false);
   const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
   const [showNameModal, setShowNameModal] = useState(false);
+  const [composerStage, setComposerStage] = useState<ComposerStage>('workbench');
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
@@ -223,6 +223,7 @@ export default function CreationModal({
       composerVideoMetaRef.current = null;
       setIsEditingExistingReflection(false);
       setShowDescriptionInput(false);
+      setComposerStage('workbench');
       void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
       composerFilteredPhotoUriRef.current = null;
       setComposerFilteredPhotoUri(null);
@@ -245,6 +246,7 @@ export default function CreationModal({
       setPhase('creating');
       setConfirming(false);
       setShowDescriptionInput(true);
+      setComposerStage('workbench');
       setStagingEventId(editEvent.event_id);
       stagingEventIdRef.current = editEvent.event_id;
       setIsCompanionInReflection(!!(m?.is_companion_present ?? m?.companion_in_reflection));
@@ -328,6 +330,7 @@ export default function CreationModal({
     setPhase('picker');
     setConfirming(false);
     setShowDescriptionInput(false);
+    setComposerStage('workbench');
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
     setIsSelfie(false);
@@ -524,11 +527,16 @@ export default function CreationModal({
         setMediaType('video');
         setVideoUri(normalizedUri);
         setPhoto({ uri: normalizedUri });
+        setConfirming(false);
+        setShowDescriptionInput(true);
       } else {
         setMediaType('photo');
         setVideoUri(null);
         setPhoto({ uri: normalizedUri });
+        setConfirming(false);
+        setShowDescriptionInput(true);
       }
+      setComposerStage('workbench');
       setImageSourceType(
         media.source === 'search' ? 'search' : media.source === 'gallery' ? 'gallery' : 'camera'
       );
@@ -542,7 +550,6 @@ export default function CreationModal({
         media.source === 'search' ? 'unsplash' : media.source === 'gallery' ? 'gallery' : 'camera'
       );
       setMediaSource(`/${media.source}` as '/camera' | '/gallery' | '/search');
-      setConfirming(true);
       setDescription('');
       setIsAiGenerated(false);
       setShortCaption('');
@@ -769,7 +776,7 @@ export default function CreationModal({
       return;
     }
 
-    const MAX_SOURCE_VIDEO_SECONDS = 60;
+    const MAX_SOURCE_VIDEO_SECONDS = 5 * 60;
     if (mediaType === 'video' && videoUri) {
       const isLocalVideo =
         !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
@@ -785,7 +792,7 @@ export default function CreationModal({
         if (durSec > MAX_SOURCE_VIDEO_SECONDS) {
           Alert.alert(
             'Video too long',
-            `Source videos must be ${MAX_SOURCE_VIDEO_SECONDS} seconds or less. Use Trim to choose a shorter segment before sending.`
+            'Please choose a video that is 5 minutes or less. Reflections work best under 60 seconds, but 5 minutes is the hard limit.'
           );
           return;
         }
@@ -809,10 +816,10 @@ export default function CreationModal({
       overrides?.filteredPhotoUri != null && overrides.filteredPhotoUri.length > 0
         ? overrides.filteredPhotoUri
         : null;
-    const photoLookNeedsBinaryUpload =
+    const photoCompositionNeedsBinaryUpload =
       mediaType === 'photo' &&
       remotePoster &&
-      !!(composerFilteredPhotoUriRef.current || composerFilteredPhotoUri);
+      !!(filteredForUpload || composerFilteredPhotoUriRef.current || composerFilteredPhotoUri);
 
     // Detect if the poster frame changed for a video edit — requires re-extracting and re-uploading image.jpg.
     const origThumbMs = editEvent?.metadata?.thumbnail_time_ms;
@@ -829,9 +836,9 @@ export default function CreationModal({
       );
 
     // Cloud master: remote poster and/or remote video unchanged — no S3 media re-upload; Firestore-only (incl. trim/thumbnail).
-    // Photo + Look (baked extract): must re-upload image.jpg so Explorer sees the filtered poster.
+    // Photo + edited square composition: must re-upload image.jpg so Explorer sees the latest framing / Look.
     // Video + changed poster frame: must re-extract thumbnail and re-upload image.jpg.
-    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoLookNeedsBinaryUpload && !videoThumbNeedsPosterUpload) {
+    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoCompositionNeedsBinaryUpload && !videoThumbNeedsPosterUpload) {
       try {
         setUploading(true);
         const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
@@ -1611,6 +1618,7 @@ export default function CreationModal({
     setLibrarySourceKind(null);
     composerVideoMetaRef.current = null;
     setPhase('picker');
+    setComposerStage('workbench');
     setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
   };
 
@@ -1649,6 +1657,7 @@ export default function CreationModal({
     setLibrarySourceKind(null);
     setIsSelfie(false);
     composerVideoMetaRef.current = null;
+    setComposerStage('workbench');
 
     if (mediaSource) {
       beginSourceFlow(mediaSource);
@@ -1665,7 +1674,8 @@ export default function CreationModal({
       setPhoto(null);
       setVideoUri(null);
     } else if (showDescriptionInput && photo) {
-      cancelPhoto();
+      void cancelPhoto();
+      return;
     }
     // Do NOT reset phase to 'picker' here — that would briefly make showPicker
     // true before onClose() propagates visible=false from the parent, causing
@@ -1687,6 +1697,10 @@ export default function CreationModal({
       const showCreatingWait = phase === 'creating' && !showComposer && !showConfirmation;
       const showFullScreenOverlay = showComposer || showCreatingWait || showConfirmation;
       if (showFullScreenOverlay) {
+        if (showComposer && composerStage !== 'workbench') {
+          setComposerStage((prev) => (prev === 'send' ? 'ai' : 'workbench'));
+          return true;
+        }
         handleClose();
         return true;
       }
@@ -1708,6 +1722,7 @@ export default function CreationModal({
     showDescriptionInput,
     handleClose,
     onClose,
+    composerStage,
   ]);
 
   const createSnapPoints = useMemo(() => ['44%'], []);
@@ -2166,6 +2181,8 @@ export default function CreationModal({
                 peopleContext={peopleContext}
                 onPeopleContextChange={setPeopleContext}
                 explorerName={explorerName || 'Explorer'}
+                stage={composerStage}
+                onStageChange={setComposerStage}
               />
             </View>
           ) : (
