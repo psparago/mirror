@@ -32,6 +32,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
+import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
@@ -41,7 +42,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
@@ -172,6 +173,8 @@ export default function HomeScreen() {
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
   const [startIdleOnInitialSelection, setStartIdleOnInitialSelection] = useState(false);
+  const [copyToastMessage, setCopyToastMessage] = useState<string | null>(null);
+  const copyToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   //const { currentExplorerId, loading: explorerLoading } = useExplorer();
   const { explorerId: currentExplorerId, explorerData } = useExplorerSelf();
@@ -210,6 +213,27 @@ export default function HomeScreen() {
       setSelectedEvent(null);
     }
   }, [filteredEvents, selectedEvent]);
+
+  const showCopyReflectionIdToast = useCallback((message: string) => {
+    if (copyToastTimerRef.current) {
+      clearTimeout(copyToastTimerRef.current);
+      copyToastTimerRef.current = null;
+    }
+    setCopyToastMessage(message);
+    copyToastTimerRef.current = setTimeout(() => {
+      setCopyToastMessage(null);
+      copyToastTimerRef.current = null;
+    }, 2000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copyToastTimerRef.current) {
+        clearTimeout(copyToastTimerRef.current);
+        copyToastTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const loadExplorerPreferences = useCallback(() => {
     AsyncStorage.getItem('enableInfiniteScroll').then(value => {
@@ -995,6 +1019,26 @@ export default function HomeScreen() {
               From {metadata.sender}
             </Text>
           )}
+
+          <Pressable
+            onPress={async () => {
+              try {
+                await Clipboard.setStringAsync(item.event_id);
+                showCopyReflectionIdToast('Copied reflection ID');
+              } catch {
+                showCopyReflectionIdToast('Could not copy');
+              }
+            }}
+            style={({ pressed }) => [styles.eventIdPressable, pressed && styles.eventIdPressablePressed]}
+            accessibilityRole="button"
+            accessibilityLabel={`Reflection ID ${item.event_id}`}
+            accessibilityHint="Copies the reflection ID to the clipboard"
+          >
+            <Text style={styles.eventIdLabel}>Reflection ID: </Text>
+            <Text style={styles.eventIdText} numberOfLines={1}>
+              {item.event_id}
+            </Text>
+          </Pressable>
         </View>
       </TouchableOpacity>
     );
@@ -1527,6 +1571,17 @@ export default function HomeScreen() {
           />
         </View>
       )}
+
+      {copyToastMessage ? (
+        <View
+          style={[styles.clipboardToastRoot, { bottom: insets.bottom + 20 }]}
+          pointerEvents="none"
+        >
+          <BlurView intensity={80} style={styles.clipboardToastBlur}>
+            <Text style={styles.clipboardToastText}>{copyToastMessage}</Text>
+          </BlurView>
+        </View>
+      ) : null}
     </LinearGradient>
   );
 }
@@ -1990,5 +2045,50 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.5)',
     fontSize: 11,
     marginTop: 2,
+  },
+  eventIdPressable: {
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    paddingVertical: 2,
+    paddingRight: 4,
+    borderRadius: 4,
+  },
+  eventIdPressablePressed: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  eventIdLabel: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(160, 170, 180, 0.75)',
+  },
+  eventIdText: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(200, 210, 220, 0.9)',
+    fontVariant: ['tabular-nums'],
+  },
+  clipboardToastRoot: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    zIndex: 250,
+    alignItems: 'center',
+  },
+  clipboardToastBlur: {
+    paddingVertical: 12,
+    paddingHorizontal: 22,
+    borderRadius: 999,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  clipboardToastText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });

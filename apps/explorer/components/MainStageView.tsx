@@ -13,6 +13,7 @@ import {
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
+import * as Clipboard from 'expo-clipboard';
 import { CameraView, PermissionResponse } from 'expo-camera';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -28,6 +29,7 @@ import {
   KeyboardAvoidingView,
   Modal,
   Platform,
+  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -2181,6 +2183,26 @@ export default function MainStageView({
                         )}
                       </View>
                     )}
+
+                    {selectedEvent?.event_id ? (
+                      <Pressable
+                        onPress={async () => {
+                          try {
+                            await Clipboard.setStringAsync(selectedEvent.event_id);
+                            showToast('Copied reflection ID');
+                          } catch {
+                            showToast('Could not copy');
+                          }
+                        }}
+                        style={({ pressed }) => [styles.eventIdPressable, pressed && styles.eventIdPressablePressed]}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Reflection ID ${selectedEvent.event_id}`}
+                        accessibilityHint="Copies the reflection ID to the clipboard"
+                      >
+                        <Text style={styles.eventIdLabel}>Reflection ID: </Text>
+                        <Text style={styles.eventIdText}>{selectedEvent.event_id}</Text>
+                      </Pressable>
+                    ) : null}
                   </View>
 
                   {/* Play Caption Button - for videos and photos */}
@@ -2515,6 +2537,29 @@ const styles = StyleSheet.create({
   dateText: {
     color: 'rgba(255, 255, 255, 0.5)',
     fontSize: 14,
+  },
+  eventIdPressable: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    paddingVertical: 2,
+    paddingRight: 6,
+    borderRadius: 4,
+  },
+  eventIdPressablePressed: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  eventIdLabel: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(160, 170, 180, 0.75)',
+  },
+  eventIdText: {
+    fontSize: 11,
+    lineHeight: 14,
+    color: 'rgba(200, 210, 220, 0.9)',
+    fontVariant: ['tabular-nums'],
   },
   descriptionText: { color: '#fff', fontSize: 18, lineHeight: 24 },
   playCaptionButton: {

@@ -812,31 +812,31 @@ export default function ReflectionComposer({
   const doPreviewNow = useCallback(async () => {
     setPreviewBuilding(true);
     try {
-      const previewId = 'preview-temp';
-      const now = new Date();
+    const previewId = 'preview-temp';
+    const now = new Date();
       const previewImageUri =
         mediaType === 'photo' ? (await exportCurrentPhoto()) || mediaUri : mediaUri;
 
-      const mockEvent: Event = {
-        event_id: previewId,
+    const mockEvent: Event = {
+      event_id: previewId,
         image_url: previewImageUri,
-        video_url: mediaType === 'video' ? mediaUri : undefined,
-        audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
-        metadata: {
-          description: caption || "No description yet",
-          short_caption: caption || "No caption",
-          sender: 'You (Preview)',
-          event_id: previewId,
-          timestamp: now.toISOString(),
-          content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
+      video_url: mediaType === 'video' ? mediaUri : undefined,
+      audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
+      metadata: {
+        description: caption || "No description yet",
+        short_caption: caption || "No caption",
+        sender: 'You (Preview)',
+        event_id: previewId,
+        timestamp: now.toISOString(), 
+        content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
           image_source: 'camera',
-          deep_dive: aiArtifacts?.deepDive,
-        },
+        deep_dive: aiArtifacts?.deepDive,
+      },
         deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined,
-      };
+    };
 
-      setPreviewEvent(mockEvent);
-      setIsPreviewOpen(true);
+    setPreviewEvent(mockEvent);
+    setIsPreviewOpen(true);
     } finally {
       setPreviewBuilding(false);
     }
@@ -995,7 +995,7 @@ export default function ReflectionComposer({
     if (mediaType === 'video' && videoRangeMs) {
       player.currentTime = videoRangeMs.start / 1000;
     } else {
-      player.currentTime = 0;
+    player.currentTime = 0;
     }
     player.play();
   }, [player, mediaType, videoRangeMs]);
@@ -1198,19 +1198,19 @@ export default function ReflectionComposer({
         <TouchableOpacity
           style={[styles.coverActionBtn, { borderColor: 'rgba(74, 222, 128, 0.4)' }]}
           onPress={handleCoverSet}
-          activeOpacity={0.7}
-        >
+            activeOpacity={0.7}
+          >
           <FontAwesome name="check" size={16} color="#4ade80" />
           <Text style={[styles.coverActionBtnText, { color: '#4ade80' }]}>Set</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+          </TouchableOpacity>
+            <TouchableOpacity
           style={styles.coverActionBtn}
-          onPress={handleReplay}
-          activeOpacity={0.7}
-        >
+              onPress={handleReplay}
+              activeOpacity={0.7}
+            >
           <FontAwesome name="repeat" size={16} color="#fff" />
           <Text style={styles.coverActionBtnText}>Replay</Text>
-        </TouchableOpacity>
+            </TouchableOpacity>
         <TouchableOpacity
           style={styles.coverActionBtn}
           onPress={handleCoverClear}
@@ -1227,7 +1227,7 @@ export default function ReflectionComposer({
           <FontAwesome name="check-circle" size={16} color="#4FC3F7" />
           <Text style={[styles.coverActionBtnText, { color: '#4FC3F7' }]}>Done</Text>
         </TouchableOpacity>
-      </View>
+        </View>
       {thumbnailTimeMs !== null && (
         <Text style={styles.posterTimestamp}>{(thumbnailTimeMs / 1000).toFixed(1)}s</Text>
       )}
@@ -1240,7 +1240,7 @@ export default function ReflectionComposer({
       return (
         <View style={[styles.topToolbar, { top: insets.top }]}>
           <View style={styles.sendTopBar}>
-            <TouchableOpacity
+        <TouchableOpacity 
               style={styles.workbenchNavPillBack}
               onPress={goToAi}
               activeOpacity={0.7}
@@ -1255,15 +1255,15 @@ export default function ReflectionComposer({
             </Text>
             <TouchableOpacity
               style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onRetake}
-              disabled={isSending || isBlockedByAi}
+          onPress={onRetake} 
+          disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
-            >
+        >
               <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
-            </TouchableOpacity>
-          </View>
-        </View>
-      );
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
     }
     if (isPosterMode) return renderPosterToolbar();
 
@@ -1281,7 +1281,7 @@ export default function ReflectionComposer({
             >
               <FontAwesome name="arrow-left" size={16} color="#fff" />
               <Text style={styles.workbenchNavPillLabel}>{replaceMediaBackLabel}</Text>
-            </TouchableOpacity>
+        </TouchableOpacity>
             <View style={styles.workbenchTopBarSpacer} />
             <View style={styles.topBarRight}>
               <TouchableOpacity
@@ -1294,7 +1294,7 @@ export default function ReflectionComposer({
               >
                 <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
                 <FontAwesome name="arrow-right" size={12} color="#fff" />
-              </TouchableOpacity>
+        </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.toolbarCloseBtn, styles.toolbarCloseBtnWorkbench, isBlockedByAi && { opacity: 0.35 }]}
                 onPress={onRetake}
@@ -1313,7 +1313,7 @@ export default function ReflectionComposer({
       <>
         <View style={[styles.topToolbar, { top: insets.top }]}>
           <View style={styles.videoUtilityRow}>
-            <TouchableOpacity
+          <TouchableOpacity 
               style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
               onPress={onReplaceMedia}
               disabled={isSending || isBlockedByAi}
@@ -1349,7 +1349,7 @@ export default function ReflectionComposer({
           </View>
         </View>
         <View
-          style={[
+            style={[
             styles.videoActionsWrap,
             { top: insets.top + TOP_TOOLBAR_BLOCK_PX + PHOTO_BARS_GAP_PX, height: VIDEO_TOOLBAR_STRIP_PX },
           ]}
@@ -1365,7 +1365,7 @@ export default function ReflectionComposer({
               >
                 <FontAwesome name={videoPaused || videoEnded ? 'play' : 'pause'} size={16} color="#fff" />
                 <Text style={styles.toolbarChipText}>{videoPaused || videoEnded ? 'Play' : 'Pause'}</Text>
-              </TouchableOpacity>
+          </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.toolbarChip, styles.videoActionChip, isBlockedByAi && { opacity: 0.35 }]}
                 onPress={handleReplay}
@@ -1375,8 +1375,8 @@ export default function ReflectionComposer({
                 <FontAwesome name="repeat" size={16} color="#fff" />
                 <Text style={styles.toolbarChipText}>Replay</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[
+          <TouchableOpacity 
+            style={[
                   styles.toolbarChip,
                   styles.videoActionChip,
                   thumbnailTimeMs !== null && styles.toolbarChipActive,
@@ -1388,12 +1388,12 @@ export default function ReflectionComposer({
               >
                 <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
                 <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
-              </TouchableOpacity>
-            </View>
+          </TouchableOpacity>
+      </View>
           </View>
         </View>
       </>
-    );
+  );
   };
 
   const renderWorkbenchTab = () => (
@@ -1413,7 +1413,7 @@ export default function ReflectionComposer({
       >
         <FontAwesome name="info-circle" size={15} color="#4a90d9" />
         <Text style={styles.infoBtnText}>How this works</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
     </Animated.View>
   );
 
@@ -1509,8 +1509,8 @@ export default function ReflectionComposer({
               >
                 {explorerName || 'Explorer'} is in this
               </Text>
-            </TouchableOpacity>
-          </View>
+             </TouchableOpacity>
+           </View>
           <Text style={styles.aiHintLabel}>Context for AI</Text>
           <View style={styles.aiInputRow}>
             <FontAwesome name="users" size={13} color="rgba(255,255,255,0.35)" style={{ marginTop: 10 }} />
@@ -1537,17 +1537,17 @@ export default function ReflectionComposer({
             Record a short intro in your own voice.
           </Text>
           <View style={styles.aiVoiceCentered}>
-            <TouchableOpacity
+        <TouchableOpacity 
               style={[styles.aiRecordBtn, audioRecorder?.isRecording && styles.aiRecordBtnActive]}
-              onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
+          onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
               activeOpacity={0.7}
-            >
-              <FontAwesome
+        >
+          <FontAwesome 
                 name={audioRecorder?.isRecording ? 'stop' : 'microphone'}
                 size={18}
-                color="#fff"
-              />
-            </TouchableOpacity>
+            color="#fff" 
+          />
+        </TouchableOpacity>
             {hasRecordedAudio && !audioRecorder?.isRecording ? (
               <View style={styles.aiVoiceDoneCol}>
                 <View style={styles.aiVoiceBadgeRow}>
@@ -1559,10 +1559,10 @@ export default function ReflectionComposer({
             ) : (
               <Text style={styles.aiVoicePrompt}>
                 {audioRecorder?.isRecording ? 'Recording...' : 'Tap to Record'}
-              </Text>
+        </Text>
             )}
-          </View>
-        </View>
+      </View>
+      </View>
 
         {/* SECTION: Caption */}
         <View style={[styles.aiCard, { flex: 1 }]}>
@@ -1574,10 +1574,10 @@ export default function ReflectionComposer({
             style={styles.aiCaptionInput}
             placeholder="Edit the AI caption or write your own..."
             placeholderTextColor="rgba(255,255,255,0.28)"
-            value={caption}
-            onChangeText={setCaption}
-            multiline
-            textAlignVertical="top"
+        value={caption}
+        onChangeText={setCaption}
+        multiline
+        textAlignVertical="top"
           />
         </View>
       </ScrollView>
