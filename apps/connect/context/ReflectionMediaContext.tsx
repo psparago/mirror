@@ -4,6 +4,8 @@ export type PendingMedia = {
   uri: string;
   type: 'photo' | 'video';
   source: 'camera' | 'gallery' | 'search';
+  /** When true, reflection metadata marks this as a companion selfie for the Explorer. */
+  isSelfie?: boolean;
   searchQuery?: string;
   searchCanonicalName?: string;
   /** Library asset id (e.g. Unsplash `id`). */

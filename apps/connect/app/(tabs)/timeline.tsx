@@ -259,16 +259,17 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
 
       if (sortBy === 'sent') {
-        const aId = parseInt(a.event_id, 10) || 0;
-        const bId = parseInt(b.event_id, 10) || 0;
-        return bId - aId;
+        // Order by last Firestore update (bumps on edit/re-send), not event_id
+        const aTime = getTimestampMs(a.timestamp || a.sentTimestamp);
+        const bTime = getTimestampMs(b.timestamp || b.sentTimestamp);
+        return bTime - aTime;
       }
 
-      // 'recent' (default) and 'impact' tiebreaker: response timestamp, then sent timestamp
+      // 'recent' (default) and 'impact' tiebreaker: response time first, then doc timestamp (edit bumps order)
       const aResponseTs = responseTimestampMap.get(a.event_id);
       const bResponseTs = responseTimestampMap.get(b.event_id);
-      const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.sentTimestamp || a.timestamp);
-      const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.sentTimestamp || b.timestamp);
+      const aTime = aResponseTs ? getTimestampMs(aResponseTs) : getTimestampMs(a.timestamp || a.sentTimestamp);
+      const bTime = bResponseTs ? getTimestampMs(bResponseTs) : getTimestampMs(b.timestamp || b.sentTimestamp);
       return bTime - aTime;
     });
 
@@ -569,11 +570,12 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         setEventObjectsMap(eventsMap);
 
         // Sort by timestamp descending (most recent first)
-        // Sort by engagementTimestamp (viewed time) if available, otherwise use sentTimestamp (original sent time)
+        // Viewed/engaged first, then doc timestamp (updates on edit) before preserved first-sent time
         reflectionsList.sort((a, b) => {
           // Helper to get timestamp value
           const getTime = (reflection: SentReflection): number => {
-            const ts = reflection.engagementTimestamp || reflection.sentTimestamp || reflection.timestamp;
+            const ts =
+              reflection.engagementTimestamp || reflection.timestamp || reflection.sentTimestamp;
             if (!ts) return 0;
             if (ts.toMillis) return ts.toMillis();
             if (ts.seconds) return ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000;

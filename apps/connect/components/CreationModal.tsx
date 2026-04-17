@@ -118,6 +118,10 @@ const safeUploadToS3 = async (localUri: string, presignedUrl: string) => {
   }
 };
 
+/** Dark blue-slate surfaces for the creation sheet (timeline is #000; composer uses similar navy). */
+const CREATION_SURFACE_GRADIENT = ['#2c364d', '#181c28'] as const;
+const CREATION_SHEET_CORNER_BG = CREATION_SURFACE_GRADIENT[1];
+
 export type CreationModalInitialAction = 'camera' | 'gallery' | 'search';
 
 export interface CreationModalProps {
@@ -160,7 +164,6 @@ export default function CreationModal({
   const pinnedEditEventIdRef = useRef<string | null>(null);
   const mediaReplacedDuringEditRef = useRef(false);
   const [isEditingExistingReflection, setIsEditingExistingReflection] = useState(false);
-  const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
   const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const [deepDiveVoice, setDeepDiveVoice] = useState<string>(DEFAULT_TTS_VOICE);
   const { currentExplorerId, explorerName, activeRelationship } = useExplorer();
@@ -199,6 +202,8 @@ export default function CreationModal({
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
   const pendingRouteRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
+  /** Next camera session should pass ?selfie=1 (selfie metadata + Explorer selfie affordances). */
+  const sourceFlowExtrasRef = useRef<{ cameraSelfie?: boolean }>({});
   /** Kept in sync with the active source route; avoids Hermes/ReferenceError if a stale closure still touches this binding after hot reload. */
   const lastSourceForRecoveryRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
   const sourceTransitionLockRef = useRef(false);
@@ -209,13 +214,33 @@ export default function CreationModal({
   /** Latest video trim / thumbnail choices from ReflectionComposer (ms). */
   const composerVideoMetaRef = useRef<ComposerVideoMeta | null>(null);
 
-  const beginSourceFlow = useCallback((route: '/camera' | '/gallery' | '/search') => {
-    lastSourceForRecoveryRef.current = route;
-    sourceTransitionLockRef.current = true;
-    pendingRouteRef.current = route;
-    sheetRef.current?.close();
-    setPhase('creating');
-  }, []);
+  const beginSourceFlow = useCallback(
+    (route: '/camera' | '/gallery' | '/search', extras?: { cameraSelfie?: boolean }) => {
+      sourceFlowExtrasRef.current = extras?.cameraSelfie ? { cameraSelfie: true } : {};
+      lastSourceForRecoveryRef.current = route;
+      sourceTransitionLockRef.current = true;
+      pendingRouteRef.current = route;
+      sheetRef.current?.close();
+      setPhase('creating');
+    },
+    []
+  );
+
+  /** After clearing composer state, reopen the same media source the user came from (create or edit). */
+  const beginReplaceReturnFlow = useCallback(
+    (src: '/camera' | '/gallery' | '/search' | null, selfie: boolean) => {
+      if (src === '/camera') {
+        beginSourceFlow('/camera', selfie ? { cameraSelfie: true } : undefined);
+      } else if (src === '/gallery') {
+        beginSourceFlow('/gallery');
+      } else if (src === '/search') {
+        beginSourceFlow('/search');
+      } else {
+        beginSourceFlow('/gallery');
+      }
+    },
+    [beginSourceFlow]
+  );
 
   useEffect(() => {
     if (!visible) {
@@ -231,6 +256,7 @@ export default function CreationModal({
       void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
       composerFilteredPhotoUriRef.current = null;
       setComposerFilteredPhotoUri(null);
+      setMediaSource(null);
       return;
     }
 
@@ -313,10 +339,16 @@ export default function CreationModal({
             ? 'gallery'
             : 'camera'
       );
+      setMediaSource(
+        m?.image_source === 'search'
+          ? '/search'
+          : m?.image_source === 'gallery'
+            ? '/gallery'
+            : '/camera'
+      );
       setDescription(desc);
       setShortCaption(shortCap);
       setDeepDive(dd);
-      setIntent('none');
       setAudioUri(null);
       lastProcessedUriRef.current = null;
       setAiAudioUrl(editEvent.audio_url || null);
@@ -346,6 +378,7 @@ export default function CreationModal({
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
+    setMediaSource(null);
     sourceTransitionLockRef.current = false;
     suppressPickerRecoveryRef.current = false;
     lastSourceForRecoveryRef.current = null;
@@ -359,7 +392,11 @@ export default function CreationModal({
     pendingRouteRef.current = null;
     // Wait one frame for state/UI transition before navigation.
     requestAnimationFrame(() => {
-      router.push(route);
+      const extras = sourceFlowExtrasRef.current;
+      sourceFlowExtrasRef.current = {};
+      const path =
+        route === '/camera' && extras.cameraSelfie ? (`${route}?selfie=1` as const) : route;
+      router.push(path as '/camera' | '/gallery' | '/search');
       // Keep lock briefly so sheet close callbacks can't immediately tear down the flow.
       setTimeout(() => {
         sourceTransitionLockRef.current = false;
@@ -527,22 +564,28 @@ export default function CreationModal({
     const media = consumePendingMedia();
     if (media) {
       lastSourceForRecoveryRef.current = null;
+      // Same entry as gallery/search: workbench first (Looks / trim), never skip to AI.
+      setComposerStage('workbench');
+      setConfirming(false);
       setPhase('creating');
       const normalizedUri = ensureFileUri(media.uri);
+      const isEditingExisting =
+        !!(editSourceEventIdRef.current || pinnedEditEventIdRef.current);
+      if (typeof media.isSelfie === 'boolean') {
+        setIsSelfie(media.isSelfie);
+      } else if (!isEditingExisting) {
+        setIsSelfie(false);
+      }
       if (media.type === 'video') {
         setMediaType('video');
         setVideoUri(normalizedUri);
         setPhoto({ uri: normalizedUri });
-        setConfirming(false);
-        setShowDescriptionInput(true);
       } else {
         setMediaType('photo');
         setVideoUri(null);
         setPhoto({ uri: normalizedUri });
-        setConfirming(false);
-        setShowDescriptionInput(true);
       }
-      setComposerStage('workbench');
+      setShowDescriptionInput(true);
       setImageSourceType(
         media.source === 'search' ? 'search' : media.source === 'gallery' ? 'gallery' : 'camera'
       );
@@ -560,7 +603,6 @@ export default function CreationModal({
       setIsAiGenerated(false);
       setShortCaption('');
       setDeepDive('');
-      setIntent('none');
       setAudioUri(null);
       setStagingEventId(null);
       stagingEventIdRef.current = null;
@@ -1447,7 +1489,6 @@ export default function CreationModal({
     setIsAiThinking(false);
     setStagingEventId(null);
     stagingEventIdRef.current = null;
-    setIntent('none');
     setAudioUri(null);
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
@@ -1460,6 +1501,7 @@ export default function CreationModal({
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
+    setMediaSource(null);
     setConfirming(false);
     editSourceEventIdRef.current = null;
     pinnedEditEventIdRef.current = null;
@@ -1490,7 +1532,6 @@ export default function CreationModal({
     setIsAiThinking(false);
     setStagingEventId(null);
     stagingEventIdRef.current = null;
-    setIntent('none');
     setAudioUri(null);
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
@@ -1503,6 +1544,7 @@ export default function CreationModal({
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
+    setMediaSource(null);
     setConfirming(false);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     editSourceEventIdRef.current = null;
@@ -1599,29 +1641,9 @@ export default function CreationModal({
     return null;
   };
 
-  const triggerAI = async () => {
-    if (!photo) return;
-    setIntent('ai');
-    const aiResult = await generateDeepDiveBackground({ silent: false });
-    // Special handling to ensure description is set from the now-fetched AI result
-    if (aiResult?.short_caption) {
-      setDescription(aiResult.short_caption);
-    }
-  };
-
-  const changeMethod = () => {
-    // Clear description and audio, return to action buttons
-    setDescription('');
-    setAudioUri(null);
-    setIntent('none');
-    setIsAiGenerated(false);
-    setShortCaption('');
-    setDeepDive('');
-    setIsAiThinking(false);
-    lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
-  };
-
   const handleReplaceMediaInEdit = async () => {
+    const replaceReturnSrc = mediaSource;
+    const replaceReturnSelfie = isSelfie;
     mediaReplacedDuringEditRef.current = true;
     const stagingId = stagingEventId || stagingEventIdRef.current;
     if (stagingId && stagingId !== editSourceEventIdRef.current) {
@@ -1666,7 +1688,6 @@ export default function CreationModal({
     setAiAudioS3Key(null);
     setAiDeepDiveS3Key(null);
     setIsAiThinking(false);
-    setIntent('none');
     setAudioUri(null);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     setLibraryId('');
@@ -1674,7 +1695,7 @@ export default function CreationModal({
     setLibrarySourceKind(null);
     composerVideoMetaRef.current = null;
     setComposerStage('workbench');
-    beginSourceFlow('/gallery');
+    beginReplaceReturnFlow(replaceReturnSrc, replaceReturnSelfie);
   };
 
   const handleReplaceMedia = async () => {
@@ -1682,6 +1703,8 @@ export default function CreationModal({
       await handleReplaceMediaInEdit();
       return;
     }
+    const replaceReturnSrc = mediaSource;
+    const replaceReturnSelfie = isSelfie;
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
     await deleteStagingArtifacts();
@@ -1704,17 +1727,15 @@ export default function CreationModal({
     setIsAiThinking(false);
     setStagingEventId(null);
     stagingEventIdRef.current = null;
-    setIntent('none');
     setAudioUri(null);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
-    setIsSelfie(false);
     composerVideoMetaRef.current = null;
     setComposerStage('workbench');
 
-    beginSourceFlow('/gallery');
+    beginReplaceReturnFlow(replaceReturnSrc, replaceReturnSelfie);
   };
 
   const handleClose = () => {
@@ -1865,7 +1886,10 @@ export default function CreationModal({
     setConfirming(false);
     const retry = mediaSource;
     if (retry === '/gallery' || retry === '/camera' || retry === '/search') {
-      beginSourceFlow(retry);
+      beginSourceFlow(
+        retry,
+        retry === '/camera' && isSelfie ? { cameraSelfie: true } : undefined
+      );
     } else {
       setPhase('picker');
       setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
@@ -1890,6 +1914,14 @@ export default function CreationModal({
     const u = photo?.uri;
     return typeof u === 'string' && (u.startsWith('http://') || u.startsWith('https://'));
   }, [photo?.uri]);
+
+  /** Matches Workbench back → re-pick media (`handleReplaceMedia` / `beginReplaceReturnFlow`). */
+  const composerReplaceBackLabel = useMemo(() => {
+    if (mediaSource === '/gallery') return 'Library';
+    if (mediaSource === '/search') return 'Search';
+    if (mediaSource === '/camera') return 'Camera';
+    return 'Library';
+  }, [mediaSource]);
 
   const initialVideoMetaForComposer = useMemo((): Partial<ComposerVideoMeta> | null => {
     if (!isEditingExistingReflection || mediaType !== 'video' || !editEvent?.metadata) {
@@ -1928,14 +1960,12 @@ export default function CreationModal({
           if (sourceTransitionLockRef.current) return;
           if (phase === 'picker' && index === -1) onClose();
         }}
+        handleStyle={styles.sheetHandleRegion}
         handleIndicatorStyle={styles.sheetHandle}
         backgroundStyle={styles.sheetBackground}
       >
         <BottomSheetView style={styles.sheetContent}>
-          <LinearGradient
-            colors={['#A1C4FD', '#C2E9FB']}
-            style={styles.dashboardContainer}
-          >
+          <LinearGradient colors={[...CREATION_SURFACE_GRADIENT]} style={styles.dashboardContainer}>
             <View style={styles.dashboardContent}>
               <Text style={styles.dashboardTitle}>
                 Create a Reflection
@@ -2040,40 +2070,6 @@ export default function CreationModal({
                 <View style={styles.confirmBarRow}>
                   <View style={styles.confirmLeftColumn}>
                     <TouchableOpacity
-                      style={styles.confirmPresenceToggle}
-                      onPress={() => setIsCompanionInReflection(!isCompanionInReflection)}
-                      activeOpacity={0.7}
-                    >
-                      <FontAwesome
-                        name={isCompanionInReflection ? 'check-square-o' : 'square-o'}
-                        size={16}
-                        color={isCompanionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
-                      />
-                      <Text style={[
-                        styles.confirmPresenceText,
-                        isCompanionInReflection && styles.confirmPresenceTextActive,
-                      ]}>
-                        I'm in this
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.confirmPresenceToggle}
-                      onPress={() => setIsExplorerInReflection(!isExplorerInReflection)}
-                      activeOpacity={0.7}
-                    >
-                      <FontAwesome
-                        name={isExplorerInReflection ? 'check-square-o' : 'square-o'}
-                        size={16}
-                        color={isExplorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
-                      />
-                      <Text style={[
-                        styles.confirmPresenceText,
-                        isExplorerInReflection && styles.confirmPresenceTextActive,
-                      ]}>
-                        {explorerName || 'Explorer'} is in this
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
                       onPress={() => detailsSheetRef.current?.snapToIndex(0)}
                       style={styles.addDetailsBtn}
                       activeOpacity={0.7}
@@ -2096,7 +2092,9 @@ export default function CreationModal({
                       <Text style={styles.confirmChooseText}>Choose</Text>
                     </TouchableOpacity>
                     <TouchableOpacity onPress={handleConfirmCancel} style={styles.confirmCancelBtn}>
-                      <Text style={styles.confirmCancelText}>Cancel</Text>
+                      <Text style={styles.confirmCancelText}>
+                        {mediaSource === '/camera' ? 'Retake' : 'Cancel'}
+                      </Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -2119,40 +2117,6 @@ export default function CreationModal({
               >
                 <BottomSheetView style={styles.detailsSheetContent}>
                   <Text style={styles.detailsSheetTitle}>More Details</Text>
-                  <TouchableOpacity
-                    style={styles.sheetPresenceToggle}
-                    onPress={() => setIsCompanionInReflection(!isCompanionInReflection)}
-                    activeOpacity={0.7}
-                  >
-                    <FontAwesome
-                      name={isCompanionInReflection ? 'check-square-o' : 'square-o'}
-                      size={16}
-                      color={isCompanionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
-                    />
-                    <Text style={[
-                      styles.confirmPresenceText,
-                      isCompanionInReflection && styles.confirmPresenceTextActive,
-                    ]}>
-                      I'm in this
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.sheetPresenceToggle}
-                    onPress={() => setIsExplorerInReflection(!isExplorerInReflection)}
-                    activeOpacity={0.7}
-                  >
-                    <FontAwesome
-                      name={isExplorerInReflection ? 'check-square-o' : 'square-o'}
-                      size={16}
-                      color={isExplorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.6)'}
-                    />
-                    <Text style={[
-                      styles.confirmPresenceText,
-                      isExplorerInReflection && styles.confirmPresenceTextActive,
-                    ]}>
-                      {explorerName || 'Explorer'} is in this
-                    </Text>
-                  </TouchableOpacity>
                   <View style={styles.detailsInputRow}>
                     <FontAwesome name="users" size={14} color="rgba(255,255,255,0.4)" style={{ marginTop: 2 }} />
                     <BottomSheetTextInput
@@ -2182,6 +2146,7 @@ export default function CreationModal({
           ) : showComposer && photo ? (
             <View style={styles.composerContainer}>
               <ReflectionComposer
+                key={`${mediaType}-${photo.uri}`}
                 mediaUri={mediaType === 'video' && videoUri ? videoUri : photo.uri}
                 mediaType={mediaType}
                 initialCaption={description}
@@ -2233,14 +2198,15 @@ export default function CreationModal({
                 explorerName={explorerName || 'Explorer'}
                 stage={composerStage}
                 onStageChange={setComposerStage}
+                replaceMediaBackLabel={composerReplaceBackLabel}
               />
             </View>
           ) : (
-            <LinearGradient colors={['#A1C4FD', '#C2E9FB']} style={styles.creatingWaitContainer}>
+            <LinearGradient colors={[...CREATION_SURFACE_GRADIENT]} style={styles.creatingWaitContainer}>
               <View style={styles.modalCloseBar}>
-                <TouchableOpacity onPress={handleClose} style={styles.modalCloseButton}>
-                  <FontAwesome name="times" size={24} color="#2C3E50" />
-                  <Text style={styles.modalCloseText}>Close</Text>
+                <TouchableOpacity onPress={handleClose} style={styles.modalCloseButtonDark}>
+                  <FontAwesome name="times" size={24} color="#f1f5f9" />
+                  <Text style={styles.modalCloseTextDark}>Close</Text>
                 </TouchableOpacity>
               </View>
               <View style={styles.creatingWaitContent}>
@@ -2292,14 +2258,23 @@ export default function CreationModal({
 }
 
 var styles = StyleSheet.create({
+  sheetHandleRegion: {
+    paddingBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255, 255, 255, 0.22)',
+  },
   sheetHandle: {
-    backgroundColor: 'rgba(44, 62, 80, 0.35)',
-    width: 40,
+    backgroundColor: 'rgba(255, 255, 255, 0.42)',
+    width: 44,
+    height: 5,
+    borderRadius: 3,
   },
   sheetBackground: {
-    backgroundColor: '#C2E9FB',
+    backgroundColor: CREATION_SHEET_CORNER_BG,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 255, 255, 0.3)',
   },
   sheetContent: {
     flex: 1,
@@ -2327,7 +2302,7 @@ var styles = StyleSheet.create({
   creatingWaitText: {
     fontSize: 20,
     fontWeight: '600',
-    color: '#2C3E50',
+    color: '#e2e8f0',
     textAlign: 'center',
   },
   modalCloseBar: {
@@ -2353,10 +2328,26 @@ var styles = StyleSheet.create({
     borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.9)',
   },
+  modalCloseButtonDark: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
   modalCloseText: {
     fontSize: 16,
     fontWeight: '600',
     color: '#2C3E50',
+  },
+  modalCloseTextDark: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#f1f5f9',
   },
   container: {
     flex: 1,
@@ -2375,7 +2366,7 @@ var styles = StyleSheet.create({
   dashboardTitle: {
     fontSize: 22,
     fontWeight: '600',
-    color: '#2C3E50',
+    color: '#f1f5f9',
     marginBottom: 14,
     textAlign: 'center',
     fontFamily: Platform.select({
@@ -2396,15 +2387,19 @@ var styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 20,
     borderRadius: 10,
+    borderWidth: 1,
   },
   captureButton: {
     backgroundColor: '#2E78B7',
+    borderColor: 'rgba(100, 168, 228, 0.45)',
   },
   galleryButton: {
-    backgroundColor: '#8E44AD',
+    backgroundColor: 'rgba(142, 68, 173, 0.18)',
+    borderColor: 'rgba(186, 149, 232, 0.38)',
   },
   searchButton: {
-    backgroundColor: '#E67E22',
+    backgroundColor: 'rgba(230, 126, 34, 0.16)',
+    borderColor: 'rgba(241, 180, 118, 0.38)',
   },
   simpleButtonText: {
     color: '#fff',
@@ -2797,20 +2792,6 @@ var styles = StyleSheet.create({
     gap: 8,
     marginLeft: 16,
   },
-  confirmPresenceToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    paddingVertical: 3,
-  },
-  confirmPresenceText: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  confirmPresenceTextActive: {
-    color: '#4FC3F7',
-  },
   addDetailsBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2874,15 +2855,6 @@ var styles = StyleSheet.create({
     paddingBottom: 20,
     gap: 10,
   },
-  sheetPresenceToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-  },
   detailsSheetTitle: {
     color: '#fff',
     fontSize: 16,
@@ -2932,10 +2904,12 @@ var styles = StyleSheet.create({
     paddingVertical: 6,
     paddingHorizontal: 14,
     borderRadius: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(79, 195, 247, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(79, 195, 247, 0.22)',
   },
   companionNameText: {
-    color: '#2C3E50',
+    color: '#cbd5e1',
     fontSize: 14,
     fontWeight: '500',
   },

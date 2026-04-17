@@ -36,6 +36,8 @@ export default function TimelineHomeScreen() {
   // This ensures the modal opens even if the screen remounts.
   useEffect(() => {
     if (pendingMedia && !creationModalVisible) {
+      // New camera/gallery/search pick is never an edit session; avoid edit hydration racing consume.
+      setEditingReflection(null);
       setCreationModalVisible(true);
     }
   }, [pendingMedia, creationModalVisible]);

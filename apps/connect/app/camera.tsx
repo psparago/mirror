@@ -3,12 +3,15 @@ import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProce
 import { FontAwesome } from '@expo/vector-icons';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 export default function CameraScreen() {
   const router = useRouter();
+  const { selfie } = useLocalSearchParams<{ selfie?: string }>();
+  /** Set via `?selfie=1` when re-picking from a selfie-marked reflection; no on-camera checkbox. */
+  const markAsSelfie = selfie === '1' || selfie === 'true';
   const { setPendingMedia } = useReflectionMedia();
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<CameraType>('front');
@@ -27,7 +30,7 @@ export default function CameraScreen() {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
       if (!picture) return;
       const optimizedUri = await prepareImageForUpload(picture.uri);
-      setPendingMedia({ uri: optimizedUri, type: 'photo', source: 'camera' });
+      setPendingMedia({ uri: optimizedUri, type: 'photo', source: 'camera', isSelfie: markAsSelfie });
       router.back();
     } catch (error: any) {
       console.error('Photo capture error:', error);
@@ -50,7 +53,7 @@ export default function CameraScreen() {
       if (!result.canceled && result.assets?.length) {
         const video = result.assets[0];
         const compressedUri = await prepareVideoForUpload(video.uri);
-        setPendingMedia({ uri: compressedUri, type: 'video', source: 'camera' });
+        setPendingMedia({ uri: compressedUri, type: 'video', source: 'camera', isSelfie: markAsSelfie });
         router.back();
       }
     } catch (error: any) {

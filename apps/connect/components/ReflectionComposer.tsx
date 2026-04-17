@@ -9,7 +9,6 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  BackHandler,
   Keyboard,
   LayoutChangeEvent,
   Image as NativeImage,
@@ -102,6 +101,8 @@ interface ReflectionComposerProps {
   explorerName?: string;
   stage: ComposerStage;
   onStageChange: (next: ComposerStage) => void;
+  /** Workbench back: where re-pick media opens (Library, Camera, Search). */
+  replaceMediaBackLabel?: string;
 }
 
 const MIN_PHOTO_SCALE = 0.35;
@@ -165,6 +166,7 @@ export default function ReflectionComposer({
   explorerName,
   stage,
   onStageChange,
+  replaceMediaBackLabel = 'Library',
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
@@ -209,6 +211,10 @@ export default function ReflectionComposer({
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewEvent, setPreviewEvent] = useState<Event | null>(null);
+  /** Photo export for Replay preview (not upload). Keeps spinner on Preview, not Send, while `lookExtractBusy`. */
+  const [previewBuilding, setPreviewBuilding] = useState(false);
+  /** Photo export before `onSend` while parent `isSending` may still be false. */
+  const [sendPreparing, setSendPreparing] = useState(false);
 
   const [isAiCancelled, setIsAiCancelled] = useState(false);
   const isBlockedByAi = isAiThinking && !isAiCancelled;
@@ -559,15 +565,6 @@ export default function ReflectionComposer({
     markPhotoEdited();
   }, [photoScale, photoTranslateX, photoTranslateY, photoRotation, markPhotoEdited]);
 
-  useEffect(() => {
-    if (Platform.OS !== 'android') return undefined;
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      onRetake();
-      return true;
-    });
-    return () => sub.remove();
-  }, [onRetake]);
-
   // Sync AI Caption if user hasn't typed yet
   useEffect(() => {
     if (aiArtifacts?.caption && !caption) {
@@ -794,11 +791,16 @@ export default function ReflectionComposer({
     const now = Date.now();
     if (now - lastSendAtRef.current < 800) return;
     lastSendAtRef.current = now;
-    let filteredPhotoUri: string | null = null;
-    if (mediaType === 'photo') {
-      filteredPhotoUri = await exportCurrentPhoto();
+    setSendPreparing(true);
+    try {
+      let filteredPhotoUri: string | null = null;
+      if (mediaType === 'photo') {
+        filteredPhotoUri = await exportCurrentPhoto();
+      }
+      onSend({ ...buildSendPayload(), filteredPhotoUri });
+    } finally {
+      setSendPreparing(false);
     }
-    onSend({ ...buildSendPayload(), filteredPhotoUri });
   }, [buildSendPayload, onSend, mediaType, exportCurrentPhoto]);
 
   const handleSendWithThrottle = useCallback(async () => {
@@ -808,31 +810,36 @@ export default function ReflectionComposer({
 
 
   const doPreviewNow = useCallback(async () => {
-    const previewId = 'preview-temp';
-    const now = new Date();
-    const previewImageUri =
-      mediaType === 'photo' ? (await exportCurrentPhoto()) || mediaUri : mediaUri;
+    setPreviewBuilding(true);
+    try {
+      const previewId = 'preview-temp';
+      const now = new Date();
+      const previewImageUri =
+        mediaType === 'photo' ? (await exportCurrentPhoto()) || mediaUri : mediaUri;
 
-    const mockEvent: Event = {
-      event_id: previewId,
-      image_url: previewImageUri,
-      video_url: mediaType === 'video' ? mediaUri : undefined,
-      audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
-      metadata: {
-        description: caption || "No description yet",
-        short_caption: caption || "No caption",
-        sender: 'You (Preview)',
+      const mockEvent: Event = {
         event_id: previewId,
-        timestamp: now.toISOString(),
-        content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
-        image_source: 'camera',
-        deep_dive: aiArtifacts?.deepDive,
-      },
-      deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined,
-    };
+        image_url: previewImageUri,
+        video_url: mediaType === 'video' ? mediaUri : undefined,
+        audio_url: audioUri || aiArtifacts?.audioUrl || undefined,
+        metadata: {
+          description: caption || "No description yet",
+          short_caption: caption || "No caption",
+          sender: 'You (Preview)',
+          event_id: previewId,
+          timestamp: now.toISOString(),
+          content_type: mediaType === 'video' ? 'video' : (audioUri ? 'audio' : 'text'),
+          image_source: 'camera',
+          deep_dive: aiArtifacts?.deepDive,
+        },
+        deep_dive_audio_url: aiArtifacts?.deepDiveAudioUrl || undefined,
+      };
 
-    setPreviewEvent(mockEvent);
-    setIsPreviewOpen(true);
+      setPreviewEvent(mockEvent);
+      setIsPreviewOpen(true);
+    } finally {
+      setPreviewBuilding(false);
+    }
   }, [mediaUri, mediaType, audioUri, aiArtifacts, caption, exportCurrentPhoto]);
 
   const handlePreview = useCallback(() => {
@@ -1234,15 +1241,18 @@ export default function ReflectionComposer({
         <View style={[styles.topToolbar, { top: insets.top }]}>
           <View style={styles.sendTopBar}>
             <TouchableOpacity
-              style={styles.androidBackBtn}
+              style={styles.workbenchNavPillBack}
               onPress={goToAi}
               activeOpacity={0.7}
               accessibilityRole="button"
-              accessibilityLabel="Back to AI"
+              accessibilityLabel="Back to Sparkle"
             >
               <FontAwesome name="arrow-left" size={16} color="#fff" />
+              <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
             </TouchableOpacity>
-            <Text style={styles.sendStageTitle}>Preview & Send</Text>
+            <Text style={[styles.sendStageTitle, styles.sendStageTitleCenter]} numberOfLines={1}>
+              Preview & Send
+            </Text>
             <TouchableOpacity
               style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
               onPress={onRetake}
@@ -1261,30 +1271,32 @@ export default function ReflectionComposer({
       return (
         <View style={[styles.topToolbar, { top: insets.top }]}>
           <View style={styles.photoUtilityRow}>
-            <View style={styles.photoUtilityLeft}>
-              <TouchableOpacity
-                style={[styles.androidBackBtn, isBlockedByAi && { opacity: 0.35 }]}
-                onPress={onReplaceMedia}
-                disabled={isSending || isBlockedByAi}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel="Back to media picker"
-              >
-                <FontAwesome name="arrow-left" size={16} color="#fff" />
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
+              onPress={onReplaceMedia}
+              disabled={isSending || isBlockedByAi}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Back to ${replaceMediaBackLabel}`}
+            >
+              <FontAwesome name="arrow-left" size={16} color="#fff" />
+              <Text style={styles.workbenchNavPillLabel}>{replaceMediaBackLabel}</Text>
+            </TouchableOpacity>
+            <View style={styles.workbenchTopBarSpacer} />
             <View style={styles.topBarRight}>
               <TouchableOpacity
-                style={[styles.topBarNextBtn, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
                 onPress={goToAi}
                 disabled={isSending || isAiThinking || lookExtractBusy}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Go to Sparkle"
               >
-                <Text style={styles.topBarNextText}>Next</Text>
+                <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
                 <FontAwesome name="arrow-right" size={12} color="#fff" />
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+                style={[styles.toolbarCloseBtn, styles.toolbarCloseBtnWorkbench, isBlockedByAi && { opacity: 0.35 }]}
                 onPress={onRetake}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
@@ -1302,27 +1314,31 @@ export default function ReflectionComposer({
         <View style={[styles.topToolbar, { top: insets.top }]}>
           <View style={styles.videoUtilityRow}>
             <TouchableOpacity
-              style={[styles.androidBackBtn, isBlockedByAi && { opacity: 0.35 }]}
+              style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
               onPress={onReplaceMedia}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
-              accessibilityLabel="Back to media picker"
+              accessibilityLabel={`Back to ${replaceMediaBackLabel}`}
             >
               <FontAwesome name="arrow-left" size={16} color="#fff" />
+              <Text style={styles.workbenchNavPillLabel}>{replaceMediaBackLabel}</Text>
             </TouchableOpacity>
+            <View style={styles.workbenchTopBarSpacer} />
             <View style={styles.topBarRight}>
               <TouchableOpacity
-                style={[styles.topBarNextBtn, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
                 onPress={goToAi}
                 disabled={isSending || isAiThinking || lookExtractBusy}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Go to Sparkle"
               >
-                <Text style={styles.topBarNextText}>Next</Text>
+                <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
                 <FontAwesome name="arrow-right" size={12} color="#fff" />
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
+                style={[styles.toolbarCloseBtn, styles.toolbarCloseBtnWorkbench, isBlockedByAi && { opacity: 0.35 }]}
                 onPress={onRetake}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
@@ -1407,12 +1423,29 @@ export default function ReflectionComposer({
   const renderAiTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
       <View style={styles.aiNavBar}>
-        <TouchableOpacity onPress={goToWorkbench} style={styles.aiNavBackBtn} activeOpacity={0.7}>
+        <TouchableOpacity
+          onPress={goToWorkbench}
+          style={styles.aiNavBackRow}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Back to Workbench"
+        >
           <FontAwesome name="arrow-left" size={16} color="#fff" />
+          <Text style={styles.aiNavBackLabel}>Workbench</Text>
         </TouchableOpacity>
-        <Text style={styles.aiNavTitle}>AI & Caption</Text>
-        <TouchableOpacity onPress={goToSend} style={styles.aiNavNextBtn} activeOpacity={0.7}>
-          <Text style={styles.aiNavNextText}>Next</Text>
+        <Text style={[styles.aiNavTitle, styles.aiNavTitleCenter]} numberOfLines={1}>
+          Sparkle
+        </Text>
+        <TouchableOpacity
+          onPress={goToSend}
+          style={styles.aiNavNextBtn}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Go to Preview and Send"
+        >
+          <Text style={styles.aiNavNextText} numberOfLines={1}>
+            Preview & Send
+          </Text>
           <FontAwesome name="arrow-right" size={12} color="#fff" />
         </TouchableOpacity>
       </View>
@@ -1424,7 +1457,7 @@ export default function ReflectionComposer({
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.aiSubtitleText}>
-          No changes needed? Tap Next to keep your current draft as-is.
+          No changes needed? Tap Preview & Send (top-right) to keep your current draft as-is.
         </Text>
 
         {/* SECTION: Sparkle Hints */}
@@ -1439,7 +1472,9 @@ export default function ReflectionComposer({
           <View style={styles.aiTogglePair}>
             <TouchableOpacity
               style={styles.aiToggleRow}
-              onPress={() => onCompanionInReflectionChange?.(!companionInReflection)}
+              onPress={() =>
+                onCompanionInReflectionChange?.(!companionInReflection)
+              }
               activeOpacity={0.7}
             >
               <FontAwesome
@@ -1447,7 +1482,12 @@ export default function ReflectionComposer({
                 size={16}
                 color={companionInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.45)'}
               />
-              <Text style={[styles.aiToggleLabel, companionInReflection && styles.aiToggleLabelActive]}>
+              <Text
+                style={[
+                  styles.aiToggleLabel,
+                  companionInReflection && styles.aiToggleLabelActive,
+                ]}
+              >
                 I'm in this
               </Text>
             </TouchableOpacity>
@@ -1461,7 +1501,12 @@ export default function ReflectionComposer({
                 size={16}
                 color={explorerInReflection ? '#4FC3F7' : 'rgba(255,255,255,0.45)'}
               />
-              <Text style={[styles.aiToggleLabel, explorerInReflection && styles.aiToggleLabelActive]}>
+              <Text
+                style={[
+                  styles.aiToggleLabel,
+                  explorerInReflection && styles.aiToggleLabelActive,
+                ]}
+              >
                 {explorerName || 'Explorer'} is in this
               </Text>
             </TouchableOpacity>
@@ -1586,25 +1631,35 @@ export default function ReflectionComposer({
       {!isBlockedByAi && (
         <View style={styles.sendBtnRow}>
           <TouchableOpacity
-            style={[styles.sendSlimBtn, styles.previewSlimBtn, (isSending || isAiThinking) && { opacity: 0.4 }]}
+            style={[
+              styles.sendSlimBtn,
+              styles.previewSlimBtn,
+              (isSending || isAiThinking || previewBuilding || lookExtractBusy) && { opacity: 0.4 },
+            ]}
             onPress={handlePreview}
-            disabled={isSending || isAiThinking || lookExtractBusy}
+            disabled={isSending || isAiThinking || lookExtractBusy || previewBuilding}
             activeOpacity={0.7}
           >
-            <FontAwesome name="eye" size={15} color="#fff" />
-            <Text style={styles.sendSlimBtnText}>Preview</Text>
+            {previewBuilding ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <FontAwesome name="eye" size={15} color="#fff" />
+                <Text style={styles.sendSlimBtnText}>Preview</Text>
+              </>
+            )}
           </TouchableOpacity>
           <TouchableOpacity
             style={[
               styles.sendSlimBtn,
               styles.sendSlimBtnPrimary,
-              (isSending || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
+              (isSending || sendPreparing || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
             ]}
             onPress={handleSendWithThrottle}
-            disabled={isSending || lookExtractBusy || (!caption && !hasRecordedAudio)}
+            disabled={isSending || sendPreparing || lookExtractBusy || (!caption && !hasRecordedAudio)}
             activeOpacity={0.7}
           >
-            {isSending || lookExtractBusy ? (
+            {isSending || sendPreparing ? (
               <ActivityIndicator color="#fff" size="small" />
             ) : (
               <>
@@ -1772,8 +1827,8 @@ export default function ReflectionComposer({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. Tap Next (top-right) to move forward; the video stops immediately. Back (top-left) reopens the gallery so you can pick different media. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
-              : 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. Tap Next (top-right) to move forward. Back (top-left) reopens the gallery so you can pick different media. X closes back to the timeline.'}
+              ? 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
+              : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1823,7 +1878,7 @@ export default function ReflectionComposer({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Voice Intro</Text>
               <Text style={styles.infoDesc}>
-                Optional. Record a short intro in your own voice on the AI & Caption screen. If you record one, this is what the Explorer hears before the content plays — your real voice takes priority over any AI-generated audio. If you skip it, Sparkle creates an AI voice from your caption instead. Either way, something always plays before the content.
+                Optional. Record a short intro in your own voice on the Sparkle screen. If you record one, this is what the Explorer hears before the content plays — your real voice takes priority over any AI-generated audio. If you skip it, Sparkle creates an AI voice from your caption instead. Either way, something always plays before the content.
               </Text>
             </View>
           </View>
@@ -1835,7 +1890,7 @@ export default function ReflectionComposer({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Caption</Text>
               <Text style={styles.infoDesc}>
-                Sparkle writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the AI & Caption screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
+                Sparkle writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the Sparkle screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
               </Text>
             </View>
           </View>
@@ -1845,11 +1900,11 @@ export default function ReflectionComposer({
               <FontAwesome name="magic" size={14} color="#f5c842" />
             </View>
             <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Sparkle & Play</Text>
+              <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
-                  ? 'On the AI & Caption screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
-                  : 'On the AI & Caption screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
+                  ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
+                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1858,21 +1913,21 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            Use Back (top-left) and Next (top-right) to move between stages freely. Back on the Workbench opens the gallery to pick different media; X closes to the timeline. Nothing sends until you tap Send on the final screen.
+            Use the labeled chips on the top bar: on Workbench, the left chip matches where you picked media (Camera, Library, or Search); the right chip is Sparkle. On Sparkle, Workbench goes back and Preview & Send goes forward. X closes to the timeline. Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            Fast path: if you just want to send quickly, tap Next through each screen. If Sparkle hasn't run yet or is out of date, it runs automatically in the background and advances to Preview & Send when ready — no extra taps needed.
+            Fast path: if you just want to send quickly, follow the labeled top chips through each stage. If Sparkle hasn't run yet or is out of date, it runs automatically in the background and advances to Preview & Send when ready — no extra taps needed.
           </Text>
           <Text style={styles.infoProTip}>
-            If you change trim, poster, caption, context, or a photo Look after running Sparkle, the Run Sparkle button re-enables. Sparkle runs automatically when you tap Next to Preview & Send so AI always stays in sync with your edits.
+            If you change trim, poster, caption, context, or a photo Look after running Sparkle, the Run Sparkle button re-enables. Sparkle runs automatically when you tap the Preview & Send control (top-right) so AI always stays in sync with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
-              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops immediately when you tap Next.'
+              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops when you leave Workbench for Sparkle.'
               : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>
-            On Android, the system back key works the same as the close button (X) in the top bar.
+            On Android, the system back key steps back between Workbench, Sparkle, and Preview & Send; from Workbench it closes like the X button.
           </Text>
         </BottomSheetScrollView>
       </BottomSheet>
@@ -2045,14 +2100,18 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     marginRight: 0,
+    minWidth: 0,
   },
   videoUtilityRow: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    minWidth: 0,
+  },
+  workbenchTopBarSpacer: {
+    flex: 1,
+    minWidth: 6,
   },
   videoActionsRow: {
     flex: 1,
@@ -2064,11 +2123,6 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
-  photoUtilityLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
   androidBackBtn: {
     width: 34,
     height: 34,
@@ -2079,10 +2133,42 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.22)',
   },
+  workbenchNavPillBack: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    minHeight: 36,
+    borderRadius: 20,
+    backgroundColor: 'rgba(30, 30, 30, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+    flexShrink: 0,
+  },
+  workbenchNavPillNext: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    minHeight: 36,
+    borderRadius: 18,
+    backgroundColor: '#2e78b7',
+    flexShrink: 0,
+  },
+  workbenchNavPillLabel: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+    flexShrink: 0,
+  },
   topBarRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 14,
+    flexShrink: 0,
+    marginRight: 2,
   },
   topBarNextBtn: {
     flexDirection: 'row',
@@ -2105,7 +2191,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 10,
+    paddingLeft: 6,
+    paddingRight: 4,
     paddingTop: 4,
     paddingBottom: 4,
     zIndex: 30,
@@ -2188,6 +2275,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  toolbarCloseBtnWorkbench: {
+    marginLeft: 2,
+  },
   posterTimestamp: {
     color: '#4ade80',
     fontSize: 11,
@@ -2243,19 +2333,26 @@ const styles = StyleSheet.create({
   aiNavBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(255,255,255,0.1)',
+    gap: 6,
   },
-  aiNavBackBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+  aiNavBackRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    maxWidth: '42%',
+  },
+  aiNavBackLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   aiNavTitle: {
     fontSize: 17,
@@ -2263,19 +2360,26 @@ const styles = StyleSheet.create({
     color: '#f2f6fb',
     letterSpacing: 0.3,
   },
+  aiNavTitleCenter: {
+    flex: 1,
+    textAlign: 'center',
+  },
   aiNavNextBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 5,
     backgroundColor: '#2e78b7',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
     borderRadius: 18,
+    maxWidth: '50%',
   },
   aiNavNextText: {
     color: '#fff',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
+    flexShrink: 1,
+    minWidth: 0,
   },
   aiSubtitleText: {
     color: 'rgba(255,255,255,0.4)',
@@ -2509,6 +2613,12 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.7)',
     fontSize: 15,
     fontWeight: '600',
+  },
+  sendStageTitleCenter: {
+    flex: 1,
+    textAlign: 'center',
+    minWidth: 0,
+    marginHorizontal: 4,
   },
   sendTopBar: {
     flex: 1,
