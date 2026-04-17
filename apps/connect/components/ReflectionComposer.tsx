@@ -9,7 +9,6 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   BackHandler,
   Keyboard,
   LayoutChangeEvent,
@@ -173,6 +172,7 @@ export default function ReflectionComposer({
   const [caption, setCaption] = useState(initialCaption);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [videoEnded, setVideoEnded] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
   const [isPosterMode, setIsPosterMode] = useState(false);
@@ -287,7 +287,11 @@ export default function ReflectionComposer({
         currentFilterType,
         photoEditRevision,
       };
-      if (wantsAutoPlayRef.current) {
+      if (autoAdvanceRef.current) {
+        autoAdvanceRef.current = false;
+        wantsAutoPlayRef.current = false;
+        setTimeout(() => onStageChange('send'), 400);
+      } else if (wantsAutoPlayRef.current) {
         wantsAutoPlayRef.current = false;
         setTimeout(() => playAiPreview(), 400);
       }
@@ -338,23 +342,16 @@ export default function ReflectionComposer({
   ]);
 
   const ensureAiCurrent = useCallback(
-    (purpose: 'preview' | 'send'): boolean => {
-      const requiresInitialAiRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
-      const requiresAiRerun = isAiStale();
-      if (!requiresInitialAiRun && !requiresAiRerun) return true;
-
-      const title = requiresInitialAiRun ? 'Run Sparkle first' : 'Re-run Sparkle';
-      const message = requiresInitialAiRun
-        ? 'Run Sparkle once before preview/send so AI is generated from your current reflection.'
-        : `You've changed content that affects AI. Re-run Sparkle before ${purpose}.`;
-
-      Alert.alert(title, message, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Run Sparkle', onPress: openSparkleSheet },
-      ]);
+    (): boolean => {
+      const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
+      if (!needsRun) return true;
+      autoAdvanceRef.current = false;
+      wantsAutoPlayRef.current = false;
+      setIsAiCancelled(false);
+      onTriggerMagic(caption || undefined).catch(() => {});
       return false;
     },
-    [hasAnyAiArtifacts, isAiStale, openSparkleSheet],
+    [hasAnyAiArtifacts, isAiStale, onTriggerMagic, caption],
   );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
@@ -613,6 +610,8 @@ export default function ReflectionComposer({
     setVideoRangeMs(null);
     setThumbnailTimeMs(null);
     setIsPosterMode(false);
+    setVideoPaused(false);
+    setVideoEnded(false);
   }, [mediaUri, mediaType]);
 
   // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
@@ -732,7 +731,10 @@ export default function ReflectionComposer({
       const curMs = player.currentTime * 1000;
       setPlayheadMs(curMs);
       if (curMs > videoRangeMs.end - 50) {
-        player.currentTime = videoRangeMs.start / 1000;
+        player.pause();
+        player.currentTime = videoRangeMs.end / 1000;
+        setVideoEnded(true);
+        setVideoPaused(false);
       } else if (curMs < videoRangeMs.start - 50) {
         player.currentTime = videoRangeMs.start / 1000;
       }
@@ -787,10 +789,6 @@ export default function ReflectionComposer({
     return uri;
   }, [mediaType, syncPhotoExportTransform, extractFilteredImage, lastFilteredExtractUriRef]);
 
-  const openSparkleSheet = useCallback(() => {
-    setIsPosterMode(false);
-    onStageChange('ai');
-  }, [onStageChange]);
 
   const doSendNow = useCallback(async () => {
     const now = Date.now();
@@ -804,7 +802,7 @@ export default function ReflectionComposer({
   }, [buildSendPayload, onSend, mediaType, exportCurrentPhoto]);
 
   const handleSendWithThrottle = useCallback(async () => {
-    if (!ensureAiCurrent('send')) return;
+    if (!ensureAiCurrent()) return;
     doSendNow();
   }, [ensureAiCurrent, doSendNow]);
 
@@ -838,7 +836,7 @@ export default function ReflectionComposer({
   }, [mediaUri, mediaType, audioUri, aiArtifacts, caption, exportCurrentPhoto]);
 
   const handlePreview = useCallback(() => {
-    if (!ensureAiCurrent('preview')) return;
+    if (!ensureAiCurrent()) return;
     void doPreviewNow();
   }, [ensureAiCurrent, doPreviewNow]);
 
@@ -846,16 +844,27 @@ export default function ReflectionComposer({
     onStageChange('workbench');
     Keyboard.dismiss();
   };
-  const goToAi = () => {
+  const goToAi = useCallback(() => {
     if (mediaType === 'video') {
       try { player.pause(); } catch { /* tearing down */ }
     }
     onStageChange('ai');
-  };
-  const goToSend = () => {
-    onStageChange('send');
+  }, [mediaType, player, onStageChange]);
+
+  const goToSend = useCallback(() => {
     Keyboard.dismiss();
-  };
+    const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
+    if (needsRun) {
+      autoAdvanceRef.current = true;
+      wantsAutoPlayRef.current = false;
+      setIsAiCancelled(false);
+      onTriggerMagic(caption || undefined).catch(() => {
+        autoAdvanceRef.current = false;
+      });
+      return;
+    }
+    onStageChange('send');
+  }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, caption]);
 
   // AI audio preview playback — caption → pause → deep dive
   type PreviewPhase = 'idle' | 'caption' | 'pause' | 'deep_dive';
@@ -938,9 +947,11 @@ export default function ReflectionComposer({
   }, [previewSound]);
 
   const wantsAutoPlayRef = useRef(false);
+  const autoAdvanceRef = useRef(false);
 
   const handleRunSparkleAndPlay = useCallback(() => {
     wantsAutoPlayRef.current = true;
+    autoAdvanceRef.current = false;
     setIsAiCancelled(false);
     onTriggerMagic(caption || undefined).catch(() => {
       wantsAutoPlayRef.current = false;
@@ -949,8 +960,30 @@ export default function ReflectionComposer({
 
   // --- RENDERERS ---
 
+  const togglePlayPause = useCallback(() => {
+    if (videoEnded) {
+      setVideoEnded(false);
+      if (videoRangeMs) {
+        player.currentTime = videoRangeMs.start / 1000;
+      } else {
+        player.currentTime = 0;
+      }
+      player.play();
+      setVideoPaused(false);
+      return;
+    }
+    if (videoPaused) {
+      player.play();
+      setVideoPaused(false);
+    } else {
+      player.pause();
+      setVideoPaused(true);
+    }
+  }, [player, videoEnded, videoPaused, videoRangeMs]);
+
   const handleReplay = useCallback(() => {
     setVideoEnded(false);
+    setVideoPaused(false);
     setIsPosterMode(false);
     if (mediaType === 'video' && videoRangeMs) {
       player.currentTime = videoRangeMs.start / 1000;
@@ -1015,7 +1048,7 @@ export default function ReflectionComposer({
     try { player.currentTime = ms / 1000; } catch { /* ignore */ }
   }, [player]);
 
-  const posterScrubGesture = useMemo(() =>
+  const posterScrubPan = useMemo(() =>
     Gesture.Pan()
       .enabled(isPosterMode)
       .onBegin(() => {
@@ -1032,6 +1065,20 @@ export default function ReflectionComposer({
         runOnJS(seekToMs)(targetMs);
       }),
     [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs],
+  );
+
+  const tapToTogglePlay = useMemo(() =>
+    Gesture.Tap()
+      .enabled(!isPosterMode)
+      .onEnd(() => {
+        runOnJS(togglePlayPause)();
+      }),
+    [isPosterMode, togglePlayPause],
+  );
+
+  const videoGesture = useMemo(() =>
+    Gesture.Race(posterScrubPan, tapToTogglePlay),
+    [posterScrubPan, tapToTogglePlay],
   );
 
   const isWorkbenchStage = stage === 'workbench';
@@ -1061,7 +1108,7 @@ export default function ReflectionComposer({
       ]}
     >
       {mediaType === 'video' ? (
-        <GestureDetector gesture={posterScrubGesture}>
+        <GestureDetector gesture={videoGesture}>
           <View style={styles.media}>
             <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
             {isPosterMode && (
@@ -1296,6 +1343,15 @@ export default function ReflectionComposer({
             <View style={styles.videoActionsRow}>
               <TouchableOpacity
                 style={[styles.toolbarChip, styles.videoActionChip, isBlockedByAi && { opacity: 0.35 }]}
+                onPress={togglePlayPause}
+                disabled={isSending || isBlockedByAi}
+                activeOpacity={0.7}
+              >
+                <FontAwesome name={videoPaused || videoEnded ? 'play' : 'pause'} size={16} color="#fff" />
+                <Text style={styles.toolbarChipText}>{videoPaused || videoEnded ? 'Play' : 'Pause'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toolbarChip, styles.videoActionChip, isBlockedByAi && { opacity: 0.35 }]}
                 onPress={handleReplay}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
@@ -1346,6 +1402,7 @@ export default function ReflectionComposer({
   );
 
   const hasAiAudio = !!(audioUri || aiArtifacts?.audioUrl);
+  const sparkleNeeded = !aiSnapshotRef.current && !hasAnyAiArtifacts || isAiStale();
 
   const renderAiTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
@@ -1484,14 +1541,14 @@ export default function ReflectionComposer({
       <View style={[styles.aiFooter, { paddingBottom: Math.max(insets.bottom + 8, 20) }]}>
         <View style={styles.aiFooterBtnRow}>
           <TouchableOpacity
-            style={[styles.aiSparkleBtn, isAiThinking && { opacity: 0.6 }]}
+            style={[styles.aiSparkleBtn, (!sparkleNeeded && !isAiThinking) && { opacity: 0.35 }]}
             onPress={handleRunSparkleAndPlay}
-            disabled={isAiThinking}
+            disabled={isAiThinking || !sparkleNeeded}
             activeOpacity={0.8}
           >
             <FontAwesome name="magic" size={14} color="#fff" />
             <Text style={styles.aiSparkleBtnText}>
-              {isAiThinking ? 'Running...' : 'Run Sparkle'}
+              {isAiThinking ? 'Running...' : sparkleNeeded ? 'Run Sparkle' : 'Up to Date'}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -1715,8 +1772,8 @@ export default function ReflectionComposer({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench you trim, replay, and set a poster frame. Tap Next at the top-right to move to AI & Caption where you add hints, record voice, and write the caption. Then Preview & Send to review and deliver. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
-              : 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. Tap Next at the top-right to move to AI & Caption where you add hints, record voice, and write the caption. Then Preview & Send to review and deliver.'}
+              ? 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. Tap Next (top-right) to move forward; the video stops immediately. Back (top-left) reopens the gallery so you can pick different media. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
+              : 'Three stages: Workbench → AI & Caption → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. Tap Next (top-right) to move forward. Back (top-left) reopens the gallery so you can pick different media. X closes back to the timeline.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1726,9 +1783,9 @@ export default function ReflectionComposer({
                   <FontAwesome name="scissors" size={14} color="#4FC3F7" />
                 </View>
                 <View style={styles.infoTextWrap}>
-                  <Text style={styles.infoLabel}>Trim</Text>
+                  <Text style={styles.infoLabel}>Trim & Playback</Text>
                   <Text style={styles.infoDesc}>
-                    The gold trim bar sits below the top controls. Drag the handles to set the playback window the Explorer will experience — start and end times are saved as metadata only, the full source video is uploaded. The selected duration shows inside the bar. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom in: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision.
+                    The gold trim bar sits below the top controls. Drag the handles to set the playback window the Explorer will experience — start and end times are saved as metadata only, the full source video is uploaded. The selected duration shows inside the bar. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom in: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision. Tap the video itself to pause or resume playback. The video does not loop — when it reaches the end, a Replay button appears. There is also a play/pause button in the top control bar.
                   </Text>
                 </View>
               </View>
@@ -1791,8 +1848,8 @@ export default function ReflectionComposer({
               <Text style={styles.infoLabel}>Sparkle & Play</Text>
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
-                  ? 'On the AI & Caption screen, mark who is in the clip, add names and context, then tap Run Sparkle. AI uses your hints and media to draft a caption and generate an AI voice intro. After Sparkle finishes it auto-plays what was generated — caption audio first, then the deep dive. If you already have a Sparkle result and just want to hear it again, tap the Play button without re-running. If you recorded your own voice, that always takes priority — the AI voice is the fallback when you skip recording. Run Sparkle as many times as you want.'
-                  : 'On the AI & Caption screen, mark who is in the photo, add names and context, then tap Run Sparkle. AI uses your hints and media to draft a caption and generate an AI voice intro. After Sparkle finishes it auto-plays what was generated — caption audio first, then the deep dive. If you already have a Sparkle result and just want to hear it again, tap the Play button without re-running. If you recorded your own voice, that always takes priority — the AI voice is the fallback when you skip recording. Run Sparkle as many times as you want.'}
+                  ? 'On the AI & Caption screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
+                  : 'On the AI & Caption screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1801,14 +1858,17 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            Use the Back arrow (top-left) and Next (top-right) to move between stages freely. Nothing sends until you tap Send on the final screen.
+            Use Back (top-left) and Next (top-right) to move between stages freely. Back on the Workbench opens the gallery to pick different media; X closes to the timeline. Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            If you change trim, poster, caption, or a photo Look after running Sparkle, you will be prompted to run it again before preview or send so AI stays in sync.
+            Fast path: if you just want to send quickly, tap Next through each screen. If Sparkle hasn't run yet or is out of date, it runs automatically in the background and advances to Preview & Send when ready — no extra taps needed.
+          </Text>
+          <Text style={styles.infoProTip}>
+            If you change trim, poster, caption, context, or a photo Look after running Sparkle, the Run Sparkle button re-enables. Sparkle runs automatically when you tap Next to Preview & Send so AI always stays in sync with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
-              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Video pauses immediately when you tap Next.'
+              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops immediately when you tap Next.'
               : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>

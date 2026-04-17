@@ -155,6 +155,9 @@ export default function CreationModal({
   const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
   /** Production `event_id` being edited (never use as staging folder id). */
   const editSourceEventIdRef = useRef<string | null>(null);
+  /** Pinned copy of the edit event ID that survives state resets during media replacement.
+   *  Only cleared on modal close or upload success — never by intermediate resets. */
+  const pinnedEditEventIdRef = useRef<string | null>(null);
   const mediaReplacedDuringEditRef = useRef(false);
   const [isEditingExistingReflection, setIsEditingExistingReflection] = useState(false);
   const [intent, setIntent] = useState<'none' | 'voice' | 'ai' | 'note'>('none');
@@ -219,6 +222,7 @@ export default function CreationModal({
       suppressPickerRecoveryRef.current = false;
       lastSourceForRecoveryRef.current = null;
       editSourceEventIdRef.current = null;
+      pinnedEditEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
       composerVideoMetaRef.current = null;
       setIsEditingExistingReflection(false);
@@ -240,6 +244,7 @@ export default function CreationModal({
       const dd = (m?.deep_dive?.trim() || '') as string;
 
       editSourceEventIdRef.current = editEvent.event_id;
+      pinnedEditEventIdRef.current = editEvent.event_id;
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(true);
 
@@ -325,6 +330,7 @@ export default function CreationModal({
 
     setIsEditingExistingReflection(false);
     editSourceEventIdRef.current = null;
+    pinnedEditEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
 
     setPhase('picker');
@@ -799,7 +805,7 @@ export default function CreationModal({
       }
     }
 
-    const editIdMeta = editSourceEventIdRef.current;
+    const editIdMeta = editSourceEventIdRef.current || pinnedEditEventIdRef.current;
     const replacedMeta = mediaReplacedDuringEditRef.current;
     const hasNewLocalVoiceMeta = !!(activeAudioUri && activeAudioUri.startsWith('file'));
     const photoUriMeta = photo.uri;
@@ -928,6 +934,7 @@ export default function CreationModal({
         setLibrarySourceKind(null);
         setConfirming(false);
         editSourceEventIdRef.current = null;
+        pinnedEditEventIdRef.current = null;
         mediaReplacedDuringEditRef.current = false;
         setIsEditingExistingReflection(false);
         composerVideoMetaRef.current = null;
@@ -1017,8 +1024,13 @@ export default function CreationModal({
         return;
       }
 
-      const eventID = editSourceEventIdRef.current || Date.now().toString();
-      const startedAsEditBundle = !!editSourceEventIdRef.current;
+      const resolvedEditId = editSourceEventIdRef.current || pinnedEditEventIdRef.current;
+      const eventID = resolvedEditId || Date.now().toString();
+      const startedAsEditBundle = !!resolvedEditId;
+      if (pinnedEditEventIdRef.current && !editSourceEventIdRef.current) {
+        debugLog('⚠️ editSourceEventIdRef was unexpectedly null; recovered from pinnedEditEventIdRef:', pinnedEditEventIdRef.current);
+        editSourceEventIdRef.current = pinnedEditEventIdRef.current;
+      }
       const lastEditedAtIso = startedAsEditBundle ? new Date().toISOString() : undefined;
       /** Cloud master: do not re-upload the S3 master when editing trim/thumbnail on an existing remote video. */
       const skipVideoMasterReupload =
@@ -1257,6 +1269,26 @@ export default function CreationModal({
       await Promise.all(uploadPromises);
       debugLog('✅ uploadEventBundle: All uploads completed successfully');
 
+      // 8b. If editing and media type changed from video to photo, delete stale video files from S3.
+      const wasOriginallyVideo = startedAsEditBundle && !!editEvent?.video_url;
+      const isNowPhoto = mediaType !== 'video';
+      if (wasOriginallyVideo && isNowPhoto && currentExplorerId) {
+        const staleVideoKeys = [
+          `${currentExplorerId}/to/${eventID}/video.mp4`,
+          `${currentExplorerId}/to/${eventID}/video_original.mp4`,
+          `${currentExplorerId}/to/${eventID}/video.mov`,
+        ];
+        debugLog('🗑️ Deleting stale video files from S3:', staleVideoKeys);
+        try {
+          const delParams = new URLSearchParams({ path: 'to', explorer_id: currentExplorerId });
+          delParams.set('extra_keys', JSON.stringify(staleVideoKeys));
+          const delRes = await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${delParams.toString()}`, { method: 'DELETE' });
+          if (!delRes.ok) console.warn('Stale video cleanup failed:', delRes.status);
+        } catch (e) {
+          console.warn('Stale video cleanup failed (non-blocking):', e);
+        }
+      }
+
       // 9. Cleanup Staging & Local (image + TTS artifacts)
       showToast('✅ Reflection sent!');
 
@@ -1316,6 +1348,7 @@ export default function CreationModal({
       setLibrarySourceKind(null);
       setConfirming(false);
       editSourceEventIdRef.current = null;
+      pinnedEditEventIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(false);
       composerVideoMetaRef.current = null;
@@ -1339,9 +1372,20 @@ export default function CreationModal({
       if (!startedAsEditBundle) {
         firestorePayload.engagement_count = 0;
       }
-      setDoc(doc(collection(db, ExplorerConfig.collections.reflections), eventID), firestorePayload, {
+      const eventDocRef = doc(collection(db, ExplorerConfig.collections.reflections), eventID);
+      setDoc(eventDocRef, firestorePayload, {
         merge: true,
       }).catch((err) => console.error('Firestore signal error:', err));
+
+      // When editing and media changed from video to photo, purge stale video metadata.
+      // merge:true preserves old fields so we must explicitly delete them.
+      if (wasOriginallyVideo && isNowPhoto) {
+        updateDoc(eventDocRef, {
+          'metadata.video_start_ms': deleteField(),
+          'metadata.video_end_ms': deleteField(),
+          'metadata.thumbnail_time_ms': deleteField(),
+        }).catch((err) => console.warn('Video metadata cleanup error:', err));
+      }
 
     } catch (error: any) {
       console.error("Full Upload Error:", error);
@@ -1418,6 +1462,7 @@ export default function CreationModal({
     setLibrarySourceKind(null);
     setConfirming(false);
     editSourceEventIdRef.current = null;
+    pinnedEditEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
@@ -1461,6 +1506,7 @@ export default function CreationModal({
     setConfirming(false);
     lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     editSourceEventIdRef.current = null;
+    pinnedEditEventIdRef.current = null;
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
@@ -1608,18 +1654,27 @@ export default function CreationModal({
     setPhoto(null);
     setVideoUri(null);
     setMediaType('photo');
+    setDescription('');
+    setShowDescriptionInput(false);
+    setIsAiGenerated(false);
+    setShortCaption('');
+    setDeepDive('');
     setStagingEventId(null);
     stagingEventIdRef.current = null;
     setAiAudioUrl(null);
     setAiDeepDiveAudioUrl(null);
+    setAiAudioS3Key(null);
+    setAiDeepDiveS3Key(null);
     setIsAiThinking(false);
+    setIntent('none');
+    setAudioUri(null);
+    lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
     setLibraryId('');
     setLibrarySearchTerm('');
     setLibrarySourceKind(null);
     composerVideoMetaRef.current = null;
-    setPhase('picker');
     setComposerStage('workbench');
-    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
+    beginSourceFlow('/gallery');
   };
 
   const handleReplaceMedia = async () => {
@@ -1659,12 +1714,7 @@ export default function CreationModal({
     composerVideoMetaRef.current = null;
     setComposerStage('workbench');
 
-    if (mediaSource) {
-      beginSourceFlow(mediaSource);
-    } else {
-      setPhase('picker');
-      setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
-    }
+    beginSourceFlow('/gallery');
   };
 
   const handleClose = () => {
