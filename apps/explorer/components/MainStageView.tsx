@@ -1,8 +1,10 @@
 import { FontAwesome } from '@expo/vector-icons';
 import {
+  coerceThumbnailTimeMs,
   Event,
   EventMetadata,
   getCloudMasterTrimWindow,
+  getValidVideoTrimMs,
   playerMachine,
   seekVideoToSeconds,
   useThrottledCallback,
@@ -29,6 +31,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TextStyle,
   TouchableOpacity,
   useWindowDimensions,
   View
@@ -45,6 +48,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 function trimMeta(s?: string): string {
   return typeof s === 'string' ? s.trim() : '';
+}
+
+/** True when the decoder is showing the trim window (not frame 0 before seek settles). */
+function playheadShowsTrimStart(
+  trim: ReturnType<typeof getCloudMasterTrimWindow>,
+  currentTimeSec: number
+): boolean {
+  if (!trim.active) return true;
+  return currentTimeSec >= trim.startSec - 0.2 && currentTimeSec < trim.endSec + 0.5;
 }
 
 /** True when the only "caption" we have is the generic fallback word (not a real title). */
@@ -210,20 +222,32 @@ export default function MainStageView({
     if (!selectedEvent) return null;
     const fromMap = eventMetadata[selectedEvent.event_id];
     if (fromMap) {
+      let merged: EventMetadata = fromMap;
       const emb = selectedEvent.metadata;
       if (emb && typeof emb === 'object') {
         const e = emb as Partial<EventMetadata>;
         const mapCap = trimMeta(fromMap.short_caption) || trimMeta(fromMap.description);
         const embCap = trimMeta(e.short_caption) || trimMeta(e.description);
         if (embCap && (!mapCap || isGenericReflectionCaption(mapCap))) {
-          return {
+          merged = {
             ...fromMap,
             short_caption: trimMeta(fromMap.short_caption) || trimMeta(e.short_caption) || embCap,
             description: trimMeta(fromMap.description) || trimMeta(e.description) || embCap,
           };
         }
+        const mapTrimActive = getCloudMasterTrimWindow(merged).active;
+        const embTrim = getValidVideoTrimMs(e as EventMetadata);
+        if (!mapTrimActive && embTrim) {
+          const embThumb = coerceThumbnailTimeMs(e.thumbnail_time_ms);
+          merged = {
+            ...merged,
+            video_start_ms: embTrim.startMs,
+            video_end_ms: embTrim.endMs,
+            ...(embThumb !== undefined ? { thumbnail_time_ms: embThumb } : {}),
+          };
+        }
       }
-      return fromMap;
+      return merged;
     }
 
     const embedded = selectedEvent.metadata;
@@ -242,6 +266,8 @@ export default function MainStageView({
             ? m.description.trim()
             : '';
       const primary = short || desc || 'Reflection';
+      const embeddedTrim = getValidVideoTrimMs(m as EventMetadata);
+      const embeddedThumb = coerceThumbnailTimeMs(m.thumbnail_time_ms);
       return {
         event_id: typeof m.event_id === 'string' && m.event_id ? m.event_id : selectedEvent.event_id,
         description: desc || primary,
@@ -260,6 +286,10 @@ export default function MainStageView({
           : {}),
         ...(typeof m.deep_dive === 'string' ? { deep_dive: m.deep_dive } : {}),
         ...(typeof m.deep_dive_audio_url === 'string' ? { deep_dive_audio_url: m.deep_dive_audio_url } : {}),
+        ...(embeddedTrim
+          ? { video_start_ms: embeddedTrim.startMs, video_end_ms: embeddedTrim.endMs }
+          : {}),
+        ...(embeddedThumb !== undefined ? { thumbnail_time_ms: embeddedThumb } : {}),
       };
     }
 
@@ -1050,17 +1080,47 @@ export default function MainStageView({
     playerRef.current = player;
   }, [player]);
 
-  // Listen for "playing" status to lift the thumbnail shield & track isVideoPlaying
+  // Listen for "playing" status to lift the thumbnail shield & track isVideoPlaying.
+  // For trimmed video, `isPlaying` can become true before seek-to-trim completes; keep the
+  // poster shield until `currentTime` enters the trim window (or fallback timeout).
   useEffect(() => {
     if (!player) return;
 
+    let shieldLiftFallback: ReturnType<typeof setTimeout> | null = null;
+    const clearShieldLiftFallback = () => {
+      if (shieldLiftFallback) {
+        clearTimeout(shieldLiftFallback);
+        shieldLiftFallback = null;
+      }
+    };
+
+    const tryLiftThumbnailShield = () => {
+      const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+      if (playheadShowsTrimStart(trim, player.currentTime)) {
+        clearShieldLiftFallback();
+        setVideoReady(true);
+      }
+    };
+
     const playingSub = player.addListener('playingChange', ({ isPlaying }: { isPlaying: boolean }) => {
       setIsVideoPlaying(isPlaying);
-      // Once the video actually reports it is playing, we know the first frame is ready.
-      // We can now safely hide the thumbnail image.
       if (isPlaying) {
-        setVideoReady(true);
+        const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+        if (!trim.active) {
+          clearShieldLiftFallback();
+          setVideoReady(true);
+        } else {
+          tryLiftThumbnailShield();
+          if (!playheadShowsTrimStart(trim, player.currentTime)) {
+            clearShieldLiftFallback();
+            shieldLiftFallback = setTimeout(() => {
+              shieldLiftFallback = null;
+              setVideoReady(true);
+            }, 3200);
+          }
+        }
       } else {
+        clearShieldLiftFallback();
         // When the video stops playing, check if it reached the end.
         // playingChange fires immediately when the player stops, which is faster
         // than the native playToEnd event (which can lag seconds behind on streamed content).
@@ -1088,11 +1148,22 @@ export default function MainStageView({
       }
     });
 
+    const timeSub = player.addListener('timeUpdate', () => {
+      if (!player.playing) return;
+      const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+      if (!trim.active) return;
+      tryLiftThumbnailShield();
+    });
+
     // When the player finishes loading a new source, retry play() if the machine
     // expects the video to be playing. This handles the race condition where
     // Hardware Sync called player.play() before the source was ready.
     const statusSub = player.addListener('statusChange', ({ status }: { status: string }) => {
       if (status === 'readyToPlay') {
+        const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
+        if (trim.active) {
+          seekVideoToSeconds(player, trim.startSec);
+        }
         const currentState = stateRef.current;
         const shouldBePlaying = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
@@ -1104,7 +1175,9 @@ export default function MainStageView({
     });
 
     return () => {
+      clearShieldLiftFallback();
       playingSub.remove();
+      timeSub.remove();
       statusSub.remove();
     };
   }, [player]);
@@ -1345,7 +1418,7 @@ export default function MainStageView({
       } else {
         send({ type: 'TELL_ME_MORE' });
       }
-    }, 750);
+    }, 400);
     deepDiveBreathTimeoutRef.current = timeoutId;
 
     return () => {
@@ -2518,10 +2591,8 @@ const styles = StyleSheet.create({
     color: '#FFD700',
     fontWeight: 'bold',
     fontSize: 14,
-    textShadowColor: 'rgba(0, 0, 0, 0.75)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2
-  },
+    textShadow: '0px 1px 2px rgba(0, 0, 0, 0.75)',
+  } as TextStyle,
   deleteButton: { padding: 10, justifyContent: 'center', alignItems: 'center' },
   toast: {
     position: 'absolute',

@@ -1,5 +1,16 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, AvatarFilterBar, ExplorerConfig, useAuth, useCompanionAvatars, useExplorer } from '@projectmirror/shared';
+import {
+  API_ENDPOINTS,
+  AvatarFilterBar,
+  coerceThumbnailTimeMs,
+  Event,
+  EventMetadata,
+  ExplorerConfig,
+  getValidVideoTrimFromFields,
+  useAuth,
+  useCompanionAvatars,
+  useExplorer,
+} from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
@@ -24,7 +35,6 @@ import {
 } from 'react-native';
 
 import { ReplayModal } from '@/components/ReplayModal';
-import { Event, EventMetadata } from '@projectmirror/shared';
 
 interface SentReflection {
   event_id: string;
@@ -100,14 +110,14 @@ function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMet
   if (typeof o.last_edited_at === 'string' && o.last_edited_at.trim()) {
     meta.last_edited_at = o.last_edited_at.trim();
   }
-  if (typeof o.video_start_ms === 'number' && Number.isFinite(o.video_start_ms)) {
-    meta.video_start_ms = o.video_start_ms;
+  const trim = getValidVideoTrimFromFields(o.video_start_ms, o.video_end_ms);
+  if (trim) {
+    meta.video_start_ms = trim.startMs;
+    meta.video_end_ms = trim.endMs;
   }
-  if (typeof o.video_end_ms === 'number' && Number.isFinite(o.video_end_ms)) {
-    meta.video_end_ms = o.video_end_ms;
-  }
-  if (typeof o.thumbnail_time_ms === 'number' && Number.isFinite(o.thumbnail_time_ms)) {
-    meta.thumbnail_time_ms = o.thumbnail_time_ms;
+  const thumbMs = coerceThumbnailTimeMs(o.thumbnail_time_ms);
+  if (thumbMs !== undefined) {
+    meta.thumbnail_time_ms = thumbMs;
   }
   return meta;
 }

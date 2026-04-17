@@ -185,16 +185,17 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 
-                                5000: 'snap',
-                                10000: 'done'
-                            }
+                            // Shorter windows so caption/deep-dive flow is not blocked for ~10s after video ends.
+                            after: {
+                                2000: 'snap',
+                                4500: 'done',
+                            },
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
                             after: {
-                                5000: 'done'
-                            }
+                                2000: 'done',
+                            },
                         },
                         done: { type: 'final' }
                     }
@@ -254,16 +255,16 @@ export const playerMachine = setup({
                             ]
                         },
                         waiting: {
-                            after: { 
-                                5000: 'snap',
-                                10000: 'done'
-                            }
+                            after: {
+                                2000: 'snap',
+                                4500: 'done',
+                            },
                         },
                         snap: {
                             entry: ['triggerSelfie', assign({ selfieTaken: true })],
                             after: {
-                                5000: 'done'
-                            }
+                                2000: 'done',
+                            },
                         },
                         done: { type: 'final' }
                     }

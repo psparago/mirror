@@ -1,7 +1,18 @@
 import MainStageView from '@/components/MainStageView';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, AvatarFilterBar, Event, EventMetadata, ExplorerConfig, ListEventsResponse, useCompanionAvatars, useThrottledCallback } from '@projectmirror/shared';
+import {
+  API_ENDPOINTS,
+  AvatarFilterBar,
+  coerceThumbnailTimeMs,
+  Event,
+  EventMetadata,
+  ExplorerConfig,
+  getValidVideoTrimFromFields,
+  ListEventsResponse,
+  useCompanionAvatars,
+  useThrottledCallback,
+} from '@projectmirror/shared';
 import {
   collection,
   db,
@@ -53,7 +64,11 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
   const sender = typeof o.sender === 'string' ? o.sender : '';
   const deepDive = typeof o.deep_dive === 'string' ? o.deep_dive : '';
-  if (!description && !shortCaption && !sender && !deepDive) return null;
+
+  const trimPair = getValidVideoTrimFromFields(o.video_start_ms, o.video_end_ms);
+  const hasVideoTrim = trimPair !== null;
+
+  if (!description && !shortCaption && !sender && !deepDive && !hasVideoTrim) return null;
 
   const ts = o.timestamp;
   let timestamp: string;
@@ -83,6 +98,16 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
   else if (description) meta.short_caption = description;
   else if (deepDive.trim()) meta.short_caption = captionSeed;
   if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
+
+  if (trimPair) {
+    meta.video_start_ms = trimPair.startMs;
+    meta.video_end_ms = trimPair.endMs;
+  }
+  const thumbMs = coerceThumbnailTimeMs(o.thumbnail_time_ms);
+  if (thumbMs !== undefined) {
+    meta.thumbnail_time_ms = thumbMs;
+  }
+
   return meta;
 }
 
@@ -586,12 +611,6 @@ export default function HomeScreen() {
         }
       }
       if (Object.keys(embeddedById).length > 0) {
-        if (__DEV__) {
-          console.log(
-            '🗣️ Metadata applied from embedded event.metadata (no S3)',
-            Object.keys(embeddedById).join(', ')
-          );
-        }
         setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
       }
     } catch (err: any) {
@@ -678,12 +697,6 @@ export default function HomeScreen() {
         });
 
         if (Object.keys(firestoreMetadataById).length > 0) {
-          if (__DEV__) {
-            console.log(
-              '🗣️ Metadata applied from Firestore (delta)',
-              Object.keys(firestoreMetadataById).join(', ')
-            );
-          }
           setEventMetadata((prev) => ({ ...prev, ...firestoreMetadataById }));
         }
 
@@ -728,12 +741,6 @@ export default function HomeScreen() {
               }
             }
             if (Object.keys(fromListOnly).length > 0) {
-              if (__DEV__) {
-                console.log(
-                  '🗣️ Metadata applied from embedded event.metadata (no S3)',
-                  Object.keys(fromListOnly).join(', ')
-                );
-              }
               setEventMetadata((prev) => ({ ...prev, ...fromListOnly }));
             }
 
@@ -1584,9 +1591,7 @@ const styles = StyleSheet.create({
     color: '#FFD700',
     fontWeight: 'bold',
     fontSize: 16,
-    textShadowColor: 'rgba(0, 0, 0, 0.75)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
+    textShadow: '0px 1px 2px rgba(0, 0, 0, 0.75)',
   },
   listContainer: {
     paddingHorizontal: 8,

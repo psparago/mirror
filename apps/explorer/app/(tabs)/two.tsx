@@ -48,12 +48,6 @@ export default function TabTwoScreen() {
         }
       }
       if (Object.keys(embeddedById).length > 0) {
-        if (__DEV__) {
-          console.log(
-            '🗣️ Metadata applied from embedded event.metadata (no S3)',
-            Object.keys(embeddedById).join(', ')
-          );
-        }
         setEventMetadata((prev) => ({ ...prev, ...embeddedById }));
       }
     } catch (err: any) {
