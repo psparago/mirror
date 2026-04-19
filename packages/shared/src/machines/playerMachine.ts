@@ -8,12 +8,14 @@ export interface PlayerContext {
     hasSpoken: boolean;
     videoFinished: boolean;
     selfieTaken: boolean;
+    /** When false, selfie region completes without capturing (Explorer setting). */
+    takeSelfie: boolean;
 }
 
 // 2. EVENTS
 export type PlayerEvent =
-    | { type: 'SELECT_EVENT'; event: Event; metadata: EventMetadata }
-    | { type: 'SELECT_EVENT_INSTANT'; event: Event; metadata: EventMetadata }
+    | { type: 'SELECT_EVENT'; event: Event; metadata: EventMetadata; takeSelfie?: boolean }
+    | { type: 'SELECT_EVENT_INSTANT'; event: Event; metadata: EventMetadata; takeSelfie?: boolean }
     | { type: 'METADATA_LOADED'; metadata: EventMetadata }
     | { type: 'NARRATION_FINISHED' }
     | { type: 'VIDEO_FINISHED' }
@@ -53,6 +55,7 @@ export const playerMachine = setup({
         hasSpoken: false,
         videoFinished: false,
         selfieTaken: false,
+        takeSelfie: true,
     },
 
     on: {
@@ -69,7 +72,8 @@ export const playerMachine = setup({
                     metadata: ({ event }) => event.metadata,
                     hasSpoken: false,
                     videoFinished: false,
-                    selfieTaken: false
+                    selfieTaken: false,
+                    takeSelfie: ({ event }) => event.takeSelfie !== false,
                 })
             ]
         },
@@ -82,7 +86,8 @@ export const playerMachine = setup({
                     metadata: ({ event }) => event.metadata,
                     hasSpoken: true, // Skip narration
                     videoFinished: false,
-                    selfieTaken: false
+                    selfieTaken: false,
+                    takeSelfie: ({ event }) => event.takeSelfie !== false,
                 })
             ]
         }
@@ -181,6 +186,11 @@ export const playerMachine = setup({
                         evaluating: {
                             always: [
                                 { guard: ({ context }: { context: PlayerContext }) => context.selfieTaken, target: 'done' },
+                                {
+                                    guard: ({ context }: { context: PlayerContext }) => !context.takeSelfie,
+                                    target: 'done',
+                                    actions: assign({ selfieTaken: true }),
+                                },
                                 { target: 'waiting' }
                             ]
                         },
@@ -251,6 +261,11 @@ export const playerMachine = setup({
                         evaluating: {
                             always: [
                                 { guard: ({ context }: { context: PlayerContext }) => context.selfieTaken, target: 'done' },
+                                {
+                                    guard: ({ context }: { context: PlayerContext }) => !context.takeSelfie,
+                                    target: 'done',
+                                    actions: assign({ selfieTaken: true }),
+                                },
                                 { target: 'waiting' }
                             ]
                         },
@@ -307,6 +322,11 @@ export const playerMachine = setup({
                         evaluating: {
                             always: [
                                 { guard: ({ context }: { context: PlayerContext }) => context.selfieTaken, target: 'done' },
+                                {
+                                    guard: ({ context }: { context: PlayerContext }) => !context.takeSelfie,
+                                    target: 'done',
+                                    actions: assign({ selfieTaken: true }),
+                                },
                                 { target: 'waiting' }
                             ]
                         },
@@ -337,14 +357,24 @@ export const playerMachine = setup({
                 },
                 viewing: {
                     entry: 'showSelfieBubble',
-                    initial: 'waiting',
+                    initial: 'decide',
                     states: {
+                        decide: {
+                            always: [
+                                {
+                                    guard: ({ context }: { context: PlayerContext }) => !context.takeSelfie,
+                                    target: 'done',
+                                },
+                                { target: 'waiting' },
+                            ],
+                        },
                         waiting: { after: { 5000: 'snap' } },
                         snap: {
                             entry: 'triggerSelfie',
-                            type: 'final'
-                        }
-                    }
+                            type: 'final',
+                        },
+                        done: { type: 'final' },
+                    },
                 }
             }
         },

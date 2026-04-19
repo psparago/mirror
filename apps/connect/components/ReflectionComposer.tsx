@@ -39,7 +39,11 @@ import { ReflectionFilteredPhoto } from '@/hooks/ReflectionFilteredPhoto';
 import { useReflectionFilters, type ReflectionFilterType } from '@/hooks/useReflectionFilters';
 import { PHOTO_EXPORT_SIZE_PX } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
-import { VideoTrimSlider } from '@projectmirror/shared';
+import {
+  VideoTrimSlider,
+  coerceThumbnailTimeMs,
+  getValidVideoTrimFromFields,
+} from '@projectmirror/shared';
 
 export type ComposerVideoMeta = {
   video_start_ms: number;
@@ -278,6 +282,9 @@ export default function ReflectionComposer({
     caption: string;
     currentFilterType: ReflectionFilterType;
     photoEditRevision: number;
+    companionInReflection: boolean;
+    explorerInReflection: boolean;
+    peopleContextNorm: string;
   } | null>(null);
   const prevAiThinkingRef = useRef(isAiThinking);
 
@@ -292,6 +299,9 @@ export default function ReflectionComposer({
         caption,
         currentFilterType,
         photoEditRevision,
+        companionInReflection: !!companionInReflection,
+        explorerInReflection: !!explorerInReflection,
+        peopleContextNorm: (peopleContext ?? '').trim(),
       };
       if (autoAdvanceRef.current) {
         autoAdvanceRef.current = false;
@@ -302,7 +312,20 @@ export default function ReflectionComposer({
         setTimeout(() => playAiPreview(), 400);
       }
     }
-  }, [isAiThinking, isAiCancelled, videoRangeMs, thumbnailTimeMs, caption, currentFilterType, photoEditRevision, playAiPreview]);
+  }, [
+    isAiThinking,
+    isAiCancelled,
+    videoRangeMs,
+    thumbnailTimeMs,
+    caption,
+    currentFilterType,
+    photoEditRevision,
+    companionInReflection,
+    explorerInReflection,
+    peopleContext,
+    playAiPreview,
+    onStageChange,
+  ]);
 
   const isAiStale = useCallback((): boolean => {
     const snap = aiSnapshotRef.current;
@@ -313,8 +336,20 @@ export default function ReflectionComposer({
     if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
     if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
     if (thumbnailTimeMs !== snap.thumbMs) return true;
+    if (!!companionInReflection !== snap.companionInReflection) return true;
+    if (!!explorerInReflection !== snap.explorerInReflection) return true;
+    if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return true;
     return false;
-  }, [caption, currentFilterType, photoEditRevision, videoRangeMs, thumbnailTimeMs]);
+  }, [
+    caption,
+    currentFilterType,
+    photoEditRevision,
+    videoRangeMs,
+    thumbnailTimeMs,
+    companionInReflection,
+    explorerInReflection,
+    peopleContext,
+  ]);
 
   const hasAnyAiArtifacts = useMemo(
     () =>
@@ -337,6 +372,9 @@ export default function ReflectionComposer({
       caption,
       currentFilterType,
       photoEditRevision,
+      companionInReflection: !!companionInReflection,
+      explorerInReflection: !!explorerInReflection,
+      peopleContextNorm: (peopleContext ?? '').trim(),
     };
   }, [
     hasAnyAiArtifacts,
@@ -345,6 +383,9 @@ export default function ReflectionComposer({
     caption,
     currentFilterType,
     photoEditRevision,
+    companionInReflection,
+    explorerInReflection,
+    peopleContext,
   ]);
 
   const ensureAiCurrent = useCallback(
@@ -654,21 +695,18 @@ export default function ReflectionComposer({
 
       const durationMs = Math.round(player.duration * 1000);
       setSourceVideoDurationMs(durationMs);
-      const s = initialVideoMeta?.video_start_ms;
-      const e = initialVideoMeta?.video_end_ms;
-      const hasInitialTrim =
-        typeof s === 'number' &&
-        typeof e === 'number' &&
-        e > s &&
-        s >= 0;
-
-      if (typeof initialVideoMeta?.thumbnail_time_ms === 'number') {
-        setThumbnailTimeMs(initialVideoMeta.thumbnail_time_ms);
+      const trim = getValidVideoTrimFromFields(
+        initialVideoMeta?.video_start_ms,
+        initialVideoMeta?.video_end_ms,
+      );
+      const thumbMs = coerceThumbnailTimeMs(initialVideoMeta?.thumbnail_time_ms);
+      if (thumbMs !== undefined) {
+        setThumbnailTimeMs(thumbMs);
       }
 
-      if (hasInitialTrim) {
-        const clampedEnd = Math.min(e, durationMs);
-        const clampedStart = Math.max(0, Math.min(s, clampedEnd - 1));
+      if (trim) {
+        const clampedEnd = Math.min(trim.endMs, durationMs);
+        const clampedStart = Math.max(0, Math.min(trim.startMs, clampedEnd - 1));
         setVideoRangeMs({ start: clampedStart, end: Math.max(clampedStart + 1, clampedEnd) });
         try { player.currentTime = clampedStart / 1000; } catch { /* ignore */ }
       } else {
@@ -716,9 +754,11 @@ export default function ReflectionComposer({
 
   useEffect(() => {
     if (!videoRangeMs || thumbnailTimeMs === null) return;
-    if (thumbnailTimeMs < videoRangeMs.start || thumbnailTimeMs > videoRangeMs.end) {
-      setThumbnailTimeMs(videoRangeMs.start);
-    }
+    let next = thumbnailTimeMs;
+    if (next > videoRangeMs.end) next = videoRangeMs.end;
+    if (next < 0) next = 0;
+    // Poster may intentionally sit slightly before the playback in-point (cover vs trim window).
+    if (next !== thumbnailTimeMs) setThumbnailTimeMs(next);
   }, [videoRangeMs, thumbnailTimeMs]);
 
   useEffect(() => {
@@ -1418,7 +1458,8 @@ export default function ReflectionComposer({
   );
 
   const hasAiAudio = !!(audioUri || aiArtifacts?.audioUrl);
-  const sparkleNeeded = !aiSnapshotRef.current && !hasAnyAiArtifacts || isAiStale();
+  const sparkleNeeded =
+    (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
 
   const renderAiTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
@@ -1852,7 +1893,7 @@ export default function ReflectionComposer({
                 <View style={styles.infoTextWrap}>
                   <Text style={styles.infoLabel}>Poster</Text>
                   <Text style={styles.infoDesc}>
-                    The poster is the frame the Explorer sees first, before the video plays — think of it like a movie poster. Tap Poster to enter poster mode. The video pauses and the top bar shows arrow buttons to step backward and forward in quarter-second jumps. Tap Set to lock the current frame. You can also swipe on the video to scrub freely. Clear drops back to the default frame, and Done exits and resumes playback. If you trim so the poster time falls outside the new range, it snaps to the trim start automatically.
+                    The poster is the frame the Explorer sees first, before the video plays — think of it like a movie poster. Tap Poster to enter poster mode. The video pauses and the top bar shows arrow buttons to step backward and forward in quarter-second jumps. Tap Set to lock the current frame. You can also swipe on the video to scrub freely. Clear drops back to the default frame, and Done exits and resumes playback. If the poster time falls after the end of your trim, it moves to the end of the trim; you can also place it slightly before the trim start if you want a cover frame that is not the first moment of playback.
                   </Text>
                 </View>
               </View>
@@ -1878,7 +1919,7 @@ export default function ReflectionComposer({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Voice Intro</Text>
               <Text style={styles.infoDesc}>
-                Optional. Record a short intro in your own voice on the Sparkle screen. If you record one, this is what the Explorer hears before the content plays — your real voice takes priority over any AI-generated audio. If you skip it, Sparkle creates an AI voice from your caption instead. Either way, something always plays before the content.
+                Optional. Record a short intro in your own voice on the Sparkle screen. After you send, the Explorer hears that recording first when present; it always takes priority over AI-generated intro audio. If you do not record, Sparkle can synthesize speech from your caption after you run Sparkle — so run Sparkle at least once before sending if you want an AI voice intro.
               </Text>
             </View>
           </View>
@@ -1903,8 +1944,8 @@ export default function ReflectionComposer({
               <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
-                  ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
-                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables automatically if you edit hints, caption, or media. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
+                  ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change trim, poster, caption, or Sparkle hints (toggles or context text). If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
+                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Sparkle hints (toggles or context text), how the photo is framed, or a Look. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1916,10 +1957,10 @@ export default function ReflectionComposer({
             Use the labeled chips on the top bar: on Workbench, the left chip matches where you picked media (Camera, Library, or Search); the right chip is Sparkle. On Sparkle, Workbench goes back and Preview & Send goes forward. X closes to the timeline. Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            Fast path: if you just want to send quickly, follow the labeled top chips through each stage. If Sparkle hasn't run yet or is out of date, it runs automatically in the background and advances to Preview & Send when ready — no extra taps needed.
+            Fast path: on Sparkle, tap Preview & Send (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready — you do not need a separate Run Sparkle tap in that case.
           </Text>
           <Text style={styles.infoProTip}>
-            If you change trim, poster, caption, context, or a photo Look after running Sparkle, the Run Sparkle button re-enables. Sparkle runs automatically when you tap the Preview & Send control (top-right) so AI always stays in sync with your edits.
+            After Sparkle has run, changing trim, poster, caption, Sparkle hints, or (for photos) framing or a Look makes Run Sparkle light up again. Tapping Preview & Send will run Sparkle first when needed, then take you to the send stage so AI stays aligned with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'

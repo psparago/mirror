@@ -1,5 +1,5 @@
 import MainStageView from '@/components/MainStageView';
-import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
+import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import {
   API_ENDPOINTS,
@@ -36,6 +36,7 @@ import * as Clipboard from 'expo-clipboard';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
+import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -59,57 +60,67 @@ function eventHasEmbeddedMetadata(event: Event): boolean {
 
 /** Coerce Firestore `metadata` field (plain JSON / Timestamp) into EventMetadata. */
 function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): EventMetadata | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const o = raw as Record<string, unknown>;
-  const description = typeof o.description === 'string' ? o.description : '';
-  const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
-  const sender = typeof o.sender === 'string' ? o.sender : '';
-  const deepDive = typeof o.deep_dive === 'string' ? o.deep_dive : '';
+  try {
+    if (!raw || typeof raw !== 'object') return null;
+    const o = raw as Record<string, unknown>;
+    const description = typeof o.description === 'string' ? o.description : '';
+    const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
+    const sender = typeof o.sender === 'string' ? o.sender : '';
+    const deepDive = typeof o.deep_dive === 'string' ? o.deep_dive : '';
 
-  const trimPair = getValidVideoTrimFromFields(o.video_start_ms, o.video_end_ms);
-  const hasVideoTrim = trimPair !== null;
+    const trimPair = getValidVideoTrimFromFields(o.video_start_ms, o.video_end_ms);
+    const hasVideoTrim =
+      trimPair !== null &&
+      typeof trimPair.startMs === 'number' &&
+      typeof trimPair.endMs === 'number';
 
-  if (!description && !shortCaption && !sender && !deepDive && !hasVideoTrim) return null;
+    if (!description && !shortCaption && !sender && !deepDive && !hasVideoTrim) return null;
 
-  const ts = o.timestamp;
-  let timestamp: string;
-  if (typeof ts === 'string') {
-    timestamp = ts;
-  } else if (ts && typeof ts === 'object' && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
-    timestamp = (ts as { toDate: () => Date }).toDate().toISOString();
-  } else {
-    timestamp = new Date().toISOString();
+    const ts = o.timestamp;
+    let timestamp: string;
+    if (typeof ts === 'string') {
+      timestamp = ts;
+    } else if (ts && typeof ts === 'object' && typeof (ts as { toDate?: () => Date }).toDate === 'function') {
+      timestamp = (ts as { toDate: () => Date }).toDate().toISOString();
+    } else {
+      timestamp = new Date().toISOString();
+    }
+
+    const captionSeed = shortCaption || description || (deepDive ? deepDive.trim().slice(0, 120) : '') || 'Reflection';
+    const meta: EventMetadata = {
+      description: description || shortCaption || captionSeed,
+      sender: sender || 'Companion',
+      timestamp,
+      event_id: typeof o.event_id === 'string' ? o.event_id : fallbackEventId,
+    };
+    if (typeof o.sender_id === 'string') meta.sender_id = o.sender_id;
+    if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
+      meta.content_type = o.content_type;
+    }
+    if (o.image_source === 'camera' || o.image_source === 'search' || o.image_source === 'gallery') {
+      meta.image_source = o.image_source;
+    }
+    if (shortCaption) meta.short_caption = shortCaption;
+    else if (description) meta.short_caption = description;
+    else if (deepDive.trim()) meta.short_caption = captionSeed;
+    if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
+
+    if (hasVideoTrim && trimPair !== null) {
+      meta.video_start_ms = trimPair.startMs;
+      meta.video_end_ms = trimPair.endMs;
+    }
+    const thumbMs = coerceThumbnailTimeMs(o.thumbnail_time_ms);
+    if (thumbMs !== undefined) {
+      meta.thumbnail_time_ms = thumbMs;
+    }
+
+    return meta;
+  } catch (e) {
+    if (__DEV__) {
+      console.warn('[normalizeFirestoreMetadata]', fallbackEventId, e);
+    }
+    return null;
   }
-
-  const captionSeed = shortCaption || description || (deepDive ? deepDive.trim().slice(0, 120) : '') || 'Reflection';
-  const meta: EventMetadata = {
-    description: description || shortCaption || captionSeed,
-    sender: sender || 'Companion',
-    timestamp,
-    event_id: typeof o.event_id === 'string' ? o.event_id : fallbackEventId,
-  };
-  if (typeof o.sender_id === 'string') meta.sender_id = o.sender_id;
-  if (o.content_type === 'text' || o.content_type === 'audio' || o.content_type === 'video') {
-    meta.content_type = o.content_type;
-  }
-  if (o.image_source === 'camera' || o.image_source === 'search' || o.image_source === 'gallery') {
-    meta.image_source = o.image_source;
-  }
-  if (shortCaption) meta.short_caption = shortCaption;
-  else if (description) meta.short_caption = description;
-  else if (deepDive.trim()) meta.short_caption = captionSeed;
-  if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
-
-  if (trimPair) {
-    meta.video_start_ms = trimPair.startMs;
-    meta.video_end_ms = trimPair.endMs;
-  }
-  const thumbMs = coerceThumbnailTimeMs(o.thumbnail_time_ms);
-  if (thumbMs !== undefined) {
-    meta.thumbnail_time_ms = thumbMs;
-  }
-
-  return meta;
 }
 
 const EVENT_DATE_MONTHS = [
@@ -171,6 +182,7 @@ export default function HomeScreen() {
   const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
+  const [takeSelfie, setTakeSelfie] = useState(DEFAULT_TAKE_SELFIE);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
   const [startIdleOnInitialSelection, setStartIdleOnInitialSelection] = useState(false);
   const [copyToastMessage, setCopyToastMessage] = useState<string | null>(null);
@@ -248,6 +260,12 @@ export default function HomeScreen() {
       }
     }).catch(err => console.warn('Failed to load instant video setting:', err));
 
+    AsyncStorage.getItem('takeSelfie').then(value => {
+      if (value !== null) {
+        setTakeSelfie(value === 'true');
+      }
+    }).catch(err => console.warn('Failed to load take selfie setting:', err));
+
     AsyncStorage.getItem('readVideoCaptions').then(value => {
       if (value !== null) {
         setReadVideoCaptions(value === 'true');
@@ -280,7 +298,8 @@ export default function HomeScreen() {
     enableInfiniteScroll,
     instantVideoPlayback,
     readVideoCaptions,
-  }), [autoplay, enableInfiniteScroll, instantVideoPlayback, readVideoCaptions]);
+    takeSelfie,
+  }), [autoplay, enableInfiniteScroll, instantVideoPlayback, readVideoCaptions, takeSelfie]);
 
 
 
@@ -682,14 +701,16 @@ export default function HomeScreen() {
       async (snapshot: QuerySnapshot) => {
         // Always merge metadata from the full snapshot (fixes cold start: we used to skip the
         // first snapshot entirely, so eventMetadata stayed empty and every card showed "Reflection").
-        const fromAllDocs: Record<string, EventMetadata> = {};
+        // One setEventMetadata per snapshot — docChanges metadata is redundant with this full pass
+        // but we still walk docChanges for arrival/delete signals and list-vs-Firestore merge hints.
+        const metadataFromFirestore: Record<string, EventMetadata> = {};
         for (const docSnap of snapshot.docs) {
           const id = docSnap.id;
           const meta = normalizeFirestoreMetadata(docSnap.data()?.metadata, id);
-          if (meta) fromAllDocs[id] = meta;
+          if (meta) metadataFromFirestore[id] = meta;
         }
-        if (Object.keys(fromAllDocs).length > 0) {
-          setEventMetadata((prev) => ({ ...prev, ...fromAllDocs }));
+        if (Object.keys(metadataFromFirestore).length > 0) {
+          setEventMetadata((prev) => ({ ...prev, ...metadataFromFirestore }));
         }
 
         if (isInitialLoad) {
@@ -700,29 +721,22 @@ export default function HomeScreen() {
         // 2. Check for added / modified / removed reflections
         const newReflectionIds: string[] = [];
         const removedReflectionIds: string[] = [];
+        /** Ids that got non-null Firestore metadata this batch (for list API merge). Reuse snapshot map — no second normalize. */
         const firestoreMetadataById: Record<string, EventMetadata> = {};
         snapshot.docChanges().forEach((change) => {
           if (change.type === 'added') {
             const id = change.doc.id;
             newReflectionIds.push(id);
-            const fromFs = normalizeFirestoreMetadata(change.doc.data()?.metadata, id);
-            if (fromFs) {
-              firestoreMetadataById[id] = fromFs;
-            }
+            const m = metadataFromFirestore[id];
+            if (m) firestoreMetadataById[id] = m;
           } else if (change.type === 'modified') {
             const id = change.doc.id;
-            const fromFs = normalizeFirestoreMetadata(change.doc.data()?.metadata, id);
-            if (fromFs) {
-              firestoreMetadataById[id] = fromFs;
-            }
+            const m = metadataFromFirestore[id];
+            if (m) firestoreMetadataById[id] = m;
           } else if (change.type === 'removed') {
             removedReflectionIds.push(change.doc.id);
           }
         });
-
-        if (Object.keys(firestoreMetadataById).length > 0) {
-          setEventMetadata((prev) => ({ ...prev, ...firestoreMetadataById }));
-        }
 
         // Remove deleted reflections from local state immediately
         if (removedReflectionIds.length > 0) {
@@ -975,11 +989,12 @@ export default function HomeScreen() {
         {/* Thumbnail */}
         <View style={styles.gridThumbnailContainer}>
           <Image
-            source={{ uri: item.image_url }}
+            source={{ uri: item.image_url, cacheKey: imageUrlCacheKey(item.image_url) }}
             style={styles.gridThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
             cachePolicy="memory-disk"
+            priority="low"
             onError={(error) => {
               console.error(`Error loading image for event ${item.event_id}:`, error);
             }}

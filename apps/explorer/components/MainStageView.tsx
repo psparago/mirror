@@ -23,6 +23,7 @@ import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Image } from 'expo-image';
+import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
 import {
   Alert,
   FlatList,
@@ -135,6 +136,8 @@ interface MainStageProps {
     instantVideoPlayback?: boolean;
     readVideoCaptions?: boolean;
     autoPlayDeepDive?: boolean;
+    /** When false, skips automatic selfie capture after reflections (default: on). */
+    takeSelfie?: boolean;
   };
   filterBar?: React.ReactNode;
   /** Shown in the header as "{name}'s Reflections" when multiple items exist. */
@@ -342,6 +345,7 @@ export default function MainStageView({
   const selectedMetadataRef = useRef(selectedMetadata);
   const onPlaybackIdleRef = useRef(onPlaybackIdle);
   const configRef = useRef(config);
+  configRef.current = config;
 
   // Bridge pattern refs for machine actions
   const sendRef = useRef<any>(() => { });
@@ -545,8 +549,10 @@ export default function MainStageView({
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         seekVideoToSeconds(playerRef.current, trim.active ? trim.startSec : 0);
 
-        // Trigger bubble animation
-        selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
+        // Trigger bubble animation (only when automatic selfie is enabled)
+        if (configRef.current?.takeSelfie !== false) {
+          selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
+        }
 
         // The actual .play() call is now managed by the Hardware Sync useEffect for maximum reliability
       },
@@ -707,6 +713,7 @@ export default function MainStageView({
       },
 
       showSelfieBubble: () => {
+        if (configRef.current?.takeSelfie === false) return;
         selfieMirrorOpacity.value = 1;
       },
 
@@ -884,13 +891,15 @@ export default function MainStageView({
         send({
           type: 'SELECT_EVENT_INSTANT',
           event: selectedEventRef.current,
-          metadata: selectedMetadataRef.current
+          metadata: selectedMetadataRef.current,
+          takeSelfie: configRef.current?.takeSelfie !== false,
         });
       } else {
         send({
           type: 'SELECT_EVENT',
           event: selectedEventRef.current,
-          metadata: selectedMetadataRef.current
+          metadata: selectedMetadataRef.current,
+          takeSelfie: configRef.current?.takeSelfie !== false,
         });
       }
       return;
@@ -911,7 +920,8 @@ export default function MainStageView({
           send({
             type: 'SELECT_EVENT_INSTANT',
             event: selectedEventRef.current,
-            metadata: selectedMetadataRef.current
+            metadata: selectedMetadataRef.current,
+            takeSelfie: configRef.current?.takeSelfie !== false,
           });
         } else {
           // Standard replay (respects narration for videos)
@@ -945,7 +955,12 @@ export default function MainStageView({
 
       // playingAudio doesn't handle REPLAY — re-select the event
       if (currentState.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
-        send({ type: 'SELECT_EVENT', event: selectedEventRef.current, metadata: selectedMetadataRef.current });
+        send({
+          type: 'SELECT_EVENT',
+          event: selectedEventRef.current,
+          metadata: selectedMetadataRef.current,
+          takeSelfie: configRef.current?.takeSelfie !== false,
+        });
       } else {
         send({ type: 'REPLAY' });
       }
@@ -1073,9 +1088,31 @@ export default function MainStageView({
     setVideoReady(false);
   }, [videoSource]);
 
-  const player = useVideoPlayer(videoSource || '', (player) => {
-    player.timeUpdateEventInterval = 0.25;
+  // Stable source for the hook — expo-video's useVideoPlayer recreates the native player when
+  // its `source` argument changes (see JSON.stringify(parsedSource) in the hook). Recreating
+  // AVPlayerViewController on each signed URL / selection churn triggers heavy main-thread UIKit
+  // work. Initialize empty and swap media via replace() instead.
+  const player = useVideoPlayer('', (p) => {
+    p.timeUpdateEventInterval = 0.25;
   });
+
+  useEffect(() => {
+    if (!player) return;
+    if (videoSource) {
+      try {
+        player.replace(videoSource);
+        player.timeUpdateEventInterval = 0.25;
+      } catch {
+        /* teardown / invalid URI */
+      }
+    } else {
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [player, videoSource]);
 
   // Keep playerRef in sync so machine actions (stopAllMedia, playVideo, etc.) work
   useEffect(() => {
@@ -1201,6 +1238,10 @@ export default function MainStageView({
 
   // Helper for reused selfie logic
   const performSelfieCapture = useCallback(async (delay = 0) => {
+    if (configRef.current?.takeSelfie === false) {
+      debugLog('📸 Helper: Skipping selfie — disabled in settings');
+      return;
+    }
     // Ensure permission before starting ANY UI transitions (mirror, flash, etc)
     if (!cameraPermission?.granted) {
       try {
@@ -1365,7 +1406,7 @@ export default function MainStageView({
     selectedMetadataRef.current = selectedMetadata;
     onPlaybackIdleRef.current = onPlaybackIdle;
     configRef.current = config;
-  }, [events, selectedEvent, state, onEventSelect, onDelete, onCaptureSelfie, onReplay, selectedMetadata]);
+  }, [events, selectedEvent, state, onEventSelect, onDelete, onCaptureSelfie, onReplay, selectedMetadata, config]);
 
   // Notify parent when we enter the finished state (video/audio/narration completed).
   const wasFinishedRef = useRef(false);
@@ -1459,9 +1500,19 @@ export default function MainStageView({
         opacity.value = 1;
       } else if (useInstantPlayback) {
         debugLog('⚡ Using instant video playback (skipping narration)');
-        send({ type: 'SELECT_EVENT_INSTANT', event: selectedEvent!, metadata: selectedMetadata! });
+        send({
+          type: 'SELECT_EVENT_INSTANT',
+          event: selectedEvent!,
+          metadata: selectedMetadata!,
+          takeSelfie: config?.takeSelfie !== false,
+        });
       } else {
-        send({ type: 'SELECT_EVENT', event: selectedEvent!, metadata: selectedMetadata! });
+        send({
+          type: 'SELECT_EVENT',
+          event: selectedEvent!,
+          metadata: selectedMetadata!,
+          takeSelfie: config?.takeSelfie !== false,
+        });
       }
 
       // Reset swipe-to-dismiss animation values for fresh overlay opening
@@ -1472,7 +1523,7 @@ export default function MainStageView({
       // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
       performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, config?.takeSelfie, performUpNextAutoscrollToEvent]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -1650,7 +1701,12 @@ export default function MainStageView({
     debugLog('🔁 User pressed REPLAY');
 
     if (state.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
-      send({ type: 'SELECT_EVENT', event: selectedEventRef.current, metadata: selectedMetadataRef.current });
+      send({
+        type: 'SELECT_EVENT',
+        event: selectedEventRef.current,
+        metadata: selectedMetadataRef.current,
+        takeSelfie: configRef.current?.takeSelfie !== false,
+      });
     } else {
       const isVideo = !!selectedEventRef.current?.video_url;
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
@@ -1660,7 +1716,8 @@ export default function MainStageView({
         send({
           type: 'SELECT_EVENT_INSTANT',
           event: selectedEventRef.current,
-          metadata: selectedMetadataRef.current
+          metadata: selectedMetadataRef.current,
+          takeSelfie: configRef.current?.takeSelfie !== false,
         });
       } else {
         send({ type: 'REPLAY' });
@@ -1921,11 +1978,12 @@ export default function MainStageView({
             }} />
           )}
           <Image
-            source={{ uri: item.image_url }}
+            source={{ uri: item.image_url, cacheKey: imageUrlCacheKey(item.image_url) }}
             style={styles.upNextThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
             cachePolicy="memory-disk"
+            priority="low"
           />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
@@ -2122,10 +2180,14 @@ export default function MainStageView({
                     {/* We keep this visible if: (1) It's a photo OR (2) It's a video that hasn't started playing yet */}
                     {(!videoSource || !videoReady) && (
                       <Image
-                        source={{ uri: selectedEvent.image_url }}
+                        source={{
+                          uri: selectedEvent.image_url,
+                          cacheKey: imageUrlCacheKey(selectedEvent.image_url),
+                        }}
                         style={[styles.mediaImage, { position: 'absolute', zIndex: 10 }]}
                         contentFit="contain"
                         cachePolicy="memory-disk"
+                        priority="high"
                       />
                     )}
                     {/* Play/Replay overlay */}

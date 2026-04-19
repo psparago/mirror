@@ -251,13 +251,29 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
     }
 
-    // Helper to get timestamp value in milliseconds
+    // Helper to get timestamp value in milliseconds (Firestore Timestamp, Date, ISO string, or epoch ms)
     const getTimestampMs = (ts: any): number => {
-      if (!ts) return 0;
-      if (ts.toMillis) return ts.toMillis();
-      if (ts.seconds !== undefined) return ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000;
-      if (typeof ts === 'number') return ts;
+      if (ts == null) return 0;
+      if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+      if (typeof ts === 'string') {
+        const parsed = Date.parse(ts);
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+      if (ts instanceof Date) return ts.getTime();
+      if (typeof ts.toMillis === 'function') return ts.toMillis();
+      if (typeof ts.seconds === 'number') {
+        return ts.seconds * 1000 + (typeof ts.nanoseconds === 'number' ? ts.nanoseconds : 0) / 1e6;
+      }
       return 0;
+    };
+
+    /** For "Sent" sort: true send time only — top-level `timestamp` bumps on engagement/edits and must not reorder the timeline. */
+    const getReflectionSentSortMs = (r: SentReflection): number => {
+      const fromSent = getTimestampMs(r.sentTimestamp);
+      if (fromSent !== 0) return fromSent;
+      const fromMeta = r.metadata?.timestamp ? getTimestampMs(r.metadata.timestamp) : 0;
+      if (fromMeta !== 0) return fromMeta;
+      return getTimestampMs(r.timestamp);
     };
 
     result.sort((a, b) => {
@@ -269,9 +285,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
 
       if (sortBy === 'sent') {
-        // Order by last Firestore update (bumps on edit/re-send), not event_id
-        const aTime = getTimestampMs(a.timestamp || a.sentTimestamp);
-        const bTime = getTimestampMs(b.timestamp || b.sentTimestamp);
+        const aTime = getReflectionSentSortMs(a);
+        const bTime = getReflectionSentSortMs(b);
         return bTime - aTime;
       }
 
@@ -705,9 +720,13 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         }
       }
 
+      // Firestore row metadata can omit video trim/poster (stored on the S3 bundle); list API fills them.
+      const rowMeta = item.metadata as EventMetadata | undefined;
+      const listMeta = fullEvent?.metadata as EventMetadata | undefined;
       const metadata =
-        (item.metadata as EventMetadata | undefined) ??
-        (fullEvent?.metadata as EventMetadata | undefined);
+        rowMeta && listMeta
+          ? ({ ...rowMeta, ...listMeta } as EventMetadata)
+          : rowMeta ?? listMeta;
       const imageUrl = fullEvent?.image_url || item.reflectionImageUrl || '';
       if (!imageUrl) {
         Alert.alert('Cannot edit', 'Image URL is not available for this reflection yet.');

@@ -14,6 +14,8 @@ export type CloudMasterTrimWindow = {
 
 /**
  * Parses a numeric milliseconds value from JSON / Firestore (number or numeric string).
+ * Also accepts Firestore {@link Timestamp}-like objects (`toMillis` or `seconds`/`nanoseconds`),
+ * which can appear if numeric fields were written incorrectly.
  * Rejects NaN, Infinity, and non-numeric types so older or partial documents never break playback.
  */
 export function parseVideoMsField(raw: unknown): number | undefined {
@@ -25,10 +27,37 @@ export function parseVideoMsField(raw: unknown): number | undefined {
     const n = parseFloat(raw);
     return Number.isFinite(n) ? n : undefined;
   }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.toMillis === 'function') {
+      try {
+        const ms = (obj.toMillis as () => number)();
+        if (typeof ms === 'number' && Number.isFinite(ms)) return ms;
+      } catch {
+        return undefined;
+      }
+    }
+    if (typeof obj.seconds === 'number' && Number.isFinite(obj.seconds)) {
+      const ns =
+        typeof obj.nanoseconds === 'number' && Number.isFinite(obj.nanoseconds) ? obj.nanoseconds : 0;
+      return obj.seconds * 1000 + ns / 1e6;
+    }
+  }
   return undefined;
 }
 
 export type ValidVideoTrimMs = { startMs: number; endMs: number };
+
+function isValidVideoTrimMsShape(x: unknown): x is ValidVideoTrimMs {
+  if (!x || typeof x !== 'object' || Array.isArray(x)) return false;
+  const o = x as Record<string, unknown>;
+  const startMs = o.startMs;
+  const endMs = o.endMs;
+  if (typeof startMs !== 'number' || typeof endMs !== 'number') return false;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false;
+  if (startMs < 0 || endMs <= startMs) return false;
+  return true;
+}
 
 /**
  * Valid trim only when both ends are present, finite, non-negative start, and end > start
@@ -40,8 +69,11 @@ export function getValidVideoTrimFromFields(start: unknown, end: unknown): Valid
   if (s === undefined || e === undefined || s < 0 || e <= s) return null;
   const startMs = Math.round(s);
   const endMs = Math.round(e);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
   if (endMs <= startMs) return null;
-  return { startMs, endMs };
+  const out: ValidVideoTrimMs = { startMs, endMs };
+  // Belt-and-suspenders: never return a malformed shape (Hermes / odd data can otherwise slip through).
+  return isValidVideoTrimMsShape(out) ? out : null;
 }
 
 export function getValidVideoTrimMs(meta: EventMetadata | null | undefined): ValidVideoTrimMs | null {

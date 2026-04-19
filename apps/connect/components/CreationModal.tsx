@@ -9,7 +9,16 @@ import {
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
+import {
+  API_ENDPOINTS,
+  Event,
+  EventMetadata,
+  ExplorerConfig,
+  coerceThumbnailTimeMs,
+  getValidVideoTrimFromFields,
+  useAuth,
+  useExplorer,
+} from '@projectmirror/shared';
 import { collection, db, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
@@ -312,16 +321,13 @@ export default function CreationModal({
         setMediaType('video');
         setVideoUri(editEvent.video_url);
         setPhoto({ uri: editEvent.image_url });
-        if (
-          typeof m?.video_start_ms === 'number' &&
-          typeof m?.video_end_ms === 'number' &&
-          m.video_end_ms > m.video_start_ms
-        ) {
+        const trimHydrate = getValidVideoTrimFromFields(m?.video_start_ms, m?.video_end_ms);
+        const thumbHydrate = coerceThumbnailTimeMs(m?.thumbnail_time_ms);
+        if (trimHydrate) {
           composerVideoMetaRef.current = {
-            video_start_ms: m.video_start_ms,
-            video_end_ms: m.video_end_ms,
-            thumbnail_time_ms:
-              typeof m.thumbnail_time_ms === 'number' ? m.thumbnail_time_ms : null,
+            video_start_ms: trimHydrate.startMs,
+            video_end_ms: trimHydrate.endMs,
+            thumbnail_time_ms: thumbHydrate ?? null,
           };
         } else {
           composerVideoMetaRef.current = null;
@@ -1929,16 +1935,14 @@ export default function CreationModal({
     }
     const m = editEvent.metadata;
     const partial: Partial<ComposerVideoMeta> = {};
-    if (
-      typeof m.video_start_ms === 'number' &&
-      typeof m.video_end_ms === 'number' &&
-      m.video_end_ms > m.video_start_ms
-    ) {
-      partial.video_start_ms = m.video_start_ms;
-      partial.video_end_ms = m.video_end_ms;
+    const trim = getValidVideoTrimFromFields(m.video_start_ms, m.video_end_ms);
+    if (trim) {
+      partial.video_start_ms = trim.startMs;
+      partial.video_end_ms = trim.endMs;
     }
-    if (typeof m.thumbnail_time_ms === 'number') {
-      partial.thumbnail_time_ms = m.thumbnail_time_ms;
+    const thumb = coerceThumbnailTimeMs(m.thumbnail_time_ms);
+    if (thumb !== undefined) {
+      partial.thumbnail_time_ms = thumb;
     }
     return Object.keys(partial).length > 0 ? partial : null;
   }, [isEditingExistingReflection, mediaType, editEvent]);

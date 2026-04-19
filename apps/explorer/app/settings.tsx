@@ -1,6 +1,6 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
-import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
+import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
 import { ExplorerConfig, VersionDisplay } from '@projectmirror/shared';
 import { auth, db, doc, setDoc } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -18,6 +18,7 @@ export default function SettingsScreen() {
     const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
     // Instant video playback setting
     const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
+    const [takeSelfie, setTakeSelfie] = useState(DEFAULT_TAKE_SELFIE);
     const [lastOtaLabel, setLastOtaLabel] = useState<string | null>(null);
 
     console.log('auth.currentUser.uid', auth.currentUser?.uid);
@@ -28,6 +29,11 @@ export default function SettingsScreen() {
                 setInstantVideoPlayback(value === 'true');
             }
         }).catch(err => console.warn('Failed to load setting:', err));
+        AsyncStorage.getItem('takeSelfie').then(value => {
+            if (value !== null) {
+                setTakeSelfie(value === 'true');
+            }
+        }).catch(err => console.warn('Failed to load take selfie setting:', err));
     }, []);
 
     useEffect(() => {
@@ -67,6 +73,15 @@ export default function SettingsScreen() {
             await AsyncStorage.setItem('instantVideoPlayback', value.toString());
         } catch (err) {
             console.warn('Failed to save setting:', err);
+        }
+    };
+
+    const toggleTakeSelfie = async (value: boolean) => {
+        setTakeSelfie(value);
+        try {
+            await AsyncStorage.setItem('takeSelfie', value.toString());
+        } catch (err) {
+            console.warn('Failed to save take selfie setting:', err);
         }
     };
 
@@ -142,6 +157,20 @@ export default function SettingsScreen() {
                                 onValueChange={toggleInstantVideoPlayback}
                                 trackColor={{ false: '#767577', true: '#4FC3F7' }}
                                 thumbColor={instantVideoPlayback ? '#fff' : '#f4f3f4'}
+                            />
+                        </View>
+                        <View style={[styles.settingRow, { marginTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', paddingTop: 16 }]}>
+                            <View style={styles.settingInfo}>
+                                <Text style={styles.settingLabel}>Take Selfie</Text>
+                                <Text style={styles.settingDescription}>
+                                    After a reflection, capture your selfie response automatically (turn off to browse without sending your selfie)
+                                </Text>
+                            </View>
+                            <Switch
+                                value={takeSelfie}
+                                onValueChange={toggleTakeSelfie}
+                                trackColor={{ false: '#767577', true: '#4FC3F7' }}
+                                thumbColor={takeSelfie ? '#fff' : '#f4f3f4'}
                             />
                         </View>
                     </View>

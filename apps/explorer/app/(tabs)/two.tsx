@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, StyleSheet, Text, View, useWindowDimensions, TouchableOpacity, Modal } from 'react-native';
+import { Image } from 'expo-image';
+import { ActivityIndicator, FlatList, StyleSheet, Text, View, useWindowDimensions, TouchableOpacity, Modal } from 'react-native';
+import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
 import { API_ENDPOINTS, Event, EventMetadata, ListEventsResponse } from '@projectmirror/shared';
 
 function eventHasEmbeddedMetadata(event: Event): boolean {
@@ -69,9 +71,9 @@ export default function TabTwoScreen() {
         activeOpacity={0.8}
       >
         <Image
-          source={{ uri: item.image_url }}
+          source={{ uri: item.image_url, cacheKey: imageUrlCacheKey(item.image_url) }}
           style={styles.photo}
-          resizeMode="cover"
+          contentFit="cover"
         />
         {hasDescription && (
           <View style={styles.descriptionBadge}>
@@ -147,9 +149,12 @@ export default function TabTwoScreen() {
             </TouchableOpacity>
             
             <Image
-              source={{ uri: selectedEvent.image_url }}
+              source={{
+                uri: selectedEvent.image_url,
+                cacheKey: imageUrlCacheKey(selectedEvent.image_url),
+              }}
               style={styles.fullScreenImage}
-              resizeMode="contain"
+              contentFit="contain"
             />
             
             {selectedMetadata && selectedMetadata.description && (
