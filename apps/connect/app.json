@@ -79,6 +79,14 @@
           "ios": {
             "buildReactNativeFromSource": true,
             "useFrameworks": "static"
+          },
+          "android": {
+            "extraGradleProperties": [
+              {
+                "name": "android.defaults.buildfeatures.renderscript",
+                "value": "true"
+              }
+            ]
           }
         }
       ],
