@@ -25,7 +25,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         otaLabel: OTA_LABEL,
         sentryDsn: SENTRY_DSN_CONNECT,
     },
-    name: IS_DEV ? 'Connect Dev' : (config.name ?? 'Connect'),
+    name: IS_DEV ? 'Connect (Dev)' : (config.name ?? 'Connect'),
     slug: config.slug ?? 'reflections-connect',
     ios: {
         ...config.ios,
