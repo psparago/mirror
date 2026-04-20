@@ -187,12 +187,6 @@ export default function CreationModal({
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [videoUri, setVideoUri] = useState<string | null>(null);
   const [imageSourceType, setImageSourceType] = useState<'camera' | 'search' | 'gallery'>('camera');
-  /** Local extract from Look (B&W); forces photo binary re-upload when editing a remote poster. */
-  const [composerFilteredPhotoUri, setComposerFilteredPhotoUri] = useState<string | null>(null);
-  const composerFilteredPhotoUriRef = useRef<string | null>(null);
-  useEffect(() => {
-    composerFilteredPhotoUriRef.current = composerFilteredPhotoUri;
-  }, [composerFilteredPhotoUri]);
   const [isCompanionInReflection, setIsCompanionInReflection] = useState(false);
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
   const [isSelfie, setIsSelfie] = useState(false);
@@ -262,9 +256,6 @@ export default function CreationModal({
       setIsEditingExistingReflection(false);
       setShowDescriptionInput(false);
       setComposerStage('workbench');
-      void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
-      composerFilteredPhotoUriRef.current = null;
-      setComposerFilteredPhotoUri(null);
       setMediaSource(null);
       return;
     }
@@ -570,7 +561,7 @@ export default function CreationModal({
     const media = consumePendingMedia();
     if (media) {
       lastSourceForRecoveryRef.current = null;
-      // Same entry as gallery/search: workbench first (Looks / trim), never skip to AI.
+      // Same entry as gallery/search: workbench first (framing / trim), never skip to AI.
       setComposerStage('workbench');
       setConfirming(false);
       setPhase('creating');
@@ -871,9 +862,7 @@ export default function CreationModal({
         ? overrides.filteredPhotoUri
         : null;
     const photoCompositionNeedsBinaryUpload =
-      mediaType === 'photo' &&
-      remotePoster &&
-      !!(filteredForUpload || composerFilteredPhotoUriRef.current || composerFilteredPhotoUri);
+      mediaType === 'photo' && remotePoster && !!filteredForUpload;
 
     // Detect if the poster frame changed for a video edit — requires re-extracting and re-uploading image.jpg.
     const origThumbMs = editEvent?.metadata?.thumbnail_time_ms;
@@ -890,7 +879,7 @@ export default function CreationModal({
       );
 
     // Cloud master: remote poster and/or remote video unchanged — no S3 media re-upload; Firestore-only (incl. trim/thumbnail).
-    // Photo + edited square composition: must re-upload image.jpg so Explorer sees the latest framing / Look.
+    // Photo + edited square composition: must re-upload image.jpg so Explorer sees the latest framing.
     // Video + changed poster frame: must re-extract thumbnail and re-upload image.jpg.
     if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoCompositionNeedsBinaryUpload && !videoThumbNeedsPosterUpload) {
       try {
@@ -986,9 +975,6 @@ export default function CreationModal({
         mediaReplacedDuringEditRef.current = false;
         setIsEditingExistingReflection(false);
         composerVideoMetaRef.current = null;
-        void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
-        composerFilteredPhotoUriRef.current = null;
-        setComposerFilteredPhotoUri(null);
         sheetRef.current?.close();
         onClose();
         if (audioRecorder.isRecording) {
@@ -1451,9 +1437,6 @@ export default function CreationModal({
       if (tempCompressedVideo) {
         safeDeleteCacheFile(tempCompressedVideo).catch(() => { });
       }
-      void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
-      composerFilteredPhotoUriRef.current = null;
-      setComposerFilteredPhotoUri(null);
       setUploading(false);
     }
   };
@@ -1514,9 +1497,6 @@ export default function CreationModal({
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
-    void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
-    composerFilteredPhotoUriRef.current = null;
-    setComposerFilteredPhotoUri(null);
   };
 
   const retakePhoto = async () => {
@@ -1558,9 +1538,6 @@ export default function CreationModal({
     mediaReplacedDuringEditRef.current = false;
     setIsEditingExistingReflection(false);
     composerVideoMetaRef.current = null;
-    void deleteScratchMediaFile(composerFilteredPhotoUriRef.current);
-    composerFilteredPhotoUriRef.current = null;
-    setComposerFilteredPhotoUri(null);
   };
 
   const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
@@ -2180,7 +2157,6 @@ export default function CreationModal({
                     targetCaption: targetCaption || description || undefined,
                   });
                 }}
-                onFilteredUriChange={setComposerFilteredPhotoUri}
                 onSend={(data) => {
                   uploadEventBundle({
                     caption: data.caption,

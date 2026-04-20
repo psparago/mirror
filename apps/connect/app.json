@@ -72,21 +72,12 @@
           "photosPermission": "Allow Reflections Connect to access your photos to create Reflections."
         }
       ],
-      "./plugins/reactNativeImageFilterKit",
       [
         "expo-build-properties",
         {
           "ios": {
             "buildReactNativeFromSource": true,
             "useFrameworks": "static"
-          },
-          "android": {
-            "extraGradleProperties": [
-              {
-                "name": "android.defaults.buildfeatures.renderscript",
-                "value": "true"
-              }
-            ]
           }
         }
       ],

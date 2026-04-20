@@ -35,8 +35,7 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ReflectionFilteredPhoto } from '@/hooks/ReflectionFilteredPhoto';
-import { useReflectionFilters, type ReflectionFilterType } from '@/hooks/useReflectionFilters';
+import { captureRef } from 'react-native-view-shot';
 import { PHOTO_EXPORT_SIZE_PX } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
 import {
@@ -56,7 +55,7 @@ export type ComposerSendPayload = {
   audioUri: string | null;
   deepDive: string | null;
   videoMeta?: ComposerVideoMeta | null;
-  /** Final square photo export (original or Look-baked) to upload instead of the raw source photo. */
+  /** Final square photo export (framing baked) to upload instead of the raw source photo. */
   filteredPhotoUri?: string | null;
 };
 
@@ -80,8 +79,6 @@ interface ReflectionComposerProps {
   onCancel: () => void;
   onReplaceMedia: () => void;
   onSend: (data: ComposerSendPayload) => void;
-  /** Fired when Look filter extract completes or clears (toggle off / new media). */
-  onFilteredUriChange?: (uri: string | null) => void;
   /** Hydrate trim / thumbnail when editing an existing video reflection. */
   initialVideoMeta?: Partial<ComposerVideoMeta> | null;
   /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
@@ -152,7 +149,6 @@ export default function ReflectionComposer({
   onCancel: onRetake,
   onReplaceMedia,
   onSend,
-  onFilteredUriChange,
   onTriggerMagic,
   isSending,
   onReplaceMediaFromPreview,
@@ -186,18 +182,8 @@ export default function ReflectionComposer({
   const [sourceVideoDurationMs, setSourceVideoDurationMs] = useState(0);
   const lastSendAtRef = useRef(0);
 
-  const {
-    currentFilterType,
-    setCurrentFilterType,
-    isFilterActive,
-    extractImageEnabled,
-    lookExtractBusy,
-    handleExtractImage,
-    extractFilteredImage,
-    lastFilteredExtractUriRef,
-  } = useReflectionFilters({ mediaUri, mediaType, onFilteredUriChange });
-
-  const noopExtractImage = useCallback(() => {}, []);
+  const photoExportStageRef = useRef<View>(null);
+  const [photoExportBusy, setPhotoExportBusy] = useState(false);
   const [photoSourceSize, setPhotoSourceSize] = useState<{ width: number; height: number } | null>(null);
   const [photoStageSize, setPhotoStageSize] = useState(0);
   const [photoEditRevision, setPhotoEditRevision] = useState(0);
@@ -215,7 +201,7 @@ export default function ReflectionComposer({
   // Preview State
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewEvent, setPreviewEvent] = useState<Event | null>(null);
-  /** Photo export for Replay preview (not upload). Keeps spinner on Preview, not Send, while `lookExtractBusy`. */
+  /** Photo export for Replay preview (not upload). Keeps spinner on Preview, not Send, while `photoExportBusy`. */
   const [previewBuilding, setPreviewBuilding] = useState(false);
   /** Photo export before `onSend` while parent `isSending` may still be false. */
   const [sendPreparing, setSendPreparing] = useState(false);
@@ -280,13 +266,14 @@ export default function ReflectionComposer({
     trimEnd: number | null;
     thumbMs: number | null;
     caption: string;
-    currentFilterType: ReflectionFilterType;
     photoEditRevision: number;
     companionInReflection: boolean;
     explorerInReflection: boolean;
     peopleContextNorm: string;
   } | null>(null);
   const prevAiThinkingRef = useRef(isAiThinking);
+  /** `playAiPreview` is declared later; the AI-completion effect calls through this ref to satisfy TS ordering. */
+  const playAiPreviewRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     const wasThinking = prevAiThinkingRef.current;
@@ -297,7 +284,6 @@ export default function ReflectionComposer({
         trimEnd: videoRangeMs?.end ?? null,
         thumbMs: thumbnailTimeMs,
         caption,
-        currentFilterType,
         photoEditRevision,
         companionInReflection: !!companionInReflection,
         explorerInReflection: !!explorerInReflection,
@@ -309,7 +295,7 @@ export default function ReflectionComposer({
         setTimeout(() => onStageChange('send'), 400);
       } else if (wantsAutoPlayRef.current) {
         wantsAutoPlayRef.current = false;
-        setTimeout(() => playAiPreview(), 400);
+        setTimeout(() => void playAiPreviewRef.current?.(), 400);
       }
     }
   }, [
@@ -318,12 +304,10 @@ export default function ReflectionComposer({
     videoRangeMs,
     thumbnailTimeMs,
     caption,
-    currentFilterType,
     photoEditRevision,
     companionInReflection,
     explorerInReflection,
     peopleContext,
-    playAiPreview,
     onStageChange,
   ]);
 
@@ -331,7 +315,6 @@ export default function ReflectionComposer({
     const snap = aiSnapshotRef.current;
     if (!snap) return false;
     if (caption.trim() !== snap.caption.trim()) return true;
-    if (currentFilterType !== snap.currentFilterType) return true;
     if (photoEditRevision !== snap.photoEditRevision) return true;
     if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
     if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
@@ -342,7 +325,6 @@ export default function ReflectionComposer({
     return false;
   }, [
     caption,
-    currentFilterType,
     photoEditRevision,
     videoRangeMs,
     thumbnailTimeMs,
@@ -370,7 +352,6 @@ export default function ReflectionComposer({
       trimEnd: videoRangeMs?.end ?? null,
       thumbMs: thumbnailTimeMs,
       caption,
-      currentFilterType,
       photoEditRevision,
       companionInReflection: !!companionInReflection,
       explorerInReflection: !!explorerInReflection,
@@ -381,7 +362,6 @@ export default function ReflectionComposer({
     videoRangeMs,
     thumbnailTimeMs,
     caption,
-    currentFilterType,
     photoEditRevision,
     companionInReflection,
     explorerInReflection,
@@ -410,21 +390,10 @@ export default function ReflectionComposer({
   const VIDEO_TOOLBAR_STRIP_PX = 44;
   /** Compact trim bar height below action strip. */
   const VIDEO_TRIM_BAR_PX = 56;
-  /** Photo Looks bar block height used for media top offset. */
-  const PHOTO_LOOKS_STRIP_PX = 48;
+  /** Photo tools strip (rotate / reset) height for media top offset. */
+  const PHOTO_TOOLS_STRIP_PX = 44;
   /** Visual breathing room between bars. */
   const PHOTO_BARS_GAP_PX = 8;
-
-  const LOOK_OPTIONS: {
-    id: ReflectionFilterType;
-    label: string;
-    icon: React.ComponentProps<typeof FontAwesome>['name'];
-  }[] = [
-    { id: 'original', label: 'Original', icon: 'image' },
-    { id: 'clarity', label: 'Clarity', icon: 'bolt' },
-    { id: 'classic', label: 'Classic', icon: 'adjust' },
-    { id: 'warm', label: 'Warm', icon: 'fire' },
-  ];
 
   const handlePhotoStageLayout = useCallback((e: LayoutChangeEvent) => {
     const side = Math.min(e.nativeEvent.layout.width, e.nativeEvent.layout.height);
@@ -817,14 +786,26 @@ export default function ReflectionComposer({
 
   const exportCurrentPhoto = useCallback(async (): Promise<string | null> => {
     if (mediaType !== 'photo') return null;
+    const target = photoExportStageRef.current;
+    if (!target) return null;
     syncPhotoExportTransform();
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    let uri = await extractFilteredImage();
-    if (!uri) {
-      uri = lastFilteredExtractUriRef.current;
+    setPhotoExportBusy(true);
+    try {
+      const raw = await captureRef(target, {
+        format: 'jpg',
+        quality: 0.88,
+        result: 'tmpfile',
+      });
+      const path = typeof raw === 'string' ? raw : '';
+      if (!path) return null;
+      return path.startsWith('file://') ? path : `file://${path}`;
+    } catch {
+      return null;
+    } finally {
+      setPhotoExportBusy(false);
     }
-    return uri;
-  }, [mediaType, syncPhotoExportTransform, extractFilteredImage, lastFilteredExtractUriRef]);
+  }, [mediaType, syncPhotoExportTransform]);
 
 
   const doSendNow = useCallback(async () => {
@@ -982,6 +963,8 @@ export default function ReflectionComposer({
 
     setPreviewPhase('idle');
   }, [audioUri, aiArtifacts?.audioUrl, aiArtifacts?.deepDiveAudioUrl, ensureSpeakerMode, playOneClip]);
+
+  playAiPreviewRef.current = playAiPreview;
 
   const stopAiPreview = useCallback(async () => {
     previewAbortRef.current = true;
@@ -1145,7 +1128,7 @@ export default function ReflectionComposer({
           top:
             insets.top +
             (isWorkbenchStage && mediaType === 'photo'
-              ? photoEditBarPx + PHOTO_LOOKS_STRIP_PX + PHOTO_BARS_GAP_PX
+              ? photoEditBarPx + PHOTO_TOOLS_STRIP_PX + PHOTO_BARS_GAP_PX
               : 0) +
             (isWorkbenchStage && mediaType === 'video'
               ? videoTopBarsPx
@@ -1171,24 +1154,13 @@ export default function ReflectionComposer({
             <GestureDetector gesture={photoEditorGesture}>
               <View style={styles.photoStageClip}>
                 <Animated.View style={[styles.photoStageFill, photoTransformStyle]}>
-                  {currentFilterType !== 'original' ? (
-                    <ReflectionFilteredPhoto
-                      mediaUri={mediaUri}
-                      currentFilterType={currentFilterType}
-                      extractImageEnabled={false}
-                      onExtractImage={noopExtractImage}
-                      style={styles.photoStageFill}
-                      imageStyle={styles.photoStageFill}
-                    />
-                  ) : (
-                    <Image
-                      source={{ uri: mediaUri }}
-                      style={styles.photoStageFill}
-                      contentFit="contain"
-                      cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
-                      transition={isRemoteMediaUri ? 200 : 0}
-                    />
-                  )}
+                  <Image
+                    source={{ uri: mediaUri }}
+                    style={styles.photoStageFill}
+                    contentFit="contain"
+                    cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
+                    transition={isRemoteMediaUri ? 200 : 0}
+                  />
                 </Animated.View>
                 <View pointerEvents="none" style={styles.photoFrameOverlay}>
                   <Text style={styles.photoFrameLabel}>Explorer frame</Text>
@@ -1325,9 +1297,9 @@ export default function ReflectionComposer({
             <View style={styles.workbenchTopBarSpacer} />
             <View style={styles.topBarRight}>
               <TouchableOpacity
-                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || photoExportBusy) && { opacity: 0.35 }]}
                 onPress={goToAi}
-                disabled={isSending || isAiThinking || lookExtractBusy}
+                disabled={isSending || isAiThinking || photoExportBusy}
                 activeOpacity={0.7}
                 accessibilityRole="button"
                 accessibilityLabel="Go to Sparkle"
@@ -1367,9 +1339,9 @@ export default function ReflectionComposer({
             <View style={styles.workbenchTopBarSpacer} />
             <View style={styles.topBarRight}>
               <TouchableOpacity
-                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || lookExtractBusy) && { opacity: 0.35 }]}
+                style={[styles.workbenchNavPillNext, (isSending || isAiThinking || photoExportBusy) && { opacity: 0.35 }]}
                 onPress={goToAi}
-                disabled={isSending || isAiThinking || lookExtractBusy}
+                disabled={isSending || isAiThinking || photoExportBusy}
                 activeOpacity={0.7}
                 accessibilityRole="button"
                 accessibilityLabel="Go to Sparkle"
@@ -1675,10 +1647,10 @@ export default function ReflectionComposer({
             style={[
               styles.sendSlimBtn,
               styles.previewSlimBtn,
-              (isSending || isAiThinking || previewBuilding || lookExtractBusy) && { opacity: 0.4 },
+              (isSending || isAiThinking || previewBuilding || photoExportBusy) && { opacity: 0.4 },
             ]}
             onPress={handlePreview}
-            disabled={isSending || isAiThinking || lookExtractBusy || previewBuilding}
+            disabled={isSending || isAiThinking || photoExportBusy || previewBuilding}
             activeOpacity={0.7}
           >
             {previewBuilding ? (
@@ -1697,7 +1669,7 @@ export default function ReflectionComposer({
               (isSending || sendPreparing || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
             ]}
             onPress={handleSendWithThrottle}
-            disabled={isSending || sendPreparing || lookExtractBusy || (!caption && !hasRecordedAudio)}
+            disabled={isSending || sendPreparing || photoExportBusy || (!caption && !hasRecordedAudio)}
             activeOpacity={0.7}
           >
             {isSending || sendPreparing ? (
@@ -1730,12 +1702,8 @@ export default function ReflectionComposer({
 
       {mediaType === 'photo' ? (
         <View style={styles.photoExportHidden} pointerEvents="none">
-          <View style={styles.photoExportStage}>
-            <ReflectionFilteredPhoto
-              mediaUri={mediaUri}
-              currentFilterType={currentFilterType}
-              extractImageEnabled={extractImageEnabled}
-              onExtractImage={handleExtractImage}
+          <View ref={photoExportStageRef} collapsable={false} style={styles.photoExportStage}>
+            <View
               style={[
                 styles.photoExportFill,
                 {
@@ -1747,8 +1715,14 @@ export default function ReflectionComposer({
                   ],
                 },
               ]}
-              imageStyle={styles.photoExportFill}
-            />
+            >
+              <Image
+                source={{ uri: mediaUri }}
+                style={styles.photoExportFill}
+                contentFit="contain"
+                cachePolicy={isRemoteMediaUri ? 'memory-disk' : 'disk'}
+              />
+            </View>
           </View>
         </View>
       ) : null}
@@ -1791,53 +1765,24 @@ export default function ReflectionComposer({
         <View
           style={[
             styles.looksBarWrap,
-            { top: insets.top + photoEditBarPx + PHOTO_BARS_GAP_PX, height: PHOTO_LOOKS_STRIP_PX },
+            { top: insets.top + photoEditBarPx + PHOTO_BARS_GAP_PX, height: PHOTO_TOOLS_STRIP_PX },
           ]}
           pointerEvents="box-none"
         >
-          <View style={styles.looksToolbar}>
-            <View style={styles.photoLooksRow}>
-              {LOOK_OPTIONS.map((opt) => {
-                const selected = currentFilterType === opt.id;
-                return (
-                  <TouchableOpacity
-                    key={opt.id}
-                    style={[
-                      styles.toolbarChip,
-                      styles.photoLookChip,
-                      selected && styles.toolbarChipActive,
-                      (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 },
-                    ]}
-                    onPress={() => {
-                      if (isBlockedByAi || lookExtractBusy) return;
-                      setCurrentFilterType(opt.id);
-                    }}
-                    disabled={isSending || isBlockedByAi || lookExtractBusy}
-                    activeOpacity={0.7}
-                  >
-                    <FontAwesome
-                      name={opt.icon}
-                      size={16}
-                      color={selected ? '#4FC3F7' : '#fff'}
-                    />
-                    <Text style={[styles.toolbarChipText, selected && { color: '#4FC3F7' }]}>{opt.label}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+          <View style={[styles.looksToolbar, { justifyContent: 'flex-end' }]}>
             <TouchableOpacity
-              style={[styles.toolbarChip, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              style={[styles.toolbarChip, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
               onPress={() => rotatePhotoBy(-90)}
-              disabled={isSending || isBlockedByAi || lookExtractBusy}
+              disabled={isSending || isBlockedByAi || photoExportBusy}
               activeOpacity={0.7}
             >
               <FontAwesome name="undo" size={16} color="#fff" />
               <Text style={styles.toolbarChipText}>Rotate</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.toolbarChip, (isBlockedByAi || lookExtractBusy) && { opacity: 0.35 }]}
+              style={[styles.toolbarChip, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
               onPress={resetPhotoTransform}
-              disabled={isSending || isBlockedByAi || lookExtractBusy}
+              disabled={isSending || isBlockedByAi || photoExportBusy}
               activeOpacity={0.7}
             >
               <FontAwesome name="refresh" size={16} color="#fff" />
@@ -1869,7 +1814,7 @@ export default function ReflectionComposer({
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
               ? 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
-              : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and choose a Look. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
+              : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and use Reset to clear framing. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1989,7 +1934,7 @@ export default function ReflectionComposer({
           setPreviewEvent(null);
         }}
         isSending={isSending}
-        isSendDisabled={isBlockedByAi || lookExtractBusy || (!caption && !hasRecordedAudio)}
+        isSendDisabled={isBlockedByAi || photoExportBusy || (!caption && !hasRecordedAudio)}
       />
 
     </GestureHandlerRootView>
@@ -2123,19 +2068,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     backgroundColor: 'rgba(7,10,14,0.36)',
-  },
-  photoLooksRow: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    gap: 4,
-    minWidth: 0,
-  },
-  photoLookChip: {
-    flex: 1,
-    minWidth: 0,
-    paddingHorizontal: 6,
   },
   photoUtilityRow: {
     flex: 1,

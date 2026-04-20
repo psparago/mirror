@@ -7,7 +7,6 @@
     "packages/*"
   ],
   "scripts": {
-    "eas-build-pre-install": "bash ./eas-build-pre-install.sh",
     "explorer": "cd apps/explorer && npx expo start -c --dev-client",
     "connect": "cd apps/connect && npx expo start -c --dev-client --port 8082",
     "build:explorer": "cd apps/explorer && eas build --profile development --platform ios",
