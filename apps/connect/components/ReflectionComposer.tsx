@@ -1166,7 +1166,9 @@ export default function ReflectionComposer({
             </GestureDetector>
             <View pointerEvents="none" style={styles.photoFrameChrome}>
               <View style={styles.photoFrameBorder} />
-              <Text style={styles.photoFrameLabel}>Crop</Text>
+              <View style={styles.photoFrameLabelPill}>
+                <Text style={styles.photoFrameLabelText}>Crop</Text>
+              </View>
             </View>
           </View>
         </View>
@@ -1268,12 +1270,14 @@ export default function ReflectionComposer({
             </Text>
             <TouchableOpacity
               style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
-          onPress={onRetake} 
-          disabled={isSending || isBlockedByAi}
+              onPress={onRetake}
+              disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
-        >
+              accessibilityRole="button"
+              accessibilityLabel="Close"
+            >
               <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
-        </TouchableOpacity>
+            </TouchableOpacity>
       </View>
     </View>
   );
@@ -1313,6 +1317,8 @@ export default function ReflectionComposer({
                 onPress={onRetake}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
               >
                 <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
               </TouchableOpacity>
@@ -1355,6 +1361,8 @@ export default function ReflectionComposer({
                 onPress={onRetake}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
               >
                 <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
               </TouchableOpacity>
@@ -1450,18 +1458,34 @@ export default function ReflectionComposer({
         <Text style={[styles.aiNavTitle, styles.aiNavTitleCenter]} numberOfLines={1}>
           Sparkle
         </Text>
-        <TouchableOpacity
-          onPress={goToSend}
-          style={styles.aiNavNextBtn}
-          activeOpacity={0.7}
-          accessibilityRole="button"
-          accessibilityLabel="Go to Preview and Send"
-        >
-          <Text style={styles.aiNavNextText} numberOfLines={1}>
-            Preview & Send
-          </Text>
-          <FontAwesome name="arrow-right" size={12} color="#fff" />
-        </TouchableOpacity>
+        <View style={[styles.topBarRight, styles.aiNavRightCluster]}>
+          <TouchableOpacity
+            onPress={goToSend}
+            style={styles.aiNavNextBtn}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Finish Sparkle and go to preview and send"
+          >
+            <Text style={styles.aiNavNextText} numberOfLines={1}>
+              Finish
+            </Text>
+            <FontAwesome name="arrow-right" size={12} color="#fff" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.toolbarCloseBtn,
+              styles.toolbarCloseBtnWorkbench,
+              (isSending || isBlockedByAi) && { opacity: 0.35 },
+            ]}
+            onPress={onRetake}
+            disabled={isSending || isBlockedByAi}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          >
+            <FontAwesome name="times" size={14} color="rgba(255,255,255,0.8)" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
@@ -1471,7 +1495,7 @@ export default function ReflectionComposer({
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.aiSubtitleText}>
-          No changes needed? Tap Preview & Send (top-right) to keep your current draft as-is.
+          No changes needed? Tap Finish (top-right) to keep your current draft and open preview.
         </Text>
 
         {/* SECTION: Sparkle Hints */}
@@ -1904,13 +1928,13 @@ export default function ReflectionComposer({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            Use the labeled chips on the top bar: on Workbench, the left chip matches where you picked media (Camera, Library, or Search); the right chip is Sparkle. On Sparkle, Workbench goes back and Preview & Send goes forward. X closes to the timeline. Nothing sends until you tap Send on the final screen.
+            Workbench: left chip re-opens where you picked media (Camera, Library, or Search); right side is Sparkle and X. Sparkle: left is Workbench; right is Finish (opens Preview & Send) and X. Preview & Send: left is Sparkle; right is X. X always closes to the timeline (same behavior on every stage). Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            Fast path: on Sparkle, tap Preview & Send (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready — you do not need a separate Run Sparkle tap in that case.
+            Fast path: on Sparkle, tap Finish (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready — you do not need a separate Run Sparkle tap in that case.
           </Text>
           <Text style={styles.infoProTip}>
-            After Sparkle has run, changing trim, poster, caption, Sparkle hints, or (for photos) framing in Workbench makes Run Sparkle light up again. Tapping Preview & Send will run Sparkle first when needed, then take you to the send stage so AI stays aligned with your edits.
+            After Sparkle has run, changing trim, poster, caption, Sparkle hints, or (for photos) framing in Workbench makes Run Sparkle light up again. Tapping Finish will run Sparkle first when needed, then take you to Preview & Send so AI stays aligned with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
@@ -1993,17 +2017,28 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: 'rgba(79,195,247,0.65)',
   },
-  /** Centered on the top edge of the crop square, overlapping the frame (read as “this is the crop”). */
-  photoFrameLabel: {
+  /**
+   * Pill behind “Crop”: background + radius live on a View so iOS and Android clip the same.
+   * (Radius on Text alone is inconsistent across platforms.)
+   */
+  photoFrameLabelPill: {
     marginTop: -12,
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(10,15,22,0.88)',
-    color: 'rgba(189,227,252,0.95)',
+    backgroundColor: 'rgba(38,52,68,0.86)',
+    overflow: 'hidden',
+    alignSelf: 'center',
+  },
+  photoFrameLabelText: {
+    color: 'rgba(226,244,255,0.98)',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.2,
+    ...Platform.select({
+      android: { includeFontPadding: false },
+      default: {},
+    }),
   },
   photoStageFill: {
     width: '100%',
@@ -2379,6 +2414,12 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
   },
+  /** Tight right column on Sparkle: Finish + X (matches workbench / send close behavior). */
+  aiNavRightCluster: {
+    flexShrink: 1,
+    minWidth: 0,
+    maxWidth: '52%',
+  },
   aiNavNextBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2387,7 +2428,8 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     paddingHorizontal: 10,
     borderRadius: 18,
-    maxWidth: '50%',
+    flexShrink: 1,
+    minWidth: 0,
   },
   aiNavNextText: {
     color: '#fff',
