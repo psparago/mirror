@@ -2183,7 +2183,7 @@ export default function CreationModal({
             </View>
           ) : (
             <LinearGradient colors={[...CREATION_SURFACE_GRADIENT]} style={styles.creatingWaitContainer}>
-              <View style={styles.modalCloseBar}>
+              <View style={[styles.modalCloseBar, { paddingTop: insets.top + 8 }]}>
                 <TouchableOpacity onPress={handleClose} style={styles.modalCloseButtonDark}>
                   <FontAwesome name="times" size={24} color="#f1f5f9" />
                   <Text style={styles.modalCloseTextDark}>Close</Text>
@@ -2290,7 +2290,6 @@ var styles = StyleSheet.create({
     justifyContent: 'flex-end',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingTop: 56,
     paddingBottom: 8,
     backgroundColor: 'transparent',
     position: 'absolute',

@@ -2,6 +2,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { CameraType, CameraView } from 'expo-camera';
 import React from 'react';
 import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface CameraModalProps {
   visible: boolean;
@@ -26,6 +27,10 @@ export default function CameraModal({
   onShutterPress,
   uploading,
 }: CameraModalProps) {
+  const insets = useSafeAreaInsets();
+  const topBarTop = insets.top + 8;
+  const modeBarTop = topBarTop + 50 + 12;
+
   return (
     <Modal
       visible={visible}
@@ -41,7 +46,7 @@ export default function CameraModal({
           facing={facing}
         />
 
-        <View style={styles.topControls}>
+        <View style={[styles.topControls, { top: topBarTop }]}>
           <TouchableOpacity
             style={styles.closeCameraButton}
             onPress={onClose}
@@ -58,7 +63,7 @@ export default function CameraModal({
         </View>
 
         {/* Photo/Video Mode Toggle */}
-        <View style={styles.modeToggleContainer}>
+        <View style={[styles.modeToggleContainer, { top: modeBarTop }]}>
           <TouchableOpacity
             style={[styles.modeButton, cameraMode === 'photo' && styles.modeButtonActive]}
             onPress={() => onSetCameraMode('photo')}
@@ -99,7 +104,6 @@ const styles = StyleSheet.create({
   },
   topControls: {
     position: 'absolute',
-    top: 60,
     left: 0,
     right: 0,
     flexDirection: 'row',
@@ -127,7 +131,6 @@ const styles = StyleSheet.create({
   },
   modeToggleContainer: {
     position: 'absolute',
-    top: 130,
     left: 0,
     right: 0,
     flexDirection: 'row',

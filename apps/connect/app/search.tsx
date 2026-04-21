@@ -16,9 +16,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function SearchScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { setPendingMedia } = useReflectionMedia();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -84,7 +86,7 @@ export default function SearchScreen() {
       )}
 
       {/* Fixed Header Section */}
-      <View style={styles.fixedHeader}>
+      <View style={[styles.fixedHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.header}>
           <TouchableOpacity style={styles.closeButton} onPress={() => router.back()}>
             <FontAwesome name="times" size={24} color="white" />
@@ -203,7 +205,6 @@ const styles = StyleSheet.create({
   },
   fixedHeader: {
     backgroundColor: '#1a1a2e',
-    paddingTop: 60,
     paddingBottom: 10,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.1)',

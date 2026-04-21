@@ -6,6 +6,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 export default function CameraScreen() {
   const router = useRouter();
@@ -18,6 +19,9 @@ export default function CameraScreen() {
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [capturing, setCapturing] = useState(false);
   const cameraRef = useRef<CameraView>(null);
+  const insets = useSafeAreaInsets();
+  const topBarTop = insets.top + 8;
+  const modeBarTop = topBarTop + 50 + 12;
 
   const toggleCameraFacing = () => {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
@@ -97,7 +101,7 @@ export default function CameraScreen() {
         facing={facing}
       />
 
-      <View style={styles.topControls}>
+      <View style={[styles.topControls, { top: topBarTop }]}>
         <TouchableOpacity style={styles.controlButton} onPress={() => router.back()}>
           <FontAwesome name="times" size={24} color="white" />
         </TouchableOpacity>
@@ -106,7 +110,7 @@ export default function CameraScreen() {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.modeToggleContainer}>
+      <View style={[styles.modeToggleContainer, { top: modeBarTop }]}>
         <TouchableOpacity
           style={[styles.modeButton, cameraMode === 'photo' && styles.modeButtonActive]}
           onPress={() => setCameraMode('photo')}
@@ -166,7 +170,6 @@ const styles = StyleSheet.create({
   },
   topControls: {
     position: 'absolute',
-    top: 60,
     left: 0,
     right: 0,
     flexDirection: 'row',
@@ -185,7 +188,6 @@ const styles = StyleSheet.create({
   },
   modeToggleContainer: {
     position: 'absolute',
-    top: 130,
     left: 0,
     right: 0,
     flexDirection: 'row',

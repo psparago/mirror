@@ -158,9 +158,10 @@ function timelineRowIsOwnedByCurrentCompanion(
   authUid: string | undefined,
   currentIdentity: string | null
 ): boolean {
-  if (!authUid) return false;
-  if (item.sender_id === authUid) return true;
-  if (item.metadata?.sender_id === authUid) return true;
+  if (authUid) {
+    if (item.sender_id === authUid) return true;
+    if (item.metadata?.sender_id === authUid) return true;
+  }
   if (currentIdentity) {
     const label = reflectionSenderLabel(item);
     if (label?.toLowerCase() === currentIdentity.toLowerCase()) return true;
@@ -1425,6 +1426,9 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     paddingHorizontal: 6,
     marginTop: -2,
+    flexShrink: 0,
+    zIndex: 1,
+    elevation: 2,
   },
   description: {
     fontSize: 14,

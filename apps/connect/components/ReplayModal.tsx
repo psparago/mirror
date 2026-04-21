@@ -622,7 +622,12 @@ export function ReplayModal({
       <GestureDetector gesture={swipeDownGesture}>
         <View style={styles.container}>
           {/* MAIN STAGE */}
-          <View style={styles.mediaContainer}>
+          <View
+            style={[
+              styles.mediaContainer,
+              { paddingTop: insets.top + 56 },
+            ]}
+          >
             <View style={styles.mediaFrame}>
               {isVideo ? (
                  <VideoView 
@@ -749,7 +754,7 @@ export function ReplayModal({
           )}
 
           {/* TOP CONTROLS - Rendered last to appear on top */}
-          <View style={[styles.topControls, { top: insets.top - 15 }]}>
+          <View style={[styles.topControls, { top: insets.top + 8 }]}>
             <View style={{ flex: 1 }} />
             {onReplaceMedia ? (
               <TouchableOpacity
@@ -865,8 +870,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    paddingTop: 60, 
-    paddingBottom: 120, 
+    paddingBottom: 120,
   },
   mediaFrame: {
     flex: 1,
