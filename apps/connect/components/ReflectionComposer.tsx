@@ -391,7 +391,7 @@ export default function ReflectionComposer({
   /** Compact trim bar height below action strip. */
   const VIDEO_TRIM_BAR_PX = 56;
   /** Photo tools strip (rotate / reset) height for media top offset. */
-  const PHOTO_TOOLS_STRIP_PX = 44;
+  const PHOTO_TOOLS_STRIP_PX = 56;
   /** Visual breathing room between bars. */
   const PHOTO_BARS_GAP_PX = 8;
 
@@ -1162,11 +1162,12 @@ export default function ReflectionComposer({
                     transition={isRemoteMediaUri ? 200 : 0}
                   />
                 </Animated.View>
-                <View pointerEvents="none" style={styles.photoFrameOverlay}>
-                  <Text style={styles.photoFrameLabel}>Explorer frame</Text>
-                </View>
               </View>
             </GestureDetector>
+            <View pointerEvents="none" style={styles.photoFrameChrome}>
+              <View style={styles.photoFrameBorder} />
+              <Text style={styles.photoFrameLabel}>Crop</Text>
+            </View>
           </View>
         </View>
       )}
@@ -1769,24 +1770,28 @@ export default function ReflectionComposer({
           ]}
           pointerEvents="box-none"
         >
-          <View style={[styles.looksToolbar, { justifyContent: 'flex-end' }]}>
+          <View style={styles.photoEditToolsToolbar}>
             <TouchableOpacity
-              style={[styles.toolbarChip, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
+              style={[styles.photoToolBtn, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
               onPress={() => rotatePhotoBy(-90)}
               disabled={isSending || isBlockedByAi || photoExportBusy}
-              activeOpacity={0.7}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Rotate photo"
             >
-              <FontAwesome name="undo" size={16} color="#fff" />
-              <Text style={styles.toolbarChipText}>Rotate</Text>
+              <FontAwesome name="rotate-left" size={20} color="#fff" />
+              <Text style={styles.photoToolBtnText}>Rotate</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.toolbarChip, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
+              style={[styles.photoToolBtn, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
               onPress={resetPhotoTransform}
               disabled={isSending || isBlockedByAi || photoExportBusy}
-              activeOpacity={0.7}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Reset crop and rotation"
             >
-              <FontAwesome name="refresh" size={16} color="#fff" />
-              <Text style={styles.toolbarChipText}>Reset</Text>
+              <FontAwesome name="refresh" size={20} color="#fff" />
+              <Text style={styles.photoToolBtnText}>Reset</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1814,7 +1819,7 @@ export default function ReflectionComposer({
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
               ? 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
-              : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate chip, and use Reset to clear framing. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
+              : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate button, and tap Reset to undo zoom, pan, and rotation. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -1846,12 +1851,12 @@ export default function ReflectionComposer({
           ) : (
             <View style={styles.infoRow}>
               <View style={styles.infoIconWrap}>
-                <FontAwesome name="adjust" size={14} color="#f39c12" />
+                <FontAwesome name="crop" size={14} color="#f39c12" />
               </View>
               <View style={styles.infoTextWrap}>
-                <Text style={styles.infoLabel}>Looks</Text>
+                <Text style={styles.infoLabel}>Crop & position</Text>
                 <Text style={styles.infoDesc}>
-                  Frame the photo inside the square by dragging and pinching, and rotate with a two-finger twist or the Rotate chip. Reset returns to the original framing. Choose Original, Clarity, Classic, or Warm from the Looks bar. That square composition is what gets baked and uploaded for the Explorer. Clarity bumps contrast and saturation; Classic is black and white; Warm leans golden.
+                  Frame the photo inside the square by dragging and pinching. Twist with two fingers to rotate, or tap Rotate for a 90° turn. Reset snaps back to the original fit. What you see in that square is what gets exported and uploaded for the Explorer — same idea as cropping before you post elsewhere.
                 </Text>
               </View>
             </View>
@@ -1890,7 +1895,7 @@ export default function ReflectionComposer({
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
                   ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change trim, poster, caption, or Sparkle hints (toggles or context text). If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
-                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Sparkle hints (toggles or context text), how the photo is framed, or a Look. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
+                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro — after it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Sparkle hints (toggles or context text), or how the photo is framed in Workbench. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -1905,12 +1910,12 @@ export default function ReflectionComposer({
             Fast path: on Sparkle, tap Preview & Send (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready — you do not need a separate Run Sparkle tap in that case.
           </Text>
           <Text style={styles.infoProTip}>
-            After Sparkle has run, changing trim, poster, caption, Sparkle hints, or (for photos) framing or a Look makes Run Sparkle light up again. Tapping Preview & Send will run Sparkle first when needed, then take you to the send stage so AI stays aligned with your edits.
+            After Sparkle has run, changing trim, poster, caption, Sparkle hints, or (for photos) framing in Workbench makes Run Sparkle light up again. Tapping Preview & Send will run Sparkle first when needed, then take you to the send stage so AI stays aligned with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
               ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops when you leave Workbench for Sparkle.'
-              : 'The Explorer sees your photo with the Look you chose, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
+              : 'The Explorer sees your cropped photo first, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>
             On Android, the system back key steps back between Workbench, Sparkle, and Preview & Send; from Workbench it closes like the X button.
@@ -1970,25 +1975,31 @@ const styles = StyleSheet.create({
     maxWidth: '100%',
     maxHeight: '100%',
     alignSelf: 'center',
+    overflow: 'visible',
   },
   photoStageClip: {
     flex: 1,
     overflow: 'hidden',
     backgroundColor: '#000',
   },
-  photoFrameOverlay: {
+  /** Sits on the square crop (sibling of clip) so the badge can extend past the mask without clipping. */
+  photoFrameChrome: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+    alignItems: 'center',
+  },
+  photoFrameBorder: {
     ...StyleSheet.absoluteFillObject,
     borderWidth: 2,
     borderColor: 'rgba(79,195,247,0.65)',
   },
+  /** Centered on the top edge of the crop square, overlapping the frame (read as “this is the crop”). */
   photoFrameLabel: {
-    position: 'absolute',
-    top: 8,
-    left: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    marginTop: -12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
     borderRadius: 999,
-    backgroundColor: 'rgba(10,15,22,0.72)',
+    backgroundColor: 'rgba(10,15,22,0.88)',
     color: 'rgba(189,227,252,0.95)',
     fontSize: 11,
     fontWeight: '700',
@@ -2068,6 +2079,37 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     backgroundColor: 'rgba(7,10,14,0.36)',
+  },
+  /** Photo workbench: left-aligned tools (rotate / reset), larger targets — similar rhythm to native crop UIs. */
+  photoEditToolsToolbar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 12,
+    paddingLeft: 14,
+    paddingRight: 14,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(0,0,0,0.42)',
+  },
+  photoToolBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    minHeight: 48,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  photoToolBtnText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    letterSpacing: 0.2,
   },
   photoUtilityRow: {
     flex: 1,
