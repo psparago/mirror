@@ -44,6 +44,9 @@
       "ios": {
         "appleId": "peter.sparago@gmail.com",
         "ascAppId": "6757921651"
+      },
+      "android": {
+        "track": "internal"
       }
     }
   }
