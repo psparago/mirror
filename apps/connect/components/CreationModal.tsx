@@ -1,10 +1,13 @@
 import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '@/components/ReflectionComposer';
+import { CreationModalConfirmationVideo } from '@/components/CreationModalConfirmationVideo';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
   deleteScratchMediaFile,
   ensureFileUri,
+  materializeVideoSourceToFileAsync,
   prepareImageForUpload,
-  prepareVideoForUpload,
+  probeLocalVideoDurationSeconds,
+  REFLECTION_MAX_VIDEO_SECONDS,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -25,7 +28,6 @@ import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView } from 'expo-video';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import BottomSheet, { BottomSheetBackdrop, BottomSheetTextInput, BottomSheetView } from '@gorhom/bottom-sheet';
 import { useIsFocused } from '@react-navigation/native';
@@ -56,6 +58,9 @@ const debugLog = (...args: any[]) => {
 const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
 const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
 const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
+// Remote JPEG fallback when local thumbnail extraction fails (codec edge cases on Android).
+const FALLBACK_POSTER_REMOTE_URL =
+  'https://dummyimage.com/640x640/1f2937/e5e7eb.jpg&text=Video+Reflection';
 
 type LibrarySourceKind = 'unsplash' | 'camera' | 'gallery';
 
@@ -439,26 +444,7 @@ export default function CreationModal({
     onActionTriggered?.();
   }, [visible, initialAction, editEvent?.event_id, router, onActionTriggered]);
 
-  // Video player for preview
-  const videoPlayer = useVideoPlayer(videoUri || '', (player) => {
-    // Optional: handle status updates
-  });
-  
   const companionName = activeRelationship?.companionName || '';
-  
-  // Cleanup video player on unmount
-  useEffect(() => {
-    return () => {
-      if (videoPlayer) {
-        try {
-          videoPlayer.pause();
-          videoPlayer.replace(''); // Clear source to release resources
-        } catch (e) {
-          // Player may already be released
-        }
-      }
-    };
-  }, [videoPlayer]);
 
   useEffect(() => {
     if (!visible) return;
@@ -507,6 +493,35 @@ export default function CreationModal({
       // ignore
     }
   }, [isCacheUri]);
+
+  const createFallbackPosterImageAsync = useCallback(async (): Promise<string> => {
+    return FALLBACK_POSTER_REMOTE_URL;
+  }, []);
+
+  const getVideoPosterFrameAsync = useCallback(
+    async (
+      sourceVideoUri: string,
+      timeMs: number,
+      reason: 'ai' | 'send'
+    ): Promise<{ uri: string; temporary: boolean }> => {
+      const custom = composerVideoMetaRef.current?.poster_custom_uri;
+      if (typeof custom === 'string' && custom.length > 0) {
+        return { uri: custom, temporary: custom.startsWith('file://') };
+      }
+      try {
+        const { uri } = await VideoThumbnails.getThumbnailAsync(sourceVideoUri, {
+          time: timeMs,
+          quality: 0.5,
+        });
+        return { uri, temporary: true };
+      } catch (error) {
+        console.warn(`Video thumbnail failed (${reason}); using fallback poster`, error);
+        const uri = await createFallbackPosterImageAsync();
+        return { uri, temporary: false };
+      }
+    },
+    [createFallbackPosterImageAsync]
+  );
 
   // Cleanup timeouts on unmount
   useEffect(() => {
@@ -559,13 +574,30 @@ export default function CreationModal({
     if (!isFocused) return;
     if (!pendingMedia) return;
     const media = consumePendingMedia();
-    if (media) {
+    if (!media) return;
+    let cancelled = false;
+    const applyPendingMedia = async () => {
       lastSourceForRecoveryRef.current = null;
       // Same entry as gallery/search: workbench first (framing / trim), never skip to AI.
       setComposerStage('workbench');
       setConfirming(false);
       setPhase('creating');
       const normalizedUri = ensureFileUri(media.uri);
+      let resolvedVideoUri = normalizedUri;
+      if (media.type === 'video') {
+        try {
+          resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
+          if (__DEV__) {
+            console.log(
+              `🎬 [CreationModal] video source normalized for composer: ${normalizedUri} -> ${resolvedVideoUri}`
+            );
+          }
+        } catch (error) {
+          resolvedVideoUri = normalizedUri;
+          console.warn('🎬 [CreationModal] failed to materialize video picker URI:', error);
+        }
+      }
+      if (cancelled) return;
       const isEditingExisting =
         !!(editSourceEventIdRef.current || pinnedEditEventIdRef.current);
       if (typeof media.isSelfie === 'boolean') {
@@ -575,8 +607,8 @@ export default function CreationModal({
       }
       if (media.type === 'video') {
         setMediaType('video');
-        setVideoUri(normalizedUri);
-        setPhoto({ uri: normalizedUri });
+        setVideoUri(resolvedVideoUri);
+        setPhoto({ uri: resolvedVideoUri });
       } else {
         setMediaType('photo');
         setVideoUri(null);
@@ -610,8 +642,12 @@ export default function CreationModal({
           composerVideoMetaRef.current = null;
         }
       }
-    }
-  }, [isFocused, pendingMedia]);
+    };
+    void applyPendingMedia();
+    return () => {
+      cancelled = true;
+    };
+  }, [isFocused, pendingMedia, consumePendingMedia]);
 
   // Only update audioUri from recorder when we have a NEW URI and we're not recording.
   // Skip cache paths so we don't lock onto a transient file that may be deleted.
@@ -821,23 +857,17 @@ export default function CreationModal({
       return;
     }
 
-    const MAX_SOURCE_VIDEO_SECONDS = 5 * 60;
+    /** Filled for local videos so we probe once per send (no modal `VideoPlayer` while on composer). */
+    let probedLocalVideoDurationSec = 0;
     if (mediaType === 'video' && videoUri) {
       const isLocalVideo =
         !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
       if (isLocalVideo) {
-        let durSec = videoPlayer.duration > 0 ? videoPlayer.duration : 0;
-        if (durSec <= 0) {
-          for (let i = 0; i < 50; i++) {
-            await new Promise((r) => setTimeout(r, 80));
-            durSec = videoPlayer.duration > 0 ? videoPlayer.duration : 0;
-            if (durSec > 0) break;
-          }
-        }
-        if (durSec > MAX_SOURCE_VIDEO_SECONDS) {
+        probedLocalVideoDurationSec = await probeLocalVideoDurationSeconds(videoUri);
+        if (probedLocalVideoDurationSec > REFLECTION_MAX_VIDEO_SECONDS) {
           Alert.alert(
             'Video too long',
-            'Please choose a video that is 5 minutes or less. Reflections work best under 60 seconds, but 5 minutes is the hard limit.'
+            `Please choose a clip of ${REFLECTION_MAX_VIDEO_SECONDS} seconds or less. Reflections work best under 60 seconds.`
           );
           return;
         }
@@ -990,7 +1020,6 @@ export default function CreationModal({
     }
 
     let tempThumbnail: string | null = null;
-    let tempCompressedVideo: string | null = null;
     let tempGatekeptImage: string | null = null;
     let tempFilteredExtractPng: string | null = null;
     let finalCaptionAudio = activeAudioUri || aiAudioUrl;
@@ -1145,13 +1174,11 @@ export default function CreationModal({
       }
 
       if (mediaType === 'video' && videoUri) {
-        // Generate thumbnail
-        const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
-          time: thumbnailFrameMs,
-          quality: 0.5,
-        });
-        imageSource = uri;
-        tempThumbnail = uri; // Mark for cleanup
+        const posterFrame = await getVideoPosterFrameAsync(videoUri, thumbnailFrameMs, 'send');
+        imageSource = posterFrame.uri;
+        if (posterFrame.temporary) {
+          tempThumbnail = posterFrame.uri; // Mark for cleanup
+        }
       } else if (
         !filteredForUpload &&
         stagingEventId &&
@@ -1175,9 +1202,18 @@ export default function CreationModal({
         // All photo flows already go through Gatekeeper on selection/capture.
         const needsImageGatekeeper =
           imageSource.startsWith('http') || mediaType === 'video' || !!filteredForUpload;
-        const gatekeptImageUri = needsImageGatekeeper
-          ? await prepareImageForUpload(imageSource)
-          : imageSource;
+        let gatekeptImageUri = imageSource;
+        if (needsImageGatekeeper) {
+          try {
+            gatekeptImageUri = await prepareImageForUpload(imageSource);
+          } catch (gatekeeperError) {
+            console.warn(
+              '[uploadEventBundle] image gatekeeper failed; falling back to source image',
+              gatekeeperError
+            );
+            gatekeptImageUri = imageSource;
+          }
+        }
 
         if (gatekeptImageUri !== imageSource) {
           tempGatekeptImage = gatekeptImageUri;
@@ -1193,20 +1229,10 @@ export default function CreationModal({
 
       // 5. Queue Video Upload (full master only; trim is metadata — skip when editing existing remote master)
       if (mediaType === 'video' && videoUri && urls['video.mp4'] && !skipVideoMasterReupload) {
-        const isLocalVideo =
-          !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
-        let uploadUri: string = videoUri;
-        if (isLocalVideo) {
-          try {
-            const compressed = await prepareVideoForUpload(videoUri);
-            if (compressed && compressed !== videoUri) {
-              tempCompressedVideo = compressed;
-              uploadUri = compressed;
-            }
-          } catch (compressErr) {
-            console.warn('Video compress failed; uploading original file:', compressErr);
-          }
-        }
+        // Keep upload master identical to the workbench preview source. This guarantees trim/poster
+        // metadata is authored against the same file that lands in S3 and avoids Android codec drift
+        // from aggressive transcode outputs.
+        const uploadUri: string = videoUri;
         uploadPromises.push(
           FileSystem.uploadAsync(urls['video.mp4'], uploadUri, {
             httpMethod: 'PUT',
@@ -1273,19 +1299,26 @@ export default function CreationModal({
       };
 
       let vmMeta = composerVideoMetaRef.current;
-      if (
-        mediaType === 'video' &&
-        (!vmMeta || vmMeta.video_end_ms <= vmMeta.video_start_ms) &&
-        videoPlayer.duration > 0
-      ) {
-        const endMs = Math.round(videoPlayer.duration * 1000);
-        if (endMs > 0) {
-          vmMeta = {
-            video_start_ms: 0,
-            video_end_ms: endMs,
-            thumbnail_time_ms: vmMeta?.thumbnail_time_ms ?? null,
-          };
-          composerVideoMetaRef.current = vmMeta;
+      if (mediaType === 'video' && (!vmMeta || vmMeta.video_end_ms <= vmMeta.video_start_ms)) {
+        let durSec = probedLocalVideoDurationSec;
+        if (
+          durSec <= 0 &&
+          videoUri &&
+          !videoUri.startsWith('http://') &&
+          !videoUri.startsWith('https://')
+        ) {
+          durSec = await probeLocalVideoDurationSeconds(videoUri);
+        }
+        if (durSec > 0) {
+          const endMs = Math.round(durSec * 1000);
+          if (endMs > 0) {
+            vmMeta = {
+              video_start_ms: 0,
+              video_end_ms: endMs,
+              thumbnail_time_ms: vmMeta?.thumbnail_time_ms ?? null,
+            };
+            composerVideoMetaRef.current = vmMeta;
+          }
         }
       }
       if (mediaType === 'video' && vmMeta && vmMeta.video_end_ms > vmMeta.video_start_ms) {
@@ -1434,9 +1467,6 @@ export default function CreationModal({
       if (tempFilteredExtractPng) {
         void deleteScratchMediaFile(tempFilteredExtractPng);
       }
-      if (tempCompressedVideo) {
-        safeDeleteCacheFile(tempCompressedVideo).catch(() => { });
-      }
       setUploading(false);
     }
   };
@@ -1565,33 +1595,36 @@ export default function CreationModal({
 
         // If it's a video, generate a thumbnail to use for AI description
         if (mediaType === 'video' && videoUri) {
-          try {
-            const vmAi = composerVideoMetaRef.current;
-            const thumbMs = Math.max(
-              0,
-              vmAi &&
-                typeof vmAi.thumbnail_time_ms === 'number' &&
-                vmAi.thumbnail_time_ms >= 0
-                ? vmAi.thumbnail_time_ms
-                : vmAi?.video_start_ms ?? 0
-            );
-            const { uri } = await VideoThumbnails.getThumbnailAsync(videoUri, {
-              time: thumbMs,
-              quality: 0.5,
-            });
-            uriToUpload = uri;
-            isTempThumbnail = true;
-          } catch (thumbnailError) {
-            console.error("Failed to generate thumbnail for AI:", thumbnailError);
-          }
+          const vmAi = composerVideoMetaRef.current;
+          const thumbMs = Math.max(
+            0,
+            vmAi &&
+              typeof vmAi.thumbnail_time_ms === 'number' &&
+              vmAi.thumbnail_time_ms >= 0
+              ? vmAi.thumbnail_time_ms
+              : vmAi?.video_start_ms ?? 0
+          );
+          const posterFrame = await getVideoPosterFrameAsync(videoUri, thumbMs, 'ai');
+          uriToUpload = posterFrame.uri;
+          isTempThumbnail = posterFrame.temporary;
         }
 
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
         const { url: stagingUrl } = await stagingResponse.json();
         // Only gatekeep here when needed: video thumbnail may exceed 1080px.
-        const stagingImageUri =
-          mediaType === 'video' ? await prepareImageForUpload(uriToUpload) : uriToUpload;
+        let stagingImageUri = uriToUpload;
+        if (mediaType === 'video') {
+          try {
+            stagingImageUri = await prepareImageForUpload(uriToUpload);
+          } catch (gatekeeperError) {
+            console.warn(
+              '[generateDeepDiveBackground] image gatekeeper failed; using raw poster image',
+              gatekeeperError
+            );
+            stagingImageUri = uriToUpload;
+          }
+        }
         const tempGatekeptStagingUri = stagingImageUri !== uriToUpload ? stagingImageUri : null;
         await safeUploadToS3(stagingImageUri, stagingUrl);
         if (tempGatekeptStagingUri) {
@@ -1792,72 +1825,6 @@ export default function CreationModal({
     []
   );
 
-  // Video confirmation: load URI with replace() (picker/trim URIs need this), play once, no loop.
-  useEffect(() => {
-    if (confirming && videoUri && videoPlayer && mediaType === 'video') {
-      setConfirmVideoEnded(false);
-      videoPlayer.loop = false;
-      try {
-        videoPlayer.replace(videoUri);
-      } catch {
-        // replace can throw if player is tearing down; play() may still work
-      }
-      const raf = requestAnimationFrame(() => {
-        try {
-          videoPlayer.play();
-        } catch {
-          // ignore
-        }
-      });
-      return () => cancelAnimationFrame(raf);
-    }
-    if (videoPlayer && !confirming) {
-      try {
-        videoPlayer.pause();
-      } catch {
-        // ignore
-      }
-    }
-    return undefined;
-  }, [confirming, videoUri, videoPlayer, mediaType]);
-
-  useEffect(() => {
-    if (!confirming || mediaType !== 'video' || !videoPlayer) return;
-    const subPlayToEnd = videoPlayer.addListener('playToEnd', () => {
-      setConfirmVideoEnded(true);
-    });
-    // Trimmed / short exports often omit playToEnd; mirror Explorer MainStage near-end detection.
-    const subPlaying = videoPlayer.addListener('playingChange', ({ isPlaying }: { isPlaying: boolean }) => {
-      if (isPlaying) return;
-      const duration = videoPlayer.duration;
-      if (!(duration > 0)) return;
-      const epsilon = Math.min(0.45, Math.max(0.06, duration * 0.12));
-      if (videoPlayer.currentTime >= duration - epsilon) {
-        setConfirmVideoEnded(true);
-      }
-    });
-    return () => {
-      subPlayToEnd.remove();
-      subPlaying.remove();
-    };
-  }, [confirming, mediaType, videoPlayer]);
-
-  const handleConfirmVideoReplay = useCallback(() => {
-    if (!videoPlayer || !videoUri) return;
-    setConfirmVideoEnded(false);
-    try {
-      videoPlayer.replace(videoUri);
-    } catch {
-      // ignore
-    }
-    try {
-      videoPlayer.currentTime = 0;
-      videoPlayer.play();
-    } catch {
-      // ignore
-    }
-  }, [videoPlayer, videoUri]);
-
   const handleConfirmCancel = async () => {
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
@@ -2007,36 +1974,11 @@ export default function CreationModal({
             >
               <View style={styles.confirmationMedia}>
                 {mediaType === 'video' && videoUri ? (
-                  <>
-                    <VideoView
-                      player={videoPlayer}
-                      style={StyleSheet.absoluteFill}
-                      contentFit="contain"
-                      nativeControls={false}
-                    />
-                    <TouchableOpacity
-                      style={styles.confirmVideoReplayFab}
-                      onPress={handleConfirmVideoReplay}
-                      activeOpacity={0.85}
-                      accessibilityRole="button"
-                      accessibilityLabel="Replay video"
-                    >
-                      <FontAwesome name="repeat" size={16} color="#fff" />
-                      <Text style={styles.confirmVideoReplayFabText}>Replay</Text>
-                    </TouchableOpacity>
-                    {confirmVideoEnded ? (
-                      <View style={styles.confirmReplayOverlay} pointerEvents="box-none">
-                        <TouchableOpacity
-                          style={styles.confirmReplayButton}
-                          onPress={handleConfirmVideoReplay}
-                          activeOpacity={0.85}
-                        >
-                          <FontAwesome name="repeat" size={28} color="#fff" />
-                          <Text style={styles.confirmReplayText}>Replay</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ) : null}
-                  </>
+                  <CreationModalConfirmationVideo
+                    videoUri={videoUri}
+                    ended={confirmVideoEnded}
+                    onEndedChange={setConfirmVideoEnded}
+                  />
                 ) : (
                   <Image
                     source={{ uri: photo.uri }}
@@ -2707,49 +2649,6 @@ var styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
     position: 'relative',
-  },
-  confirmReplayOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-  },
-  confirmReplayButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  confirmReplayText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  confirmVideoReplayFab: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    zIndex: 6,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.28)',
-  },
-  confirmVideoReplayFabText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
   },
   confirmationBar: {
     paddingHorizontal: 20,

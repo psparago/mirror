@@ -1,12 +1,9 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import {
-  ensureFileUri,
-  prepareImageForUpload,
-  prepareVideoForUpload,
-} from '@/utils/mediaProcessor';
+import { ensureFileUri, prepareImageForUpload, processVideoForUpload } from '@/utils/mediaProcessor';
+import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
 import * as ExpoImagePicker from 'expo-image-picker';
 import { useNavigation, useRouter } from 'expo-router';
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -50,6 +47,7 @@ export default function GalleryScreen() {
   const navigation = useNavigation();
   const { setPendingMedia } = useReflectionMedia();
   const hasLaunched = useRef(false);
+  const [statusLine, setStatusLine] = useState('Opening gallery...');
 
   useEffect(() => {
     if (hasLaunched.current) return;
@@ -113,9 +111,18 @@ export default function GalleryScreen() {
         asset.type === 'video' || (asset.mimeType?.startsWith('video/') ?? false);
 
       if (isVideo) {
-        const compressedUri = await prepareVideoForUpload(expoUri);
+        setStatusLine('Checking video…');
+        const trimResult = await runMandatoryGalleryTrimIfNeededAsync(expoUri);
+        if (trimResult.kind === 'cancelled') {
+          router.back();
+          return;
+        }
+        setStatusLine('Trimming & optimizing…');
+        const optimizedVideoUri = await processVideoForUpload(trimResult.uri, {
+          wasTrimmed: trimResult.wasTrimmed,
+        });
         setPendingMedia({
-          uri: ensureFileUri(compressedUri),
+          uri: ensureFileUri(optimizedVideoUri),
           type: 'video',
           source: 'gallery',
         });
@@ -149,7 +156,7 @@ export default function GalleryScreen() {
   return (
     <View style={styles.container}>
       <ActivityIndicator size="large" color="#fff" />
-      <Text style={styles.text}>Opening gallery...</Text>
+      <Text style={styles.text}>{statusLine}</Text>
     </View>
   );
 }

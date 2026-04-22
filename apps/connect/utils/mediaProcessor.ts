@@ -1,28 +1,92 @@
 import * as FileSystem from 'expo-file-system';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { Image as RNImage } from 'react-native';
+import { createVideoPlayer } from 'expo-video';
+import { Image as RNImage, Platform } from 'react-native';
 import { Video } from 'react-native-compressor';
 
 const MAX_UPLOAD_WIDTH_PX = 1080;
-const VIDEO_BITRATE = 5 * 1000 * 1000; // 5 Mbps
-const MAX_VIDEO_RESOLUTION = 1080; // 1080p
+/** Hard cap on source / trim window length (seconds) for Reflections Connect video. */
+export const REFLECTION_MAX_VIDEO_SECONDS = 120;
+export const REFLECTION_MAX_VIDEO_MS = REFLECTION_MAX_VIDEO_SECONDS * 1000;
+/** Below this size (bytes), skip compression unless the file was just trimmed (preserves Space Saver originals). */
+export const REFLECTION_SMALL_VIDEO_BYTES = 25 * 1024 * 1024;
+/** Target long edge when compressing (720p cap, auto bitrate via compressor). */
+const COMPRESS_MAX_DIMENSION_PX = 720;
 export const PHOTO_EXPORT_SIZE_PX = 1080;
 
 function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
 }
 
+function getErrorMessage(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object' && 'message' in error) {
+    const msg = (error as { message?: unknown }).message;
+    return typeof msg === 'string' ? msg : String(msg ?? '');
+  }
+  return String(error ?? '');
+}
+
+function isAndroidCodecUnsupportedForCompression(error: unknown): boolean {
+  const msg = getErrorMessage(error).toLowerCase();
+  // Seen on Pixel when Google Photos exports Dolby Vision sources that compressor can't init.
+  return Platform.OS === 'android' && (msg.includes('video/dolby-vision') || msg.includes('name_not_found'));
+}
+
 /**
- * Normalize local media paths for RN / Expo (`file://`), including Expo ImagePicker URIs.
- * Remote `http(s)` URIs are returned unchanged.
+ * Normalize bare filesystem paths to `file://`. Remote and provider URIs stay unchanged.
+ * Important: Android gallery / Google Photos often returns `content://`; never prefix `file://`
+ * on those or you get invalid `file://content://...` URIs that break compressor and video players.
  */
 export function ensureFileUri(path: string): string {
   if (!path) return path;
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('file://')) {
+  if (
+    path.startsWith('http://') ||
+    path.startsWith('https://') ||
+    path.startsWith('file://') ||
+    path.startsWith('content://') ||
+    path.startsWith('ph://') ||
+    path.startsWith('assets-library://')
+  ) {
     return path;
   }
   const stripped = path.replace(/^file:\/\//, '');
   return `file://${stripped}`;
+}
+
+/** Undo mistaken `file://` + provider URI (legacy bug from old ensureFileUri). */
+function normalizePickerUri(uri: string): string {
+  const u = uri.trim();
+  if (u.startsWith('file://content://')) return u.slice('file://'.length);
+  if (u.startsWith('file://ph://')) return u.slice('file://'.length);
+  return u;
+}
+
+/**
+ * `react-native-compressor` and `expo-video` need a real file path. Google Photos on Android
+ * (and iCloud-backed picks on iOS) often supply `content://` / `ph://` that must be copied into
+ * app cache first.
+ */
+export async function materializeVideoSourceToFileAsync(uri: string): Promise<string> {
+  const u = normalizePickerUri(uri);
+  if (u.startsWith('http://') || u.startsWith('https://')) {
+    return u;
+  }
+  if (u.startsWith('file://')) {
+    return u;
+  }
+  if (u.startsWith('content://') || u.startsWith('ph://') || u.startsWith('assets-library://')) {
+    if (!FileSystem.cacheDirectory) {
+      throw new Error('FileSystem.cacheDirectory is not available');
+    }
+    const dest = `${FileSystem.cacheDirectory}video_pick_${Date.now()}_${Math.floor(Math.random() * 1e6)}.mp4`;
+    await FileSystem.copyAsync({ from: u, to: dest });
+    if (__DEV__) {
+      console.log(`📁 [materializeVideoSource] ${Platform.OS} copied picker URI → ${dest}`);
+    }
+    return dest;
+  }
+  return ensureFileUri(u);
 }
 
 function guessFileExtensionFromUri(uri: string): string {
@@ -130,30 +194,132 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
   }
 }
 
+export type ProcessVideoOptions = {
+  /** When true, always run compression (trim exports must be re-encoded for safe playback/size). */
+  wasTrimmed?: boolean;
+};
+
+function normalizeOutputFileUri(pathOrUri: string): string {
+  return pathOrUri.startsWith('file://') ? pathOrUri : `file://${pathOrUri}`;
+}
+
 /**
- * Gatekeeper for videos: compress the **full** source file (no physical trim).
- * Playback windows (`video_start_ms` / `video_end_ms`) are metadata-only (cloud master).
+ * Safe-sync pipeline: small originals stay untouched; large or post-trim files are compressed to 720p
+ * with auto bitrate. Any compressor failure falls back to the materialized/original file (never blocks upload).
  */
-export async function prepareVideoForUpload(uri: string): Promise<string> {
+export async function processVideoForUpload(uri: string, options: ProcessVideoOptions = {}): Promise<string> {
+  let sourceFile = uri;
   try {
-    console.log(`🎬 Compressing video: ${uri}`);
+    sourceFile = await materializeVideoSourceToFileAsync(uri);
+  } catch (e) {
+    console.error('[processVideoForUpload] materialize failed, trying original URI:', e);
+    sourceFile = normalizePickerUri(uri);
+  }
+
+  const sourceForReturn = sourceFile.startsWith('file://') ? sourceFile : ensureFileUri(sourceFile);
+
+  let skipCompress = false;
+  try {
+    const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
+    if (info.exists && typeof info.size === 'number') {
+      skipCompress = !options.wasTrimmed && info.size < REFLECTION_SMALL_VIDEO_BYTES;
+    }
+  } catch {
+    // size unknown — still compress when trimmed; otherwise attempt compress for safety on huge unknowns
+    skipCompress = false;
+  }
+
+  if (skipCompress) {
+    if (__DEV__) {
+      console.log(
+        `[processVideoForUpload] skip compression (file < ${REFLECTION_SMALL_VIDEO_BYTES} bytes, not trimmed)`
+      );
+    }
+    return sourceForReturn;
+  }
+
+  try {
+    console.log(`🎬 Compressing video: ${sourceForReturn}`);
+    const sourceDurationSec = await probeLocalVideoDurationSeconds(sourceForReturn);
 
     const compressOptions: Record<string, unknown> = {
-      compressionMethod: 'manual',
-      maxSize: MAX_VIDEO_RESOLUTION,
-      bitrate: VIDEO_BITRATE,
-      minimumFileSizeForCompress: 2,
+      compressionMethod: 'auto',
+      minimumFileSizeForCompress: 0,
+      maxSize: COMPRESS_MAX_DIMENSION_PX,
     };
 
-    const result = await Video.compress(uri, compressOptions as never, () => {});
+    const result = await Video.compress(sourceForReturn, compressOptions as never, () => {});
+    const finalUri = normalizeOutputFileUri(result);
 
-    const finalUri = result.startsWith('file://') ? result : `file://${result}`;
+    const compressedDurationSec = await probeLocalVideoDurationSeconds(finalUri);
+    const minExpectedDurationSec =
+      sourceDurationSec > 0 ? Math.max(0.5, sourceDurationSec * 0.5) : 0.5;
+    if (compressedDurationSec < minExpectedDurationSec) {
+      console.warn(
+        `[processVideoForUpload] compressed output failed validation (src=${sourceDurationSec.toFixed(3)}s, out=${compressedDurationSec.toFixed(3)}s); falling back to source`
+      );
+      return sourceForReturn;
+    }
 
     console.log(`✅ Video compressed: ${finalUri}`);
     return finalUri;
   } catch (error) {
-    console.error('[prepareVideoForUpload] failed:', error);
-    return uri;
+    if (isAndroidCodecUnsupportedForCompression(error)) {
+      console.warn('[processVideoForUpload] compression skipped (unsupported Android codec); using source');
+    } else {
+      console.error('[processVideoForUpload] compress failed; using source:', error);
+    }
+    return sourceForReturn;
+  }
+}
+
+export async function prepareVideoForUpload(uri: string): Promise<string> {
+  return processVideoForUpload(uri, {});
+}
+
+/**
+ * One-off duration read for local validation / metadata fallback. Uses a disposable player so the
+ * workbench composer can own the only long-lived `VideoPlayer` (Android struggles with two
+ * players on the same file).
+ */
+export async function probeLocalVideoDurationSeconds(uri: string): Promise<number> {
+  const normalized = normalizePickerUri(uri.trim());
+  let workUri = normalized;
+  if (workUri.startsWith('content://') || workUri.startsWith('ph://')) {
+    try {
+      workUri = await materializeVideoSourceToFileAsync(normalized);
+    } catch {
+      return 0;
+    }
+  } else if (
+    !workUri.startsWith('file://') &&
+    !workUri.startsWith('http://') &&
+    !workUri.startsWith('https://')
+  ) {
+    workUri = ensureFileUri(workUri);
+  }
+
+  const player = createVideoPlayer(workUri);
+  try {
+    player.loop = false;
+    try {
+      player.pause();
+    } catch {
+      /* ignore */
+    }
+    for (let i = 0; i < 60; i++) {
+      if (player.duration > 0) {
+        return player.duration;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return 0;
+  } finally {
+    try {
+      player.replace('');
+    } catch {
+      /* ignore */
+    }
   }
 }
 

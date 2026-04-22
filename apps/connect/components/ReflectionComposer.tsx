@@ -5,8 +5,8 @@ import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVideoPlayer, VideoView, type VideoPlayer } from 'expo-video';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Keyboard,
@@ -36,7 +36,12 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
-import { PHOTO_EXPORT_SIZE_PX } from '@/utils/mediaProcessor';
+import * as VideoThumbnails from 'expo-video-thumbnails';
+import {
+  PHOTO_EXPORT_SIZE_PX,
+  REFLECTION_MAX_VIDEO_MS,
+  REFLECTION_MAX_VIDEO_SECONDS,
+} from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
 import {
   VideoTrimSlider,
@@ -48,6 +53,8 @@ export type ComposerVideoMeta = {
   video_start_ms: number;
   video_end_ms: number;
   thumbnail_time_ms: number | null;
+  /** Local JPEG from view-shot when native thumbnails fail (e.g. Space Saver / codec quirks). */
+  poster_custom_uri?: string | null;
 };
 
 export type ComposerSendPayload = {
@@ -109,7 +116,25 @@ interface ReflectionComposerProps {
 const MIN_PHOTO_SCALE = 0.35;
 const MAX_PHOTO_SCALE = 4;
 const SOFT_VIDEO_RECOMMENDED_SECONDS = 60;
-const HARD_VIDEO_MAX_SECONDS = 5 * 60;
+
+function clampVideoTrimWindowMs(
+  start: number,
+  end: number,
+  durationMs: number,
+  maxSpanMs: number,
+): { start: number; end: number } {
+  const d = Math.max(0, Math.round(durationMs));
+  let s = Math.max(0, Math.min(Math.round(start), Math.max(0, d - 1)));
+  let e = Math.max(s + 1, Math.min(Math.round(end), d));
+  if (e - s > maxSpanMs) {
+    e = s + maxSpanMs;
+    if (e > d) {
+      e = d;
+      s = Math.max(0, e - maxSpanMs);
+    }
+  }
+  return { start: s, end: Math.max(s + 1, e) };
+}
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -139,7 +164,30 @@ function getContainedPhotoMetricsWorklet(
   };
 }
 
-export default function ReflectionComposer({
+const ReflectionComposerVideoPlayerContext = React.createContext<VideoPlayer | null>(null);
+
+function ReflectionComposerVideoPlayerProvider({
+  mediaUri,
+  children,
+}: {
+  mediaUri: string;
+  children: React.ReactNode;
+}) {
+  const player = useVideoPlayer(mediaUri, (p) => {
+    p.loop = false;
+    // Android: starting in the hook setup races SurfaceView attach; play after readyToPlay below.
+    if (Platform.OS !== 'android') {
+      p.play();
+    }
+  });
+  return (
+    <ReflectionComposerVideoPlayerContext.Provider value={player}>
+      {children}
+    </ReflectionComposerVideoPlayerContext.Provider>
+  );
+}
+
+function ReflectionComposerInner({
   mediaUri,
   mediaType,
   initialCaption = '',
@@ -177,12 +225,23 @@ export default function ReflectionComposer({
   const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
   const [thumbnailTimeMs, setThumbnailTimeMs] = useState<number | null>(null);
+  /** Fallback poster file when VideoThumbnails fails; forwarded via `onVideoMetaChange`. */
+  const [posterCustomUri, setPosterCustomUri] = useState<string | null>(null);
+  const [posterViewShotPending, setPosterViewShotPending] = useState(false);
+  const videoPosterCaptureRef = useRef<View>(null);
+  const posterThumbDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isPosterMode, setIsPosterMode] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [sourceVideoDurationMs, setSourceVideoDurationMs] = useState(0);
   const lastSendAtRef = useRef(0);
 
   const photoExportStageRef = useRef<View>(null);
+
+  useEffect(() => {
+    if (mediaType !== 'video') return;
+    setPosterCustomUri(null);
+    setPosterViewShotPending(false);
+  }, [mediaUri, mediaType]);
   const [photoExportBusy, setPhotoExportBusy] = useState(false);
   const [photoSourceSize, setPhotoSourceSize] = useState<{ width: number; height: number } | null>(null);
   const [photoStageSize, setPhotoStageSize] = useState(0);
@@ -621,35 +680,69 @@ export default function ReflectionComposer({
     setVideoEnded(false);
   }, [mediaUri, mediaType]);
 
-  // Video Player (expo-video supports remote https URIs; replace() keeps source in sync when URI changes)
-  const player = useVideoPlayer(mediaUri, (p) => {
-    p.loop = false;
-    p.play();
-  });
+  const player = useContext(ReflectionComposerVideoPlayerContext);
   const trimAppliedRef = useRef(false);
 
   useEffect(() => {
-    if (mediaType !== 'video') return;
+    if (mediaType !== 'video' || !player) return;
     player.loop = false;
   }, [player, mediaType, mediaUri]);
 
+  // Android: defer first play until the decoder reports ready — avoids a permanently black SurfaceView.
   useEffect(() => {
-    if (mediaType !== 'video' || !player) return;
-    try {
-      player.replace(mediaUri);
-      player.loop = false;
-      player.play();
-    } catch {
-      // player may be tearing down
-    }
+    if (mediaType !== 'video' || !player || Platform.OS !== 'android') return;
+    let started = false;
+    const maybeStart = () => {
+      if (started) return;
+      if (player.status === 'readyToPlay') {
+        started = true;
+        try {
+          player.play();
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    maybeStart();
+    const sub = player.addListener('statusChange', maybeStart);
+    return () => {
+      sub.remove();
+    };
   }, [mediaType, mediaUri, player]);
 
   useEffect(() => {
+    if (!player) return;
     const sub = player.addListener('playToEnd', () => {
       setVideoEnded(true);
     });
     return () => sub.remove();
   }, [player]);
+
+  useEffect(() => {
+    if (!player || mediaType !== 'video' || Platform.OS !== 'android') return;
+    if (!__DEV__) return;
+    const subStatus = player.addListener('statusChange', ({ status, error }) => {
+      console.log(
+        `🎬 [ReflectionComposer][android] status=${status} duration=${player.duration.toFixed(3)} current=${player.currentTime.toFixed(3)} uri=${mediaUri}`
+      );
+      if (error?.message) {
+        console.warn(`🎬 [ReflectionComposer][android] player error: ${error.message}`);
+      }
+    });
+    const subSource = player.addListener('sourceChange', () => {
+      console.log(`🎬 [ReflectionComposer][android] sourceChange uri=${mediaUri}`);
+    });
+    const subPlaying = player.addListener('playingChange', ({ isPlaying }) => {
+      console.log(
+        `🎬 [ReflectionComposer][android] playing=${isPlaying} status=${player.status} uri=${mediaUri}`
+      );
+    });
+    return () => {
+      subStatus.remove();
+      subSource.remove();
+      subPlaying.remove();
+    };
+  }, [player, mediaType, mediaUri]);
 
   // Once duration is known: apply initial trim and seek. Uses a statusChange listener
   // because player.duration is not reactive — it's 0 until the player is ready.
@@ -676,10 +769,18 @@ export default function ReflectionComposer({
       if (trim) {
         const clampedEnd = Math.min(trim.endMs, durationMs);
         const clampedStart = Math.max(0, Math.min(trim.startMs, clampedEnd - 1));
-        setVideoRangeMs({ start: clampedStart, end: Math.max(clampedStart + 1, clampedEnd) });
-        try { player.currentTime = clampedStart / 1000; } catch { /* ignore */ }
+        const window = clampVideoTrimWindowMs(
+          clampedStart,
+          Math.max(clampedStart + 1, clampedEnd),
+          durationMs,
+          REFLECTION_MAX_VIDEO_MS,
+        );
+        setVideoRangeMs(window);
+        try { player.currentTime = window.start / 1000; } catch { /* ignore */ }
       } else {
-        setVideoRangeMs({ start: 0, end: durationMs });
+        const window = clampVideoTrimWindowMs(0, durationMs, durationMs, REFLECTION_MAX_VIDEO_MS);
+        setVideoRangeMs(window);
+        try { player.currentTime = window.start / 1000; } catch { /* ignore */ }
       }
     };
 
@@ -718,8 +819,69 @@ export default function ReflectionComposer({
       video_start_ms: videoRangeMs.start,
       video_end_ms: videoRangeMs.end,
       thumbnail_time_ms: thumbnailTimeMs,
+      poster_custom_uri: posterCustomUri,
     });
-  }, [videoRangeMs, thumbnailTimeMs, onVideoMetaChange]);
+  }, [videoRangeMs, thumbnailTimeMs, posterCustomUri, onVideoMetaChange]);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || !mediaUri) return;
+    if (posterThumbDebounceRef.current) clearTimeout(posterThumbDebounceRef.current);
+    posterThumbDebounceRef.current = setTimeout(() => {
+      const t = thumbnailTimeMs != null ? thumbnailTimeMs : 1000;
+      const dur = sourceVideoDurationMs > 0 ? sourceVideoDurationMs : 60_000;
+      const time = Math.max(0, Math.min(Math.round(t), Math.max(0, dur - 1)));
+      void (async () => {
+        try {
+          const { uri } = await VideoThumbnails.getThumbnailAsync(mediaUri, { time, quality: 0.5 });
+          setPosterCustomUri(uri);
+          setPosterViewShotPending(false);
+        } catch {
+          setPosterCustomUri(null);
+          setPosterViewShotPending(true);
+        }
+      })();
+    }, 320);
+    return () => {
+      if (posterThumbDebounceRef.current) clearTimeout(posterThumbDebounceRef.current);
+    };
+  }, [mediaType, mediaUri, thumbnailTimeMs, sourceVideoDurationMs]);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || !posterViewShotPending || !player) return;
+    if (player.status !== 'readyToPlay') return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dur = player.duration > 0 ? player.duration : 0;
+        const seekSec = Math.min(1, Math.max(0.05, dur > 0.15 ? dur - 0.05 : 0.05));
+        try {
+          player.pause();
+        } catch {
+          /* ignore */
+        }
+        try {
+          player.currentTime = seekSec;
+        } catch {
+          /* ignore */
+        }
+        await new Promise((r) => setTimeout(r, Platform.OS === 'android' ? 450 : 280));
+        const node = videoPosterCaptureRef.current;
+        if (!node || cancelled) return;
+        const raw = await captureRef(node, { format: 'jpg', quality: 0.85, result: 'tmpfile' });
+        const path = typeof raw === 'string' ? raw : '';
+        if (!path || cancelled) return;
+        const uri = path.startsWith('file://') ? path : `file://${path}`;
+        setPosterCustomUri(uri);
+      } catch (e) {
+        if (__DEV__) console.warn('[ReflectionComposer] view-shot poster failed', e);
+      } finally {
+        if (!cancelled) setPosterViewShotPending(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaType, posterViewShotPending, player, player?.status, mediaUri]);
 
   useEffect(() => {
     if (!videoRangeMs || thumbnailTimeMs === null) return;
@@ -770,11 +932,12 @@ export default function ReflectionComposer({
           video_start_ms: videoRangeMs.start,
           video_end_ms: videoRangeMs.end,
           thumbnail_time_ms: thumbnailTimeMs,
+          poster_custom_uri: posterCustomUri,
         } as ComposerVideoMeta,
       };
     }
     return { ...base, videoMeta: null };
-  }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs]);
+  }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs, posterCustomUri]);
 
   const currentPlaybackWindowSeconds = useMemo(() => {
     if (mediaType !== 'video' || !videoRangeMs) return 0;
@@ -873,7 +1036,7 @@ export default function ReflectionComposer({
     Keyboard.dismiss();
   };
   const goToAi = useCallback(() => {
-    if (mediaType === 'video') {
+    if (mediaType === 'video' && player) {
       try { player.pause(); } catch { /* tearing down */ }
     }
     onStageChange('ai');
@@ -991,6 +1154,7 @@ export default function ReflectionComposer({
   // --- RENDERERS ---
 
   const togglePlayPause = useCallback(() => {
+    if (!player) return;
     if (videoEnded) {
       setVideoEnded(false);
       if (videoRangeMs) {
@@ -1012,6 +1176,7 @@ export default function ReflectionComposer({
   }, [player, videoEnded, videoPaused, videoRangeMs]);
 
   const handleReplay = useCallback(() => {
+    if (!player) return;
     setVideoEnded(false);
     setVideoPaused(false);
     setIsPosterMode(false);
@@ -1026,6 +1191,7 @@ export default function ReflectionComposer({
   // --- POSTER MODE ---
 
   const enterPosterMode = useCallback(() => {
+    if (!player) return;
     player.pause();
     if (thumbnailTimeMs !== null) {
       try { player.currentTime = thumbnailTimeMs / 1000; } catch { /* ignore */ }
@@ -1036,11 +1202,13 @@ export default function ReflectionComposer({
   const COVER_STEP_MS = 250;
 
   const handleCoverSet = useCallback(() => {
+    if (!player) return;
     const curMs = Math.round(player.currentTime * 1000);
     setThumbnailTimeMs(Math.max(0, curMs));
   }, [player]);
 
   const handleCoverStepBack = useCallback(() => {
+    if (!player) return;
     const rangeStart = videoRangeMs?.start ?? 0;
     const curMs = thumbnailTimeMs ?? Math.round(player.currentTime * 1000);
     const targetMs = Math.max(rangeStart, curMs - COVER_STEP_MS);
@@ -1049,6 +1217,7 @@ export default function ReflectionComposer({
   }, [player, thumbnailTimeMs, videoRangeMs]);
 
   const handleCoverStepForward = useCallback(() => {
+    if (!player) return;
     const rangeEnd = videoRangeMs?.end ?? Math.round(player.duration * 1000);
     const curMs = thumbnailTimeMs ?? Math.round(player.currentTime * 1000);
     const targetMs = Math.min(rangeEnd, curMs + COVER_STEP_MS);
@@ -1062,19 +1231,21 @@ export default function ReflectionComposer({
 
   const exitPosterMode = useCallback(() => {
     setIsPosterMode(false);
+    if (!player) return;
     player.play();
   }, [player]);
 
   const posterScrubOriginMs = useSharedValue(0);
   const videoDurationMs = useSharedValue(0);
 
+  const playerDurationForWorklet = player?.duration ?? 0;
   useEffect(() => {
-    if (player.duration > 0) {
-      videoDurationMs.value = player.duration * 1000;
-    }
-  }, [player.duration, videoDurationMs]);
+    if (!player || playerDurationForWorklet <= 0) return;
+    videoDurationMs.value = player.duration * 1000;
+  }, [player, playerDurationForWorklet, videoDurationMs]);
 
   const seekToMs = useCallback((ms: number) => {
+    if (!player) return;
     try { player.currentTime = ms / 1000; } catch { /* ignore */ }
   }, [player]);
 
@@ -1082,7 +1253,7 @@ export default function ReflectionComposer({
     Gesture.Pan()
       .enabled(isPosterMode)
       .onBegin(() => {
-        posterScrubOriginMs.value = Math.round(player.currentTime * 1000);
+        posterScrubOriginMs.value = Math.round((player?.currentTime ?? 0) * 1000);
       })
       .onUpdate((e) => {
         const rangeStart = videoRangeMs?.start ?? 0;
@@ -1094,7 +1265,7 @@ export default function ReflectionComposer({
         const targetMs = Math.max(rangeStart, Math.min(rangeEnd, posterScrubOriginMs.value + deltaMs));
         runOnJS(seekToMs)(targetMs);
       }),
-    [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs],
+    [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs, player],
   );
 
   const tapToTogglePlay = useMemo(() =>
@@ -1138,16 +1309,35 @@ export default function ReflectionComposer({
       ]}
     >
       {mediaType === 'video' ? (
-        <GestureDetector gesture={videoGesture}>
-          <View style={styles.media}>
-            <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false} />
+        <View style={styles.videoMediaFill}>
+          <View
+            ref={videoPosterCaptureRef}
+            style={styles.videoMediaSurface}
+            collapsable={false}
+          >
+            {/*
+              VideoView must not be a child of RNGH GestureDetector on Android — the native
+              surface often never paints. Keep VideoView under a plain View; gestures on overlay.
+            */}
+            {player ? (
+              <VideoView
+                key={mediaUri}
+                player={player}
+                style={styles.videoViewLayer}
+                contentFit="contain"
+                nativeControls={false}
+              />
+            ) : null}
+            <GestureDetector gesture={videoGesture}>
+              <View style={styles.videoGestureOverlay} />
+            </GestureDetector>
             {isPosterMode && (
               <View style={styles.posterModeIndicator} pointerEvents="none">
                 <Text style={styles.posterModeText}>Use arrows or swipe to find your frame</Text>
               </View>
             )}
           </View>
-        </GestureDetector>
+        </View>
       ) : (
         <View style={styles.photoRoot}>
           <View style={styles.photoStage} onLayout={handlePhotoStageLayout}>
@@ -1760,7 +1950,9 @@ export default function ReflectionComposer({
               <FontAwesome name="magic" size={36} color="#f39c12" />
             </Animated.View>
             <Animated.Text style={[styles.aiOverlayText, sparkleTextStyle]}>
-              Adding sparkle to your Reflection!
+              {mediaType === 'video'
+                ? 'Trimming & optimizing… Adding sparkle to your Reflection!'
+                : 'Adding sparkle to your Reflection!'}
             </Animated.Text>
             <TouchableOpacity
               style={styles.cancelAiButton}
@@ -1773,13 +1965,14 @@ export default function ReflectionComposer({
       )}
 
       {/* 2b. INLINE VIDEO TRIMMER — below action buttons, above video */}
-      {isWorkbenchStage && mediaType === 'video' && videoRangeMs && player.duration > 0 && (
+      {isWorkbenchStage && mediaType === 'video' && videoRangeMs && player && player.duration > 0 && (
         <View style={[styles.trimSliderOverlay, { top: videoTrimTopPx }]}>
           <VideoTrimSlider
             durationMs={Math.round(player.duration * 1000)}
             startMs={videoRangeMs.start}
             endMs={videoRangeMs.end}
             currentTimeMs={playheadMs}
+            maxRangeMs={REFLECTION_MAX_VIDEO_MS}
             onChange={(s, e) => setVideoRangeMs({ start: s, end: e })}
             onSeek={(ms) => { try { player.currentTime = ms / 1000; } catch { /* ignore */ } }}
           />
@@ -1842,7 +2035,7 @@ export default function ReflectionComposer({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under 60 seconds; 5 minutes is the hard cap.'
+              ? `Three stages: Workbench → Sparkle → Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
               : 'Three stages: Workbench → Sparkle → Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate button, and tap Reset to undo zoom, pan, and rotation. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
           </Text>
 
@@ -1970,6 +2163,21 @@ export default function ReflectionComposer({
   );
 }
 
+export default function ReflectionComposer(props: ReflectionComposerProps) {
+  if (props.mediaType === 'video') {
+    return (
+      <ReflectionComposerVideoPlayerProvider mediaUri={props.mediaUri}>
+        <ReflectionComposerInner {...props} />
+      </ReflectionComposerVideoPlayerProvider>
+    );
+  }
+  return (
+    <ReflectionComposerVideoPlayerContext.Provider value={null}>
+      <ReflectionComposerInner {...props} />
+    </ReflectionComposerVideoPlayerContext.Provider>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1982,9 +2190,26 @@ const styles = StyleSheet.create({
     bottom: 0,
     zIndex: 0,
   },
-  media: {
+  /** Fills the workbench media band; required so GestureDetector’s child gets a real height on Android. */
+  videoMediaFill: {
+    flex: 1,
     width: '100%',
-    height: '100%',
+    minHeight: 0,
+  },
+  videoMediaSurface: {
+    flex: 1,
+    width: '100%',
+    minHeight: 0,
+  },
+  videoViewLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 0,
+  },
+  /** Transparent hit target for tap / poster scrub; sits above VideoView. */
+  videoGestureOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+    backgroundColor: 'transparent',
   },
   /** Centers the square stage in the media area (matches exported 1080×1080 letterboxing). */
   photoRoot: {

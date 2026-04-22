@@ -1,5 +1,6 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { prepareImageForUpload, prepareVideoForUpload } from '@/utils/mediaProcessor';
+import { ensureFileUri, prepareImageForUpload, processVideoForUpload } from '@/utils/mediaProcessor';
+import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
 import { FontAwesome } from '@expo/vector-icons';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -56,8 +57,19 @@ export default function CameraScreen() {
 
       if (!result.canceled && result.assets?.length) {
         const video = result.assets[0];
-        const compressedUri = await prepareVideoForUpload(video.uri);
-        setPendingMedia({ uri: compressedUri, type: 'video', source: 'camera', isSelfie: markAsSelfie });
+        const trimResult = await runMandatoryGalleryTrimIfNeededAsync(video.uri);
+        if (trimResult.kind === 'cancelled') {
+          return;
+        }
+        const optimizedVideoUri = await processVideoForUpload(trimResult.uri, {
+          wasTrimmed: trimResult.wasTrimmed,
+        });
+        setPendingMedia({
+          uri: ensureFileUri(optimizedVideoUri),
+          type: 'video',
+          source: 'camera',
+          isSelfie: markAsSelfie,
+        });
         router.back();
       }
     } catch (error: any) {

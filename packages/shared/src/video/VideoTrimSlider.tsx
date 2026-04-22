@@ -17,6 +17,8 @@ export interface VideoTrimSliderProps {
   onChange: (start: number, end: number) => void;
   /** Called continuously while dragging so the parent can seek the video. */
   onSeek?: (ms: number) => void;
+  /** When set, (end − start) cannot exceed this many milliseconds. */
+  maxRangeMs?: number;
 }
 
 const HANDLE_WIDTH = 18;
@@ -31,9 +33,18 @@ function formatTime(ms: number): string {
   return m > 0 ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${s.toFixed(1)}s`;
 }
 
-export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTimeMs, onChange, onSeek }: VideoTrimSliderProps) {
+export default function VideoTrimSlider({
+  durationMs,
+  startMs,
+  endMs,
+  currentTimeMs,
+  onChange,
+  onSeek,
+  maxRangeMs,
+}: VideoTrimSliderProps) {
   const trackWidth = useSharedValue(0);
   const durationSv = useSharedValue(durationMs);
+  const maxRangeSv = useSharedValue(typeof maxRangeMs === 'number' && maxRangeMs > 0 ? maxRangeMs : 1e15);
 
   const startVal = useSharedValue(startMs);
   const endVal = useSharedValue(endMs);
@@ -54,6 +65,10 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
   useEffect(() => {
     durationSv.value = durationMs;
   }, [durationMs, durationSv]);
+
+  useEffect(() => {
+    maxRangeSv.value = typeof maxRangeMs === 'number' && maxRangeMs > 0 ? maxRangeMs : 1e15;
+  }, [maxRangeMs, maxRangeSv]);
 
   useEffect(() => {
     startVal.value = startMs;
@@ -151,7 +166,11 @@ export default function VideoTrimSlider({ durationMs, startMs, endMs, currentTim
       const winMs = isZoomedEnd.value ? Math.max(1, zoomEndWe.value - zoomEndWs.value) : dur;
       const pxPerMs = tw / winMs;
       const newEnd = originMs.value + e.translationX / pxPerMs;
-      const clamped = Math.min(dur, Math.max(newEnd, startVal.value + MIN_RANGE_MS));
+      let clamped = Math.min(dur, Math.max(newEnd, startVal.value + MIN_RANGE_MS));
+      const maxR = maxRangeSv.value;
+      if (clamped - startVal.value > maxR) {
+        clamped = Math.min(dur, startVal.value + maxR);
+      }
 
       const hitDuration = clamped >= dur - 0.5;
       const hitMinRange = clamped <= startVal.value + MIN_RANGE_MS + 0.5;
