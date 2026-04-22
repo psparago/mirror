@@ -8,6 +8,7 @@ import {
   prepareImageForUpload,
   probeLocalVideoDurationSeconds,
   REFLECTION_MAX_VIDEO_SECONDS,
+  stabilizeLocalImageFileAsync,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -221,6 +222,11 @@ export default function CreationModal({
   const detailsSheetRef = useRef<BottomSheet>(null);
   /** Latest video trim / thumbnail choices from ReflectionComposer (ms). */
   const composerVideoMetaRef = useRef<ComposerVideoMeta | null>(null);
+  /**
+   * `consumePendingMedia()` clears context in the same tick, so this effect re-runs with
+   * pendingMedia === null and must NOT invalidate the in-flight async apply (see cleanup bug).
+   */
+  const pendingMediaApplyGenerationRef = useRef(0);
 
   const beginSourceFlow = useCallback(
     (route: '/camera' | '/gallery' | '/search', extras?: { cameraSelfie?: boolean }) => {
@@ -506,14 +512,19 @@ export default function CreationModal({
     ): Promise<{ uri: string; temporary: boolean }> => {
       const custom = composerVideoMetaRef.current?.poster_custom_uri;
       if (typeof custom === 'string' && custom.length > 0) {
-        return { uri: custom, temporary: custom.startsWith('file://') };
+        const uri =
+          custom.startsWith('http://') || custom.startsWith('https://')
+            ? custom
+            : await stabilizeLocalImageFileAsync(custom, 'poster_custom');
+        return { uri, temporary: uri.startsWith('file://') };
       }
       try {
         const { uri } = await VideoThumbnails.getThumbnailAsync(sourceVideoUri, {
           time: timeMs,
           quality: 0.5,
         });
-        return { uri, temporary: true };
+        const stable = await stabilizeLocalImageFileAsync(uri, 'video_thumb');
+        return { uri: stable, temporary: true };
       } catch (error) {
         console.warn(`Video thumbnail failed (${reason}); using fallback poster`, error);
         const uri = await createFallbackPosterImageAsync();
@@ -575,10 +586,9 @@ export default function CreationModal({
     if (!pendingMedia) return;
     const media = consumePendingMedia();
     if (!media) return;
-    let cancelled = false;
-    const applyPendingMedia = async () => {
+    const applyGeneration = ++pendingMediaApplyGenerationRef.current;
+    void (async () => {
       lastSourceForRecoveryRef.current = null;
-      // Same entry as gallery/search: workbench first (framing / trim), never skip to AI.
       setComposerStage('workbench');
       setConfirming(false);
       setPhase('creating');
@@ -587,17 +597,12 @@ export default function CreationModal({
       if (media.type === 'video') {
         try {
           resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
-          if (__DEV__) {
-            console.log(
-              `🎬 [CreationModal] video source normalized for composer: ${normalizedUri} -> ${resolvedVideoUri}`
-            );
-          }
         } catch (error) {
           resolvedVideoUri = normalizedUri;
-          console.warn('🎬 [CreationModal] failed to materialize video picker URI:', error);
+          console.warn('[CreationModal] failed to materialize video picker URI:', error);
         }
       }
-      if (cancelled) return;
+      if (applyGeneration !== pendingMediaApplyGenerationRef.current) return;
       const isEditingExisting =
         !!(editSourceEventIdRef.current || pinnedEditEventIdRef.current);
       if (typeof media.isSelfie === 'boolean') {
@@ -642,11 +647,7 @@ export default function CreationModal({
           composerVideoMetaRef.current = null;
         }
       }
-    };
-    void applyPendingMedia();
-    return () => {
-      cancelled = true;
-    };
+    })();
   }, [isFocused, pendingMedia, consumePendingMedia]);
 
   // Only update audioUri from recorder when we have a NEW URI and we're not recording.

@@ -62,6 +62,37 @@ function normalizePickerUri(uri: string): string {
   return u;
 }
 
+const VOLATILE_THUMB_URI_PATTERN = /VideoThumbnails/i;
+
+/**
+ * `expo-video-thumbnails` often writes under the system cache (e.g. …/Caches/VideoThumbnails/).
+ * Those files can be removed or unreadable by the time `ImageManipulator` / upload runs — copy into
+ * `cacheDirectory` first.
+ */
+export async function stabilizeLocalImageFileAsync(uri: string, label: string): Promise<string> {
+  if (isRemoteUri(uri)) return uri.trim();
+  if (!FileSystem.cacheDirectory) {
+    return ensureFileUri(normalizePickerUri(uri));
+  }
+  const fromRaw = normalizePickerUri(uri.trim());
+  const fromUri =
+    fromRaw.startsWith('file://') ||
+    fromRaw.startsWith('content://') ||
+    fromRaw.startsWith('ph://') ||
+    fromRaw.startsWith('assets-library://')
+      ? fromRaw
+      : ensureFileUri(fromRaw);
+  const ext = guessFileExtensionFromUri(fromUri) || 'jpg';
+  const dest = `${FileSystem.cacheDirectory}${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}.${ext}`;
+  try {
+    await FileSystem.copyAsync({ from: fromUri, to: dest });
+    return dest;
+  } catch (e) {
+    console.warn('[stabilizeLocalImageFileAsync] copy failed; using original uri', e);
+    return fromUri.startsWith('file://') || fromUri.startsWith('content://') ? fromUri : ensureFileUri(fromUri);
+  }
+}
+
 /**
  * `react-native-compressor` and `expo-video` need a real file path. Google Photos on Android
  * (and iCloud-backed picks on iOS) often supply `content://` / `ph://` that must be copied into
@@ -81,9 +112,6 @@ export async function materializeVideoSourceToFileAsync(uri: string): Promise<st
     }
     const dest = `${FileSystem.cacheDirectory}video_pick_${Date.now()}_${Math.floor(Math.random() * 1e6)}.mp4`;
     await FileSystem.copyAsync({ from: u, to: dest });
-    if (__DEV__) {
-      console.log(`📁 [materializeVideoSource] ${Platform.OS} copied picker URI → ${dest}`);
-    }
     return dest;
   }
   return ensureFileUri(u);
@@ -167,6 +195,8 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
       const downloadRes = await FileSystem.downloadAsync(uri, downloadTarget);
       localUri = downloadRes.uri;
       downloadedUri = downloadRes.uri;
+    } else if (VOLATILE_THUMB_URI_PATTERN.test(localUri)) {
+      localUri = await stabilizeLocalImageFileAsync(localUri, 'gatekeeper_thumb');
     }
 
     const size = await getImageSizeAsync(localUri);
@@ -204,8 +234,11 @@ function normalizeOutputFileUri(pathOrUri: string): string {
 }
 
 /**
- * Safe-sync pipeline: small originals stay untouched; large or post-trim files are compressed to 720p
- * with auto bitrate. Any compressor failure falls back to the materialized/original file (never blocks upload).
+ * Safe-sync pipeline: small originals stay untouched on iOS; on Android we still transcode sub-threshold
+ * clips so uploads use an H.264/AAC MP4 that decodes reliably on iOS (camera/gallery encodes often skip
+ * compression for size and can play audio-only or show a blank layer there).
+ * Large or post-trim files are compressed to 720p with auto bitrate.
+ * Any compressor failure falls back to the materialized/original file (never blocks upload).
  */
 export async function processVideoForUpload(uri: string, options: ProcessVideoOptions = {}): Promise<string> {
   let sourceFile = uri;
@@ -222,7 +255,10 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
   try {
     const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
     if (info.exists && typeof info.size === 'number') {
-      skipCompress = !options.wasTrimmed && info.size < REFLECTION_SMALL_VIDEO_BYTES;
+      skipCompress =
+        !options.wasTrimmed &&
+        info.size < REFLECTION_SMALL_VIDEO_BYTES &&
+        Platform.OS !== 'android';
     }
   } catch {
     // size unknown — still compress when trimmed; otherwise attempt compress for safety on huge unknowns
@@ -230,16 +266,10 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
   }
 
   if (skipCompress) {
-    if (__DEV__) {
-      console.log(
-        `[processVideoForUpload] skip compression (file < ${REFLECTION_SMALL_VIDEO_BYTES} bytes, not trimmed)`
-      );
-    }
     return sourceForReturn;
   }
 
   try {
-    console.log(`🎬 Compressing video: ${sourceForReturn}`);
     const sourceDurationSec = await probeLocalVideoDurationSeconds(sourceForReturn);
 
     const compressOptions: Record<string, unknown> = {
@@ -261,7 +291,6 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
       return sourceForReturn;
     }
 
-    console.log(`✅ Video compressed: ${finalUri}`);
     return finalUri;
   } catch (error) {
     if (isAndroidCodecUnsupportedForCompression(error)) {

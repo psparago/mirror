@@ -88,8 +88,13 @@ export function runMandatoryGalleryTrimIfNeededAsync(pickerUri: string): Promise
         resolve(r);
       };
 
-      const sub = subscribeVideoTrim((event: { name?: string; outputPath?: string }) => {
-        const name = event?.name;
+      const sub = subscribeVideoTrim((raw: unknown) => {
+        const event =
+          raw && typeof raw === 'object'
+            ? (raw as { name?: string; outputPath?: string })
+            : null;
+        if (!event) return;
+        const name = event.name;
         if (name === 'onFinishTrimming') {
           const p = event.outputPath;
           if (typeof p === 'string' && p.length > 0) {

@@ -230,6 +230,8 @@ function ReflectionComposerInner({
   const [posterViewShotPending, setPosterViewShotPending] = useState(false);
   const videoPosterCaptureRef = useRef<View>(null);
   const posterThumbDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Prevents repeated seek-to-end on Android (ExoPlayer loading ↔ ready thrash). */
+  const videoTrimEndClampedRef = useRef(false);
   const [isPosterMode, setIsPosterMode] = useState(false);
   const [playheadMs, setPlayheadMs] = useState(0);
   const [sourceVideoDurationMs, setSourceVideoDurationMs] = useState(0);
@@ -678,7 +680,12 @@ function ReflectionComposerInner({
     setIsPosterMode(false);
     setVideoPaused(false);
     setVideoEnded(false);
+    videoTrimEndClampedRef.current = false;
   }, [mediaUri, mediaType]);
+
+  useEffect(() => {
+    videoTrimEndClampedRef.current = false;
+  }, [videoRangeMs?.start, videoRangeMs?.end]);
 
   const player = useContext(ReflectionComposerVideoPlayerContext);
   const trimAppliedRef = useRef(false);
@@ -717,32 +724,6 @@ function ReflectionComposerInner({
     });
     return () => sub.remove();
   }, [player]);
-
-  useEffect(() => {
-    if (!player || mediaType !== 'video' || Platform.OS !== 'android') return;
-    if (!__DEV__) return;
-    const subStatus = player.addListener('statusChange', ({ status, error }) => {
-      console.log(
-        `🎬 [ReflectionComposer][android] status=${status} duration=${player.duration.toFixed(3)} current=${player.currentTime.toFixed(3)} uri=${mediaUri}`
-      );
-      if (error?.message) {
-        console.warn(`🎬 [ReflectionComposer][android] player error: ${error.message}`);
-      }
-    });
-    const subSource = player.addListener('sourceChange', () => {
-      console.log(`🎬 [ReflectionComposer][android] sourceChange uri=${mediaUri}`);
-    });
-    const subPlaying = player.addListener('playingChange', ({ isPlaying }) => {
-      console.log(
-        `🎬 [ReflectionComposer][android] playing=${isPlaying} status=${player.status} uri=${mediaUri}`
-      );
-    });
-    return () => {
-      subStatus.remove();
-      subSource.remove();
-      subPlaying.remove();
-    };
-  }, [player, mediaType, mediaUri]);
 
   // Once duration is known: apply initial trim and seek. Uses a statusChange listener
   // because player.duration is not reactive — it's 0 until the player is ready.
@@ -832,9 +813,18 @@ function ReflectionComposerInner({
       const time = Math.max(0, Math.min(Math.round(t), Math.max(0, dur - 1)));
       void (async () => {
         try {
-          const { uri } = await VideoThumbnails.getThumbnailAsync(mediaUri, { time, quality: 0.5 });
-          setPosterCustomUri(uri);
-          setPosterViewShotPending(false);
+          const thumb = await VideoThumbnails.getThumbnailAsync(mediaUri, { time, quality: 0.5 });
+          const uri =
+            thumb && typeof thumb === 'object' && typeof (thumb as { uri?: unknown }).uri === 'string'
+              ? (thumb as { uri: string }).uri
+              : null;
+          if (uri) {
+            setPosterCustomUri(uri);
+            setPosterViewShotPending(false);
+          } else {
+            setPosterCustomUri(null);
+            setPosterViewShotPending(true);
+          }
         } catch {
           setPosterCustomUri(null);
           setPosterViewShotPending(true);
@@ -848,40 +838,49 @@ function ReflectionComposerInner({
 
   useEffect(() => {
     if (mediaType !== 'video' || !posterViewShotPending || !player) return;
-    if (player.status !== 'readyToPlay') return;
     let cancelled = false;
-    void (async () => {
-      try {
-        const dur = player.duration > 0 ? player.duration : 0;
-        const seekSec = Math.min(1, Math.max(0.05, dur > 0.15 ? dur - 0.05 : 0.05));
+    let captureStarted = false;
+
+    const tryRun = () => {
+      if (captureStarted || cancelled || player.status !== 'readyToPlay') return;
+      captureStarted = true;
+      void (async () => {
         try {
-          player.pause();
-        } catch {
-          /* ignore */
+          const dur = player.duration > 0 ? player.duration : 0;
+          const seekSec = Math.min(1, Math.max(0.05, dur > 0.15 ? dur - 0.05 : 0.05));
+          try {
+            player.pause();
+          } catch {
+            /* ignore */
+          }
+          try {
+            player.currentTime = seekSec;
+          } catch {
+            /* ignore */
+          }
+          await new Promise((r) => setTimeout(r, Platform.OS === 'android' ? 450 : 280));
+          const node = videoPosterCaptureRef.current;
+          if (!node || cancelled) return;
+          const raw = await captureRef(node, { format: 'jpg', quality: 0.85, result: 'tmpfile' });
+          const path = typeof raw === 'string' ? raw : '';
+          if (!path || cancelled) return;
+          const uri = path.startsWith('file://') ? path : `file://${path}`;
+          setPosterCustomUri(uri);
+        } catch (e) {
+          if (__DEV__) console.warn('[ReflectionComposer] view-shot poster failed', e);
+        } finally {
+          if (!cancelled) setPosterViewShotPending(false);
         }
-        try {
-          player.currentTime = seekSec;
-        } catch {
-          /* ignore */
-        }
-        await new Promise((r) => setTimeout(r, Platform.OS === 'android' ? 450 : 280));
-        const node = videoPosterCaptureRef.current;
-        if (!node || cancelled) return;
-        const raw = await captureRef(node, { format: 'jpg', quality: 0.85, result: 'tmpfile' });
-        const path = typeof raw === 'string' ? raw : '';
-        if (!path || cancelled) return;
-        const uri = path.startsWith('file://') ? path : `file://${path}`;
-        setPosterCustomUri(uri);
-      } catch (e) {
-        if (__DEV__) console.warn('[ReflectionComposer] view-shot poster failed', e);
-      } finally {
-        if (!cancelled) setPosterViewShotPending(false);
-      }
-    })();
+      })();
+    };
+
+    tryRun();
+    const sub = player.addListener('statusChange', tryRun);
     return () => {
       cancelled = true;
+      sub.remove();
     };
-  }, [mediaType, posterViewShotPending, player, player?.status, mediaUri]);
+  }, [mediaType, posterViewShotPending, player, mediaUri]);
 
   useEffect(() => {
     if (!videoRangeMs || thumbnailTimeMs === null) return;
@@ -900,11 +899,25 @@ function ReflectionComposerInner({
       setPlayheadMs(curMs);
       if (curMs > videoRangeMs.end - 50) {
         player.pause();
-        player.currentTime = videoRangeMs.end / 1000;
+        if (!videoTrimEndClampedRef.current) {
+          videoTrimEndClampedRef.current = true;
+          try {
+            player.currentTime = videoRangeMs.end / 1000;
+          } catch {
+            /* ignore */
+          }
+        }
         setVideoEnded(true);
         setVideoPaused(false);
       } else if (curMs < videoRangeMs.start - 50) {
-        player.currentTime = videoRangeMs.start / 1000;
+        videoTrimEndClampedRef.current = false;
+        try {
+          player.currentTime = videoRangeMs.start / 1000;
+        } catch {
+          /* ignore */
+        }
+      } else if (curMs < videoRangeMs.end - 150) {
+        videoTrimEndClampedRef.current = false;
       }
     });
     return () => {
@@ -1156,6 +1169,7 @@ function ReflectionComposerInner({
   const togglePlayPause = useCallback(() => {
     if (!player) return;
     if (videoEnded) {
+      videoTrimEndClampedRef.current = false;
       setVideoEnded(false);
       if (videoRangeMs) {
         player.currentTime = videoRangeMs.start / 1000;
@@ -1177,13 +1191,14 @@ function ReflectionComposerInner({
 
   const handleReplay = useCallback(() => {
     if (!player) return;
+    videoTrimEndClampedRef.current = false;
     setVideoEnded(false);
     setVideoPaused(false);
     setIsPosterMode(false);
     if (mediaType === 'video' && videoRangeMs) {
       player.currentTime = videoRangeMs.start / 1000;
     } else {
-    player.currentTime = 0;
+      player.currentTime = 0;
     }
     player.play();
   }, [player, mediaType, videoRangeMs]);
@@ -1244,10 +1259,20 @@ function ReflectionComposerInner({
     videoDurationMs.value = player.duration * 1000;
   }, [player, playerDurationForWorklet, videoDurationMs]);
 
-  const seekToMs = useCallback((ms: number) => {
-    if (!player) return;
-    try { player.currentTime = ms / 1000; } catch { /* ignore */ }
-  }, [player]);
+  const seekToMs = useCallback(
+    (ms: number) => {
+      if (!player) return;
+      if (videoRangeMs && ms < videoRangeMs.end - 50) {
+        videoTrimEndClampedRef.current = false;
+      }
+      try {
+        player.currentTime = ms / 1000;
+      } catch {
+        /* ignore */
+      }
+    },
+    [player, videoRangeMs],
+  );
 
   const posterScrubPan = useMemo(() =>
     Gesture.Pan()

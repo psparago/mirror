@@ -41,18 +41,19 @@ export function CreationModalConfirmationVideo({ videoUri, ended, onEndedChange 
     const subPlayToEnd = videoPlayer.addListener('playToEnd', () => {
       onEndedChange(true);
     });
-    const subPlaying = videoPlayer.addListener(
-      'playingChange',
-      ({ isPlaying }: { isPlaying: boolean }) => {
-        if (isPlaying) return;
-        const duration = videoPlayer.duration;
-        if (!(duration > 0)) return;
-        const epsilon = Math.min(0.45, Math.max(0.06, duration * 0.12));
-        if (videoPlayer.currentTime >= duration - epsilon) {
-          onEndedChange(true);
-        }
-      },
-    );
+    const subPlaying = videoPlayer.addListener('playingChange', (evt: unknown) => {
+      const isPlaying =
+        evt && typeof evt === 'object' && 'isPlaying' in evt
+          ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
+          : false;
+      if (isPlaying) return;
+      const duration = videoPlayer.duration;
+      if (!(duration > 0)) return;
+      const epsilon = Math.min(0.45, Math.max(0.06, duration * 0.12));
+      if (videoPlayer.currentTime >= duration - epsilon) {
+        onEndedChange(true);
+      }
+    });
     return () => {
       subPlayToEnd.remove();
       subPlaying.remove();

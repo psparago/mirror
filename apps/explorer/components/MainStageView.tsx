@@ -1141,7 +1141,11 @@ export default function MainStageView({
       }
     };
 
-    const playingSub = player.addListener('playingChange', ({ isPlaying }: { isPlaying: boolean }) => {
+    const playingSub = player.addListener('playingChange', (evt: unknown) => {
+      const isPlaying =
+        evt && typeof evt === 'object' && 'isPlaying' in evt
+          ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
+          : false;
       setIsVideoPlaying(isPlaying);
       if (isPlaying) {
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
@@ -1197,7 +1201,11 @@ export default function MainStageView({
     // When the player finishes loading a new source, retry play() if the machine
     // expects the video to be playing. This handles the race condition where
     // Hardware Sync called player.play() before the source was ready.
-    const statusSub = player.addListener('statusChange', ({ status }: { status: string }) => {
+    const statusSub = player.addListener('statusChange', (evt: unknown) => {
+      const status =
+        evt && typeof evt === 'object' && 'status' in evt
+          ? String((evt as { status?: string }).status)
+          : '';
       if (status === 'readyToPlay') {
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         if (trim.active) {
