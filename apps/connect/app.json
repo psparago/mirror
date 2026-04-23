@@ -37,6 +37,7 @@
         "backgroundColor": "#ffffff"
       },
       "package": "com.psparago.reflections.connect",
+      "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [

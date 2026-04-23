@@ -1,0 +1,90 @@
+{
+  "project_info": {
+    "project_number": "759023712124",
+    "project_id": "reflections-1200b",
+    "storage_bucket": "reflections-1200b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:759023712124:android:6db7ac92390a93380a96f9",
+        "android_client_info": {
+          "package_name": "com.psparago.reflections.connect"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDbntM85Bb5WLeP7MElNnXNXtMJnPoKEGk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "759023712124-2m69m3m55124i0sj43mlp7ea7afqogi8.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.psparago.reflections.explorer"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:759023712124:android:ed75c3f514786c670a96f9",
+        "android_client_info": {
+          "package_name": "com.psparago.reflections.connect.dev"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "759023712124-gjounsqm8q5vokcuh01ra2cvrcdbbr71.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.psparago.reflections.connect.dev",
+            "certificate_hash": "921ff0bf54103b9381a001cc67d4c331e7c331b9"
+          }
+        },
+        {
+          "client_id": "759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDbntM85Bb5WLeP7MElNnXNXtMJnPoKEGk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "759023712124-7cghtfpg52lqthilcm82k1qbjfbf68ra.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "759023712124-2m69m3m55124i0sj43mlp7ea7afqogi8.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.psparago.reflections.explorer"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
