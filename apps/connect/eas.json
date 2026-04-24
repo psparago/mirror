@@ -19,24 +19,29 @@
       "channel": "development"
     },
     "preview": {
-      "distribution": "internal",
+      "distribution": "store",
+      "autoIncrement": true,
       "ios": {
         "resourceClass": "m-medium"
       },
       "android": {
-        "buildType": "apk"
+        "buildType": "app-bundle"
       },
       "channel": "preview"
     },
     "production": {
-      "channel": "production",
+      "distribution": "store",
       "autoIncrement": true,
       "env": {
         "APP_VARIANT": "production"
       },
       "ios": {
         "resourceClass": "m-medium"
-      }
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "channel": "production"
     }
   },
   "submit": {
