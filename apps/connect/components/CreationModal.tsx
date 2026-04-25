@@ -64,6 +64,27 @@ const FALLBACK_POSTER_REMOTE_URL =
   'https://dummyimage.com/640x640/1f2937/e5e7eb.jpg&text=Video+Reflection';
 
 type LibrarySourceKind = 'unsplash' | 'camera' | 'gallery';
+type AiDescriptionResponse = {
+  short_caption?: string | null;
+  deep_dive?: string | null;
+  audio_url?: string | null;
+  deep_dive_audio_url?: string | null;
+  audio_s3_key?: string | null;
+  deep_dive_audio_s3_key?: string | null;
+  staging_event_id?: string | null;
+  _stagingId?: string | null;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const asOptionalString = (value: unknown): string | null =>
+  typeof value === 'string' && value.length > 0 ? value : null;
+
+const parseJsonRecord = async (response: Response): Promise<Record<string, unknown> | null> => {
+  const json = await response.json().catch(() => null);
+  return isRecord(json) ? json : null;
+};
 
 function resolveLibrarySource(
   kind: LibrarySourceKind | null | undefined,
@@ -272,16 +293,23 @@ export default function CreationModal({
     }
 
     if (editEvent?.event_id) {
-      const m = editEvent.metadata;
+      const imageUrl = asOptionalString(editEvent?.image_url);
+      const videoUrl = asOptionalString(editEvent?.video_url);
+      if (!imageUrl) {
+        console.warn('[CreationModal] edit reflection is missing image_url; skipping hydration');
+        return;
+      }
+      const eventId = editEvent.event_id;
+      const m = isRecord(editEvent?.metadata) ? editEvent.metadata : undefined;
       const desc =
-        (m?.description?.trim() ||
-          m?.short_caption?.trim() ||
-          '') as string;
-      const shortCap = (m?.short_caption?.trim() || desc) as string;
-      const dd = (m?.deep_dive?.trim() || '') as string;
+        (typeof m?.description === 'string' ? m.description.trim() : '') ||
+        (typeof m?.short_caption === 'string' ? m.short_caption.trim() : '') ||
+        '';
+      const shortCap = (typeof m?.short_caption === 'string' ? m.short_caption.trim() : '') || desc;
+      const dd = typeof m?.deep_dive === 'string' ? m.deep_dive.trim() : '';
 
-      editSourceEventIdRef.current = editEvent.event_id;
-      pinnedEditEventIdRef.current = editEvent.event_id;
+      editSourceEventIdRef.current = eventId;
+      pinnedEditEventIdRef.current = eventId;
       mediaReplacedDuringEditRef.current = false;
       setIsEditingExistingReflection(true);
 
@@ -289,8 +317,8 @@ export default function CreationModal({
       setConfirming(false);
       setShowDescriptionInput(true);
       setComposerStage('workbench');
-      setStagingEventId(editEvent.event_id);
-      stagingEventIdRef.current = editEvent.event_id;
+      setStagingEventId(eventId);
+      stagingEventIdRef.current = eventId;
       setIsCompanionInReflection(!!(m?.is_companion_present ?? m?.companion_in_reflection));
       setIsExplorerInReflection(!!(m?.is_explorer_present ?? m?.explorer_in_reflection));
       setIsSelfie(!!m?.is_selfie);
@@ -319,10 +347,10 @@ export default function CreationModal({
       lastSourceForRecoveryRef.current = null;
       setTransitionUnlockTick((v) => v + 1);
 
-      if (editEvent.video_url) {
+      if (videoUrl) {
         setMediaType('video');
-        setVideoUri(editEvent.video_url);
-        setPhoto({ uri: editEvent.image_url });
+        setVideoUri(videoUrl);
+        setPhoto({ uri: imageUrl });
         const trimHydrate = getValidVideoTrimFromFields(m?.video_start_ms, m?.video_end_ms);
         const thumbHydrate = coerceThumbnailTimeMs(m?.thumbnail_time_ms);
         if (trimHydrate) {
@@ -337,7 +365,7 @@ export default function CreationModal({
       } else {
         setMediaType('photo');
         setVideoUri(null);
-        setPhoto({ uri: editEvent.image_url });
+        setPhoto({ uri: imageUrl });
         composerVideoMetaRef.current = null;
       }
       setImageSourceType(
@@ -359,8 +387,8 @@ export default function CreationModal({
       setDeepDive(dd);
       setAudioUri(null);
       lastProcessedUriRef.current = null;
-      setAiAudioUrl(editEvent.audio_url || null);
-      setAiDeepDiveAudioUrl(editEvent.deep_dive_audio_url || null);
+      setAiAudioUrl(asOptionalString(editEvent?.audio_url));
+      setAiDeepDiveAudioUrl(asOptionalString(editEvent?.deep_dive_audio_url));
       setAiAudioS3Key(null);
       setAiDeepDiveS3Key(null);
       setIsAiGenerated(!!dd || !!shortCap);
@@ -586,15 +614,25 @@ export default function CreationModal({
     if (!pendingMedia) return;
     const media = consumePendingMedia();
     if (!media) return;
+    const mediaUri = asOptionalString(media?.uri);
+    if (!mediaUri) {
+      console.warn('[CreationModal] pending media missing uri; ignoring lifecycle resume payload');
+      return;
+    }
+    const mediaKind = media?.type === 'video' ? 'video' : 'photo';
+    const mediaSourceKind =
+      media?.source === 'search' || media?.source === 'gallery' || media?.source === 'camera'
+        ? media.source
+        : 'gallery';
     const applyGeneration = ++pendingMediaApplyGenerationRef.current;
     void (async () => {
       lastSourceForRecoveryRef.current = null;
       setComposerStage('workbench');
       setConfirming(false);
       setPhase('creating');
-      const normalizedUri = ensureFileUri(media.uri);
+      const normalizedUri = ensureFileUri(mediaUri);
       let resolvedVideoUri = normalizedUri;
-      if (media.type === 'video') {
+      if (mediaKind === 'video') {
         try {
           resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
         } catch (error) {
@@ -610,7 +648,7 @@ export default function CreationModal({
       } else if (!isEditingExisting) {
         setIsSelfie(false);
       }
-      if (media.type === 'video') {
+      if (mediaKind === 'video') {
         setMediaType('video');
         setVideoUri(resolvedVideoUri);
         setPhoto({ uri: resolvedVideoUri });
@@ -621,18 +659,19 @@ export default function CreationModal({
       }
       setShowDescriptionInput(true);
       setImageSourceType(
-        media.source === 'search' ? 'search' : media.source === 'gallery' ? 'gallery' : 'camera'
+        mediaSourceKind === 'search' ? 'search' : mediaSourceKind === 'gallery' ? 'gallery' : 'camera'
       );
-      setSearchQueryContext(media.searchQuery || '');
-      setSearchCanonicalName(media.searchCanonicalName || '');
-      setLibraryId((media.libraryId || '').trim());
+      setSearchQueryContext(typeof media?.searchQuery === 'string' ? media.searchQuery : '');
+      setSearchCanonicalName(typeof media?.searchCanonicalName === 'string' ? media.searchCanonicalName : '');
+      setLibraryId((typeof media?.libraryId === 'string' ? media.libraryId : '').trim());
       setLibrarySearchTerm(
-        ((media.librarySearchTerm || media.searchQuery || '') as string).trim()
+        ((typeof media?.librarySearchTerm === 'string' ? media.librarySearchTerm : '') ||
+          (typeof media?.searchQuery === 'string' ? media.searchQuery : '')).trim()
       );
       setLibrarySourceKind(
-        media.source === 'search' ? 'unsplash' : media.source === 'gallery' ? 'gallery' : 'camera'
+        mediaSourceKind === 'search' ? 'unsplash' : mediaSourceKind === 'gallery' ? 'gallery' : 'camera'
       );
-      setMediaSource(`/${media.source}` as '/camera' | '/gallery' | '/search');
+      setMediaSource(`/${mediaSourceKind}` as '/camera' | '/gallery' | '/search');
       setDescription('');
       setIsAiGenerated(false);
       setShortCaption('');
@@ -640,10 +679,10 @@ export default function CreationModal({
       setAudioUri(null);
       setStagingEventId(null);
       stagingEventIdRef.current = null;
-      lastProcessedUriRef.current = audioRecorder.uri ?? lastProcessedUriRef.current;
+      lastProcessedUriRef.current = audioRecorder?.uri ?? lastProcessedUriRef.current;
       if (editSourceEventIdRef.current) {
         mediaReplacedDuringEditRef.current = true;
-        if (media.type === 'video') {
+        if (mediaKind === 'video') {
           composerVideoMetaRef.current = null;
         }
       }
@@ -671,7 +710,14 @@ export default function CreationModal({
     }
   }, [audioRecorder.uri, audioRecorder.isRecording]);
 
-  const getAIDescription = async (imageUrl: string, options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = {}) => {
+  const getAIDescription = async (
+    imageUrl: string,
+    options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = {}
+  ): Promise<AiDescriptionResponse | null> => {
+    if (!currentExplorerId || !imageUrl) {
+      console.warn('[CreationModal] AI description skipped: missing explorer or image URL');
+      return null;
+    }
     try {
       if (!options.silent) {
         setIsAiThinking(true);
@@ -683,7 +729,7 @@ export default function CreationModal({
         companionName: companionName || undefined,
         companionInReflection: isCompanionInReflection,
         explorerInReflection: isExplorerInReflection,
-        peopleContext: peopleContext.trim() || undefined,
+        peopleContext: peopleContext?.trim() || undefined,
       });
 
       let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${currentExplorerId}`;
@@ -706,7 +752,7 @@ export default function CreationModal({
         clearTimeout(timeoutId);
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
-        if (fetchError.name === 'AbortError') {
+        if (fetchError?.name === 'AbortError') {
           throw new Error('AI description request timed out after 60 seconds');
         }
         throw fetchError;
@@ -719,31 +765,42 @@ export default function CreationModal({
       }
 
       // Parse JSON response
-      const aiResponse = await response.json();
+      const aiResponse = await parseJsonRecord(response);
+      const shortCaptionValue = asOptionalString(aiResponse?.short_caption);
+      const deepDiveValue = asOptionalString(aiResponse?.deep_dive);
 
-      if (aiResponse && aiResponse.short_caption && aiResponse.deep_dive) {
-        setShortCaption(aiResponse.short_caption);
-        setDeepDive(aiResponse.deep_dive);
-        setAiAudioUrl(aiResponse.audio_url || null);
-        setAiDeepDiveAudioUrl(aiResponse.deep_dive_audio_url || null);
-        setAiAudioS3Key(aiResponse.audio_s3_key || null);
-        setAiDeepDiveS3Key(aiResponse.deep_dive_audio_s3_key || null);
-        if (aiResponse.staging_event_id) {
-          setStagingEventId(aiResponse.staging_event_id);
-          stagingEventIdRef.current = aiResponse.staging_event_id;
+      if (shortCaptionValue && deepDiveValue) {
+        const result: AiDescriptionResponse = {
+          short_caption: shortCaptionValue,
+          deep_dive: deepDiveValue,
+          audio_url: asOptionalString(aiResponse?.audio_url),
+          deep_dive_audio_url: asOptionalString(aiResponse?.deep_dive_audio_url),
+          audio_s3_key: asOptionalString(aiResponse?.audio_s3_key),
+          deep_dive_audio_s3_key: asOptionalString(aiResponse?.deep_dive_audio_s3_key),
+          staging_event_id: asOptionalString(aiResponse?.staging_event_id),
+        };
+        setShortCaption(result.short_caption ?? '');
+        setDeepDive(result.deep_dive ?? '');
+        setAiAudioUrl(result.audio_url ?? null);
+        setAiDeepDiveAudioUrl(result.deep_dive_audio_url ?? null);
+        setAiAudioS3Key(result.audio_s3_key ?? null);
+        setAiDeepDiveS3Key(result.deep_dive_audio_s3_key ?? null);
+        if (result.staging_event_id) {
+          setStagingEventId(result.staging_event_id);
+          stagingEventIdRef.current = result.staging_event_id;
         }
 
         if (!options.silent) {
           // PROTECTION: Only update the description if the current one is empty
           // OR if it's already an AI generated one (user hasn't manually tweaked it yet)
-          if (!description.trim() || isAiGenerated) {
-            setDescription(aiResponse.short_caption);
+          if (!description?.trim() || isAiGenerated) {
+            setDescription(result.short_caption ?? '');
           } else {
             debugLog('📝 User has custom text, keeping it but updating AI metadata in background');
           }
           setIsAiGenerated(true);
         }
-        return aiResponse;
+        return result;
       } else {
         throw new Error("Invalid response format from AI");
       }
@@ -841,7 +898,12 @@ export default function CreationModal({
     videoMeta?: ComposerVideoMeta | null;
     filteredPhotoUri?: string | null;
   }) => {
-    if (!photo) return;
+    const currentPhotoUri = asOptionalString(photo?.uri);
+    if (!currentExplorerId) {
+      Alert.alert('Explorer Not Ready', 'Please wait for the Explorer profile to load before sending.');
+      return;
+    }
+    if (!currentPhotoUri) return;
 
     if (overrides?.videoMeta !== undefined) {
       composerVideoMetaRef.current = overrides.videoMeta;
@@ -849,8 +911,8 @@ export default function CreationModal({
 
     // 1. Resolve Data (Prefer overrides from Composer, fall back to State)
     const activeAudioUri = overrides?.audioUri !== undefined ? overrides.audioUri : audioUri;
-    let finalCaption = (overrides?.caption !== undefined ? overrides.caption : description).trim();
-    let finalDeepDive = overrides?.deepDive !== undefined ? overrides.deepDive : deepDive;
+    let finalCaption = (overrides?.caption !== undefined ? overrides.caption ?? '' : description ?? '').trim();
+    let finalDeepDive = overrides?.deepDive !== undefined ? overrides.deepDive ?? '' : deepDive ?? '';
 
     // Require either text description OR audio recording
     if (!finalCaption && !activeAudioUri) {
@@ -878,7 +940,7 @@ export default function CreationModal({
     const editIdMeta = editSourceEventIdRef.current || pinnedEditEventIdRef.current;
     const replacedMeta = mediaReplacedDuringEditRef.current;
     const hasNewLocalVoiceMeta = !!(activeAudioUri && activeAudioUri.startsWith('file'));
-    const photoUriMeta = photo.uri;
+    const photoUriMeta = currentPhotoUri;
     const remotePoster =
       typeof photoUriMeta === 'string' &&
       (photoUriMeta.startsWith('http://') || photoUriMeta.startsWith('https://'));
@@ -920,22 +982,23 @@ export default function CreationModal({
         if (!snap.exists()) {
           throw new Error('Reflection not found');
         }
-        const prevMeta = (snap.data()?.metadata as EventMetadata | undefined) || ({} as EventMetadata);
+        const snapData = snap.data();
+        const prevMeta = (isRecord(snapData?.metadata) ? snapData.metadata : {}) as unknown as EventMetadata;
         const resolvedLib = resolveLibrarySource(librarySourceKind, imageSourceType);
-        const libSearchStored = (librarySearchTerm.trim() || searchQueryContext.trim()) || '';
-        const libIdStored = libraryId.trim();
-        const peopleTrim = peopleContext.trim();
+        const libSearchStored = (librarySearchTerm?.trim() || searchQueryContext?.trim()) || '';
+        const libIdStored = libraryId?.trim() ?? '';
+        const peopleTrim = peopleContext?.trim() ?? '';
         const patch: Record<string, unknown> = {
-          'metadata.description': finalCaption || prevMeta.description || 'Reflection',
-          'metadata.short_caption': finalCaption || prevMeta.short_caption || finalCaption || 'Reflection',
+          'metadata.description': finalCaption || prevMeta?.description || 'Reflection',
+          'metadata.short_caption': finalCaption || prevMeta?.short_caption || 'Reflection',
           'metadata.companion_in_reflection': isCompanionInReflection,
           'metadata.explorer_in_reflection': isExplorerInReflection,
           'metadata.is_companion_present': isCompanionInReflection,
           'metadata.is_explorer_present': isExplorerInReflection,
           'metadata.is_selfie': isSelfie,
           'metadata.library_source': resolvedLib,
-          'metadata.search_query': searchQueryContext.trim() || deleteField(),
-          'metadata.search_canonical_name': searchCanonicalName.trim() || deleteField(),
+          'metadata.search_query': searchQueryContext?.trim() || deleteField(),
+          'metadata.search_canonical_name': searchCanonicalName?.trim() || deleteField(),
         };
         if (peopleTrim) {
           patch['metadata.people_context'] = peopleTrim;
@@ -1013,7 +1076,7 @@ export default function CreationModal({
         }
       } catch (error: any) {
         console.error('Metadata-only update error:', error);
-        Alert.alert('Update Error', error.message || 'Failed to update reflection');
+        Alert.alert('Update Error', error?.message || 'Failed to update reflection');
       } finally {
         setUploading(false);
       }
@@ -1058,15 +1121,15 @@ export default function CreationModal({
           }
           // PROTECTION: Never overwrite the user's manual caption during this final polish phase
           // if it doesn't match the AI's returned version. We favor what the user sees on screen.
-          if (!finalCaption && aiResult.short_caption) {
+          if (!finalCaption && aiResult?.short_caption) {
             finalCaption = aiResult.short_caption;
           }
 
-          finalDeepDive = aiResult.deep_dive;
-          finalCaptionAudio = activeAudioUri || aiResult.audio_url; // Keep human audio as absolute priority
-          finalDeepDiveAudio = aiResult.deep_dive_audio_url;
-          if (aiResult.audio_s3_key) stagingTtsKeysToDelete.push(aiResult.audio_s3_key);
-          if (aiResult.deep_dive_audio_s3_key) stagingTtsKeysToDelete.push(aiResult.deep_dive_audio_s3_key);
+          finalDeepDive = aiResult?.deep_dive ?? finalDeepDive ?? '';
+          finalCaptionAudio = activeAudioUri || aiResult?.audio_url || null; // Keep human audio as absolute priority
+          finalDeepDiveAudio = aiResult?.deep_dive_audio_url || null;
+          if (aiResult?.audio_s3_key) stagingTtsKeysToDelete.push(aiResult.audio_s3_key);
+          if (aiResult?.deep_dive_audio_s3_key) stagingTtsKeysToDelete.push(aiResult.deep_dive_audio_s3_key);
           debugLog(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
         } else {
           console.warn("⚠️ AI enhancement failed, proceeding with available content.");
@@ -1153,7 +1216,11 @@ export default function CreationModal({
         throw new Error(`Failed to get upload URLs: ${batchRes.status}`);
       }
 
-      const { urls } = await batchRes.json();
+      const batchJson = await parseJsonRecord(batchRes);
+      const urls = isRecord(batchJson?.urls) ? batchJson.urls : null;
+      if (!urls) {
+        throw new Error('Upload service returned no upload URLs');
+      }
       debugLog('📡 uploadEventBundle: Received presigned URLs for:', Object.keys(urls));
       const uploadPromises: Promise<any>[] = [];
 
@@ -1168,7 +1235,7 @@ export default function CreationModal({
       );
 
       // 3. Prepare Image Source
-      let imageSource = photo.uri;
+      let imageSource = currentPhotoUri;
       if (mediaType === 'photo' && filteredForUpload) {
         imageSource = filteredForUpload;
         tempFilteredExtractPng = filteredForUpload;
@@ -1189,13 +1256,15 @@ export default function CreationModal({
         // We use that remote URL as the source for safeUploadToS3, which will download it then upload it
         const stagingRes = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
         if (stagingRes.ok) {
-          const { url } = await stagingRes.json();
-          imageSource = url;
+          const stagingJson = await parseJsonRecord(stagingRes);
+          const stagingUrl = asOptionalString(stagingJson?.url);
+          if (stagingUrl) imageSource = stagingUrl;
         }
       }
 
       // 4. Queue Image Upload
-      if (urls['image.jpg']) {
+      const imageUploadUrl = asOptionalString(urls?.['image.jpg']);
+      if (imageUploadUrl) {
         debugLog('📤 uploadEventBundle: Queuing image upload...');
         // Only gatekeep here when needed:
         // - remote (staging GET URL) needs download + resize
@@ -1220,7 +1289,7 @@ export default function CreationModal({
           tempGatekeptImage = gatekeptImageUri;
         }
 
-        uploadPromises.push(safeUploadToS3(gatekeptImageUri, urls['image.jpg']).then(res => {
+        uploadPromises.push(safeUploadToS3(gatekeptImageUri, imageUploadUrl).then(res => {
           debugLog('✅ uploadEventBundle: Image upload completed');
           return res;
         }));
@@ -1229,13 +1298,14 @@ export default function CreationModal({
       }
 
       // 5. Queue Video Upload (full master only; trim is metadata — skip when editing existing remote master)
-      if (mediaType === 'video' && videoUri && urls['video.mp4'] && !skipVideoMasterReupload) {
+      const videoUploadUrl = asOptionalString(urls?.['video.mp4']);
+      if (mediaType === 'video' && videoUri && videoUploadUrl && !skipVideoMasterReupload) {
         // Keep upload master identical to the workbench preview source. This guarantees trim/poster
         // metadata is authored against the same file that lands in S3 and avoids Android codec drift
         // from aggressive transcode outputs.
         const uploadUri: string = videoUri;
         uploadPromises.push(
-          FileSystem.uploadAsync(urls['video.mp4'], uploadUri, {
+          FileSystem.uploadAsync(videoUploadUrl, uploadUri, {
             httpMethod: 'PUT',
             headers: { 'Content-Type': 'video/mp4' },
           }).then(res => {
@@ -1246,11 +1316,12 @@ export default function CreationModal({
       }
 
       // 6. Queue Audio Upload
-      if (hasAudio && urls['audio.m4a']) {
+      const audioUploadUrl = asOptionalString(urls?.['audio.m4a']);
+      if (hasAudio && audioUploadUrl) {
         const audioSource = activeAudioUri || finalCaptionAudio;
         if (audioSource) {
           debugLog('📤 uploadEventBundle: Queuing audio upload...');
-          uploadPromises.push(safeUploadToS3(audioSource, urls['audio.m4a']).then(res => {
+          uploadPromises.push(safeUploadToS3(audioSource, audioUploadUrl).then(res => {
             debugLog('✅ uploadEventBundle: Audio upload completed');
             return res;
           }));
@@ -1258,9 +1329,10 @@ export default function CreationModal({
       }
 
       // 6.5 Queue Deep Dive Audio Upload
-      if (hasDeepDiveAudio && finalDeepDiveAudio && urls['deep_dive.m4a']) {
+      const deepDiveUploadUrl = asOptionalString(urls?.['deep_dive.m4a']);
+      if (hasDeepDiveAudio && finalDeepDiveAudio && deepDiveUploadUrl) {
         debugLog('📤 uploadEventBundle: Queuing deep dive audio upload...');
-        uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, urls['deep_dive.m4a']).then(res => {
+        uploadPromises.push(safeUploadToS3(finalDeepDiveAudio, deepDiveUploadUrl).then(res => {
           debugLog('✅ uploadEventBundle: Deep dive audio upload completed');
           return res;
         }));
@@ -1270,9 +1342,9 @@ export default function CreationModal({
       const contentType: NonNullable<EventMetadata['content_type']> =
         mediaType === 'video' ? 'video' : hasAudio ? 'audio' : 'text';
       const resolvedLib = resolveLibrarySource(librarySourceKind, imageSourceType);
-      const libSearchStored = (librarySearchTerm.trim() || searchQueryContext.trim()) || undefined;
-      const libIdStored = libraryId.trim() || undefined;
-      const peopleTrim = peopleContext.trim();
+      const libSearchStored = (librarySearchTerm?.trim() || searchQueryContext?.trim()) || undefined;
+      const libIdStored = libraryId?.trim() || undefined;
+      const peopleTrim = peopleContext?.trim() ?? '';
       const eventMetadata: EventMetadata = {
         description:
           finalCaption ||
@@ -1294,8 +1366,8 @@ export default function CreationModal({
         ...(libIdStored ? { library_id: libIdStored } : {}),
         ...(libSearchStored ? { library_search_term: libSearchStored } : {}),
         ...(peopleTrim ? { people_context: peopleTrim, people_context_hints: peopleTrim } : {}),
-        ...(searchQueryContext.trim() ? { search_query: searchQueryContext.trim() } : {}),
-        ...(searchCanonicalName.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
+        ...(searchQueryContext?.trim() ? { search_query: searchQueryContext.trim() } : {}),
+        ...(searchCanonicalName?.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
         ...(lastEditedAtIso ? { last_edited_at: lastEditedAtIso } : {}),
       };
 
@@ -1381,8 +1453,8 @@ export default function CreationModal({
         }
       }
 
-      if (photo.uri && !photo.uri.startsWith('http')) {
-        safeDeleteCacheFile(photo.uri).catch(() => { });
+      if (currentPhotoUri && !currentPhotoUri.startsWith('http')) {
+        safeDeleteCacheFile(currentPhotoUri).catch(() => { });
       }
       if (mediaType === 'video' && videoUri) {
         safeDeleteCacheFile(videoUri).catch(() => { });
@@ -1457,7 +1529,7 @@ export default function CreationModal({
 
     } catch (error: any) {
       console.error("Full Upload Error:", error);
-      Alert.alert("Upload Error", error.message);
+      Alert.alert("Upload Error", error?.message ?? 'Failed to upload Reflection');
     } finally {
       if (tempThumbnail) {
         FileSystem.deleteAsync(tempThumbnail, { idempotent: true }).catch(() => { });
@@ -1571,8 +1643,11 @@ export default function CreationModal({
     composerVideoMetaRef.current = null;
   };
 
-  const generateDeepDiveBackground = async (options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }) => {
-    if (!photo) return null;
+  const generateDeepDiveBackground = async (
+    options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }
+  ): Promise<AiDescriptionResponse | null> => {
+    const currentPhotoUri = asOptionalString(photo?.uri);
+    if (!currentExplorerId || !currentPhotoUri) return null;
 
     try {
       if (!options.silent) {
@@ -1591,7 +1666,7 @@ export default function CreationModal({
         setStagingEventId(stagingId);
         stagingEventIdRef.current = stagingId;
 
-        let uriToUpload = photo.uri;
+        let uriToUpload = currentPhotoUri;
         let isTempThumbnail = false;
 
         // If it's a video, generate a thumbnail to use for AI description
@@ -1612,7 +1687,14 @@ export default function CreationModal({
 
         // Upload to staging first
         const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
-        const { url: stagingUrl } = await stagingResponse.json();
+        if (!stagingResponse.ok) {
+          throw new Error(`Failed to get staging upload URL: ${stagingResponse.status}`);
+        }
+        const stagingJson = await parseJsonRecord(stagingResponse);
+        const stagingUrl = asOptionalString(stagingJson?.url);
+        if (!stagingUrl) {
+          throw new Error('Staging upload URL was missing');
+        }
         // Only gatekeep here when needed: video thumbnail may exceed 1080px.
         let stagingImageUri = uriToUpload;
         if (mediaType === 'video') {
@@ -1643,7 +1725,9 @@ export default function CreationModal({
       // Get presigned GET URL for staging image
       const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
       if (getStagingUrlResponse.ok) {
-        const { url: getStagingUrl } = await getStagingUrlResponse.json();
+        const getStagingJson = await parseJsonRecord(getStagingUrlResponse);
+        const getStagingUrl = asOptionalString(getStagingJson?.url);
+        if (!getStagingUrl) return { _stagingId: stagingId };
         const aiResult = await getAIDescription(getStagingUrl, options);
         // Always return _stagingId so caller can delete staging even when AI fails
         return aiResult ? { ...aiResult, _stagingId: stagingId } : { _stagingId: stagingId };
@@ -1855,16 +1939,18 @@ export default function CreationModal({
   // Compute visibility states — NO conditional returns so nothing unmounts/remounts.
   // Uses an absolutely-positioned View instead of <Modal> to avoid iOS UIWindow
   // stacking issues with the camera's fullScreenModal presentation.
-  const showConfirmation = confirming && !!photo;
-  const showComposer = showDescriptionInput && !!photo && !confirming;
+  const photoUri = asOptionalString(photo?.uri);
+  const activeMediaUri = mediaType === 'video' && videoUri ? videoUri : photoUri;
+  const showConfirmation = confirming && !!photoUri;
+  const showComposer = showDescriptionInput && !!activeMediaUri && !confirming;
   const showCreatingWait = phase === 'creating' && !showComposer && !showConfirmation;
   const showFullScreenOverlay = visible && isFocused && (showComposer || showCreatingWait || showConfirmation);
   const showPicker = visible && phase === 'picker' && !showFullScreenOverlay;
 
   const confirmationPosterRemote = useMemo(() => {
-    const u = photo?.uri;
+    const u = photoUri;
     return typeof u === 'string' && (u.startsWith('http://') || u.startsWith('https://'));
-  }, [photo?.uri]);
+  }, [photoUri]);
 
   /** Matches Workbench back → re-pick media (`handleReplaceMedia` / `beginReplaceReturnFlow`). */
   const composerReplaceBackLabel = useMemo(() => {
@@ -1968,7 +2054,7 @@ export default function CreationModal({
           An absolute View stays in the normal view hierarchy and always paints. */}
       {showFullScreenOverlay && (
         <View style={styles.fullScreenOverlay}>
-          {showConfirmation && photo ? (
+          {showConfirmation && photoUri ? (
             <KeyboardAvoidingView
               style={styles.confirmationContainer}
               behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -1982,7 +2068,7 @@ export default function CreationModal({
                   />
                 ) : (
                   <Image
-                    source={{ uri: photo.uri }}
+                    source={{ uri: photoUri }}
                     style={StyleSheet.absoluteFill}
                     contentFit={mediaType === 'photo' ? 'cover' : 'contain'}
                     cachePolicy={confirmationPosterRemote ? 'memory-disk' : 'disk'}
@@ -2067,23 +2153,23 @@ export default function CreationModal({
                 </BottomSheetView>
               </BottomSheet>
             </KeyboardAvoidingView>
-          ) : showComposer && photo ? (
+          ) : showComposer && activeMediaUri ? (
             <View style={styles.composerContainer}>
               <ReflectionComposer
-                key={`${mediaType}-${photo.uri}`}
-                mediaUri={mediaType === 'video' && videoUri ? videoUri : photo.uri}
+                key={`${mediaType}-${activeMediaUri}`}
+                mediaUri={activeMediaUri}
                 mediaType={mediaType}
-                initialCaption={description}
+                initialCaption={description ?? ''}
                 initialVideoMeta={initialVideoMetaForComposer}
                 onVideoMetaChange={(meta) => {
                   composerVideoMetaRef.current = meta;
                 }}
                 audioUri={audioUri}
                 aiArtifacts={{
-                  caption: shortCaption,
-                  deepDive: deepDive,
-                  audioUrl: aiAudioUrl || undefined,
-                  deepDiveAudioUrl: aiDeepDiveAudioUrl || undefined,
+                  caption: shortCaption ?? '',
+                  deepDive: deepDive ?? '',
+                  audioUrl: aiAudioUrl ?? undefined,
+                  deepDiveAudioUrl: aiDeepDiveAudioUrl ?? undefined,
                 }}
                 isAiThinking={isAiThinking}
                 isSending={uploading}
@@ -2097,7 +2183,7 @@ export default function CreationModal({
                   stagingEventIdRef.current = null;
                   await generateDeepDiveBackground({
                     silent: false,
-                    targetCaption: targetCaption || description || undefined,
+                    targetCaption: targetCaption ?? description ?? undefined,
                   });
                 }}
                 onSend={(data) => {
@@ -2118,7 +2204,7 @@ export default function CreationModal({
                 onExplorerInReflectionChange={setIsExplorerInReflection}
                 peopleContext={peopleContext}
                 onPeopleContextChange={setPeopleContext}
-                explorerName={explorerName || 'Explorer'}
+                explorerName={explorerName ?? 'Explorer'}
                 stage={composerStage}
                 onStageChange={setComposerStage}
                 replaceMediaBackLabel={composerReplaceBackLabel}

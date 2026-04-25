@@ -22,13 +22,17 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/../.."
 
-# EAS update channel — must match the "channel" in eas.json for the build profile you ship.
-# Production builds use "production"; preview uses "preview".
+# SENIOR STAFF SAFETY: Force the variant to production
+# This ensures app.config.js uses the correct package names and Sentry IDs
+export APP_VARIANT="production"
+
+# EAS update channel — must match the "channel" in eas.json
 UPDATE_CHANNEL="production"
 
 update_explorer() {
   echo "🔵 Publishing OTA for Reflections Explorer..."
   cd "$PROJECT_ROOT/apps/explorer"
+  # This automatically bundles and uploads for both iOS and Android
   npx eas update --branch "$UPDATE_CHANNEL" --message "$MESSAGE"
   echo ""
 }
@@ -36,13 +40,17 @@ update_explorer() {
 update_connect() {
   echo "🟢 Publishing OTA for Reflections Connect..."
   cd "$PROJECT_ROOT/apps/connect"
+  # This automatically bundles and uploads for both iOS and Android
   npx eas update --branch "$UPDATE_CHANNEL" --message "$MESSAGE"
   echo ""
 }
 
 # Single prompt for message (used for one or both apps)
 read -p "📝 Enter update message (or press Enter for default): " MESSAGE
-MESSAGE="${MESSAGE:-Memory and performance improvements}"
+if [[ -z "$MESSAGE" ]]; then
+  echo "❌ Error: You must provide an update message."
+  exit 1
+fi
 
 echo ""
 if [[ -z "$TARGET" ]]; then

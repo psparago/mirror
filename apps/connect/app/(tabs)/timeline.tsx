@@ -54,9 +54,15 @@ interface SentReflection {
   metadata?: EventMetadata;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const asOptionalString = (value: unknown): string | null =>
+  typeof value === 'string' && value.length > 0 ? value : null;
+
 function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMetadata | undefined {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const o = raw as Record<string, unknown>;
+  if (!isRecord(raw)) return undefined;
+  const o = raw;
   const description = typeof o.description === 'string' ? o.description : '';
   const shortCaption = typeof o.short_caption === 'string' ? o.short_caption : '';
   const sender = typeof o.sender === 'string' ? o.sender : '';
@@ -232,7 +238,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
   // This ensures the list updates when responseEventIds changes
   // SORTED BY: Response timestamp (viewed) first, so most recently viewed are at top
   const displayReflections = useMemo(() => {
-    let result = reflections.map(r => ({
+    let result = (Array.isArray(reflections) ? reflections : []).filter(Boolean).map(r => ({
       ...r,
       hasResponse: !r.deletedAt && r.status !== 'deleted' && responseEventIds.has(r.event_id),
     }));
@@ -242,11 +248,13 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
     // Filter by selected companion avatar (null = show all)
     if (selectedCompanionId) {
-      const companion = companions.find(c => c.userId === selectedCompanionId);
+      const companion = (Array.isArray(companions) ? companions : []).find(c => c?.userId === selectedCompanionId);
       if (companion) {
         result = result.filter(r => {
           if (r.sender_id) return r.sender_id === selectedCompanionId;
-          if (r.sender) return r.sender.toLowerCase() === companion.companionName.toLowerCase();
+          if (r.sender && companion?.companionName) {
+            return r.sender.toLowerCase() === companion.companionName.toLowerCase();
+          }
           return false;
         });
       }
@@ -322,7 +330,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
         const countQuery = query(reflectionsRef, where('explorerId', '==', currentExplorerId));
         const countSnap = await getCountFromServer(countQuery);
-        setTotalReflectionCount(countSnap.data().count);
+        const countData = countSnap.data();
+        setTotalReflectionCount(typeof countData?.count === 'number' ? countData.count : 0);
       } catch (err) {
         console.warn('Timeline reflection count failed:', err);
       }
@@ -354,11 +363,12 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       const eventIds = new Set<string>();
       const eventIdMap = new Map<string, string>();
       const timestampMap = new Map<string, any>();
-      snapshot.docs.forEach((doc) => {
-        const data = doc.data();
+      (snapshot?.docs ?? []).filter(Boolean).forEach((doc) => {
+        const data = doc.data?.();
+        if (!isRecord(data)) return;
         // Document ID = original reflection event_id. S3 path uses response_event_id (or doc.id for new model)
         const originalEventId = doc.id;
-        const responseEventId = data.response_event_id ?? originalEventId;
+        const responseEventId = asOptionalString(data?.response_event_id) ?? originalEventId;
 
         if (originalEventId) {
           eventIds.add(originalEventId);
@@ -419,21 +429,29 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
           'deleted': 1,
         };
 
-        for (const docSnapshot of snapshot.docs) {
-          const data = docSnapshot.data();
+        for (const docSnapshot of snapshot?.docs ?? []) {
+          const data = docSnapshot.data?.();
+          if (!isRecord(data)) continue;
           const docId = docSnapshot.id; // Document ID should be the event_id
-          const eventIdFromData = data.event_id;
+          const eventIdFromData = asOptionalString(data?.event_id);
 
           // Use document ID as the primary key (it should be the event_id)
           // Fall back to event_id field if document ID is somehow different
           const actualEventId = docId || eventIdFromData;
+          if (!actualEventId) continue;
 
           // Warn if document ID doesn't match event_id field
           if (eventIdFromData && docId !== eventIdFromData) {
             console.warn(`Document ID (${docId}) doesn't match event_id field (${eventIdFromData})`);
           }
 
-          const currentStatus = data.status || 'ready';
+          const currentStatus =
+            data?.status === 'engaged' ||
+            data?.status === 'replayed' ||
+            data?.status === 'deleted' ||
+            data?.status === 'ready'
+              ? data.status
+              : 'ready';
           const currentPriority = statusPriority[currentStatus] || 0;
 
           // Check if we already have this event_id
@@ -463,8 +481,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
               engagementCount: typeof data.engagement_count === 'number' ? data.engagement_count : 0,
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
-              sender: data.sender,
-              sender_id: data.sender_id,
+              sender: asOptionalString(data?.sender) ?? undefined,
+              sender_id: asOptionalString(data?.sender_id) ?? undefined,
             });
           } else {
             // We already have this event_id - always update to higher priority status
@@ -491,8 +509,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
               existing.status = currentStatus;
               existing.timestamp = data.timestamp;
               // Update sender if available
-              if (data.sender) {
-                existing.sender = data.sender;
+              const sender = asOptionalString(data?.sender);
+              if (sender) {
+                existing.sender = sender;
               }
               // Update engagement timestamp for engaged/replayed
               if (currentStatus === 'engaged' || currentStatus === 'replayed') {
@@ -520,8 +539,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                 existing.engagementCount = Math.max(existing.engagementCount || 0, data.engagement_count);
               }
               // Update sender if available (even if timestamp isn't newer)
-              if (data.sender) {
-                existing.sender = data.sender;
+              const sender = asOptionalString(data?.sender);
+              if (sender) {
+                existing.sender = sender;
               }
             } else if (currentPriority === existingPriority && currentStatus !== existing.status) {
               // Same priority but different status - this shouldn't happen, but log it
@@ -556,9 +576,12 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
           const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
           if (gen !== snapshotGenRef.current) return; // stale — newer snapshot arrived
           if (eventsResponse.ok) {
-            const eventsData = await eventsResponse.json();
-            (eventsData.events || []).forEach((e: Event) => {
-              allMirrorEventsMap.set(e.event_id, e);
+            const eventsData = await eventsResponse.json().catch(() => null);
+            const events = isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+            events.filter(Boolean).forEach((e) => {
+              const event = e as Event;
+              const eventId = asOptionalString(event?.event_id);
+              if (eventId) allMirrorEventsMap.set(eventId, event);
             });
           }
         } catch (error) {
@@ -567,6 +590,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
         // Enrich from list API (image URLs + embedded metadata when Firestore has none yet)
         const reflectionsList = Array.from(reflectionMap.values())
+          .filter(Boolean)
           .filter((reflection) => !reflection.deletedAt && reflection.status !== 'deleted')
           .map((reflection) => {
             const matchingEvent = allMirrorEventsMap.get(reflection.event_id);
@@ -659,8 +683,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         { method: 'DELETE' }
       );
       if (!deleteRes.ok) {
-        const errData = await deleteRes.json().catch(() => ({}));
-        throw new Error(errData.errors?.join(', ') || 'Failed to delete reflection');
+        const errData = await deleteRes.json().catch(() => null);
+        const errors = isRecord(errData) && Array.isArray(errData?.errors) ? errData.errors : [];
+        throw new Error(errors.filter((e): e is string => typeof e === 'string').join(', ') || 'Failed to delete reflection');
       }
 
       // 2. Delete selfie response image from S3 if it exists
@@ -709,8 +734,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         try {
           const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
           if (eventsResponse.ok) {
-            const eventsData = await eventsResponse.json();
-            const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
+            const eventsData = await eventsResponse.json().catch(() => null);
+            const events = isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+            const matchingEvent = events.filter(Boolean).find((e) => (e as Event)?.event_id === item.event_id) as Event | undefined;
             if (matchingEvent) {
               fullEvent = matchingEvent;
               setEventObjectsMap((prev) => new Map(prev).set(item.event_id, matchingEvent));
@@ -728,7 +754,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         rowMeta && listMeta
           ? ({ ...rowMeta, ...listMeta } as EventMetadata)
           : rowMeta ?? listMeta;
-      const imageUrl = fullEvent?.image_url || item.reflectionImageUrl || '';
+      const imageUrl = asOptionalString(fullEvent?.image_url) ?? asOptionalString(item.reflectionImageUrl) ?? '';
       if (!imageUrl) {
         Alert.alert('Cannot edit', 'Image URL is not available for this reflection yet.');
         return null;
@@ -944,9 +970,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       {/* Header Section */}
       <View style={styles.headerContainer}>
         {/* Companion Avatar Filter */}
-        {companions.length > 0 && (
+        {(Array.isArray(companions) ? companions : []).length > 0 && (
           <AvatarFilterBar
-            companions={companions}
+            companions={Array.isArray(companions) ? companions : []}
             selectedId={selectedCompanionId}
             onSelect={setSelectedCompanionId}
             loading={companionsLoading}
@@ -1005,9 +1031,10 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       {hasReflections && (
         <View style={styles.listArea}>
         <FlatList
-          data={displayReflections}
-          keyExtractor={(item) => item.event_id}
+          data={(Array.isArray(displayReflections) ? displayReflections : []).filter(Boolean)}
+          keyExtractor={(item, index) => item?.event_id ?? `reflection-${index}`}
           renderItem={({ item, index }) => {
+            if (!item?.event_id) return null;
             const hasSelfie = !!item.hasResponse;
             const rawEngagementCount = item.engagementCount ?? 0;
             const engagementCount = rawEngagementCount > 0 ? rawEngagementCount : (hasSelfie ? 1 : 0);
@@ -1031,8 +1058,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                     try {
                       const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
                       if (eventsResponse.ok) {
-                        const eventsData = await eventsResponse.json();
-                        const matchingEvent = (eventsData.events || []).find((e: Event) => e.event_id === item.event_id);
+                        const eventsData = await eventsResponse.json().catch(() => null);
+                        const events = isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+                        const matchingEvent = events.filter(Boolean).find((e) => (e as Event)?.event_id === item.event_id) as Event | undefined;
                         if (matchingEvent) {
                           fullEvent = matchingEvent;
                           // Update the map for future use
@@ -1061,7 +1089,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                   // Construct Event object with all required fields
                   const eventForReplay: Event = {
                     event_id: item.event_id,
-                    image_url: fullEvent?.image_url || item.reflectionImageUrl || '',
+                    image_url: asOptionalString(fullEvent?.image_url) ?? asOptionalString(item.reflectionImageUrl) ?? '',
                     audio_url: fullEvent?.audio_url,
                     video_url: fullEvent?.video_url,
                     deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
@@ -1169,9 +1197,10 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                               const url = `${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${responseEventId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`;
                               const imageResponse = await fetch(url);
                               if (imageResponse.ok) {
-                                const data = await imageResponse.json();
-                                if (data.url) {
-                                  setSelfieImageUrl(data.url);
+                                const data = await imageResponse.json().catch(() => null);
+                                const selfieUrl = isRecord(data) ? asOptionalString(data?.url) : null;
+                                if (selfieUrl) {
+                                  setSelfieImageUrl(selfieUrl);
                                 } else {
                                   console.error('No URL in response:', data);
                                 }
