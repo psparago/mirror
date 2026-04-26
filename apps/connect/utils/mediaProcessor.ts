@@ -287,7 +287,15 @@ async function compressVideoSourceAsync(sourceForReturn: string, logTag: string)
   }
 }
 
-export async function compressVideoIfNeededAsync(uri: string): Promise<string> {
+export type CompressVideoIfNeededOptions = {
+  /** Force compression regardless of source size (used for camera captures). */
+  alwaysCompress?: boolean;
+};
+
+export async function compressVideoIfNeededAsync(
+  uri: string,
+  options: CompressVideoIfNeededOptions = {}
+): Promise<string> {
   let sourceFile = uri;
   try {
     sourceFile = await materializeVideoSourceToFileAsync(uri);
@@ -298,13 +306,15 @@ export async function compressVideoIfNeededAsync(uri: string): Promise<string> {
 
   const sourceForReturn = sourceFile.startsWith('file://') ? sourceFile : ensureFileUri(sourceFile);
 
-  try {
-    const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
-    if (info.exists && typeof info.size === 'number' && info.size < REFLECTION_SMALL_VIDEO_BYTES) {
-      return sourceForReturn;
+  if (!options.alwaysCompress) {
+    try {
+      const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
+      if (info.exists && typeof info.size === 'number' && info.size < REFLECTION_SMALL_VIDEO_BYTES) {
+        return sourceForReturn;
+      }
+    } catch {
+      // size unknown — attempt compression so large 4K provider exports still get optimized.
     }
-  } catch {
-    // size unknown — attempt compression so large 4K provider exports still get optimized.
   }
 
   return compressVideoSourceAsync(sourceForReturn, 'compressVideoIfNeededAsync');

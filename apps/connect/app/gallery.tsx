@@ -1,6 +1,7 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
 import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
+import { FontAwesome } from '@expo/vector-icons';
 import * as ExpoImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { useNavigation, useRouter } from 'expo-router';
@@ -53,6 +54,9 @@ export default function GalleryScreen() {
   const hasLaunched = useRef(false);
   const cancelledRef = useRef(false);
   const [statusLine, setStatusLine] = useState('Getting your library ready...');
+  const [waitIcon, setWaitIcon] = useState<'photo' | 'video-camera' | 'scissors' | 'cloud-upload'>(
+    'photo'
+  );
   const [isProcessing, setIsProcessing] = useState(false);
 
   const confirmLargeVideoAsync = async (sizeBytes?: number | null): Promise<boolean> => {
@@ -118,7 +122,8 @@ export default function GalleryScreen() {
         return;
       }
 
-      setStatusLine('Choose a photo or video for your Reflection...');
+      setStatusLine('Opening your library…');
+      setWaitIcon('photo');
       const result = await ExpoImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
         allowsEditing: false,
@@ -134,7 +139,11 @@ export default function GalleryScreen() {
       const expoUri = ensureFileUri(asset.uri);
       const isVideo =
         asset.type === 'video' || (asset.mimeType?.startsWith('video/') ?? false);
-      setStatusLine(isVideo ? 'Loading selected video…' : 'Loading selected photo…');
+      setStatusLine(
+        isVideo ? 'Opening video from your library…' : 'Opening photo from your library…'
+      );
+      setWaitIcon(isVideo ? 'video-camera' : 'photo');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
       console.log('[GalleryScreen] media selected', {
         type: isVideo ? 'video' : 'photo',
         uri: asset.uri,
@@ -143,7 +152,8 @@ export default function GalleryScreen() {
       });
 
       if (isVideo) {
-        setStatusLine('Checking video details…');
+        setStatusLine('Preparing video for your Reflection…');
+        setWaitIcon('video-camera');
         let detectedSizeBytes: number | null = typeof asset.fileSize === 'number' ? asset.fileSize : null;
         if (!detectedSizeBytes) {
           try {
@@ -161,10 +171,11 @@ export default function GalleryScreen() {
           return;
         }
         if (detectedSizeBytes && detectedSizeBytes >= LARGE_VIDEO_WARN_BYTES) {
-          setStatusLine('Large video detected. Opening trim tools…');
+          setStatusLine('Large video detected. Preparing trim tools…');
         } else {
-          setStatusLine('Opening trim tools…');
+          setStatusLine('Preparing trim tools…');
         }
+        setWaitIcon('scissors');
         if (cancelledRef.current) return;
         console.log('[GalleryScreen] launching mandatory trim', {
           uri: expoUri,
@@ -186,13 +197,15 @@ export default function GalleryScreen() {
         }
         if (cancelledRef.current) return;
         setStatusLine('Preparing your video for Reflection...');
+        setWaitIcon('cloud-upload');
         setPendingMedia({
           uri: ensureFileUri(trimResult.uri),
           type: 'video',
           source: 'gallery',
         });
       } else {
-        setStatusLine('Preparing photo…');
+        setStatusLine('Preparing photo for your Reflection…');
+        setWaitIcon('photo');
         const optimizedUri = await prepareImageForUpload(expoUri);
         if (cancelledRef.current) return;
         setPendingMedia({
@@ -225,20 +238,25 @@ export default function GalleryScreen() {
 
   return (
     <View style={styles.container}>
-      <ActivityIndicator size="large" color="#fff" />
-      <Text style={styles.text}>{statusLine}</Text>
-      {isProcessing ? (
-        <TouchableOpacity
-          style={styles.cancelBtn}
-          onPress={() => {
-            cancelledRef.current = true;
-            router.back();
-          }}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.cancelBtnText}>Cancel</Text>
-        </TouchableOpacity>
-      ) : null}
+      <View style={styles.waitCard}>
+        <View style={styles.waitIconWrap}>
+          <FontAwesome name={waitIcon} size={20} color="#dbeafe" />
+        </View>
+        <ActivityIndicator size="large" color="#f39c12" />
+        <Text style={styles.text}>{statusLine}</Text>
+        {isProcessing ? (
+          <TouchableOpacity
+            style={styles.cancelBtn}
+            onPress={() => {
+              cancelledRef.current = true;
+              router.back();
+            }}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.cancelBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -248,24 +266,53 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#000',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 20,
+  },
+  waitCard: {
+    width: '86%',
+    maxWidth: 360,
+    alignItems: 'center',
+    borderRadius: 24,
+    paddingVertical: 28,
+    paddingHorizontal: 24,
+    backgroundColor: 'rgba(15, 23, 42, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.45)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.26,
+    shadowRadius: 18,
+    elevation: 10,
+    gap: 12,
+  },
+  waitIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 219, 254, 0.45)',
   },
   text: {
-    color: '#fff',
-    marginTop: 16,
-    fontSize: 16,
+    color: '#f39c12',
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   cancelBtn: {
-    marginTop: 18,
-    paddingHorizontal: 18,
+    marginTop: 8,
+    paddingHorizontal: 20,
     paddingVertical: 10,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.55)',
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(191, 219, 254, 0.6)',
+    backgroundColor: 'rgba(59, 130, 246, 0.18)',
   },
   cancelBtnText: {
-    color: '#fff',
+    color: '#e2e8f0',
     fontSize: 14,
     fontWeight: '700',
   },

@@ -1,5 +1,4 @@
 import { FontAwesome } from '@expo/vector-icons';
-import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
@@ -8,11 +7,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView, type VideoPlayer } from 'expo-video';
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   ActivityIndicator,
   Keyboard,
   LayoutChangeEvent,
+  Modal,
   Image as NativeImage,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -218,9 +220,10 @@ function ReflectionComposerInner({
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
-  const infoSheetRef = useRef<BottomSheet>(null);
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
   const [caption, setCaption] = useState(initialCaption);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [isCaptionFocused, setIsCaptionFocused] = useState(false);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
@@ -1070,6 +1073,20 @@ function ReflectionComposerInner({
     onStageChange('send');
   }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, caption]);
 
+  const openHowItWorks = useCallback(() => {
+    Keyboard.dismiss();
+    setIsInfoOpen(true);
+  }, []);
+
+  const closeHowItWorks = useCallback(() => {
+    setIsInfoOpen(false);
+  }, []);
+
+  useEffect(() => {
+    // Help sheet should never persist across stage/screen transitions.
+    setIsInfoOpen(false);
+  }, [stage, isPreviewOpen]);
+
   // AI audio preview playback — caption → pause → deep dive
   type PreviewPhase = 'idle' | 'caption' | 'pause' | 'deep_dive';
   const [previewSound, setPreviewSound] = useState<Audio.Sound | null>(null);
@@ -1652,7 +1669,7 @@ function ReflectionComposerInner({
       ) : null}
       <TouchableOpacity
         style={styles.infoBtn}
-        onPress={() => infoSheetRef.current?.snapToIndex(0)}
+        onPress={openHowItWorks}
         activeOpacity={0.7}
       >
         <FontAwesome name="info-circle" size={15} color="#4a90d9" />
@@ -1715,6 +1732,7 @@ function ReflectionComposerInner({
         style={styles.aiScreenScroll}
         contentContainerStyle={{ flexGrow: 1, paddingBottom: 8 }}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.aiSubtitleText}>
@@ -1788,6 +1806,36 @@ function ReflectionComposerInner({
           </View>
         </View>
 
+        {/* SECTION: Caption */}
+        <View style={[styles.aiCard, { flex: 1 }]}>
+          <View style={styles.aiCardHeader}>
+            <FontAwesome name="pencil" size={14} color="#8e44ad" />
+            <Text style={styles.aiCardTitle}>Caption (Optional)</Text>
+          </View>
+          <TextInput
+            style={styles.aiCaptionInput}
+            placeholder="Edit the AI caption or write your own..."
+            placeholderTextColor="rgba(255,255,255,0.28)"
+            value={caption}
+            onChangeText={setCaption}
+            onFocus={() => setIsCaptionFocused(true)}
+            onBlur={() => setIsCaptionFocused(false)}
+            multiline
+            textAlignVertical="top"
+            blurOnSubmit={false}
+          />
+          {isCaptionFocused ? (
+            <TouchableOpacity
+              style={styles.aiCaptionDoneBtn}
+              onPress={() => Keyboard.dismiss()}
+              activeOpacity={0.75}
+            >
+              <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
+              <Text style={styles.aiCaptionDoneText}>Done editing</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
         {/* SECTION: Voice Intro */}
         <View style={styles.aiCard}>
           <View style={styles.aiCardHeader}>
@@ -1824,27 +1872,20 @@ function ReflectionComposerInner({
             )}
       </View>
       </View>
-
-        {/* SECTION: Caption */}
-        <View style={[styles.aiCard, { flex: 1 }]}>
-          <View style={styles.aiCardHeader}>
-            <FontAwesome name="pencil" size={14} color="#8e44ad" />
-            <Text style={styles.aiCardTitle}>Caption (Optional)</Text>
-          </View>
-          <TextInput
-            style={styles.aiCaptionInput}
-            placeholder="Edit the AI caption or write your own..."
-            placeholderTextColor="rgba(255,255,255,0.28)"
-        value={caption}
-        onChangeText={setCaption}
-        multiline
-        textAlignVertical="top"
-          />
-        </View>
       </ScrollView>
 
       {/* FOOTER: Run Sparkle + Play + How this works */}
       <View style={[styles.aiFooter, { paddingBottom: Math.max(insets.bottom + 8, 20) }]}>
+        {keyboardHeight > 0 ? (
+          <TouchableOpacity
+            style={styles.aiKeyboardDoneBtn}
+            onPress={() => Keyboard.dismiss()}
+            activeOpacity={0.75}
+          >
+            <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
+            <Text style={styles.aiKeyboardDoneText}>Done editing</Text>
+          </TouchableOpacity>
+        ) : null}
         <View style={styles.aiFooterBtnRow}>
           <TouchableOpacity
             style={[styles.aiSparkleBtn, (!sparkleNeeded && !isAiThinking) && { opacity: 0.35 }]}
@@ -1876,12 +1917,15 @@ function ReflectionComposerInner({
           </TouchableOpacity>
         </View>
         <TouchableOpacity
-          style={styles.aiInfoLink}
-          onPress={() => infoSheetRef.current?.snapToIndex(0)}
+          style={[styles.infoBtn, styles.sendInfoBtnSpacing]}
+          onPress={openHowItWorks}
           activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }}
+          accessibilityRole="button"
+          accessibilityLabel="How Sparkle works"
         >
-          <FontAwesome name="info-circle" size={13} color="#4a90d9" />
-          <Text style={styles.aiInfoLinkText}>How this works</Text>
+          <FontAwesome name="info-circle" size={15} color="#4a90d9" />
+          <Text style={styles.infoBtnText}>How this works</Text>
         </TouchableOpacity>
       </View>
     </Animated.View>
@@ -1890,46 +1934,59 @@ function ReflectionComposerInner({
   const renderSendTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={styles.sendTabContainer}>
       {!isBlockedByAi && (
-        <View style={styles.sendBtnRow}>
+        <>
+          <View style={styles.sendBtnRow}>
+            <TouchableOpacity
+              style={[
+                styles.sendSlimBtn,
+                styles.previewSlimBtn,
+                (isSending || isAiThinking || previewBuilding || photoExportBusy) && { opacity: 0.4 },
+              ]}
+              onPress={handlePreview}
+              disabled={isSending || isAiThinking || photoExportBusy || previewBuilding}
+              activeOpacity={0.7}
+            >
+              {previewBuilding ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <FontAwesome name="eye" size={15} color="#fff" />
+                  <Text style={styles.sendSlimBtnText}>Preview</Text>
+                </>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.sendSlimBtn,
+                styles.sendSlimBtnPrimary,
+                (isSending || sendPreparing || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
+              ]}
+              onPress={handleSendWithThrottle}
+              disabled={isSending || sendPreparing || photoExportBusy || (!caption && !hasRecordedAudio)}
+              activeOpacity={0.7}
+            >
+              {isSending || sendPreparing ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <FontAwesome name="paper-plane" size={15} color="#fff" />
+                  <Text style={styles.sendSlimBtnText}>Send</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </View>
           <TouchableOpacity
-            style={[
-              styles.sendSlimBtn,
-              styles.previewSlimBtn,
-              (isSending || isAiThinking || previewBuilding || photoExportBusy) && { opacity: 0.4 },
-            ]}
-            onPress={handlePreview}
-            disabled={isSending || isAiThinking || photoExportBusy || previewBuilding}
+            style={[styles.infoBtn, styles.sendInfoBtnSpacing]}
+            onPress={openHowItWorks}
             activeOpacity={0.7}
+            hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }}
+            accessibilityRole="button"
+            accessibilityLabel="How Preview and Send works"
           >
-            {previewBuilding ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <>
-                <FontAwesome name="eye" size={15} color="#fff" />
-                <Text style={styles.sendSlimBtnText}>Preview</Text>
-              </>
-            )}
+            <FontAwesome name="info-circle" size={15} color="#4a90d9" />
+            <Text style={styles.infoBtnText}>How this works</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.sendSlimBtn,
-              styles.sendSlimBtnPrimary,
-              (isSending || sendPreparing || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
-            ]}
-            onPress={handleSendWithThrottle}
-            disabled={isSending || sendPreparing || photoExportBusy || (!caption && !hasRecordedAudio)}
-            activeOpacity={0.7}
-          >
-            {isSending || sendPreparing ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <>
-                <FontAwesome name="paper-plane" size={15} color="#fff" />
-                <Text style={styles.sendSlimBtnText}>Send</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        </View>
+        </>
       )}
     </Animated.View>
   );
@@ -1978,13 +2035,17 @@ function ReflectionComposerInner({
       {/* 2. AI SPARKLE OVERLAY — rendered outside the bottom sheet */}
       {isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
-          <View style={styles.sparkleCard}>
-            <Animated.View style={sparkleIconStyle}>
-              <FontAwesome name="magic" size={36} color="#f39c12" />
+          <View style={[styles.sparkleCard, styles.sendingCard]}>
+            <Animated.View style={[styles.sendingIconWrap, sparkleIconStyle]}>
+              <FontAwesome name="magic" size={20} color="#fcd34d" />
             </Animated.View>
+            <ActivityIndicator color="#f39c12" size="large" />
             <Animated.Text style={[styles.aiOverlayText, sparkleTextStyle]}>
               Adding Sparkle to your Reflection...
             </Animated.Text>
+            <Text style={styles.aiOverlaySubText}>
+              Please keep the app open while Sparkle prepares your Reflection.
+            </Text>
             <TouchableOpacity
               style={styles.cancelAiButton}
               onPress={() => setIsAiCancelled(true)}
@@ -2068,123 +2129,202 @@ function ReflectionComposerInner({
         </View>
       ) : null}
 
-      {/* 5. EDITOR GUIDE SHEET */}
-      <BottomSheet
-        ref={infoSheetRef}
-        index={-1}
-        snapPoints={['70%']}
-        enablePanDownToClose
-        backgroundStyle={styles.infoSheetBg}
-        handleIndicatorStyle={styles.sheetHandle}
+      {/* 5. EDITOR GUIDE SHEET (Modal — guarantees rendering above Sparkle overlay) */}
+      <Modal
+        visible={isInfoOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={closeHowItWorks}
+        statusBarTranslucent
       >
-        <BottomSheetScrollView contentContainerStyle={styles.infoSheetScroll}>
-          <Text style={styles.infoTitle}>Your Creative Workbench</Text>
-          <Text style={styles.infoSubtitle}>
-            {mediaType === 'video'
-              ? `Three stages: Workbench -> Sparkle -> Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
-              : 'Three stages: Workbench -> Sparkle -> Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate button, and tap Reset to undo zoom, pan, and rotation. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
-          </Text>
-
-          {mediaType === 'video' ? (
-            <>
-              <View style={styles.infoRow}>
-                <View style={styles.infoIconWrap}>
-                  <FontAwesome name="scissors" size={14} color="#4FC3F7" />
-                </View>
-                <View style={styles.infoTextWrap}>
-                  <Text style={styles.infoLabel}>Trim & Playback</Text>
-                  <Text style={styles.infoDesc}>
-                    The gold trim bar sits below the top controls. Drag the handles to set the playback window the Explorer will experience — start and end times are saved as metadata only, the full source video is uploaded. The selected duration shows inside the bar. You get a light tap when a handle hits the start, end, or minimum length. Hold a handle to zoom in: the bar temporarily maps to about four seconds centered on that handle so you can nudge the edge with precision. Tap the video itself to pause or resume playback. The video does not loop — when it reaches the end, a Replay button appears. There is also a play/pause button in the top control bar.
+        <View style={styles.infoModalRoot}>
+          <Pressable style={styles.infoModalBackdrop} onPress={closeHowItWorks} />
+          <View style={[styles.infoModalCard, { paddingBottom: Math.max(insets.bottom, 16) + 16 }]}>
+            <View style={styles.infoModalHeader}>
+              <View style={styles.sheetHandle} />
+              <TouchableOpacity
+                onPress={closeHowItWorks}
+                style={styles.infoModalCloseBtn}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityRole="button"
+                accessibilityLabel="Close how this works"
+              >
+                <FontAwesome name="close" size={18} color="#fff" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={styles.infoModalScrollHost}
+              contentContainerStyle={styles.infoSheetScroll}
+              showsVerticalScrollIndicator
+            >
+              {stage === 'workbench' ? (
+                <>
+                  <Text style={styles.infoTitle}>The Workbench</Text>
+                  <Text style={styles.infoSubtitle}>
+                    {mediaType === 'video'
+                      ? `Trim, set a poster, and tap the video to pause or resume. Sparkle is the next stage. X closes to the timeline. Reflections play best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
+                      : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
                   </Text>
-                </View>
-              </View>
 
-              <View style={styles.infoRow}>
-                <View style={styles.infoIconWrap}>
-                  <FontAwesome name="image" size={14} color="#4ade80" />
-                </View>
-                <View style={styles.infoTextWrap}>
-                  <Text style={styles.infoLabel}>Poster</Text>
-                  <Text style={styles.infoDesc}>
-                    The poster is the frame the Explorer sees first, before the video plays — think of it like a movie poster. Tap Poster to enter poster mode. The video pauses and the top bar shows arrow buttons to step backward and forward in quarter-second jumps. Tap Set to lock the current frame. You can also swipe on the video to scrub freely. Clear drops back to the default frame, and Done exits and resumes playback. If the poster time falls after the end of your trim, it moves to the end of the trim; you can also place it slightly before the trim start if you want a cover frame that is not the first moment of playback.
+                  {mediaType === 'video' ? (
+                    <>
+                      <View style={styles.infoRow}>
+                        <View style={styles.infoIconWrap}>
+                          <FontAwesome name="scissors" size={14} color="#4FC3F7" />
+                        </View>
+                        <View style={styles.infoTextWrap}>
+                          <Text style={styles.infoLabel}>Trim & Playback</Text>
+                          <Text style={styles.infoDesc}>
+                            Drag the gold bar handles to set the Explorer’s playback window — start and end are saved as metadata, the full source video is uploaded. Hold a handle to zoom in for fine control. Tap the video to pause or resume; it doesn’t loop, and a Replay button appears at the end.
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.infoRow}>
+                        <View style={styles.infoIconWrap}>
+                          <FontAwesome name="image" size={14} color="#4ade80" />
+                        </View>
+                        <View style={styles.infoTextWrap}>
+                          <Text style={styles.infoLabel}>Poster</Text>
+                          <Text style={styles.infoDesc}>
+                            The poster is the frame the Explorer sees first. Tap Poster, then use the arrows or swipe the video to scrub. Set locks the frame, Clear restores the default, Done exits poster mode.
+                          </Text>
+                        </View>
+                      </View>
+                    </>
+                  ) : (
+                    <View style={styles.infoRow}>
+                      <View style={styles.infoIconWrap}>
+                        <FontAwesome name="crop" size={14} color="#f39c12" />
+                      </View>
+                      <View style={styles.infoTextWrap}>
+                        <Text style={styles.infoLabel}>Crop & position</Text>
+                        <Text style={styles.infoDesc}>
+                          Frame the photo inside the square by dragging and pinching. Twist with two fingers to rotate, or tap Rotate for a 90° turn. What’s in the square is what the Explorer sees.
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+
+                  <View style={styles.infoDivider} />
+
+                  <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
+                  <Text style={styles.infoProTip}>
+                    Top-left chip re-opens where you picked media (Camera, Library, or Search). Top-right is Sparkle and X. X always closes to the timeline. Nothing sends until Preview & Send.
                   </Text>
-                </View>
-              </View>
-            </>
-          ) : (
-            <View style={styles.infoRow}>
-              <View style={styles.infoIconWrap}>
-                <FontAwesome name="crop" size={14} color="#f39c12" />
-              </View>
-              <View style={styles.infoTextWrap}>
-                <Text style={styles.infoLabel}>Crop & position</Text>
-                <Text style={styles.infoDesc}>
-                  Frame the photo inside the square by dragging and pinching. Twist with two fingers to rotate, or tap Rotate for a 90° turn. Reset snaps back to the original fit. What you see in that square is what gets exported and uploaded for the Explorer — same idea as cropping before you post elsewhere.
-                </Text>
-              </View>
-            </View>
-          )}
+                  <Text style={styles.infoProTip}>
+                    {mediaType === 'video'
+                      ? 'Video pauses when you leave Workbench for Sparkle.'
+                      : 'Reset snaps back to the original framing.'}
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    On Android, the system back key steps between Workbench, Sparkle, and Preview & Send; from Workbench it closes like X.
+                  </Text>
+                </>
+              ) : stage === 'ai' ? (
+                <>
+                  <Text style={styles.infoTitle}>The Sparkle Stage</Text>
+                  <Text style={styles.infoSubtitle}>
+                    Tell AI who and what is in your reflection, optionally record your voice, and let Sparkle draft a caption and an AI voice intro you can preview before sending.
+                  </Text>
 
-          <View style={styles.infoRow}>
-            <View style={styles.infoIconWrap}>
-              <FontAwesome name="microphone" size={14} color="#2e78b7" />
-            </View>
-            <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Voice Intro</Text>
-              <Text style={styles.infoDesc}>
-                Optional. Record a short intro in your own voice on the Sparkle screen. After you send, the Explorer hears that recording first when present; it always takes priority over AI-generated intro audio. If you do not record, Sparkle can synthesize speech from your caption after you run Sparkle, so run Sparkle at least once before sending if you want an AI voice intro.
-              </Text>
-            </View>
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="microphone" size={14} color="#2e78b7" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Voice Intro</Text>
+                      <Text style={styles.infoDesc}>
+                        Optional. Record a short intro in your own voice. If present, the Explorer hears it first — it always wins over the AI voice. If you skip it, Sparkle can speak your caption in an AI voice instead.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="pencil" size={14} color="#8e44ad" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Caption</Text>
+                      <Text style={styles.infoDesc}>
+                        Sparkle drafts a caption from your hints and media. You can edit or replace it. If you didn’t record a voice intro, this text becomes the AI voice intro the Explorer hears.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="magic" size={14} color="#f5c842" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
+                      <Text style={styles.infoDesc}>
+                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then deep dive. Play re-listens without regenerating. Run Sparkle shows “Up to Date” until you change {mediaType === 'video' ? 'trim, poster, caption, or hints' : 'caption, hints, or framing'}.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoDivider} />
+
+                  <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
+                  <Text style={styles.infoProTip}>
+                    Fast path: tap Finish (top-right). If Sparkle isn’t up to date, it runs first, then opens Preview & Send.
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    While editing the caption, drag the page to dismiss the keyboard or tap the Done editing button under the caption field.
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    A recorded voice intro always takes priority over AI voice.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.infoTitle}>Preview & Send</Text>
+                  <Text style={styles.infoSubtitle}>
+                    Last stop. Watch and listen to exactly what the Explorer will experience, then send when it feels right.
+                  </Text>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="eye" size={14} color="#4a90d9" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Preview</Text>
+                      <Text style={styles.infoDesc}>
+                        {mediaType === 'video'
+                          ? 'Plays in order: poster frame, then your voice or AI intro audio, then the trimmed video. Nothing is sent yet.'
+                          : 'Shows your cropped photo, then plays your voice or AI intro audio. Nothing is sent yet.'}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="paper-plane" size={14} color="#2e78b7" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Send</Text>
+                      <Text style={styles.infoDesc}>
+                        Uploads your media and audio and adds the Reflection to the timeline. Send is disabled until you have either a caption or a recorded voice intro. Stay on Wi-Fi for large videos.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoDivider} />
+
+                  <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
+                  <Text style={styles.infoProTip}>
+                    Top-left arrow goes back to Sparkle to tweak hints, caption, or voice. X closes to the timeline without sending.
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    A recorded voice intro always takes priority over the AI voice.
+                  </Text>
+                </>
+              )}
+            </ScrollView>
           </View>
-
-          <View style={styles.infoRow}>
-            <View style={styles.infoIconWrap}>
-              <FontAwesome name="pencil" size={14} color="#8e44ad" />
-            </View>
-            <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Caption</Text>
-              <Text style={styles.infoDesc}>
-                Sparkle writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the Sparkle screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.infoRow}>
-            <View style={styles.infoIconWrap}>
-              <FontAwesome name="magic" size={14} color="#f5c842" />
-            </View>
-            <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
-              <Text style={styles.infoDesc}>
-                {mediaType === 'video'
-                  ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change trim, poster, caption, or Reflection hints (toggles or context text). If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
-                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Reflection hints (toggles or context text), or how the photo is framed in Workbench. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.infoDivider} />
-
-          <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
-          <Text style={styles.infoProTip}>
-            Workbench: left chip re-opens where you picked media (Camera, Library, or Search); right side is Sparkle and X. Sparkle: left is Workbench; right is Finish (opens Preview & Send) and X. Preview & Send: left is Sparkle; right is X. X always closes to the timeline (same behavior on every stage). Nothing sends until you tap Send on the final screen.
-          </Text>
-          <Text style={styles.infoProTip}>
-            Fast path: on Sparkle, tap Finish (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready; you do not need a separate Run Sparkle tap in that case.
-          </Text>
-          <Text style={styles.infoProTip}>
-            After Sparkle has run, changing trim, poster, caption, Reflection hints, or (for photos) framing in Workbench makes Run Sparkle light up again. Tapping Finish will run Sparkle first when needed, then take you to Preview & Send so AI stays aligned with your edits.
-          </Text>
-          <Text style={styles.infoProTip}>
-            {mediaType === 'video'
-              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops when you leave Workbench for Sparkle.'
-              : 'The Explorer sees your cropped photo first, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
-          </Text>
-          <Text style={styles.infoProTip}>
-            On Android, the system back key steps back between Workbench, Sparkle, and Preview & Send; from Workbench it closes like the X button.
-          </Text>
-        </BottomSheetScrollView>
-      </BottomSheet>
+        </View>
+      </Modal>
 
       {/* REPLAY PREVIEW MODAL */}
       <ReplayModal
@@ -2645,6 +2785,50 @@ const styles = StyleSheet.create({
   sheetHandle: {
     backgroundColor: '#666',
     width: 40,
+    height: 5,
+    borderRadius: 3,
+    alignSelf: 'center',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  infoSheet: {
+    zIndex: 120,
+    elevation: 120,
+  },
+  infoModalRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  infoModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  infoModalCard: {
+    backgroundColor: '#1a1a1a',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '85%',
+    overflow: 'hidden',
+  },
+  infoModalHeader: {
+    paddingTop: 4,
+    paddingBottom: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  infoModalCloseBtn: {
+    position: 'absolute',
+    top: 6,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoModalScrollHost: {
+    flexGrow: 0,
   },
   aiScreen: {
     ...StyleSheet.absoluteFillObject,
@@ -2687,6 +2871,9 @@ const styles = StyleSheet.create({
   },
   /** Tight right column on Sparkle: Finish + X (matches workbench / send close behavior). */
   aiNavRightCluster: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     flexShrink: 1,
     minWidth: 0,
     maxWidth: '52%',
@@ -2869,11 +3056,49 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.1)',
   },
+  aiCaptionDoneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    alignSelf: 'flex-end',
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 219, 254, 0.45)',
+  },
+  aiCaptionDoneText: {
+    color: '#dbeafe',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   aiFooter: {
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
     paddingTop: 10,
     paddingHorizontal: 16,
+  },
+  aiKeyboardDoneBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    alignSelf: 'center',
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 14,
+    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 219, 254, 0.45)',
+  },
+  aiKeyboardDoneText: {
+    color: '#dbeafe',
+    fontSize: 12,
+    fontWeight: '700',
   },
   aiFooterBtnRow: {
     flexDirection: 'row',
@@ -2894,19 +3119,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 11,
     fontWeight: '600',
-  },
-  aiInfoLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    paddingTop: 12,
-    paddingBottom: 4,
-  },
-  aiInfoLinkText: {
-    color: '#4a90d9',
-    fontSize: 14,
-    fontWeight: '500',
   },
   tabContainer: {
   },
@@ -3207,6 +3419,9 @@ infoBtnText: {
   color: '#4a90d9',
   fontSize: 14,
   fontWeight: '500',
+},
+sendInfoBtnSpacing: {
+  marginTop: 12,
 },
 infoSheetBg: {
   backgroundColor: '#1a1a1a',

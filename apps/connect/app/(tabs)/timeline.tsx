@@ -285,10 +285,18 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
 
       if (sortBy === 'sent') {
-        const aTime = getTimestampMs(a.timestamp);
-        const bTime = getTimestampMs(b.timestamp);
-        const timeDiff = bTime - aTime;
-        if (timeDiff !== 0) return timeDiff;
+        // Sent view should prioritize original send time (metadata timestamp),
+        // not later activity/edit bumps on the root timestamp.
+        const aSentTime = getTimestampMs(a.metadata?.timestamp || a.sentTimestamp || a.timestamp);
+        const bSentTime = getTimestampMs(b.metadata?.timestamp || b.sentTimestamp || b.timestamp);
+        const sentDiff = bSentTime - aSentTime;
+        if (sentDiff !== 0) return sentDiff;
+
+        // If original send times tie, use most recent root update as tiebreaker.
+        const aRootTime = getTimestampMs(a.timestamp);
+        const bRootTime = getTimestampMs(b.timestamp);
+        const rootDiff = bRootTime - aRootTime;
+        if (rootDiff !== 0) return rootDiff;
         return (reflectionSenderLabel(a) || '').localeCompare(reflectionSenderLabel(b) || '');
       }
 
@@ -405,8 +413,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
             reflectionsRef,
             where('explorerId', '==', currentExplorerId),
             where('type', 'in', ['mirror_event', 'engagement_heartbeat']),
-            orderBy('timestamp', 'desc'),
-            orderBy('metadata.sender', 'asc')
+            orderBy('timestamp', 'desc')
           )
         : query(
             reflectionsRef,

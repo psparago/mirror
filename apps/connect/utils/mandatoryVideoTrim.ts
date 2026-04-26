@@ -12,17 +12,52 @@ import type { MandatoryTrimResult } from './mandatoryVideoTrim.types';
 
 type ShowEditorFn = (filePath: string, config: Record<string, unknown>) => void;
 type IsValidFileFn = (filePath: string) => boolean | Promise<boolean>;
+type CloseEditorFn = () => void;
+type TrimEventPayload = {
+  name?: string;
+  outputPath?: string;
+  startTime?: number;
+  endTime?: number;
+  duration?: number;
+  message?: string;
+  errorCode?: string;
+};
+type RemoveSubscription = { remove: () => void };
+type NativeTrimEmitterLike = {
+  onFinishTrimming?: (cb: (e: TrimEventPayload) => void) => RemoveSubscription;
+  onError?: (cb: (e: TrimEventPayload) => void) => RemoveSubscription;
+  onCancel?: (cb: () => void) => RemoveSubscription;
+  onCancelTrimming?: (cb: () => void) => RemoveSubscription;
+  onShow?: (cb: () => void) => RemoveSubscription;
+  onHide?: (cb: () => void) => RemoveSubscription;
+  onStartTrimming?: (cb: () => void) => RemoveSubscription;
+  onLoad?: (cb: (e: { duration?: number }) => void) => RemoveSubscription;
+};
 const TRIM_EDITOR_TIMEOUT_MS = 90_000;
 
-function tryLoadVideoTrimApi(): { showEditor: ShowEditorFn; isValidFile?: IsValidFileFn } | null {
+function tryLoadVideoTrimApi():
+  | {
+      showEditor: ShowEditorFn;
+      isValidFile?: IsValidFileFn;
+      closeEditor?: CloseEditorFn;
+      nativeModule?: NativeTrimEmitterLike | null;
+    }
+  | null {
   if (Platform.OS === 'web') return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('react-native-video-trim') as { showEditor?: ShowEditorFn; isValidFile?: IsValidFileFn };
+    const mod = require('react-native-video-trim') as {
+      showEditor?: ShowEditorFn;
+      isValidFile?: IsValidFileFn;
+      closeEditor?: CloseEditorFn;
+      default?: NativeTrimEmitterLike;
+    };
     if (typeof mod?.showEditor !== 'function') return null;
     return {
       showEditor: mod.showEditor,
       isValidFile: typeof mod?.isValidFile === 'function' ? mod.isValidFile : undefined,
+      closeEditor: typeof mod?.closeEditor === 'function' ? mod.closeEditor : undefined,
+      nativeModule: (mod?.default ?? null) as NativeTrimEmitterLike | null,
     };
   } catch (e) {
     console.warn(
@@ -34,13 +69,104 @@ function tryLoadVideoTrimApi(): { showEditor: ShowEditorFn; isValidFile?: IsVali
 }
 
 function subscribeVideoTrim(
-  handler: (event: { name?: string; outputPath?: string }) => void,
+  trimApi: ReturnType<typeof tryLoadVideoTrimApi>,
+  handler: (event: TrimEventPayload) => void,
 ): { remove: () => void } {
-  // Avoid static import so this file never touches TurboModuleRegistry until subscribe runs.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const RCTDeviceEventEmitter = require('react-native/Libraries/EventEmitter/RCTDeviceEventEmitter')
-    .default as { addListener: (event: string, fn: (e: unknown) => void) => { remove: () => void } };
-  return RCTDeviceEventEmitter.addListener('VideoTrim', handler as (e: unknown) => void);
+  const subs: RemoveSubscription[] = [];
+
+  const addSub = (sub: RemoveSubscription | null | undefined) => {
+    if (sub && typeof sub.remove === 'function') {
+      subs.push(sub);
+    }
+  };
+
+  const forwardNamed =
+    (name: string) =>
+    (payload?: TrimEventPayload): void => {
+      if (payload && typeof payload === 'object') {
+        handler({ ...payload, name: payload.name ?? name });
+        return;
+      }
+      handler({ name });
+    };
+
+  const nativeModule = trimApi?.nativeModule ?? null;
+  if (nativeModule) {
+    try {
+      addSub(nativeModule.onFinishTrimming?.(forwardNamed('onFinishTrimming')));
+      addSub(nativeModule.onError?.(forwardNamed('onError')));
+      addSub(nativeModule.onCancel?.(() => handler({ name: 'onCancel' })));
+      addSub(nativeModule.onCancelTrimming?.(() => handler({ name: 'onCancelTrimming' })));
+      addSub(nativeModule.onShow?.(() => handler({ name: 'onShow' })));
+      addSub(nativeModule.onHide?.(() => handler({ name: 'onHide' })));
+      addSub(nativeModule.onStartTrimming?.(() => handler({ name: 'onStartTrimming' })));
+      addSub(nativeModule.onLoad?.((payload) => handler({ name: 'onLoad', ...payload })));
+      console.log('[mandatoryVideoTrim] registered NativeVideoTrim event listeners');
+    } catch (e) {
+      console.warn('[mandatoryVideoTrim] failed to register NativeVideoTrim listeners', e);
+    }
+  }
+
+  // Old Architecture path (module-scoped + device event emitters).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { NativeEventEmitter, NativeModules } = require('react-native') as {
+      NativeEventEmitter: new (module?: unknown) => {
+        addListener: (event: string, fn: (e: unknown) => void) => RemoveSubscription;
+      };
+      NativeModules: { VideoTrim?: unknown };
+    };
+    const emitter = new NativeEventEmitter(NativeModules?.VideoTrim);
+    addSub(emitter.addListener('VideoTrim', handler as (e: unknown) => void));
+    addSub(emitter.addListener('onFinishTrimming', forwardNamed('onFinishTrimming') as (e: unknown) => void));
+    addSub(emitter.addListener('onError', forwardNamed('onError') as (e: unknown) => void));
+    addSub(emitter.addListener('onCancel', () => handler({ name: 'onCancel' })));
+    addSub(emitter.addListener('onCancelTrimming', () => handler({ name: 'onCancelTrimming' })));
+    addSub(emitter.addListener('onShow', () => handler({ name: 'onShow' })));
+    addSub(emitter.addListener('onHide', () => handler({ name: 'onHide' })));
+    addSub(emitter.addListener('onStartTrimming', () => handler({ name: 'onStartTrimming' })));
+    addSub(emitter.addListener('onLoad', forwardNamed('onLoad') as (e: unknown) => void));
+    console.log('[mandatoryVideoTrim] registered NativeEventEmitter listeners');
+  } catch (e) {
+    console.warn('[mandatoryVideoTrim] NativeEventEmitter listener registration failed', e);
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const RCTDeviceEventEmitter = require('react-native/Libraries/EventEmitter/RCTDeviceEventEmitter')
+      .default as { addListener: (event: string, fn: (e: unknown) => void) => RemoveSubscription };
+    addSub(RCTDeviceEventEmitter.addListener('VideoTrim', handler as (e: unknown) => void));
+    addSub(
+      RCTDeviceEventEmitter.addListener(
+        'onFinishTrimming',
+        forwardNamed('onFinishTrimming') as (e: unknown) => void,
+      ),
+    );
+    addSub(RCTDeviceEventEmitter.addListener('onError', forwardNamed('onError') as (e: unknown) => void));
+    addSub(RCTDeviceEventEmitter.addListener('onCancel', () => handler({ name: 'onCancel' })));
+    addSub(
+      RCTDeviceEventEmitter.addListener('onCancelTrimming', () => handler({ name: 'onCancelTrimming' })),
+    );
+    addSub(RCTDeviceEventEmitter.addListener('onShow', () => handler({ name: 'onShow' })));
+    addSub(RCTDeviceEventEmitter.addListener('onHide', () => handler({ name: 'onHide' })));
+    addSub(RCTDeviceEventEmitter.addListener('onStartTrimming', () => handler({ name: 'onStartTrimming' })));
+    addSub(RCTDeviceEventEmitter.addListener('onLoad', forwardNamed('onLoad') as (e: unknown) => void));
+    console.log('[mandatoryVideoTrim] registered RCTDeviceEventEmitter listeners');
+  } catch (e) {
+    console.warn('[mandatoryVideoTrim] RCTDeviceEventEmitter listener registration failed', e);
+  }
+
+  return {
+    remove: () => {
+      for (const sub of subs) {
+        try {
+          sub.remove();
+        } catch {
+          // best effort
+        }
+      }
+    },
+  };
 }
 
 function toNativeEditorPath(fileUri: string): string {
@@ -123,6 +249,9 @@ export function runMandatoryGalleryTrimIfNeededAsync(pickerUri: string): Promise
       fileUriNormalized,
       editorSource,
       maxDurationMs: REFLECTION_MAX_VIDEO_SECONDS * 1000,
+      hasNativeEmitterApi: Boolean(trimApi?.nativeModule),
+      hasCloseEditor: typeof trimApi?.closeEditor === 'function',
+      usingFabricRuntime: Boolean((globalThis as { nativeFabricUIManager?: unknown }).nativeFabricUIManager),
     });
 
     return await new Promise<MandatoryTrimResult>((resolve) => {
@@ -139,10 +268,10 @@ export function runMandatoryGalleryTrimIfNeededAsync(pickerUri: string): Promise
         resolve(r);
       };
 
-      const sub = subscribeVideoTrim((raw: unknown) => {
+      const sub = subscribeVideoTrim(trimApi, (raw: unknown) => {
         const event =
           raw && typeof raw === 'object'
-            ? (raw as { name?: string; outputPath?: string })
+            ? (raw as TrimEventPayload)
             : null;
         if (!event) return;
         const name = event.name;
@@ -173,6 +302,11 @@ export function runMandatoryGalleryTrimIfNeededAsync(pickerUri: string): Promise
       try {
         timeoutId = setTimeout(() => {
           console.warn('[mandatoryVideoTrim] timeout waiting for trim editor events; cancelling');
+          try {
+            trimApi.closeEditor?.();
+          } catch (e) {
+            console.warn('[mandatoryVideoTrim] closeEditor failed after timeout', e);
+          }
           finish({ kind: 'timeout' });
         }, TRIM_EDITOR_TIMEOUT_MS);
 

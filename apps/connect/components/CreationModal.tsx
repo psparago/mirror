@@ -37,6 +37,7 @@ import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
+  ActivityIndicator,
   Alert,
   Animated,
   AppState,
@@ -709,7 +710,9 @@ export default function CreationModal({
         } catch {
           setConditioningLargeVideo(true);
         }
-        const compressedVideoUri = await compressVideoIfNeededAsync(resolvedVideoUri);
+        const compressedVideoUri = await compressVideoIfNeededAsync(resolvedVideoUri, {
+          alwaysCompress: mediaSourceKind === 'camera',
+        });
         trackThisConditioningScratch(compressedVideoUri, resolvedVideoUri);
         resolvedVideoUri = compressedVideoUri;
       }
@@ -2322,23 +2325,39 @@ export default function CreationModal({
                 </TouchableOpacity>
               </View>
               <View style={styles.creatingWaitContent}>
-                <Text style={styles.creatingWaitText}>
+                <View style={styles.creatingWaitCard}>
+                  <View style={styles.creatingWaitIconWrap}>
+                    <FontAwesome
+                      name={
+                        conditioningMediaKind === 'video'
+                          ? 'video-camera'
+                          : conditioningMediaKind === 'photo'
+                            ? 'photo'
+                            : 'magic'
+                      }
+                      size={20}
+                      color="#dbeafe"
+                    />
+                  </View>
+                  <ActivityIndicator color="#f39c12" size="large" />
+                  <Text style={styles.creatingWaitText}>
                   {conditioningMediaKind === 'video'
                     ? 'Loading video for your Reflection...'
                     : conditioningMediaKind === 'photo'
                       ? 'Loading photo for your Reflection...'
                       : 'Opening creation tools...'}
-                </Text>
-                {conditioningMediaKind === 'video' ? (
-                  <>
-                    <Text style={styles.creatingWaitSubText}>
-                      This makes the video play smoothly for Cole. Just a moment!
-                    </Text>
-                    {conditioningLargeVideo ? (
-                      <Text style={styles.creatingWaitHint}>Please stay on WiFi</Text>
-                    ) : null}
-                  </>
-                ) : null}
+                  </Text>
+                  {conditioningMediaKind === 'video' ? (
+                    <>
+                      <Text style={styles.creatingWaitSubText}>
+                        This makes the video play smoothly for Cole. Just a moment!
+                      </Text>
+                      {conditioningLargeVideo ? (
+                        <Text style={styles.creatingWaitHint}>Please stay on WiFi</Text>
+                      ) : null}
+                    </>
+                  ) : null}
+                </View>
               </View>
             </LinearGradient>
           )}
@@ -2427,21 +2446,47 @@ var styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 24,
   },
+  creatingWaitCard: {
+    width: '86%',
+    maxWidth: 360,
+    alignItems: 'center',
+    borderRadius: 24,
+    paddingVertical: 28,
+    paddingHorizontal: 24,
+    backgroundColor: 'rgba(15, 23, 42, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.45)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.26,
+    shadowRadius: 18,
+    elevation: 10,
+    gap: 12,
+  },
+  creatingWaitIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 219, 254, 0.45)',
+  },
   creatingWaitText: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: '#e2e8f0',
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#f39c12',
     textAlign: 'center',
   },
   creatingWaitSubText: {
-    marginTop: 10,
-    fontSize: 15,
-    lineHeight: 21,
-    color: 'rgba(226, 232, 240, 0.82)',
+    fontSize: 13,
+    lineHeight: 18,
+    color: 'rgba(255,255,255,0.82)',
     textAlign: 'center',
   },
   creatingWaitHint: {
-    marginTop: 16,
+    marginTop: 2,
     fontSize: 13,
     fontWeight: '700',
     color: '#bfdbfe',
