@@ -11,7 +11,7 @@ import {
   useCompanionAvatars,
   useExplorer,
 } from '@projectmirror/shared';
-import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system';
@@ -276,15 +276,6 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       return 0;
     };
 
-    /** For "Sent" sort: true send time only — top-level `timestamp` bumps on engagement/edits and must not reorder the timeline. */
-    const getReflectionSentSortMs = (r: SentReflection): number => {
-      const fromSent = getTimestampMs(r.sentTimestamp);
-      if (fromSent !== 0) return fromSent;
-      const fromMeta = r.metadata?.timestamp ? getTimestampMs(r.metadata.timestamp) : 0;
-      if (fromMeta !== 0) return fromMeta;
-      return getTimestampMs(r.timestamp);
-    };
-
     result.sort((a, b) => {
       if (sortBy === 'impact') {
         const scoreA = (a.engagementCount || 0) + (responseEventIds.has(a.event_id) ? 1 : 0);
@@ -294,8 +285,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
 
       if (sortBy === 'sent') {
-        const aTime = getReflectionSentSortMs(a);
-        const bTime = getReflectionSentSortMs(b);
+        const aTime = getTimestampMs(a.timestamp);
+        const bTime = getTimestampMs(b.timestamp);
         const timeDiff = bTime - aTime;
         if (timeDiff !== 0) return timeDiff;
         return (reflectionSenderLabel(a) || '').localeCompare(reflectionSenderLabel(b) || '');
@@ -413,17 +404,14 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         ? query(
             reflectionsRef,
             where('explorerId', '==', currentExplorerId),
-            where('type', '==', 'mirror_event'),
-            orderBy('metadata.timestamp', 'desc'),
-            orderBy('metadata.sender', 'asc'),
-            limit(100)
+            where('type', 'in', ['mirror_event', 'engagement_heartbeat']),
+            orderBy('timestamp', 'desc'),
+            orderBy('metadata.sender', 'asc')
           )
         : query(
             reflectionsRef,
             where('explorerId', '==', currentExplorerId),
-            where('type', '==', 'mirror_event'),
-            orderBy('timestamp', 'desc'),
-            limit(100)
+            orderBy('timestamp', 'desc')
           );
 
     const unsubscribe = onSnapshot(
