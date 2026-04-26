@@ -9,9 +9,10 @@ const MAX_UPLOAD_WIDTH_PX = 1080;
 export const REFLECTION_MAX_VIDEO_SECONDS = 120;
 export const REFLECTION_MAX_VIDEO_MS = REFLECTION_MAX_VIDEO_SECONDS * 1000;
 /** Below this size (bytes), skip compression unless the file was just trimmed (preserves Space Saver originals). */
-export const REFLECTION_SMALL_VIDEO_BYTES = 25 * 1024 * 1024;
-/** Target long edge when compressing (720p cap, auto bitrate via compressor). */
-const COMPRESS_MAX_DIMENSION_PX = 720;
+export const REFLECTION_SMALL_VIDEO_BYTES = 50 * 1024 * 1024;
+/** Target long edge when compressing (1080p cap, auto bitrate via compressor). */
+const COMPRESS_MAX_DIMENSION_PX = 1920;
+const COMPRESS_MIN_BITRATE = 2_000_000;
 export const PHOTO_EXPORT_SIZE_PX = 1080;
 
 function isRemoteUri(uri: string): boolean {
@@ -233,11 +234,69 @@ function normalizeOutputFileUri(pathOrUri: string): string {
   return pathOrUri.startsWith('file://') ? pathOrUri : `file://${pathOrUri}`;
 }
 
+async function compressVideoSourceAsync(sourceForReturn: string, logTag: string): Promise<string> {
+  try {
+    const sourceDurationSec = await probeLocalVideoDurationSeconds(sourceForReturn);
+
+    const compressOptions: Record<string, unknown> = {
+      compressionMethod: 'auto',
+      minimumBitrate: COMPRESS_MIN_BITRATE,
+      minimumFileSizeForCompress: 0,
+      maxSize: COMPRESS_MAX_DIMENSION_PX,
+    };
+
+    const result = await Video.compress(sourceForReturn, compressOptions as never, () => {});
+    const finalUri = normalizeOutputFileUri(result);
+
+    const compressedDurationSec = await probeLocalVideoDurationSeconds(finalUri);
+    const minExpectedDurationSec =
+      sourceDurationSec > 0 ? Math.max(0.5, sourceDurationSec * 0.5) : 0.5;
+    if (compressedDurationSec < minExpectedDurationSec) {
+      console.warn(
+        `[${logTag}] compressed output failed validation (src=${sourceDurationSec.toFixed(3)}s, out=${compressedDurationSec.toFixed(3)}s); falling back to source`
+      );
+      return sourceForReturn;
+    }
+
+    return finalUri;
+  } catch (error) {
+    if (isAndroidCodecUnsupportedForCompression(error)) {
+      console.warn(`[${logTag}] compression skipped (unsupported Android codec); using source`);
+    } else {
+      console.error(`[${logTag}] compress failed; using source:`, error);
+    }
+    return sourceForReturn;
+  }
+}
+
+export async function compressVideoIfNeededAsync(uri: string): Promise<string> {
+  let sourceFile = uri;
+  try {
+    sourceFile = await materializeVideoSourceToFileAsync(uri);
+  } catch (e) {
+    console.error('[compressVideoIfNeededAsync] materialize failed, trying original URI:', e);
+    sourceFile = normalizePickerUri(uri);
+  }
+
+  const sourceForReturn = sourceFile.startsWith('file://') ? sourceFile : ensureFileUri(sourceFile);
+
+  try {
+    const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
+    if (info.exists && typeof info.size === 'number' && info.size < REFLECTION_SMALL_VIDEO_BYTES) {
+      return sourceForReturn;
+    }
+  } catch {
+    // size unknown — attempt compression so large 4K provider exports still get optimized.
+  }
+
+  return compressVideoSourceAsync(sourceForReturn, 'compressVideoIfNeededAsync');
+}
+
 /**
  * Safe-sync pipeline: small originals stay untouched on iOS; on Android we still transcode sub-threshold
  * clips so uploads use an H.264/AAC MP4 that decodes reliably on iOS (camera/gallery encodes often skip
  * compression for size and can play audio-only or show a blank layer there).
- * Large or post-trim files are compressed to 720p with auto bitrate.
+ * Large or post-trim files are compressed to 1080p with auto bitrate.
  * Any compressor failure falls back to the materialized/original file (never blocks upload).
  */
 export async function processVideoForUpload(uri: string, options: ProcessVideoOptions = {}): Promise<string> {
@@ -269,37 +328,7 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
     return sourceForReturn;
   }
 
-  try {
-    const sourceDurationSec = await probeLocalVideoDurationSeconds(sourceForReturn);
-
-    const compressOptions: Record<string, unknown> = {
-      compressionMethod: 'auto',
-      minimumFileSizeForCompress: 0,
-      maxSize: COMPRESS_MAX_DIMENSION_PX,
-    };
-
-    const result = await Video.compress(sourceForReturn, compressOptions as never, () => {});
-    const finalUri = normalizeOutputFileUri(result);
-
-    const compressedDurationSec = await probeLocalVideoDurationSeconds(finalUri);
-    const minExpectedDurationSec =
-      sourceDurationSec > 0 ? Math.max(0.5, sourceDurationSec * 0.5) : 0.5;
-    if (compressedDurationSec < minExpectedDurationSec) {
-      console.warn(
-        `[processVideoForUpload] compressed output failed validation (src=${sourceDurationSec.toFixed(3)}s, out=${compressedDurationSec.toFixed(3)}s); falling back to source`
-      );
-      return sourceForReturn;
-    }
-
-    return finalUri;
-  } catch (error) {
-    if (isAndroidCodecUnsupportedForCompression(error)) {
-      console.warn('[processVideoForUpload] compression skipped (unsupported Android codec); using source');
-    } else {
-      console.error('[processVideoForUpload] compress failed; using source:', error);
-    }
-    return sourceForReturn;
-  }
+  return compressVideoSourceAsync(sourceForReturn, 'processVideoForUpload');
 }
 
 export async function prepareVideoForUpload(uri: string): Promise<string> {
@@ -354,7 +383,7 @@ export async function probeLocalVideoDurationSeconds(uri: string): Promise<numbe
 
 /** Best-effort delete of a local scratch file (e.g. filter-kit extract PNG, gatekeeper JPEG). */
 export async function deleteScratchMediaFile(uri: string | null | undefined): Promise<void> {
-  if (!uri || isRemoteUri(uri)) return;
+  if (!uri || isRemoteUri(uri) || !uri.startsWith('file://')) return;
   try {
     await FileSystem.deleteAsync(uri, { idempotent: true });
   } catch {

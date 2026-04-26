@@ -1,5 +1,5 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { ensureFileUri, prepareImageForUpload, processVideoForUpload } from '@/utils/mediaProcessor';
+import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
 import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
 import * as ExpoImagePicker from 'expo-image-picker';
 import { useNavigation, useRouter } from 'expo-router';
@@ -117,12 +117,9 @@ export default function GalleryScreen() {
           router.back();
           return;
         }
-        setStatusLine('Trimming & optimizing…');
-        const optimizedVideoUri = await processVideoForUpload(trimResult.uri, {
-          wasTrimmed: trimResult.wasTrimmed,
-        });
+        setStatusLine('Preparing video…');
         setPendingMedia({
-          uri: ensureFileUri(optimizedVideoUri),
+          uri: ensureFileUri(trimResult.uri),
           type: 'video',
           source: 'gallery',
         });

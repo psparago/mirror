@@ -2,12 +2,14 @@ import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '
 import { CreationModalConfirmationVideo } from '@/components/CreationModalConfirmationVideo';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
+  compressVideoIfNeededAsync,
   deleteScratchMediaFile,
   ensureFileUri,
   materializeVideoSourceToFileAsync,
   prepareImageForUpload,
   probeLocalVideoDurationSeconds,
   REFLECTION_MAX_VIDEO_SECONDS,
+  REFLECTION_SMALL_VIDEO_BYTES,
   stabilizeLocalImageFileAsync,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
@@ -228,6 +230,8 @@ export default function CreationModal({
   const [mediaSource, setMediaSource] = useState<'/camera' | '/gallery' | '/search' | null>(null);
   const [showNameModal, setShowNameModal] = useState(false);
   const [composerStage, setComposerStage] = useState<ComposerStage>('workbench');
+  const [conditioningMediaKind, setConditioningMediaKind] = useState<'photo' | 'video' | null>(null);
+  const [conditioningLargeVideo, setConditioningLargeVideo] = useState(false);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
@@ -248,6 +252,7 @@ export default function CreationModal({
    * pendingMedia === null and must NOT invalidate the in-flight async apply (see cleanup bug).
    */
   const pendingMediaApplyGenerationRef = useRef(0);
+  const conditionedScratchUrisRef = useRef<Set<string>>(new Set());
 
   const beginSourceFlow = useCallback(
     (route: '/camera' | '/gallery' | '/search', extras?: { cameraSelfie?: boolean }) => {
@@ -405,6 +410,8 @@ export default function CreationModal({
     setConfirming(false);
     setShowDescriptionInput(false);
     setComposerStage('workbench');
+    setConditioningMediaKind(null);
+    setConditioningLargeVideo(false);
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
     setIsSelfie(false);
@@ -518,6 +525,40 @@ export default function CreationModal({
     return !!cacheDir && uri.startsWith(cacheDir);
   }, []);
 
+  const trackConditionedScratchUri = useCallback((uri: string | null | undefined, originalUri: string | null | undefined) => {
+    if (!uri || !uri.startsWith('file://')) return;
+    if (originalUri && uri === originalUri) return;
+    conditionedScratchUrisRef.current.add(uri);
+  }, []);
+
+  const cleanupConditionedScratchFiles = useCallback(async (uris?: Iterable<string>) => {
+    const targets = Array.from(uris ?? conditionedScratchUrisRef.current);
+    if (!uris) {
+      conditionedScratchUrisRef.current.clear();
+    }
+    await Promise.all(
+      targets.map(async (uri) => {
+        if (uris) conditionedScratchUrisRef.current.delete(uri);
+        await deleteScratchMediaFile(uri);
+      })
+    );
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      pendingMediaApplyGenerationRef.current += 1;
+      void cleanupConditionedScratchFiles();
+    };
+  }, [cleanupConditionedScratchFiles]);
+
+  useEffect(() => {
+    if (visible) return;
+    pendingMediaApplyGenerationRef.current += 1;
+    setConditioningMediaKind(null);
+    setConditioningLargeVideo(false);
+    void cleanupConditionedScratchFiles();
+  }, [visible, cleanupConditionedScratchFiles]);
+
   const safeDeleteCacheFile = useCallback(async (uri?: string | null) => {
     if (!uri) return;
     if (!isCacheUri(uri)) return;
@@ -626,21 +667,51 @@ export default function CreationModal({
         : 'gallery';
     const applyGeneration = ++pendingMediaApplyGenerationRef.current;
     void (async () => {
+      await cleanupConditionedScratchFiles();
+      if (applyGeneration !== pendingMediaApplyGenerationRef.current) {
+        return;
+      }
       lastSourceForRecoveryRef.current = null;
       setComposerStage('workbench');
       setConfirming(false);
+      setConditioningMediaKind(mediaKind);
+      setConditioningLargeVideo(false);
       setPhase('creating');
       const normalizedUri = ensureFileUri(mediaUri);
       let resolvedVideoUri = normalizedUri;
+      const conditioningScratchUris: string[] = [];
+      const trackThisConditioningScratch = (uri: string | null | undefined, originalUri: string | null | undefined) => {
+        if (!uri || !uri.startsWith('file://')) return;
+        if (originalUri && uri === originalUri) return;
+        trackConditionedScratchUri(uri, originalUri);
+        conditioningScratchUris.push(uri);
+      };
       if (mediaKind === 'video') {
         try {
           resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
+          trackThisConditioningScratch(resolvedVideoUri, normalizedUri);
         } catch (error) {
           resolvedVideoUri = normalizedUri;
           console.warn('[CreationModal] failed to materialize video picker URI:', error);
         }
+        try {
+          const info = await FileSystem.getInfoAsync(resolvedVideoUri, { size: true });
+          setConditioningLargeVideo(
+            !!(info.exists && typeof info.size === 'number' && info.size >= REFLECTION_SMALL_VIDEO_BYTES)
+          );
+        } catch {
+          setConditioningLargeVideo(true);
+        }
+        const compressedVideoUri = await compressVideoIfNeededAsync(resolvedVideoUri);
+        trackThisConditioningScratch(compressedVideoUri, resolvedVideoUri);
+        resolvedVideoUri = compressedVideoUri;
       }
-      if (applyGeneration !== pendingMediaApplyGenerationRef.current) return;
+      if (applyGeneration !== pendingMediaApplyGenerationRef.current) {
+        void cleanupConditionedScratchFiles(conditioningScratchUris);
+        setConditioningMediaKind(null);
+        setConditioningLargeVideo(false);
+        return;
+      }
       const isEditingExisting =
         !!(editSourceEventIdRef.current || pinnedEditEventIdRef.current);
       if (typeof media.isSelfie === 'boolean') {
@@ -658,6 +729,8 @@ export default function CreationModal({
         setPhoto({ uri: normalizedUri });
       }
       setShowDescriptionInput(true);
+      setConditioningMediaKind(null);
+      setConditioningLargeVideo(false);
       setImageSourceType(
         mediaSourceKind === 'search' ? 'search' : mediaSourceKind === 'gallery' ? 'gallery' : 'camera'
       );
@@ -687,7 +760,13 @@ export default function CreationModal({
         }
       }
     })();
-  }, [isFocused, pendingMedia, consumePendingMedia]);
+  }, [
+    isFocused,
+    pendingMedia,
+    consumePendingMedia,
+    cleanupConditionedScratchFiles,
+    trackConditionedScratchUri,
+  ]);
 
   // Only update audioUri from recorder when we have a NEW URI and we're not recording.
   // Skip cache paths so we don't lock onto a transient file that may be deleted.
@@ -1459,6 +1538,7 @@ export default function CreationModal({
       if (mediaType === 'video' && videoUri) {
         safeDeleteCacheFile(videoUri).catch(() => { });
       }
+      await cleanupConditionedScratchFiles();
 
       // 10. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
@@ -1569,6 +1649,7 @@ export default function CreationModal({
 
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
+    await cleanupConditionedScratchFiles();
 
     setPhoto(null);
     setVideoUri(null);
@@ -1609,6 +1690,7 @@ export default function CreationModal({
 
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
+    await cleanupConditionedScratchFiles();
 
     setPhoto(null);
     setVideoUri(null);
@@ -1773,6 +1855,7 @@ export default function CreationModal({
     const videoUriToClean = videoUri;
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
+    await cleanupConditionedScratchFiles();
 
     setPhoto(null);
     setVideoUri(null);
@@ -1812,6 +1895,7 @@ export default function CreationModal({
 
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
+    await cleanupConditionedScratchFiles();
 
     setPhoto(null);
     setVideoUri(null);
@@ -1842,12 +1926,23 @@ export default function CreationModal({
   const handleClose = () => {
     suppressPickerRecoveryRef.current = false;
     if (confirming && photo) {
+      pendingMediaApplyGenerationRef.current += 1;
+      void safeDeleteCacheFile(photo?.uri ?? null);
+      void safeDeleteCacheFile(videoUri);
+      void cleanupConditionedScratchFiles();
+      setConditioningMediaKind(null);
+      setConditioningLargeVideo(false);
       setConfirming(false);
       setPhoto(null);
       setVideoUri(null);
     } else if (showDescriptionInput && photo) {
       void cancelPhoto();
       return;
+    } else {
+      pendingMediaApplyGenerationRef.current += 1;
+      void cleanupConditionedScratchFiles();
+      setConditioningMediaKind(null);
+      setConditioningLargeVideo(false);
     }
     // Do NOT reset phase to 'picker' here — that would briefly make showPicker
     // true before onClose() propagates visible=false from the parent, causing
@@ -1915,6 +2010,7 @@ export default function CreationModal({
     const videoUriToClean = videoUri;
     await safeDeleteCacheFile(photoUriToClean);
     await safeDeleteCacheFile(videoUriToClean);
+    await cleanupConditionedScratchFiles();
     setPhoto(null);
     setVideoUri(null);
     setMediaType('photo');
@@ -2219,7 +2315,19 @@ export default function CreationModal({
                 </TouchableOpacity>
               </View>
               <View style={styles.creatingWaitContent}>
-                <Text style={styles.creatingWaitText}>Opening creation tools...</Text>
+                <Text style={styles.creatingWaitText}>
+                  {conditioningMediaKind ? 'Optimizing Reflection...' : 'Opening creation tools...'}
+                </Text>
+                {conditioningMediaKind === 'video' ? (
+                  <>
+                    <Text style={styles.creatingWaitSubText}>
+                      This makes the video play smoothly for Cole. Just a moment!
+                    </Text>
+                    {conditioningLargeVideo ? (
+                      <Text style={styles.creatingWaitHint}>Please stay on WiFi</Text>
+                    ) : null}
+                  </>
+                ) : null}
               </View>
             </LinearGradient>
           )}
@@ -2312,6 +2420,20 @@ var styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '600',
     color: '#e2e8f0',
+    textAlign: 'center',
+  },
+  creatingWaitSubText: {
+    marginTop: 10,
+    fontSize: 15,
+    lineHeight: 21,
+    color: 'rgba(226, 232, 240, 0.82)',
+    textAlign: 'center',
+  },
+  creatingWaitHint: {
+    marginTop: 16,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#bfdbfe',
     textAlign: 'center',
   },
   modalCloseBar: {
