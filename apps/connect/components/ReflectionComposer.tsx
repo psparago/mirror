@@ -1251,6 +1251,7 @@ function ReflectionComposerInner({
   }, [player]);
 
   const posterScrubOriginMs = useSharedValue(0);
+  const posterCurrentMs = useSharedValue(0);
   const videoDurationMs = useSharedValue(0);
 
   const playerDurationForWorklet = player?.duration ?? 0;
@@ -1258,6 +1259,12 @@ function ReflectionComposerInner({
     if (!player || playerDurationForWorklet <= 0) return;
     videoDurationMs.value = player.duration * 1000;
   }, [player, playerDurationForWorklet, videoDurationMs]);
+
+  useEffect(() => {
+    const sourceMs = thumbnailTimeMs ?? playheadMs;
+    if (!Number.isFinite(sourceMs) || sourceMs < 0) return;
+    posterCurrentMs.value = Math.round(sourceMs);
+  }, [thumbnailTimeMs, playheadMs, posterCurrentMs]);
 
   const seekToMs = useCallback(
     (ms: number) => {
@@ -1278,7 +1285,7 @@ function ReflectionComposerInner({
     Gesture.Pan()
       .enabled(isPosterMode)
       .onBegin(() => {
-        posterScrubOriginMs.value = Math.round((player?.currentTime ?? 0) * 1000);
+        posterScrubOriginMs.value = posterCurrentMs.value;
       })
       .onUpdate((e) => {
         const rangeStart = videoRangeMs?.start ?? 0;
@@ -1288,9 +1295,10 @@ function ReflectionComposerInner({
         const pxToMs = rangeDuration / screenWidth;
         const deltaMs = e.translationX * pxToMs;
         const targetMs = Math.max(rangeStart, Math.min(rangeEnd, posterScrubOriginMs.value + deltaMs));
+        posterCurrentMs.value = targetMs;
         runOnJS(seekToMs)(targetMs);
       }),
-    [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, videoDurationMs, player],
+    [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, posterCurrentMs, videoDurationMs],
   );
 
   const tapToTogglePlay = useMemo(() =>
@@ -1975,9 +1983,7 @@ function ReflectionComposerInner({
               <FontAwesome name="magic" size={36} color="#f39c12" />
             </Animated.View>
             <Animated.Text style={[styles.aiOverlayText, sparkleTextStyle]}>
-              {mediaType === 'video'
-                ? 'Optimizing your Reflection...'
-                : 'Preparing your Reflection...'}
+              Adding Sparkle to your Reflection...
             </Animated.Text>
             <TouchableOpacity
               style={styles.cancelAiButton}
@@ -1991,7 +1997,10 @@ function ReflectionComposerInner({
 
       {isSending && !isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
-          <View style={styles.sparkleCard}>
+          <View style={[styles.sparkleCard, styles.sendingCard]}>
+            <View style={styles.sendingIconWrap}>
+              <FontAwesome name="cloud-upload" size={20} color="#dbeafe" />
+            </View>
             <ActivityIndicator color="#f39c12" size="large" />
             <Text style={styles.aiOverlayText}>Sending to the Cloud...</Text>
             <Text style={styles.aiOverlaySubText}>
@@ -3018,6 +3027,31 @@ const styles = StyleSheet.create({
     paddingVertical: 36,
     paddingHorizontal: 40,
     gap: 16,
+  },
+  sendingCard: {
+    width: '86%',
+    maxWidth: 360,
+    paddingVertical: 28,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    backgroundColor: 'rgba(15, 23, 42, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.45)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.26,
+    shadowRadius: 18,
+    elevation: 10,
+  },
+  sendingIconWrap: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(191, 219, 254, 0.45)',
   },
   aiOverlayText: {
     color: '#f39c12', // Gold/Orange for visibility on dark

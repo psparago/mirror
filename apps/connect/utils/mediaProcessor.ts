@@ -111,11 +111,29 @@ export async function materializeVideoSourceToFileAsync(uri: string): Promise<st
     if (!FileSystem.cacheDirectory) {
       throw new Error('FileSystem.cacheDirectory is not available');
     }
-    const dest = `${FileSystem.cacheDirectory}video_pick_${Date.now()}_${Math.floor(Math.random() * 1e6)}.mp4`;
+    const ext = guessVideoExtensionFromUri(u);
+    const dest = `${FileSystem.cacheDirectory}video_pick_${Date.now()}_${Math.floor(Math.random() * 1e6)}.${ext}`;
     await FileSystem.copyAsync({ from: u, to: dest });
     return dest;
   }
   return ensureFileUri(u);
+}
+
+function guessVideoExtensionFromUri(uri: string): string {
+  try {
+    const urlPath = uri.split('?')[0];
+    const lastSegment = urlPath.split('/').pop() || '';
+    const ext = lastSegment.includes('.') ? (lastSegment.split('.').pop() || '').toLowerCase() : '';
+    if (
+      ext &&
+      ['mp4', 'mov', 'm4v', '3gp', 'mkv', 'webm'].includes(ext)
+    ) {
+      return ext;
+    }
+  } catch {
+    // ignore
+  }
+  return 'mp4';
 }
 
 function guessFileExtensionFromUri(uri: string): string {

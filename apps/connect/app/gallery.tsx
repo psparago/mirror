@@ -2,6 +2,7 @@ import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
 import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
 import * as ExpoImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { useNavigation, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -11,8 +12,11 @@ import {
   Platform,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
+
+const LARGE_VIDEO_WARN_BYTES = 150 * 1024 * 1024;
 
 async function ensureAndroidGalleryPermissions(): Promise<boolean> {
   if (Platform.OS !== 'android') return true;
@@ -47,7 +51,25 @@ export default function GalleryScreen() {
   const navigation = useNavigation();
   const { setPendingMedia } = useReflectionMedia();
   const hasLaunched = useRef(false);
-  const [statusLine, setStatusLine] = useState('Opening gallery...');
+  const cancelledRef = useRef(false);
+  const [statusLine, setStatusLine] = useState('Getting your library ready...');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const confirmLargeVideoAsync = async (sizeBytes?: number | null): Promise<boolean> => {
+    if (!sizeBytes || sizeBytes < LARGE_VIDEO_WARN_BYTES) return true;
+    const sizeMb = Math.round(sizeBytes / (1024 * 1024));
+    return await new Promise((resolve) => {
+      Alert.alert(
+        'Large video selected',
+        `This Reflection video is about ${sizeMb} MB and may take a while to prepare. Continue?`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Continue', onPress: () => resolve(true) },
+        ],
+        { cancelable: true, onDismiss: () => resolve(false) }
+      );
+    });
+  };
 
   useEffect(() => {
     if (hasLaunched.current) return;
@@ -72,6 +94,8 @@ export default function GalleryScreen() {
   const launchPicker = async () => {
     if (!hasLaunched.current) return;
     hasLaunched.current = false;
+    cancelledRef.current = false;
+    setIsProcessing(true);
 
     try {
       const granted = await ensureAndroidGalleryPermissions();
@@ -94,6 +118,7 @@ export default function GalleryScreen() {
         return;
       }
 
+      setStatusLine('Choose a photo or video for your Reflection...');
       const result = await ExpoImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
         allowsEditing: false,
@@ -109,22 +134,67 @@ export default function GalleryScreen() {
       const expoUri = ensureFileUri(asset.uri);
       const isVideo =
         asset.type === 'video' || (asset.mimeType?.startsWith('video/') ?? false);
+      setStatusLine(isVideo ? 'Loading selected video…' : 'Loading selected photo…');
+      console.log('[GalleryScreen] media selected', {
+        type: isVideo ? 'video' : 'photo',
+        uri: asset.uri,
+        mimeType: asset.mimeType,
+        fileSize: asset.fileSize,
+      });
 
       if (isVideo) {
-        setStatusLine('Checking video…');
+        setStatusLine('Checking video details…');
+        let detectedSizeBytes: number | null = typeof asset.fileSize === 'number' ? asset.fileSize : null;
+        if (!detectedSizeBytes) {
+          try {
+            const info = await FileSystem.getInfoAsync(expoUri, { size: true });
+            if (info.exists && typeof info.size === 'number') {
+              detectedSizeBytes = info.size;
+            }
+          } catch {
+            // size probe is best-effort
+          }
+        }
+        const shouldContinue = await confirmLargeVideoAsync(detectedSizeBytes);
+        if (!shouldContinue) {
+          router.back();
+          return;
+        }
+        if (detectedSizeBytes && detectedSizeBytes >= LARGE_VIDEO_WARN_BYTES) {
+          setStatusLine('Large video detected. Opening trim tools…');
+        } else {
+          setStatusLine('Opening trim tools…');
+        }
+        if (cancelledRef.current) return;
+        console.log('[GalleryScreen] launching mandatory trim', {
+          uri: expoUri,
+          detectedSizeBytes,
+        });
         const trimResult = await runMandatoryGalleryTrimIfNeededAsync(expoUri);
+        console.log('[GalleryScreen] mandatory trim result', trimResult);
+        if (trimResult.kind === 'timeout') {
+          Alert.alert(
+            'Video trim timed out',
+            'Preparing this Reflection video took too long. Please try a shorter clip or trim it first in Photos.'
+          );
+          router.back();
+          return;
+        }
         if (trimResult.kind === 'cancelled') {
           router.back();
           return;
         }
-        setStatusLine('Preparing video…');
+        if (cancelledRef.current) return;
+        setStatusLine('Preparing your video for Reflection...');
         setPendingMedia({
           uri: ensureFileUri(trimResult.uri),
           type: 'video',
           source: 'gallery',
         });
       } else {
+        setStatusLine('Preparing photo…');
         const optimizedUri = await prepareImageForUpload(expoUri);
+        if (cancelledRef.current) return;
         setPendingMedia({
           uri: ensureFileUri(optimizedUri),
           type: 'photo',
@@ -132,6 +202,7 @@ export default function GalleryScreen() {
         });
       }
 
+      if (cancelledRef.current) return;
       router.back();
     } catch (error: unknown) {
       const err = error as { code?: string; message?: string };
@@ -147,6 +218,8 @@ export default function GalleryScreen() {
       console.error('Gallery picker error:', error);
       Alert.alert('Error', 'Failed to pick media from gallery');
       router.back();
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -154,6 +227,18 @@ export default function GalleryScreen() {
     <View style={styles.container}>
       <ActivityIndicator size="large" color="#fff" />
       <Text style={styles.text}>{statusLine}</Text>
+      {isProcessing ? (
+        <TouchableOpacity
+          style={styles.cancelBtn}
+          onPress={() => {
+            cancelledRef.current = true;
+            router.back();
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.cancelBtnText}>Cancel</Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 }
@@ -169,5 +254,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     marginTop: 16,
     fontSize: 16,
+  },
+  cancelBtn: {
+    marginTop: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.55)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  cancelBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

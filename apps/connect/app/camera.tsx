@@ -58,6 +58,13 @@ export default function CameraScreen() {
       if (!result.canceled && result.assets?.length) {
         const video = result.assets[0];
         const trimResult = await runMandatoryGalleryTrimIfNeededAsync(video.uri);
+        if (trimResult.kind === 'timeout') {
+          Alert.alert(
+            'Video trim timed out',
+            'Preparing this Reflection video took too long. Please try a shorter clip or trim it first in Photos.'
+          );
+          return;
+        }
         if (trimResult.kind === 'cancelled') {
           return;
         }

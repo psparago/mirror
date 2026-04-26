@@ -2323,7 +2323,11 @@ export default function CreationModal({
               </View>
               <View style={styles.creatingWaitContent}>
                 <Text style={styles.creatingWaitText}>
-                  {conditioningMediaKind ? 'Optimizing Reflection...' : 'Opening creation tools...'}
+                  {conditioningMediaKind === 'video'
+                    ? 'Loading video for your Reflection...'
+                    : conditioningMediaKind === 'photo'
+                      ? 'Loading photo for your Reflection...'
+                      : 'Opening creation tools...'}
                 </Text>
                 {conditioningMediaKind === 'video' ? (
                   <>
