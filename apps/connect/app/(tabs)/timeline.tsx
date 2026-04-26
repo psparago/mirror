@@ -413,13 +413,15 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         ? query(
             reflectionsRef,
             where('explorerId', '==', currentExplorerId),
-            orderBy('timestamp', 'desc'),
+            where('type', '==', 'mirror_event'),
+            orderBy('metadata.timestamp', 'desc'),
             orderBy('metadata.sender', 'asc'),
             limit(100)
           )
         : query(
             reflectionsRef,
             where('explorerId', '==', currentExplorerId),
+            where('type', '==', 'mirror_event'),
             orderBy('timestamp', 'desc'),
             limit(100)
           );
@@ -1052,6 +1054,10 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
             const engagementTimestamp = hasSelfie
               ? responseTimestampMap.get(item.event_id)
               : item.engagementTimestamp;
+            const sentDisplayTimestamp =
+              item.metadata?.timestamp ||
+              item.timestamp ||
+              null;
 
             const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
             const rankColor = isTopRanked ? '#facc15' : '#cbd5e1';
@@ -1248,10 +1254,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                         <>
                           Sent by{' '}
                           <Text style={styles.senderName}>{reflectionSenderLabel(item)}</Text> •{' '}
-                          {formatEngagementDate(
-                            item.sentTimestamp ||
-                            (item.status === 'ready' ? item.timestamp : null)
-                          )}
+                          {formatEngagementDate(sentDisplayTimestamp)}
                           {item.metadata?.last_edited_at ? (
                             <Text style={styles.sentDateEdited}> • (Edited)</Text>
                           ) : null}
@@ -1259,10 +1262,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                       ) : (
                         <>
                           Sent •{' '}
-                          {formatEngagementDate(
-                            item.sentTimestamp ||
-                            (item.status === 'ready' ? item.timestamp : null)
-                          )}
+                          {formatEngagementDate(sentDisplayTimestamp)}
                           {item.metadata?.last_edited_at ? (
                             <Text style={styles.sentDateEdited}> • (Edited)</Text>
                           ) : null}
