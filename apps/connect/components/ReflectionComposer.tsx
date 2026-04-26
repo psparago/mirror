@@ -271,7 +271,7 @@ function ReflectionComposerInner({
   const isBlockedByAi = isAiThinking && !isAiCancelled;
   const hasRecordedAudio = !!audioUri;
 
-  // Magic animation: rotating star + pulsing text
+  // Sparkle animation: rotating star + pulsing text
   const sparkleRotation = useSharedValue(0);
   const sparkleScale = useSharedValue(1);
   const textOpacity = useSharedValue(1);
@@ -1475,10 +1475,10 @@ function ReflectionComposerInner({
               onPress={goToAi}
               activeOpacity={0.7}
               accessibilityRole="button"
-              accessibilityLabel="Back to Reflection Magic"
+              accessibilityLabel="Back to Sparkle"
             >
               <FontAwesome name="arrow-left" size={16} color="#fff" />
-              <Text style={styles.workbenchNavPillLabel}>Magic</Text>
+              <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
             </TouchableOpacity>
             <Text style={[styles.sendStageTitle, styles.sendStageTitleCenter]} numberOfLines={1}>
               Preview & Send
@@ -1522,9 +1522,9 @@ function ReflectionComposerInner({
                 disabled={isSending || isAiThinking || photoExportBusy}
                 activeOpacity={0.7}
                 accessibilityRole="button"
-                accessibilityLabel="Go to Reflection Magic"
+                accessibilityLabel="Go to Sparkle"
               >
-                <Text style={styles.workbenchNavPillLabel}>Magic</Text>
+                <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
                 <FontAwesome name="arrow-right" size={12} color="#fff" />
         </TouchableOpacity>
               <TouchableOpacity
@@ -1566,9 +1566,9 @@ function ReflectionComposerInner({
                 disabled={isSending || isAiThinking || photoExportBusy}
                 activeOpacity={0.7}
                 accessibilityRole="button"
-                accessibilityLabel="Go to Reflection Magic"
+                accessibilityLabel="Go to Sparkle"
               >
-                <Text style={styles.workbenchNavPillLabel}>Magic</Text>
+                <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
                 <FontAwesome name="arrow-right" size={12} color="#fff" />
               </TouchableOpacity>
               <TouchableOpacity
@@ -1671,7 +1671,7 @@ function ReflectionComposerInner({
           <Text style={styles.aiNavBackLabel}>Workbench</Text>
         </TouchableOpacity>
         <Text style={[styles.aiNavTitle, styles.aiNavTitleCenter]} numberOfLines={1}>
-          Reflection Magic
+          Sparkle
         </Text>
         <View style={[styles.topBarRight, styles.aiNavRightCluster]}>
           <TouchableOpacity
@@ -1679,7 +1679,7 @@ function ReflectionComposerInner({
             style={styles.aiNavNextBtn}
             activeOpacity={0.7}
             accessibilityRole="button"
-            accessibilityLabel="Finish Reflection Magic and go to preview and send"
+            accessibilityLabel="Finish Sparkle and go to preview and send"
           >
             <Text style={styles.aiNavNextText} numberOfLines={1}>
               Finish
@@ -1835,7 +1835,7 @@ function ReflectionComposerInner({
         </View>
       </ScrollView>
 
-      {/* FOOTER: Run Magic + Play + How this works */}
+      {/* FOOTER: Run Sparkle + Play + How this works */}
       <View style={[styles.aiFooter, { paddingBottom: Math.max(insets.bottom + 8, 20) }]}>
         <View style={styles.aiFooterBtnRow}>
           <TouchableOpacity
@@ -1846,7 +1846,7 @@ function ReflectionComposerInner({
           >
             <FontAwesome name="magic" size={14} color="#fff" />
             <Text style={styles.aiSparkleBtnText}>
-              {isAiThinking ? 'Running...' : sparkleNeeded ? 'Run Magic' : 'Up to Date'}
+              {isAiThinking ? 'Running...' : sparkleNeeded ? 'Run Sparkle' : 'Up to Date'}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -2072,8 +2072,8 @@ function ReflectionComposerInner({
           <Text style={styles.infoTitle}>Your Creative Workbench</Text>
           <Text style={styles.infoSubtitle}>
             {mediaType === 'video'
-              ? `Three stages: Workbench -> Reflection Magic -> Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Magic); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
-              : 'Three stages: Workbench -> Reflection Magic -> Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate button, and tap Reset to undo zoom, pan, and rotation. The top-right chip is labeled with the next stage (Magic); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
+              ? `Three stages: Workbench -> Sparkle -> Preview & Send. In the Workbench you trim, tap the video to pause or resume, replay, and set a poster frame. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. The video stops when you leave Workbench. X closes back to the timeline. Reflections work best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
+              : 'Three stages: Workbench -> Sparkle -> Preview & Send. In the Workbench, drag and pinch to frame the photo inside the square, rotate with two fingers or the Rotate button, and tap Reset to undo zoom, pan, and rotation. The top-right chip is labeled with the next stage (Sparkle); the top-left chip shows where you picked media (Camera, Library, or Search) to re-pick. X closes back to the timeline.'}
           </Text>
 
           {mediaType === 'video' ? (
@@ -2123,7 +2123,7 @@ function ReflectionComposerInner({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Voice Intro</Text>
               <Text style={styles.infoDesc}>
-                Optional. Record a short intro in your own voice on the Reflection Magic screen. After you send, the Explorer hears that recording first when present; it always takes priority over AI-generated intro audio. If you do not record, Reflection Magic can synthesize speech from your caption after you run Magic, so run Magic at least once before sending if you want an AI voice intro.
+                Optional. Record a short intro in your own voice on the Sparkle screen. After you send, the Explorer hears that recording first when present; it always takes priority over AI-generated intro audio. If you do not record, Sparkle can synthesize speech from your caption after you run Sparkle, so run Sparkle at least once before sending if you want an AI voice intro.
               </Text>
             </View>
           </View>
@@ -2135,7 +2135,7 @@ function ReflectionComposerInner({
             <View style={styles.infoTextWrap}>
               <Text style={styles.infoLabel}>Caption</Text>
               <Text style={styles.infoDesc}>
-                Reflection Magic writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the Reflection Magic screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
+                Sparkle writes a caption automatically based on your hints and media. You can edit it or replace it entirely on the Sparkle screen. If you did not record a voice intro, this caption text is spoken aloud to the Explorer in an AI voice before the content plays. The caption is also saved as metadata on the reflection.
               </Text>
             </View>
           </View>
@@ -2145,11 +2145,11 @@ function ReflectionComposerInner({
               <FontAwesome name="magic" size={14} color="#f5c842" />
             </View>
             <View style={styles.infoTextWrap}>
-              <Text style={styles.infoLabel}>Run Magic & Play</Text>
+              <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
               <Text style={styles.infoDesc}>
                 {mediaType === 'video'
-                  ? 'On the Reflection Magic screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Magic uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Reflection Magic result without regenerating it. Run Magic is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change trim, poster, caption, or Reflection hints (toggles or context text). If you recorded your own voice, that always takes priority over the AI voice. Run Magic as many times as you want.'
-                  : 'On the Reflection Magic screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Magic uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Reflection Magic result without regenerating it. Run Magic is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Reflection hints (toggles or context text), or how the photo is framed in Workbench. If you recorded your own voice, that always takes priority over the AI voice. Run Magic as many times as you want.'}
+                  ? 'On the Sparkle screen, add context for AI, mark who is in the clip, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change trim, poster, caption, or Reflection hints (toggles or context text). If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'
+                  : 'On the Sparkle screen, add context for AI, mark who is in the photo, and optionally record your voice or write a caption. Run Sparkle uses your hints and media to draft a caption and generate an AI voice intro. After it finishes, it auto-plays the result: caption audio first, then the deep dive. The Play button lets you re-listen to an existing Sparkle result without regenerating it. Run Sparkle is disabled and shows "Up to Date" when nothing has changed; it re-enables when you change caption, Reflection hints (toggles or context text), or how the photo is framed in Workbench. If you recorded your own voice, that always takes priority over the AI voice. Run Sparkle as many times as you want.'}
               </Text>
             </View>
           </View>
@@ -2158,21 +2158,21 @@ function ReflectionComposerInner({
 
           <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
           <Text style={styles.infoProTip}>
-            Workbench: left chip re-opens where you picked media (Camera, Library, or Search); right side is Magic and X. Reflection Magic: left is Workbench; right is Finish (opens Preview & Send) and X. Preview & Send: left is Magic; right is X. X always closes to the timeline (same behavior on every stage). Nothing sends until you tap Send on the final screen.
+            Workbench: left chip re-opens where you picked media (Camera, Library, or Search); right side is Sparkle and X. Sparkle: left is Workbench; right is Finish (opens Preview & Send) and X. Preview & Send: left is Sparkle; right is X. X always closes to the timeline (same behavior on every stage). Nothing sends until you tap Send on the final screen.
           </Text>
           <Text style={styles.infoProTip}>
-            Fast path: on Reflection Magic, tap Finish (top-right). If Reflection Magic has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready; you do not need a separate Run Magic tap in that case.
+            Fast path: on Sparkle, tap Finish (top-right). If Sparkle has not finished yet or your edits are out of date with the last run, it runs first and then moves on to Preview & Send when ready; you do not need a separate Run Sparkle tap in that case.
           </Text>
           <Text style={styles.infoProTip}>
-            After Reflection Magic has run, changing trim, poster, caption, Reflection hints, or (for photos) framing in Workbench makes Run Magic light up again. Tapping Finish will run Magic first when needed, then take you to Preview & Send so AI stays aligned with your edits.
+            After Sparkle has run, changing trim, poster, caption, Reflection hints, or (for photos) framing in Workbench makes Run Sparkle light up again. Tapping Finish will run Sparkle first when needed, then take you to Preview & Send so AI stays aligned with your edits.
           </Text>
           <Text style={styles.infoProTip}>
             {mediaType === 'video'
-              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops when you leave Workbench for Reflection Magic.'
+              ? 'The Explorer sees your poster frame first, then hears your voice or AI intro, then the video plays. Think of it as setting a stage. Tap the video to pause or resume; it does not loop. Video stops when you leave Workbench for Sparkle.'
               : 'The Explorer sees your cropped photo first, then hears your voice or AI intro. Order and pacing stay calm — no auto-advancing feed.'}
           </Text>
           <Text style={styles.infoProTip}>
-            On Android, the system back key steps back between Workbench, Reflection Magic, and Preview & Send; from Workbench it closes like the X button.
+            On Android, the system back key steps back between Workbench, Sparkle, and Preview & Send; from Workbench it closes like the X button.
           </Text>
         </BottomSheetScrollView>
       </BottomSheet>
@@ -2676,7 +2676,7 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
   },
-  /** Tight right column on Reflection Magic: Finish + X (matches workbench / send close behavior). */
+  /** Tight right column on Sparkle: Finish + X (matches workbench / send close behavior). */
   aiNavRightCluster: {
     flexShrink: 1,
     minWidth: 0,

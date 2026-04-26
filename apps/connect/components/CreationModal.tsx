@@ -194,7 +194,7 @@ export default function CreationModal({
   const [aiDeepDiveAudioUrl, setAiDeepDiveAudioUrl] = useState<string | null>(null);
   const [aiAudioS3Key, setAiAudioS3Key] = useState<string | null>(null);
   const [aiDeepDiveS3Key, setAiDeepDiveS3Key] = useState<string | null>(null);
-  const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Magic
+  const stagingEventIdRef = useRef<string | null>(null); // Sync fallback; state can lag after async Sparkle
   /** Production `event_id` being edited (never use as staging folder id). */
   const editSourceEventIdRef = useRef<string | null>(null);
   /** Pinned copy of the edit event ID that survives state resets during media replacement.
@@ -575,10 +575,17 @@ export default function CreationModal({
 
   const getVideoPosterFrameAsync = useCallback(
     async (
-      sourceVideoUri: string,
+      sourceVideoUri: string | null | undefined,
       timeMs: number,
       reason: 'ai' | 'send'
     ): Promise<{ uri: string; temporary: boolean }> => {
+      if (!sourceVideoUri?.trim()) {
+        const uri = await createFallbackPosterImageAsync();
+        return { uri, temporary: false };
+      }
+
+      const safeSourceVideoUri = sourceVideoUri.trim();
+      const safeTimeMs = Number.isFinite(timeMs) && timeMs >= 0 ? timeMs : 0;
       const custom = composerVideoMetaRef.current?.poster_custom_uri;
       if (typeof custom === 'string' && custom.length > 0) {
         const uri =
@@ -588,14 +595,14 @@ export default function CreationModal({
         return { uri, temporary: uri.startsWith('file://') };
       }
       try {
-        const { uri } = await VideoThumbnails.getThumbnailAsync(sourceVideoUri, {
-          time: timeMs,
+        const { uri } = await VideoThumbnails.getThumbnailAsync(safeSourceVideoUri, {
+          time: safeTimeMs,
           quality: 0.5,
         });
         const stable = await stabilizeLocalImageFileAsync(uri, 'video_thumb');
         return { uri: stable, temporary: true };
       } catch (error) {
-        console.warn(`Video thumbnail failed (${reason}); using fallback poster`, error);
+        console.warn(`Reflection video thumbnail failed (${reason}); using fallback poster`, error);
         const uri = await createFallbackPosterImageAsync();
         return { uri, temporary: false };
       }
@@ -1225,7 +1232,7 @@ export default function CreationModal({
       if (!activeAudioUri && !finalCaptionAudio) {
         Alert.alert(
           'Voice Generation Failed',
-          'We could not generate the Reflection voice. Please tap Magic again, wait for it to finish, or record your own voice before sending.'
+          'We could not generate the Reflection voice. Please tap Sparkle again, wait for it to finish, or record your own voice before sending.'
         );
         return;
       }

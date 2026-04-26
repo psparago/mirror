@@ -296,7 +296,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       if (sortBy === 'sent') {
         const aTime = getReflectionSentSortMs(a);
         const bTime = getReflectionSentSortMs(b);
-        return bTime - aTime;
+        const timeDiff = bTime - aTime;
+        if (timeDiff !== 0) return timeDiff;
+        return (reflectionSenderLabel(a) || '').localeCompare(reflectionSenderLabel(b) || '');
       }
 
       // 'recent' (default) and 'impact' tiebreaker: response time first, then doc timestamp (edit bumps order)
@@ -406,12 +408,21 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
     // Listen to reflections collection for sent Reflections
     const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
-    const q = query(
-      reflectionsRef,
-      where('explorerId', '==', currentExplorerId),
-      orderBy('timestamp', 'desc'),
-      limit(100)
-    );
+    const q =
+      sortBy === 'sent'
+        ? query(
+            reflectionsRef,
+            where('explorerId', '==', currentExplorerId),
+            orderBy('timestamp', 'desc'),
+            orderBy('metadata.sender', 'asc'),
+            limit(100)
+          )
+        : query(
+            reflectionsRef,
+            where('explorerId', '==', currentExplorerId),
+            orderBy('timestamp', 'desc'),
+            limit(100)
+          );
 
     const unsubscribe = onSnapshot(
       q,
@@ -655,7 +666,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         countRefreshTimerRef.current = null;
       }
     };
-  }, [currentExplorerId, scheduleReflectionCountRefresh]);
+  }, [currentExplorerId, scheduleReflectionCountRefresh, sortBy]);
 
   // Refresh local data when app comes to foreground
   useEffect(() => {

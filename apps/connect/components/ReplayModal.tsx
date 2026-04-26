@@ -697,7 +697,7 @@ export function ReplayModal({
             </View>
           </View>
 
-          {/* Tell Me More deep dive */}
+          {/* TELL ME MORE SPARKLE */}
           {canShowSparkle && !isDeepDivePending && !isDirectDeepDivePlaying && (
             <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
               <TouchableOpacity
