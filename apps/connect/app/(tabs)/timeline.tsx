@@ -331,10 +331,10 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         const reflectionsRef = collection(db, ExplorerConfig.collections.reflections);
         const countQuery = query(reflectionsRef, where('explorerId', '==', currentExplorerId));
         const countSnap = await getCountFromServer(countQuery);
-        const countData = countSnap.data();
-        setTotalReflectionCount(typeof countData?.count === 'number' ? countData.count : 0);
-      } catch (err) {
-        console.warn('Timeline reflection count failed:', err);
+        const count = countSnap?.data?.()?.count ?? 0;
+        setTotalReflectionCount(typeof count === 'number' ? count : 0);
+      } catch {
+        setTotalReflectionCount(null);
       }
     }, 350);
   }, [currentExplorerId]);
@@ -1014,9 +1014,14 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
               <Text style={[styles.sortText, sortBy === 'impact' && styles.sortTextActive]}>Impact</Text>
             </TouchableOpacity>
           </View>
-          <View style={styles.countBadge}>
-            <Text style={styles.countBadgeText}>{timelineBadgeCount.toLocaleString()}</Text>
-          </View>
+          {timelineBadgeCount > 0 ? (
+            <View
+              style={styles.countBadge}
+              accessibilityLabel={`${timelineBadgeCount.toLocaleString()} Reflections`}
+            >
+              <Text style={styles.countBadgeText}>{timelineBadgeCount.toLocaleString()}</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
