@@ -15,7 +15,7 @@ import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import { CameraView, PermissionResponse } from 'expo-camera';
-import { LinearGradient } from 'expo-linear-gradient';
+import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { useRouter } from 'expo-router';
 
 import * as Speech from 'expo-speech';
@@ -48,6 +48,28 @@ import Animated, {
   withTiming
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+/**
+ * Heavy OS call — only once per app session. Re-running when MainStage opens repeats
+ * triggers MPRemoteCommandCenter / audio route work on the main thread.
+ */
+let isAudioModeSet = false;
+
+/** Called from this module and from the home tab so grid/arrival audio works before MainStage mounts. */
+export function ensureExplorerAudioSessionOnce(): void {
+  if (isAudioModeSet) return;
+  isAudioModeSet = true;
+  Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    playsInSilentModeIOS: true,
+    shouldDuckAndroid: true,
+    staysActiveInBackground: true,
+    playThroughEarpieceAndroid: false,
+  }).catch((err) => {
+    isAudioModeSet = false;
+    console.warn('Reflections: Audio.setAudioModeAsync failed:', err);
+  });
+}
 
 function trimMeta(s?: string): string {
   return typeof s === 'string' ? s.trim() : '';
@@ -92,6 +114,12 @@ function formatEventDateFromId(eventId: string): string {
 
 /** Rough row height when `getItemLayout` is absent; used for scrollToOffset fallbacks. */
 const UP_NEXT_FALLBACK_ITEM_HEIGHT = 200;
+
+/**
+ * expo-av: widen `onPlaybackStatusUpdate` spacing — handlers only need completion edges.
+ * Default (~500ms iOS) progress ticks add JS work and contribute to Now Playing metadata churn.
+ */
+const EXPO_AV_PROGRESS_INTERVAL_MS = 60_000;
 
 function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
   const mCap = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
@@ -173,6 +201,10 @@ export default function MainStageView({
   const debugLog = (...args: any[]) => {
     if (DEBUG_LOGS) console.log(...args);
   };
+
+  useEffect(() => {
+    ensureExplorerAudioSessionOnce();
+  }, []);
 
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -442,7 +474,10 @@ export default function MainStageView({
 
               const { sound: newCaptionSound, status } = await Audio.Sound.createAsync(
                 { uri: audioUrl },
-                { shouldPlay: false },
+                {
+                  shouldPlay: false,
+                  progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+                },
                 (status) => {
                   if (status.isLoaded && !status.isPlaying && status.didJustFinish) {
                     if (captionSessionRef.current === thisSession) {
@@ -570,7 +605,10 @@ export default function MainStageView({
             debugLog(`🎧 Playing audio: ${selectedEventRef.current.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
             const { sound: newSound } = await Audio.Sound.createAsync(
               { uri: selectedEventRef.current.audio_url as string },
-              { shouldPlay: true }
+              {
+                shouldPlay: true,
+                progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+              }
             );
 
             newSound.setOnPlaybackStatusUpdate((status) => {
@@ -629,7 +667,10 @@ export default function MainStageView({
               debugLog(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
               const { sound: newSound, status } = await Audio.Sound.createAsync(
                 { uri: selectedEventRef.current.deep_dive_audio_url },
-                { shouldPlay: true }
+                {
+                  shouldPlay: true,
+                  progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+                }
               );
               newSound.setOnPlaybackStatusUpdate((status) => {
                 if (status.isLoaded && status.didJustFinish) {
@@ -1214,7 +1255,7 @@ export default function MainStageView({
         const currentState = stateRef.current;
         const shouldBePlaying = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
-        if (shouldBePlaying && !player.playing) {
+        if (shouldBePlaying && player && !player.playing) {
           debugLog('⚡ Player became ready while machine expects playback - starting play');
           player.play();
         }
@@ -1322,7 +1363,11 @@ export default function MainStageView({
         if (soundRef.current) await soundRef.current.unloadAsync();
         const { sound: newSound } = await Audio.Sound.createAsync(
           { uri: event.deep_dive_audio_url },
-          { shouldPlay: true, volume: 1.0 }
+          {
+            shouldPlay: true,
+            volume: 1.0,
+            progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+          }
         );
         soundRef.current = newSound;
         setSound(newSound);
@@ -1359,6 +1404,7 @@ export default function MainStageView({
 
 
   // --- HARDWARE SYNC (Side Effects) ---
+  // Audio session: `ensureExplorerAudioSessionOnce` at module scope + home tab — not per Reflection.
   // This effect ensures the actual hardware (Video/Audio) matches the machine state.
   // This is more reliable than actions due to closure staleness in active rendercycles.
   useEffect(() => {
@@ -1371,7 +1417,7 @@ export default function MainStageView({
     // Ensure we aren't finished
     const isFinished = state.matches('finished');
 
-    // Videos don't pause - only play or stop
+    // Videos don't pause - only play or stop. Avoid redundant player.play() — limits bridge/native churn (Now Playing).
     if (isMachinePlayingVideo && !isFinished) {
       if (!isVideoPlaying) {
         debugLog('⚡ Hardware Sync: Playing Video');
@@ -1382,7 +1428,9 @@ export default function MainStageView({
             seekVideoToSeconds(player, trim.startSec);
           }
         }
-        player.play();
+        if (player && !player.playing) {
+          player.play();
+        }
       }
     }
     // Removed pause handling for videos - they play through or finish
@@ -1810,7 +1858,10 @@ export default function MainStageView({
       try {
         const { sound: newSound } = await Audio.Sound.createAsync(
           { uri: selectedEvent.audio_url },
-          { shouldPlay: true }
+          {
+            shouldPlay: true,
+            progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+          }
         );
 
         newSound.setOnPlaybackStatusUpdate((status) => {
@@ -1882,7 +1933,11 @@ export default function MainStageView({
           if (soundRef.current) await soundRef.current.unloadAsync();
           const { sound: newSound } = await Audio.Sound.createAsync(
             { uri: event.deep_dive_audio_url },
-            { shouldPlay: true, volume: 1.0 }
+            {
+              shouldPlay: true,
+              volume: 1.0,
+              progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
+            }
           );
           soundRef.current = newSound;
           newSound.setOnPlaybackStatusUpdate((status) => {
@@ -2016,7 +2071,7 @@ export default function MainStageView({
                   <Text style={[styles.upNextMeta, isNowPlaying && styles.upNextMetaNowPlaying]}>Photo</Text>
                 </>
               )}
-              {isNowPlaying && <Text style={styles.upNextMetaNowPlaying}> • NOW PLAYING</Text>}
+              {isNowPlaying && <Text style={styles.upNextMetaNowPlaying}> • Reflections.</Text>}
               {isNewArrival && !isNowPlaying && <Text style={styles.upNextMetaNew}> • NEW</Text>}
             </View>
 
@@ -2116,10 +2171,8 @@ export default function MainStageView({
   return (
     <GestureDetector gesture={horizontalSwipeGesture}>
       <Animated.View style={[styles.modalContainer, rootAnimatedStyle]}>
-        <LinearGradient
-          colors={['#0f2027', '#203a43', '#2c5364']}
-          style={StyleSheet.absoluteFill}
-        >
+        <ExplorerGradientBackdrop layout="overlay" />
+        <View style={styles.modalForeground}>
           <View style={[styles.splitContainer, isLandscape ? styles.splitContainerLandscape : styles.splitContainerPortrait]}>
 
             {/* LEFT PANE */}
@@ -2521,7 +2574,7 @@ export default function MainStageView({
               </View>
             </KeyboardAvoidingView>
           </Modal>
-        </LinearGradient>
+        </View>
       </Animated.View>
     </GestureDetector>
   );
@@ -2529,6 +2582,7 @@ export default function MainStageView({
 
 const styles = StyleSheet.create({
   modalContainer: { flex: 1 },
+  modalForeground: { flex: 1, zIndex: 1 },
   splitContainer: { flex: 1 },
   splitContainerLandscape: { flexDirection: 'row' },
   splitContainerPortrait: { flexDirection: 'column' },

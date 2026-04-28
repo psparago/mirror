@@ -1,4 +1,5 @@
-import MainStageView from '@/components/MainStageView';
+import MainStageView, { ensureExplorerAudioSessionOnce } from '@/components/MainStageView';
+import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import {
@@ -38,7 +39,6 @@ import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
 import * as ImageManipulator from 'expo-image-manipulator';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
@@ -309,7 +309,11 @@ export default function HomeScreen() {
       // Using a local chime asset for reliable playback
       const { sound } = await Audio.Sound.createAsync(
         require('../../assets/sounds/chime.mp3'),
-        { shouldPlay: true, volume: 0.7 }
+        {
+          shouldPlay: true,
+          volume: 0.7,
+          progressUpdateIntervalMillis: 60_000,
+        }
       );
       // Clean up after playing
       sound.setOnPlaybackStatusUpdate((status: any) => {
@@ -505,20 +509,13 @@ export default function HomeScreen() {
     };
   }, [processSelfieQueue]);
 
-  // Request permissions and configure audio on startup
+  // Request permissions and configure audio once per app session (not per Reflection selection)
   useEffect(() => {
     debugLog('📸 Triggering permission check and audio setup on startup...');
 
-    // 1. Audio Mode setup
-    Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true, // Crucial for iPad usage
-      shouldDuckAndroid: true,
-      staysActiveInBackground: true,
-      playThroughEarpieceAndroid: false,
-    }).catch(err => console.warn('Audio.setAudioModeAsync failed:', err));
+    ensureExplorerAudioSessionOnce();
 
-    // 2. Camera Permission
+    // Camera Permission
     requestCameraPermission().then(result => {
       if (result.granted) {
         debugLog('✅ Camera permission granted');
@@ -876,6 +873,9 @@ export default function HomeScreen() {
     refreshEventUrlsRef.current = refreshEventUrls;
   }, [refreshEventUrls]);
 
+  /** Blocks rapid Reflection switches — avoids repeated native media / Media Remote setup */
+  const lastSelectionTime = useRef(0);
+
   const markEventAsRead = useCallback(async (eventId: string) => {
     setReadEventIds(prev => {
       if (prev.includes(eventId)) return prev;
@@ -894,12 +894,20 @@ export default function HomeScreen() {
     setStartIdleOnInitialSelection(false);
     // Ignore multiple taps on the already-selected card (use ref for immediate effect before state updates)
     if (item.event_id === selectedEventIdRef.current) return;
+
+    const now = Date.now();
+    if (now - lastSelectionTime.current < 800) {
+      debugLog('Reflections: selection ignored (800ms lockout)');
+      return;
+    }
+    lastSelectionTime.current = now;
+
     selectedEventIdRef.current = item.event_id;
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
 
     // Remove from "Recent" arrivals once selected
-    debugLog(`🖱️ Event ${item.event_id} selected. Removing from recent arrivals.`);
+    debugLog(`Reflections: ${item.event_id} selected. Removing from recent arrivals.`);
     setRecentlyArrivedIds(prev => {
       const filtered = prev.filter(id => id !== item.event_id);
       if (filtered.length !== prev.length) {
@@ -921,7 +929,7 @@ export default function HomeScreen() {
     const isStale = !item.refreshedAt || (Date.now() - item.refreshedAt > STALE_THRESHOLD);
 
     if (isStale) {
-      debugLog(`🔄 Item ${item.event_id} is stale. Refreshing in background...`);
+      debugLog(`Reflections: item ${item.event_id} is stale. Refreshing in background...`);
       const eventIdToRefresh = item.event_id;
       refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
         if (refreshedEvent) {
@@ -945,7 +953,7 @@ export default function HomeScreen() {
     }
   }, [eventMetadata, refreshEventUrls, refreshNeighborUrls]);
 
-  const throttledHandleEventPress = useThrottledCallback(handleEventPress);
+  const throttledHandleEventPress = useThrottledCallback(handleEventPress, 800);
 
   // Auto-select the first (most recent) event when events load (only once)
   const hasAutoSelectedRef = useRef(false);
@@ -1416,69 +1424,62 @@ export default function HomeScreen() {
 
   if (loading) {
     return (
-      <LinearGradient
-        colors={['#0f2027', '#203a43', '#2c5364']}
-        style={styles.centerContainer}
-      >
-        <TouchableOpacity
-          onPress={() => router.push('/settings')}
-          style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
-          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
-        >
-          <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
-        </TouchableOpacity>
+      <View style={styles.container}>
+        <ExplorerGradientBackdrop layout="screen" />
+        <View style={styles.centerContainer} pointerEvents="box-none">
+          <TouchableOpacity
+            onPress={() => router.push('/settings')}
+            style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
+            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+          >
+            <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
+          </TouchableOpacity>
 
-        <ActivityIndicator size="large" color="#fff" />
-        <Text style={[styles.loadingText, { color: '#fff' }]}>Loading Reflections...</Text>
-      </LinearGradient>
-
-
+          <ActivityIndicator size="large" color="#fff" />
+          <Text style={[styles.loadingText, { color: '#fff' }]}>Loading Reflections...</Text>
+        </View>
+      </View>
     );
   }
 
   if (error) {
     return (
-      <LinearGradient
-        colors={['#0f2027', '#203a43', '#2c5364']}
-        style={styles.centerContainer}
-      >
-        <Text style={[styles.errorText, { color: '#fff' }]}>Error: {error}</Text>
-        <Text style={[styles.retryText, { color: '#4FC3F7' }]} onPress={fetchEvents}>
-          Tap to retry
-        </Text>
-      </LinearGradient>
-
+      <View style={styles.container}>
+        <ExplorerGradientBackdrop layout="screen" />
+        <View style={styles.centerContainer}>
+          <Text style={[styles.errorText, { color: '#fff' }]}>Error: {error}</Text>
+          <Text style={[styles.retryText, { color: '#4FC3F7' }]} onPress={fetchEvents}>
+            Tap to retry
+          </Text>
+        </View>
+      </View>
     );
   }
 
   if (events.length === 0) {
     return (
-      <LinearGradient
-        colors={['#0f2027', '#203a43', '#2c5364']}
-        style={styles.centerContainer}
-      >
-        <TouchableOpacity
-          onPress={() => router.push('/settings')}
-          style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
-          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
-        >
-          <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
-        </TouchableOpacity>
+      <View style={styles.container}>
+        <ExplorerGradientBackdrop layout="screen" />
+        <View style={styles.centerContainer} pointerEvents="box-none">
+          <TouchableOpacity
+            onPress={() => router.push('/settings')}
+            style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
+            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+          >
+            <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
+          </TouchableOpacity>
 
-        <Text style={[styles.emptyText, { color: '#fff' }]}>No Reflections yet</Text>
-        <Text style={[styles.emptySubtext, { color: 'rgba(255,255,255,0.7)' }]}>Reflections from companions will appear here</Text>
-      </LinearGradient>
-
-
+          <Text style={[styles.emptyText, { color: '#fff' }]}>No Reflections yet</Text>
+          <Text style={[styles.emptySubtext, { color: 'rgba(255,255,255,0.7)' }]}>Reflections from companions will appear here</Text>
+        </View>
+      </View>
     );
   }
 
   // Z-Stack Layout: Grid (bottom) + MainStageView Overlay (top)
   return (
-    <LinearGradient
-      colors={['#0f2027', '#203a43', '#2c5364']}
-      style={styles.container}
-    >
+    <View style={styles.container}>
+      <ExplorerGradientBackdrop layout="overlay" />
       {/* Header Bar */}
       <View style={[styles.gridHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.gridHeaderLeft}>
@@ -1597,7 +1598,7 @@ export default function HomeScreen() {
           </BlurView>
         </View>
       ) : null}
-    </LinearGradient>
+    </View>
   );
 }
 
@@ -1606,7 +1607,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   centerContainer: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 20,
