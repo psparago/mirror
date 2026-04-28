@@ -1042,32 +1042,31 @@ export default function MainStageView({
       }
     });
 
-  // Vertical swipe gesture for minimize (ONLY on mediaFrame)
-  // Threshold set to ~80px (roughly 1-2" on iPad) for easier triggering
+  // Vertical swipe gesture for dismiss-to-grid (ONLY on mediaFrame).
+  // Swipe DOWN to dismiss (iOS modal-sheet convention: Apple Photos, YouTube minimize, Stories).
+  // Activation threshold is aggressive (12px) so the gesture claims the touch before
+  // iOS can hand it to the home indicator. A velocity-based commit rescues quick flicks.
   const verticalSwipeGesture = Gesture.Pan()
-    .activeOffsetY([-20, 20]) // Activate after 20px vertical movement
-    .failOffsetX([-30, 30]) // Fail if horizontal movement exceeds 30px first
+    .activeOffsetY([-12, 12])
+    .failOffsetX([-30, 30])
     .onUpdate((event) => {
-      // Only respond to downward drags
       if (event.translationY > 0) {
         translateY.value = event.translationY;
-        // Scale down and fade out as we drag (more responsive)
         const progress = Math.min(event.translationY / 200, 1);
-        scale.value = 1 - progress * 0.1; // Scale down by 10% max
-        opacity.value = 1 - progress * 0.5; // Fade out by 50% max
+        scale.value = 1 - progress * 0.1;
+        opacity.value = 1 - progress * 0.5;
       }
     })
     .onEnd((event) => {
-      const threshold = 80; // Reduced from 150px to ~1-2" swipe
-      if (event.translationY > threshold) {
-        // Animate off-screen and close
-        translateY.value = withTiming(height, { duration: 300 });
-        scale.value = withTiming(0.8, { duration: 300 });
-        opacity.value = withTiming(0, { duration: 300 }, () => {
+      // ~80pt drag OR a quick downward fling (>600 pt/s) commits.
+      const shouldDismiss = event.translationY > 80 || event.velocityY > 600;
+      if (shouldDismiss) {
+        translateY.value = withTiming(height, { duration: 250 });
+        scale.value = withTiming(0.8, { duration: 250 });
+        opacity.value = withTiming(0, { duration: 250 }, () => {
           runOnJS(handleSwipeDismiss)();
         });
       } else {
-        // Spring back to original position
         translateY.value = withSpring(0, { damping: 20, stiffness: 300 });
         scale.value = withSpring(1, { damping: 20, stiffness: 300 });
         opacity.value = withSpring(1, { damping: 20, stiffness: 300 });

@@ -43,7 +43,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, PanResponder, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
@@ -1139,43 +1139,6 @@ export default function HomeScreen() {
       }, 1000);
     }
   }, [selectedEvent, refreshEventUrls]);
-
-  // PanResponder for swipe navigation:
-  // - Left/Right: Navigate between photos
-  // - Up/Down: Return to inbox
-  const swipeResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true, // Respond to all swipes
-        onPanResponderRelease: (_, gestureState) => {
-          const absDx = Math.abs(gestureState.dx);
-          const absDy = Math.abs(gestureState.dy);
-
-          // Minimum swipe distance of 50 pixels
-          if (absDx < 50 && absDy < 50) {
-            return; // Too small, ignore
-          }
-
-          // Vertical swipe (up or down) - return to inbox
-          if (absDy > absDx && absDy > 50) {
-            closeFullScreen();
-          }
-          // Horizontal swipe (left or right) - navigate between photos
-          // Standard interpretation: swipe left = next (forward), swipe right = previous (back)
-          else if (absDx > absDy && absDx > 50 && absDy < 100) {
-            if (gestureState.dx < 0) {
-              // Swipe left - go to next photo (older, forward in array)
-              navigateToPhoto('next');
-            } else {
-              // Swipe right - go to previous photo (newer, backward in array)
-              navigateToPhoto('prev');
-            }
-          }
-        },
-      }),
-    [navigateToPhoto, closeFullScreen]
-  );
 
   // Send engagement signal to Firestore
   const sendEngagementSignal = async (eventId: string) => {
