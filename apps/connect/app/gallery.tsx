@@ -1,6 +1,11 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
-import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
+import {
+  ensureFileUri,
+  materializeVideoSourceToFileAsync,
+  prepareImageForUpload,
+  probeLocalVideoDurationSeconds,
+} from '@/utils/mediaProcessor';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { FontAwesome } from '@expo/vector-icons';
 import * as ExpoImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
@@ -54,9 +59,7 @@ export default function GalleryScreen() {
   const hasLaunched = useRef(false);
   const cancelledRef = useRef(false);
   const [statusLine, setStatusLine] = useState('Getting your library ready...');
-  const [waitIcon, setWaitIcon] = useState<'photo' | 'video-camera' | 'scissors' | 'cloud-upload'>(
-    'photo'
-  );
+  const [waitIcon, setWaitIcon] = useState<'photo' | 'video-camera' | 'cloud-upload'>('photo');
   const [isProcessing, setIsProcessing] = useState(false);
 
   const confirmLargeVideoAsync = async (sizeBytes?: number | null): Promise<boolean> => {
@@ -171,35 +174,41 @@ export default function GalleryScreen() {
           return;
         }
         if (detectedSizeBytes && detectedSizeBytes >= LARGE_VIDEO_WARN_BYTES) {
-          setStatusLine('Large video detected. Preparing trim tools…');
-        } else {
-          setStatusLine('Preparing trim tools…');
+          setStatusLine('Large video detected…');
         }
-        setWaitIcon('scissors');
-        if (cancelledRef.current) return;
-        console.log('[GalleryScreen] launching mandatory trim', {
-          uri: expoUri,
-          detectedSizeBytes,
-        });
-        const trimResult = await runMandatoryGalleryTrimIfNeededAsync(expoUri);
-        console.log('[GalleryScreen] mandatory trim result', trimResult);
-        if (trimResult.kind === 'timeout') {
+        let fileUri = expoUri;
+        try {
+          fileUri = await materializeVideoSourceToFileAsync(expoUri);
+        } catch {
+          fileUri = expoUri;
+        }
+        const durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        const durationMs = Math.round(durationSec * 1000);
+        /** Best-effort decode check (expo-video-thumbnails); Sparkle Composer re-validates — no native trim UI. */
+        try {
+          if (durationMs > 0 && fileUri) {
+            const atMs = Math.min(600, Math.max(1, durationMs - 1));
+            await VideoThumbnails.getThumbnailAsync(ensureFileUri(fileUri), {
+              time: atMs,
+            });
+          }
+        } catch {
+          /* Long masters often still decode in Composer; picker alone is not authoritative. */
+        }
+        /** Video is usable for Reflections when duration is readable; Composer clamps long clips — no trimming here. */
+        if (!Number.isFinite(durationSec)) {
           Alert.alert(
-            'Video trim timed out',
-            'Preparing this Reflection video took too long. Please try a shorter clip or trim it first in Photos.'
+            'Can\'t use this clip',
+            'Sparkle couldn’t read this Reflection. Try another video, or trim it first in Photos.',
+            [{ text: 'OK', onPress: () => router.back() }]
           );
-          router.back();
-          return;
-        }
-        if (trimResult.kind === 'cancelled') {
-          router.back();
           return;
         }
         if (cancelledRef.current) return;
-        setStatusLine('Preparing your video for Reflection...');
+        setStatusLine('Preparing your video for Reflection…');
         setWaitIcon('cloud-upload');
         setPendingMedia({
-          uri: ensureFileUri(trimResult.uri),
+          uri: ensureFileUri(fileUri),
           type: 'video',
           source: 'gallery',
         });

@@ -1,6 +1,11 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
-import { runMandatoryGalleryTrimIfNeededAsync } from '@/utils/mandatoryVideoTrim';
+import {
+  ensureFileUri,
+  materializeVideoSourceToFileAsync,
+  prepareImageForUpload,
+  probeLocalVideoDurationSeconds,
+} from '@/utils/mediaProcessor';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { FontAwesome } from '@expo/vector-icons';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -57,19 +62,32 @@ export default function CameraScreen() {
 
       if (!result.canceled && result.assets?.length) {
         const video = result.assets[0];
-        const trimResult = await runMandatoryGalleryTrimIfNeededAsync(video.uri);
-        if (trimResult.kind === 'timeout') {
+        let fileUri = video.uri;
+        try {
+          fileUri = await materializeVideoSourceToFileAsync(video.uri);
+        } catch {
+          fileUri = video.uri;
+        }
+        const durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        const durationMs = Math.round(durationSec * 1000);
+        /** Best-effort decode check (expo-video-thumbnails); Composer re-validates — no native trim UI. */
+        try {
+          if (durationMs > 0) {
+            const atMs = Math.min(600, Math.max(1, durationMs - 1));
+            await VideoThumbnails.getThumbnailAsync(ensureFileUri(fileUri), { time: atMs });
+          }
+        } catch {
+          /* Composer re-probes if needed */
+        }
+        if (!Number.isFinite(durationSec)) {
           Alert.alert(
-            'Video trim timed out',
-            'Preparing this Reflection video took too long. Please try a shorter clip or trim it first in Photos.'
+            'Can\'t use this clip',
+            'Sparkle couldn’t read this Reflection. Try recording again.',
           );
           return;
         }
-        if (trimResult.kind === 'cancelled') {
-          return;
-        }
         setPendingMedia({
-          uri: ensureFileUri(trimResult.uri),
+          uri: ensureFileUri(fileUri),
           type: 'video',
           source: 'camera',
           isSelfie: markAsSelfie,

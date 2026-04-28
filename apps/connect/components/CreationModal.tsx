@@ -1016,7 +1016,25 @@ export default function CreationModal({
         !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
       if (isLocalVideo) {
         probedLocalVideoDurationSec = await probeLocalVideoDurationSeconds(videoUri);
-        if (probedLocalVideoDurationSec > REFLECTION_MAX_VIDEO_SECONDS) {
+        const sendVm = overrides?.videoMeta ?? composerVideoMetaRef.current;
+        const trimmed = getValidVideoTrimFromFields(
+          sendVm?.video_start_ms ?? null,
+          sendVm?.video_end_ms ?? null
+        );
+        if (trimmed) {
+          const windowSec = (trimmed.endMs - trimmed.startMs) / 1000;
+          if (
+            !Number.isFinite(windowSec) ||
+            windowSec <= 0 ||
+            windowSec > REFLECTION_MAX_VIDEO_SECONDS
+          ) {
+            Alert.alert(
+              'Video too long',
+              `Please choose a clip of ${REFLECTION_MAX_VIDEO_SECONDS} seconds or less. Reflections work best under 60 seconds.`
+            );
+            return;
+          }
+        } else if (probedLocalVideoDurationSec > REFLECTION_MAX_VIDEO_SECONDS) {
           Alert.alert(
             'Video too long',
             `Please choose a clip of ${REFLECTION_MAX_VIDEO_SECONDS} seconds or less. Reflections work best under 60 seconds.`
