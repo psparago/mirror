@@ -488,7 +488,11 @@ export default function CreationModal({
       pendingRouteRef.current = null;
       setConditioningStatus('Media selection cancelled.');
       setConditioningProgress(null);
-      onClose();
+      Alert.alert(
+        'Video preparation didn\'t finish',
+        'Reflections Connect didn\'t receive the selected media in time. Please try again, and keep the app open while the Reflection is being prepared.',
+        [{ text: 'OK', onPress: onClose }]
+      );
     }, 5000);
 
     return () => {
