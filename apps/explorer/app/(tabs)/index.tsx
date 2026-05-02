@@ -177,6 +177,15 @@ export default function HomeScreen() {
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
+  const gridThumbnailSize = useMemo(() => {
+    const listHorizontalPadding = 16;
+    const cardHorizontalMargins = numColumns * 12;
+    const thumbnailWidth = Math.max(1, Math.floor((width - listHorizontalPadding - cardHorizontalMargins) / numColumns));
+    return {
+      width: thumbnailWidth,
+      height: Math.max(1, Math.round(thumbnailWidth * 9 / 16)),
+    };
+  }, [numColumns, width]);
 
   // Explorer config with state for toggleable settings
   const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
@@ -574,7 +583,7 @@ export default function HomeScreen() {
   // Get metadata for selected event  
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
 
-  // Track engagement: send signal if Star views Reflection for > 5 seconds
+  // Track engagement: send signal if Explorer views Reflection for > 5 seconds
   useEffect(() => {
     // Clear any existing timer
     if (engagementTimerRef.current) {
@@ -997,7 +1006,12 @@ export default function HomeScreen() {
         {/* Thumbnail */}
         <View style={styles.gridThumbnailContainer}>
           <Image
-            source={{ uri: item.image_url, cacheKey: imageUrlCacheKey(item.image_url) }}
+            source={{
+              uri: item.image_url,
+              cacheKey: imageUrlCacheKey(item.image_url),
+              width: gridThumbnailSize.width,
+              height: gridThumbnailSize.height,
+            }}
             style={styles.gridThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
@@ -1506,11 +1520,11 @@ export default function HomeScreen() {
         ]}
         columnWrapperStyle={styles.row}
         showsVerticalScrollIndicator={false}
-        removeClippedSubviews
+        removeClippedSubviews={true}
         initialNumToRender={12}
-        maxToRenderPerBatch={12}
-        updateCellsBatchingPeriod={50}
-        windowSize={7}
+        maxToRenderPerBatch={6}
+        updateCellsBatchingPeriod={80}
+        windowSize={3}
       />
 
       {/* Layer 2 (Top): MainStageView Overlay - Only rendered when event selected */}

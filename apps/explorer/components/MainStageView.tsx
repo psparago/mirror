@@ -385,6 +385,7 @@ export default function MainStageView({
   const playerRef = useRef<any>(null);
   const captionSoundRefForActions = useRef<Audio.Sound | null>(null);
   const performSelfieCaptureRef = useRef<((delay?: number) => Promise<void>) | null>(null);
+  const clearHeavyMediaRefsRef = useRef<() => void>(() => { });
 
   // --- THE XSTATE MACHINE ---
   const machine = useMemo(() => playerMachine.provide({
@@ -802,7 +803,7 @@ export default function MainStageView({
 
   const lastTapRef = useRef<number>(0);
 
-  /** Cole-Guard: suppress duplicate autoscroll for the same (eventId, list length) within 800ms (orientation / layout churn). */
+  /** Duplicate guard: suppress repeated autoscroll for the same (eventId, list length) within 800ms. */
   const lastUpNextAutoscrollDedupeRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
 
   const scrollFlatListToDataIndex = useCallback((index: number, animated: boolean) => {
@@ -915,9 +916,10 @@ export default function MainStageView({
       safetyTimeoutRef.current = null;
     }
 
-    // 5. Call the actual close handler (video stops when component unmounts)
+    // 5. Pre-clear native media before the overlay unmounts.
+    clearHeavyMediaRefsRef.current();
     onPlaybackIdleRef.current?.();
-    onClose();
+    requestAnimationFrame(onClose);
   }, [sound, captionSound, onClose]);
 
   const handleSingleTap = useCallback(() => {
@@ -1122,6 +1124,34 @@ export default function MainStageView({
 
   // --- AUDIO/VIDEO REFS ---
   const videoSource = selectedEvent?.video_url || null;
+  const selectedImageUrl = selectedEvent?.image_url || null;
+  const stageImageDimensions = useMemo(() => {
+    const stagePaneWidth = isLandscape ? width * 0.7 : width;
+    const stagePaneHeight = isLandscape ? height : height * 0.6;
+    return {
+      width: Math.max(1, Math.round(stagePaneWidth - 40)),
+      height: Math.max(1, Math.round(stagePaneHeight - 290)),
+    };
+  }, [height, isLandscape, width]);
+  const [stageImageSource, setStageImageSource] = useState<React.ComponentProps<typeof Image>['source']>(undefined);
+
+  useEffect(() => {
+    if (!selectedImageUrl) {
+      setStageImageSource(undefined);
+      return;
+    }
+
+    setStageImageSource({
+      uri: selectedImageUrl,
+      cacheKey: imageUrlCacheKey(selectedImageUrl),
+      width: stageImageDimensions.width,
+      height: stageImageDimensions.height,
+    });
+
+    return () => {
+      setStageImageSource(undefined);
+    };
+  }, [selectedImageUrl, stageImageDimensions.height, stageImageDimensions.width]);
 
   // Reset readiness when source changes
   useEffect(() => {
@@ -1148,6 +1178,7 @@ export default function MainStageView({
     } else {
       try {
         player.pause();
+        player.replace('');
       } catch {
         /* ignore */
       }
@@ -1158,6 +1189,28 @@ export default function MainStageView({
   useEffect(() => {
     playerRef.current = player;
   }, [player]);
+
+  const clearHeavyMediaRefs = useCallback(() => {
+    setStageImageSource(undefined);
+    setVideoReady(false);
+    setIsVideoPlaying(false);
+    playerRef.current = null;
+    selectedEventRef.current = null;
+    selectedMetadataRef.current = null;
+
+    if (player) {
+      try {
+        player.pause();
+        player.replace('');
+      } catch {
+        /* Player may already be released during teardown. */
+      }
+    }
+  }, [player]);
+
+  useEffect(() => {
+    clearHeavyMediaRefsRef.current = clearHeavyMediaRefs;
+  }, [clearHeavyMediaRefs]);
 
   // Listen for "playing" status to lift the thumbnail shield & track isVideoPlaying.
   // For trimmed video, `isPlaying` can become true before seek-to-trim completes; keep the
@@ -1272,15 +1325,9 @@ export default function MainStageView({
   // Cleanup video player on unmount to prevent stale playback
   useEffect(() => {
     return () => {
-      if (player) {
-        try {
-          player.pause();
-        } catch (e) {
-          // Player may already be released
-        }
-      }
+      clearHeavyMediaRefsRef.current();
     };
-  }, [player]);
+  }, []);
 
   // --- ACTIONS IMPLEMENTATION ---
 
@@ -2040,7 +2087,12 @@ export default function MainStageView({
             }} />
           )}
           <Image
-            source={{ uri: item.image_url, cacheKey: imageUrlCacheKey(item.image_url) }}
+            source={{
+              uri: item.image_url,
+              cacheKey: imageUrlCacheKey(item.image_url),
+              width: 56,
+              height: 56,
+            }}
             style={styles.upNextThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
@@ -2238,14 +2290,12 @@ export default function MainStageView({
 
                     {/* Layer 2: Thumbnail Shield (Rendered ON TOP until video is ready) */}
                     {/* We keep this visible if: (1) It's a photo OR (2) It's a video that hasn't started playing yet */}
-                    {(!videoSource || !videoReady) && (
+                    {stageImageSource && (!videoSource || !videoReady) && (
                       <Image
-                        source={{
-                          uri: selectedEvent.image_url,
-                          cacheKey: imageUrlCacheKey(selectedEvent.image_url),
-                        }}
+                        source={stageImageSource}
                         style={[styles.mediaImage, { position: 'absolute', zIndex: 10 }]}
                         contentFit="contain"
+                        recyclingKey={selectedEvent.event_id}
                         cachePolicy="memory-disk"
                         priority="high"
                       />
@@ -2476,8 +2526,9 @@ export default function MainStageView({
                   wrapToTop();
                 }}
                 removeClippedSubviews={true}
-                maxToRenderPerBatch={10}
-                windowSize={5}
+                initialNumToRender={6}
+                maxToRenderPerBatch={6}
+                windowSize={3}
                 key={isLandscape ? 'list' : 'grid'}
                 numColumns={isLandscape ? 1 : 2}
                 columnWrapperStyle={!isLandscape ? { gap: 8 } : undefined}
