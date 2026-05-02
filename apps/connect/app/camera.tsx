@@ -1,6 +1,7 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
   ensureFileUri,
+  isUsableVideoDurationSeconds,
   materializeVideoSourceToFileAsync,
   prepareImageForUpload,
   probeLocalVideoDurationSeconds,
@@ -69,6 +70,13 @@ export default function CameraScreen() {
           fileUri = video.uri;
         }
         const durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        if (!isUsableVideoDurationSeconds(durationSec)) {
+          Alert.alert(
+            'Can\'t use this clip',
+            'Reflections Connect couldn’t read this video. Try recording again.',
+          );
+          return;
+        }
         const durationMs = Math.round(durationSec * 1000);
         /** Best-effort decode check (expo-video-thumbnails); Composer re-validates — no native trim UI. */
         try {
@@ -78,13 +86,6 @@ export default function CameraScreen() {
           }
         } catch {
           /* Composer re-probes if needed */
-        }
-        if (!Number.isFinite(durationSec)) {
-          Alert.alert(
-            'Can\'t use this clip',
-            'Sparkle couldn’t read this Reflection. Try recording again.',
-          );
-          return;
         }
         setPendingMedia({
           uri: ensureFileUri(fileUri),

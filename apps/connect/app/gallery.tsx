@@ -1,6 +1,8 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
   ensureFileUri,
+  isUsableVideoDurationSeconds,
+  LARGE_VIDEO_WARN_BYTES,
   materializeVideoSourceToFileAsync,
   prepareImageForUpload,
   probeLocalVideoDurationSeconds,
@@ -21,8 +23,6 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-
-const LARGE_VIDEO_WARN_BYTES = 150 * 1024 * 1024;
 
 async function ensureAndroidGalleryPermissions(): Promise<boolean> {
   if (Platform.OS !== 'android') return true;
@@ -58,17 +58,23 @@ export default function GalleryScreen() {
   const { setPendingMedia } = useReflectionMedia();
   const hasLaunched = useRef(false);
   const cancelledRef = useRef(false);
-  const [statusLine, setStatusLine] = useState('Getting your library ready...');
-  const [waitIcon, setWaitIcon] = useState<'photo' | 'video-camera' | 'cloud-upload'>('photo');
+  const [statusLine, setStatusLine] = useState('Loading media library…');
+  const [statusDetail, setStatusDetail] = useState('Thanks for your patience. Larger videos can take a little while to get ready.');
+  const [prepStep, setPrepStep] = useState(0);
+  const [waitIcon, setWaitIcon] = useState<'folder-open' | 'photo' | 'video-camera' | 'cloud-upload'>('folder-open');
   const [isProcessing, setIsProcessing] = useState(false);
 
   const confirmLargeVideoAsync = async (sizeBytes?: number | null): Promise<boolean> => {
-    if (!sizeBytes || sizeBytes < LARGE_VIDEO_WARN_BYTES) return true;
-    const sizeMb = Math.round(sizeBytes / (1024 * 1024));
+    if (typeof sizeBytes === 'number' && sizeBytes < LARGE_VIDEO_WARN_BYTES) return true;
+    const sizeMb = typeof sizeBytes === 'number' ? Math.round(sizeBytes / (1024 * 1024)) : null;
+    const message =
+      sizeMb != null
+        ? `This Reflection video is about ${sizeMb} MB. It may take a minute or more to polish for smooth playback, so please keep Reflections Connect open. Continue?`
+        : 'This video may take a minute or more to polish for smooth playback, so please keep Reflections Connect open. Continue?';
     return await new Promise((resolve) => {
       Alert.alert(
         'Large video selected',
-        `This Reflection video is about ${sizeMb} MB and may take a while to prepare. Continue?`,
+        message,
         [
           { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
           { text: 'Continue', onPress: () => resolve(true) },
@@ -125,8 +131,10 @@ export default function GalleryScreen() {
         return;
       }
 
-      setStatusLine('Opening your library…');
-      setWaitIcon('photo');
+      setStatusLine('Loading media library…');
+      setStatusDetail('Thanks for your patience. Larger videos can take a little while to get ready.');
+      setPrepStep(1);
+      setWaitIcon('folder-open');
       const result = await ExpoImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
         allowsEditing: false,
@@ -143,10 +151,16 @@ export default function GalleryScreen() {
       const isVideo =
         asset.type === 'video' || (asset.mimeType?.startsWith('video/') ?? false);
       setStatusLine(
-        isVideo ? 'Opening video from your library…' : 'Opening photo from your library…'
+        isVideo ? 'Video selected. Preparing it now…' : 'Photo selected. Preparing it now…'
       );
+      setStatusDetail(
+        isVideo
+          ? 'Reflections Connect is getting the selected video ready.'
+          : 'Reflections Connect is getting the selected photo ready.'
+      );
+      setPrepStep(2);
       setWaitIcon(isVideo ? 'video-camera' : 'photo');
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       console.log('[GalleryScreen] media selected', {
         type: isVideo ? 'video' : 'photo',
         uri: asset.uri,
@@ -156,6 +170,8 @@ export default function GalleryScreen() {
 
       if (isVideo) {
         setStatusLine('Preparing video for your Reflection…');
+        setStatusDetail('Checking video size before preparing playback.');
+        setPrepStep(3);
         setWaitIcon('video-camera');
         let detectedSizeBytes: number | null = typeof asset.fileSize === 'number' ? asset.fileSize : null;
         if (!detectedSizeBytes) {
@@ -168,25 +184,66 @@ export default function GalleryScreen() {
             // size probe is best-effort
           }
         }
+        let largeVideoConfirmed = false;
         const shouldContinue = await confirmLargeVideoAsync(detectedSizeBytes);
         if (!shouldContinue) {
           router.back();
           return;
         }
+        largeVideoConfirmed =
+          detectedSizeBytes == null || detectedSizeBytes >= LARGE_VIDEO_WARN_BYTES;
         if (detectedSizeBytes && detectedSizeBytes >= LARGE_VIDEO_WARN_BYTES) {
           setStatusLine('Large video detected…');
+          setStatusDetail('Large videos take longer because they are copied and prepared first.');
         }
         let fileUri = expoUri;
         try {
+          setStatusLine('Copying video into Reflections…');
+          setStatusDetail('Keeping a local working copy so preparation is reliable.');
+          setPrepStep(4);
           fileUri = await materializeVideoSourceToFileAsync(expoUri);
         } catch {
           fileUri = expoUri;
         }
+        if (!largeVideoConfirmed) {
+          try {
+            const materializedInfo = await FileSystem.getInfoAsync(fileUri, { size: true });
+            const materializedSize =
+              materializedInfo.exists && typeof materializedInfo.size === 'number'
+                ? materializedInfo.size
+                : null;
+            const shouldContinueMaterialized = await confirmLargeVideoAsync(materializedSize);
+            if (!shouldContinueMaterialized) {
+              router.back();
+              return;
+            }
+            if (materializedSize && materializedSize >= LARGE_VIDEO_WARN_BYTES) {
+              setStatusLine('Large video detected…');
+              setStatusDetail('Large videos take longer because they are copied and prepared first.');
+            }
+          } catch {
+            // size probe is best-effort; continue to strict duration validation below
+          }
+        }
+        setStatusLine('Reading video details…');
+        setStatusDetail('Checking duration and making sure the clip can be opened.');
+        setPrepStep(5);
         const durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        if (!isUsableVideoDurationSeconds(durationSec)) {
+          Alert.alert(
+            'Can\'t use this clip',
+            'Reflections Connect couldn’t read this video. Try another video, or trim/export it from Photos first.',
+            [{ text: 'OK', onPress: () => router.back() }]
+          );
+          return;
+        }
         const durationMs = Math.round(durationSec * 1000);
         /** Best-effort decode check (expo-video-thumbnails); Sparkle Composer re-validates — no native trim UI. */
         try {
           if (durationMs > 0 && fileUri) {
+            setStatusLine('Finding a preview frame…');
+            setStatusDetail('Preparing the first image you will see in the workbench.');
+            setPrepStep(6);
             const atMs = Math.min(600, Math.max(1, durationMs - 1));
             await VideoThumbnails.getThumbnailAsync(ensureFileUri(fileUri), {
               time: atMs,
@@ -195,17 +252,10 @@ export default function GalleryScreen() {
         } catch {
           /* Long masters often still decode in Composer; picker alone is not authoritative. */
         }
-        /** Video is usable for Reflections when duration is readable; Composer clamps long clips — no trimming here. */
-        if (!Number.isFinite(durationSec)) {
-          Alert.alert(
-            'Can\'t use this clip',
-            'Sparkle couldn’t read this Reflection. Try another video, or trim it first in Photos.',
-            [{ text: 'OK', onPress: () => router.back() }]
-          );
-          return;
-        }
         if (cancelledRef.current) return;
         setStatusLine('Preparing your video for Reflection…');
+        setStatusDetail('Opening the workbench next.');
+        setPrepStep(7);
         setWaitIcon('cloud-upload');
         setPendingMedia({
           uri: ensureFileUri(fileUri),
@@ -214,6 +264,8 @@ export default function GalleryScreen() {
         });
       } else {
         setStatusLine('Preparing photo for your Reflection…');
+        setStatusDetail('Optimizing the image for upload.');
+        setPrepStep(3);
         setWaitIcon('photo');
         const optimizedUri = await prepareImageForUpload(expoUri);
         if (cancelledRef.current) return;
@@ -253,6 +305,10 @@ export default function GalleryScreen() {
         </View>
         <ActivityIndicator size="large" color="#f39c12" />
         <Text style={styles.text}>{statusLine}</Text>
+        <Text style={styles.detailText}>{statusDetail}</Text>
+        <View style={styles.stepTrack}>
+          <View style={[styles.stepFill, { width: `${Math.max(12, Math.min(100, (prepStep / 7) * 100))}%` }]} />
+        </View>
         {isProcessing ? (
           <TouchableOpacity
             style={styles.cancelBtn}
@@ -310,6 +366,24 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     textAlign: 'center',
+  },
+  detailText: {
+    color: '#cbd5e1',
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  stepTrack: {
+    width: '100%',
+    height: 5,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(148, 163, 184, 0.22)',
+  },
+  stepFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#f39c12',
   },
   cancelBtn: {
     marginTop: 8,

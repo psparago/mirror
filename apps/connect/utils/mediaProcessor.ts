@@ -10,10 +10,19 @@ export const REFLECTION_MAX_VIDEO_SECONDS = 120;
 export const REFLECTION_MAX_VIDEO_MS = REFLECTION_MAX_VIDEO_SECONDS * 1000;
 /** Below this size (bytes), skip compression unless the file was just trimmed (preserves Space Saver originals). */
 export const REFLECTION_SMALL_VIDEO_BYTES = 50 * 1024 * 1024;
+/** Warn before work that is likely to trigger expensive video conditioning. */
+export const LARGE_VIDEO_WARN_BYTES = REFLECTION_SMALL_VIDEO_BYTES;
 /** Target long edge when compressing (1080p cap, auto bitrate via compressor). */
 const COMPRESS_MAX_DIMENSION_PX = 1920;
 const COMPRESS_MIN_BITRATE = 2_000_000;
 export const PHOTO_EXPORT_SIZE_PX = 1080;
+
+export class VideoPreparationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VideoPreparationError';
+  }
+}
 
 function isRemoteUri(uri: string): boolean {
   return uri.startsWith('http://') || uri.startsWith('https://');
@@ -26,6 +35,10 @@ function getErrorMessage(error: unknown): string {
     return typeof msg === 'string' ? msg : String(msg ?? '');
   }
   return String(error ?? '');
+}
+
+export function isUsableVideoDurationSeconds(durationSec: number | null | undefined): durationSec is number {
+  return typeof durationSec === 'number' && Number.isFinite(durationSec) && durationSec > 0;
 }
 
 function isAndroidCodecUnsupportedForCompression(error: unknown): boolean {
@@ -134,6 +147,25 @@ function guessVideoExtensionFromUri(uri: string): string {
     // ignore
   }
   return 'mp4';
+}
+
+export function isLikelyMp4VideoUri(uri: string): boolean {
+  try {
+    const path = normalizePickerUri(uri).split('?')[0].toLowerCase();
+    return path.endsWith('.mp4') || path.endsWith('.m4v');
+  } catch {
+    return false;
+  }
+}
+
+export function hasKnownNonMp4VideoExtension(uri: string): boolean {
+  try {
+    const path = normalizePickerUri(uri).split('?')[0].toLowerCase();
+    const ext = path.includes('.') ? path.split('.').pop() : '';
+    return !!ext && ['mov', '3gp', 'mkv', 'webm'].includes(ext);
+  } catch {
+    return false;
+  }
 }
 
 function guessFileExtensionFromUri(uri: string): string {
@@ -246,15 +278,31 @@ export async function prepareImageForUpload(uri: string): Promise<string> {
 export type ProcessVideoOptions = {
   /** When true, always run compression (trim exports must be re-encoded for safe playback/size). */
   wasTrimmed?: boolean;
+  /** Force compression regardless of source size (used for camera captures). */
+  alwaysCompress?: boolean;
+  onProgress?: (progress: VideoProcessProgress) => void;
+};
+
+export type VideoProcessProgress = {
+  stage: 'materializing' | 'checking' | 'compressing' | 'validating' | 'ready';
+  progress: number | null;
 };
 
 function normalizeOutputFileUri(pathOrUri: string): string {
   return pathOrUri.startsWith('file://') ? pathOrUri : `file://${pathOrUri}`;
 }
 
-async function compressVideoSourceAsync(sourceForReturn: string, logTag: string): Promise<string> {
+async function compressVideoSourceAsync(
+  sourceForReturn: string,
+  logTag: string,
+  onProgress?: ProcessVideoOptions['onProgress']
+): Promise<string> {
   try {
+    onProgress?.({ stage: 'checking', progress: null });
     const sourceDurationSec = await probeLocalVideoDurationSeconds(sourceForReturn);
+    if (!isUsableVideoDurationSeconds(sourceDurationSec)) {
+      throw new VideoPreparationError('Reflections Connect could not read this video duration.');
+    }
 
     const compressOptions: Record<string, unknown> = {
       compressionMethod: 'auto',
@@ -263,25 +311,49 @@ async function compressVideoSourceAsync(sourceForReturn: string, logTag: string)
       maxSize: COMPRESS_MAX_DIMENSION_PX,
     };
 
-    const result = await Video.compress(sourceForReturn, compressOptions as never, () => {});
+    onProgress?.({ stage: 'compressing', progress: 0 });
+    const result = await Video.compress(sourceForReturn, compressOptions as never, (progress: number) => {
+      const normalizedProgress = Number.isFinite(progress)
+        ? Math.max(0, Math.min(1, progress > 1 ? progress / 100 : progress))
+        : 0;
+      onProgress?.({ stage: 'compressing', progress: normalizedProgress });
+    });
     const finalUri = normalizeOutputFileUri(result);
 
+    onProgress?.({ stage: 'validating', progress: null });
     const compressedDurationSec = await probeLocalVideoDurationSeconds(finalUri);
     const minExpectedDurationSec =
       sourceDurationSec > 0 ? Math.max(0.5, sourceDurationSec * 0.5) : 0.5;
-    if (compressedDurationSec < minExpectedDurationSec) {
+    if (
+      !isUsableVideoDurationSeconds(compressedDurationSec) ||
+      compressedDurationSec < minExpectedDurationSec
+    ) {
       console.warn(
-        `[${logTag}] compressed output failed validation (src=${sourceDurationSec.toFixed(3)}s, out=${compressedDurationSec.toFixed(3)}s); falling back to source`
+        `[${logTag}] compressed output failed validation (src=${sourceDurationSec.toFixed(3)}s, out=${isUsableVideoDurationSeconds(compressedDurationSec) ? compressedDurationSec.toFixed(3) : 'unreadable'}s); falling back to source`
       );
+      if (!isLikelyMp4VideoUri(sourceForReturn)) {
+        throw new VideoPreparationError(
+          'Reflections Connect could not prepare this video as an MP4. Please trim or export it from Photos and try again.'
+        );
+      }
       return sourceForReturn;
     }
 
+    onProgress?.({ stage: 'ready', progress: 1 });
     return finalUri;
   } catch (error) {
+    if (error instanceof VideoPreparationError) {
+      throw error;
+    }
     if (isAndroidCodecUnsupportedForCompression(error)) {
       console.warn(`[${logTag}] compression skipped (unsupported Android codec); using source`);
     } else {
       console.error(`[${logTag}] compress failed; using source:`, error);
+    }
+    if (!isLikelyMp4VideoUri(sourceForReturn)) {
+      throw new VideoPreparationError(
+        'Reflections Connect could not prepare this video as an MP4. Please trim or export it from Photos and try again.'
+      );
     }
     return sourceForReturn;
   }
@@ -296,40 +368,21 @@ export async function compressVideoIfNeededAsync(
   uri: string,
   options: CompressVideoIfNeededOptions = {}
 ): Promise<string> {
-  let sourceFile = uri;
-  try {
-    sourceFile = await materializeVideoSourceToFileAsync(uri);
-  } catch (e) {
-    console.error('[compressVideoIfNeededAsync] materialize failed, trying original URI:', e);
-    sourceFile = normalizePickerUri(uri);
-  }
-
-  const sourceForReturn = sourceFile.startsWith('file://') ? sourceFile : ensureFileUri(sourceFile);
-
-  if (!options.alwaysCompress) {
-    try {
-      const info = await FileSystem.getInfoAsync(sourceForReturn, { size: true });
-      if (info.exists && typeof info.size === 'number' && info.size < REFLECTION_SMALL_VIDEO_BYTES) {
-        return sourceForReturn;
-      }
-    } catch {
-      // size unknown — attempt compression so large 4K provider exports still get optimized.
-    }
-  }
-
-  return compressVideoSourceAsync(sourceForReturn, 'compressVideoIfNeededAsync');
+  return processVideoForUpload(uri, { alwaysCompress: options.alwaysCompress });
 }
 
 /**
- * Safe-sync pipeline: small originals stay untouched on iOS; on Android we still transcode sub-threshold
- * clips so uploads use an H.264/AAC MP4 that decodes reliably on iOS (camera/gallery encodes often skip
- * compression for size and can play audio-only or show a blank layer there).
+ * Safe-sync pipeline: small MP4-like originals stay untouched on iOS; on Android we still transcode
+ * sub-threshold clips so uploads use an H.264/AAC MP4 that decodes reliably on iOS (camera/gallery
+ * encodes often skip compression for size and can play audio-only or show a blank layer there).
  * Large or post-trim files are compressed to 1080p with auto bitrate.
- * Any compressor failure falls back to the materialized/original file (never blocks upload).
+ * Compressor failure falls back only when the source is already MP4-like; obvious non-MP4 sources
+ * are rejected so we do not upload a misleading `video.mp4` master.
  */
 export async function processVideoForUpload(uri: string, options: ProcessVideoOptions = {}): Promise<string> {
   let sourceFile = uri;
   try {
+    options.onProgress?.({ stage: 'materializing', progress: null });
     sourceFile = await materializeVideoSourceToFileAsync(uri);
   } catch (e) {
     console.error('[processVideoForUpload] materialize failed, trying original URI:', e);
@@ -344,8 +397,10 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
     if (info.exists && typeof info.size === 'number') {
       skipCompress =
         !options.wasTrimmed &&
+        !options.alwaysCompress &&
         info.size < REFLECTION_SMALL_VIDEO_BYTES &&
-        Platform.OS !== 'android';
+        Platform.OS !== 'android' &&
+        isLikelyMp4VideoUri(sourceForReturn);
     }
   } catch {
     // size unknown — still compress when trimmed; otherwise attempt compress for safety on huge unknowns
@@ -353,10 +408,11 @@ export async function processVideoForUpload(uri: string, options: ProcessVideoOp
   }
 
   if (skipCompress) {
+    options.onProgress?.({ stage: 'ready', progress: 1 });
     return sourceForReturn;
   }
 
-  return compressVideoSourceAsync(sourceForReturn, 'processVideoForUpload');
+  return compressVideoSourceAsync(sourceForReturn, 'processVideoForUpload', options.onProgress);
 }
 
 export async function prepareVideoForUpload(uri: string): Promise<string> {
@@ -368,14 +424,14 @@ export async function prepareVideoForUpload(uri: string): Promise<string> {
  * workbench composer can own the only long-lived `VideoPlayer` (Android struggles with two
  * players on the same file).
  */
-export async function probeLocalVideoDurationSeconds(uri: string): Promise<number> {
+export async function probeLocalVideoDurationSeconds(uri: string): Promise<number | null> {
   const normalized = normalizePickerUri(uri.trim());
   let workUri = normalized;
   if (workUri.startsWith('content://') || workUri.startsWith('ph://')) {
     try {
       workUri = await materializeVideoSourceToFileAsync(normalized);
     } catch {
-      return 0;
+      return null;
     }
   } else if (
     !workUri.startsWith('file://') &&
@@ -399,7 +455,7 @@ export async function probeLocalVideoDurationSeconds(uri: string): Promise<numbe
       }
       await new Promise((r) => setTimeout(r, 50));
     }
-    return 0;
+    return null;
   } finally {
     try {
       player.replace('');

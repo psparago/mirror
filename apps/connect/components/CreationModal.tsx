@@ -2,15 +2,19 @@ import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '
 import { CreationModalConfirmationVideo } from '@/components/CreationModalConfirmationVideo';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import {
-  compressVideoIfNeededAsync,
   deleteScratchMediaFile,
   ensureFileUri,
+  hasKnownNonMp4VideoExtension,
+  isUsableVideoDurationSeconds,
   materializeVideoSourceToFileAsync,
   prepareImageForUpload,
+  processVideoForUpload,
   probeLocalVideoDurationSeconds,
   REFLECTION_MAX_VIDEO_SECONDS,
   REFLECTION_SMALL_VIDEO_BYTES,
   stabilizeLocalImageFileAsync,
+  VideoPreparationError,
+  type VideoProcessProgress,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -233,6 +237,8 @@ export default function CreationModal({
   const [composerStage, setComposerStage] = useState<ComposerStage>('workbench');
   const [conditioningMediaKind, setConditioningMediaKind] = useState<'photo' | 'video' | null>(null);
   const [conditioningLargeVideo, setConditioningLargeVideo] = useState(false);
+  const [conditioningStatus, setConditioningStatus] = useState('Opening creation tools...');
+  const [conditioningProgress, setConditioningProgress] = useState<number | null>(null);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
@@ -243,6 +249,7 @@ export default function CreationModal({
   const lastSourceForRecoveryRef = useRef<'/camera' | '/gallery' | '/search' | null>(null);
   const sourceTransitionLockRef = useRef(false);
   const suppressPickerRecoveryRef = useRef(false);
+  const pickerRecoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
   const sheetRef = useRef<BottomSheet>(null);
   const detailsSheetRef = useRef<BottomSheet>(null);
@@ -257,10 +264,16 @@ export default function CreationModal({
 
   const beginSourceFlow = useCallback(
     (route: '/camera' | '/gallery' | '/search', extras?: { cameraSelfie?: boolean }) => {
+      if (pickerRecoveryTimerRef.current) {
+        clearTimeout(pickerRecoveryTimerRef.current);
+        pickerRecoveryTimerRef.current = null;
+      }
       sourceFlowExtrasRef.current = extras?.cameraSelfie ? { cameraSelfie: true } : {};
       lastSourceForRecoveryRef.current = route;
       sourceTransitionLockRef.current = true;
       pendingRouteRef.current = route;
+      setConditioningStatus('Opening creation tools...');
+      setConditioningProgress(null);
       sheetRef.current?.close();
       setPhase('creating');
     },
@@ -413,6 +426,8 @@ export default function CreationModal({
     setComposerStage('workbench');
     setConditioningMediaKind(null);
     setConditioningLargeVideo(false);
+    setConditioningStatus('Opening creation tools...');
+    setConditioningProgress(null);
     setIsCompanionInReflection(false);
     setIsExplorerInReflection(false);
     setIsSelfie(false);
@@ -449,9 +464,9 @@ export default function CreationModal({
     });
   }, [phase, router]);
 
-  // If a source screen (camera/gallery/search) is dismissed without selecting media,
-  // we return to this screen focused but with no pending media. Restore the picker sheet
-  // (do not re-push the same route — that left users on "Opening creation tools..." until Close).
+  // If a source screen is dismissed without selected media, do not reopen the source
+  // picker automatically. During large-video handoff, pending media can arrive after
+  // focus returns; reopening the picker makes a successful selection look like it failed.
   useEffect(() => {
     if (!visible || !isFocused) return;
     if (phase !== 'creating') return;
@@ -460,11 +475,39 @@ export default function CreationModal({
     if (pendingRouteRef.current) return;
     if (pendingMedia) return;
     if (photo || showDescriptionInput) return;
-    lastSourceForRecoveryRef.current = null;
-    pendingRouteRef.current = null;
-    setPhase('picker');
-    setTimeout(() => sheetRef.current?.snapToIndex(0), 100);
-  }, [visible, isFocused, phase, pendingMedia, photo, showDescriptionInput, transitionUnlockTick]);
+    if (conditioningMediaKind) return;
+    if (pickerRecoveryTimerRef.current) return;
+
+    // Give pending-media context a generous beat to arrive after the source route pops.
+    // If nothing arrives, close the creation flow instead of exposing the source sheet.
+    const recoveryGeneration = pendingMediaApplyGenerationRef.current;
+    pickerRecoveryTimerRef.current = setTimeout(() => {
+      pickerRecoveryTimerRef.current = null;
+      if (pendingMediaApplyGenerationRef.current !== recoveryGeneration) return;
+      lastSourceForRecoveryRef.current = null;
+      pendingRouteRef.current = null;
+      setConditioningStatus('Media selection cancelled.');
+      setConditioningProgress(null);
+      onClose();
+    }, 5000);
+
+    return () => {
+      if (pickerRecoveryTimerRef.current) {
+        clearTimeout(pickerRecoveryTimerRef.current);
+        pickerRecoveryTimerRef.current = null;
+      }
+    };
+  }, [
+    visible,
+    isFocused,
+    phase,
+    pendingMedia,
+    photo,
+    showDescriptionInput,
+    conditioningMediaKind,
+    transitionUnlockTick,
+    onClose,
+  ]);
 
   const initialActionTriggeredRef = useRef(false);
   useEffect(() => {
@@ -554,9 +597,15 @@ export default function CreationModal({
 
   useEffect(() => {
     if (visible) return;
+    if (pickerRecoveryTimerRef.current) {
+      clearTimeout(pickerRecoveryTimerRef.current);
+      pickerRecoveryTimerRef.current = null;
+    }
     pendingMediaApplyGenerationRef.current += 1;
     setConditioningMediaKind(null);
     setConditioningLargeVideo(false);
+    setConditioningStatus('Opening creation tools...');
+    setConditioningProgress(null);
     void cleanupConditionedScratchFiles();
   }, [visible, cleanupConditionedScratchFiles]);
 
@@ -675,6 +724,10 @@ export default function CreationModal({
         : 'gallery';
     const applyGeneration = ++pendingMediaApplyGenerationRef.current;
     void (async () => {
+      if (pickerRecoveryTimerRef.current) {
+        clearTimeout(pickerRecoveryTimerRef.current);
+        pickerRecoveryTimerRef.current = null;
+      }
       await cleanupConditionedScratchFiles();
       if (applyGeneration !== pendingMediaApplyGenerationRef.current) {
         return;
@@ -684,6 +737,10 @@ export default function CreationModal({
       setConfirming(false);
       setConditioningMediaKind(mediaKind);
       setConditioningLargeVideo(false);
+      setConditioningStatus(
+        mediaKind === 'video' ? 'Receiving video from your library...' : 'Preparing photo...'
+      );
+      setConditioningProgress(mediaKind === 'video' ? 0.08 : null);
       setPhase('creating');
       const normalizedUri = ensureFileUri(mediaUri);
       let resolvedVideoUri = normalizedUri;
@@ -696,6 +753,8 @@ export default function CreationModal({
       };
       if (mediaKind === 'video') {
         try {
+          setConditioningStatus('Copying video into Reflections...');
+          setConditioningProgress(0.14);
           resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
           trackThisConditioningScratch(resolvedVideoUri, normalizedUri);
         } catch (error) {
@@ -703,6 +762,8 @@ export default function CreationModal({
           console.warn('[CreationModal] failed to materialize video picker URI:', error);
         }
         try {
+          setConditioningStatus('Checking video size...');
+          setConditioningProgress(0.22);
           const info = await FileSystem.getInfoAsync(resolvedVideoUri, { size: true });
           setConditioningLargeVideo(
             !!(info.exists && typeof info.size === 'number' && info.size >= REFLECTION_SMALL_VIDEO_BYTES)
@@ -710,16 +771,58 @@ export default function CreationModal({
         } catch {
           setConditioningLargeVideo(true);
         }
-        const compressedVideoUri = await compressVideoIfNeededAsync(resolvedVideoUri, {
-          alwaysCompress: mediaSourceKind === 'camera',
-        });
-        trackThisConditioningScratch(compressedVideoUri, resolvedVideoUri);
-        resolvedVideoUri = compressedVideoUri;
+        try {
+          const handleVideoProgress = (progress: VideoProcessProgress) => {
+            if (progress.stage === 'materializing') {
+              setConditioningStatus('Preparing local video copy...');
+              setConditioningProgress(0.28);
+            } else if (progress.stage === 'checking') {
+              setConditioningStatus('Reading video details...');
+              setConditioningProgress(0.34);
+            } else if (progress.stage === 'compressing') {
+              const compressorProgress = progress.progress ?? 0;
+              setConditioningStatus(
+                progress.progress == null
+                  ? 'Optimizing video for smooth playback...'
+                  : `Optimizing video for smooth playback... ${Math.round(compressorProgress * 100)}%`
+              );
+              setConditioningProgress(0.38 + compressorProgress * 0.44);
+            } else if (progress.stage === 'validating') {
+              setConditioningStatus('Checking prepared video...');
+              setConditioningProgress(0.88);
+            } else if (progress.stage === 'ready') {
+              setConditioningStatus('Opening the workbench...');
+              setConditioningProgress(0.96);
+            }
+          };
+          const compressedVideoUri = await processVideoForUpload(resolvedVideoUri, {
+            alwaysCompress: mediaSourceKind === 'camera',
+            onProgress: handleVideoProgress,
+          });
+          trackThisConditioningScratch(compressedVideoUri, resolvedVideoUri);
+          resolvedVideoUri = compressedVideoUri;
+        } catch (error) {
+          console.warn('[CreationModal] video conditioning failed:', error);
+          void cleanupConditionedScratchFiles(conditioningScratchUris);
+          setConditioningMediaKind(null);
+          setConditioningLargeVideo(false);
+          setConditioningStatus('Opening creation tools...');
+          setConditioningProgress(null);
+          Alert.alert(
+            'Can\'t prepare this video',
+            error instanceof VideoPreparationError
+              ? error.message
+              : 'Reflections Connect could not prepare this video. Please trim or export it from Photos and try again.'
+          );
+          return;
+        }
       }
       if (applyGeneration !== pendingMediaApplyGenerationRef.current) {
         void cleanupConditionedScratchFiles(conditioningScratchUris);
         setConditioningMediaKind(null);
         setConditioningLargeVideo(false);
+        setConditioningStatus('Opening creation tools...');
+        setConditioningProgress(null);
         return;
       }
       const isEditingExisting =
@@ -741,6 +844,8 @@ export default function CreationModal({
       setShowDescriptionInput(true);
       setConditioningMediaKind(null);
       setConditioningLargeVideo(false);
+      setConditioningStatus('Opening creation tools...');
+      setConditioningProgress(null);
       setImageSourceType(
         mediaSourceKind === 'search' ? 'search' : mediaSourceKind === 'gallery' ? 'gallery' : 'camera'
       );
@@ -1010,12 +1115,19 @@ export default function CreationModal({
     }
 
     /** Filled for local videos so we probe once per send (no modal `VideoPlayer` while on composer). */
-    let probedLocalVideoDurationSec = 0;
+    let probedLocalVideoDurationSec: number | null = null;
     if (mediaType === 'video' && videoUri) {
       const isLocalVideo =
         !videoUri.startsWith('http://') && !videoUri.startsWith('https://');
       if (isLocalVideo) {
         probedLocalVideoDurationSec = await probeLocalVideoDurationSeconds(videoUri);
+        if (!isUsableVideoDurationSeconds(probedLocalVideoDurationSec)) {
+          Alert.alert(
+            'Can\'t use this clip',
+            'Reflections Connect couldn’t read this video. Please choose another video, or trim/export it from Photos first.'
+          );
+          return;
+        }
         const sendVm = overrides?.videoMeta ?? composerVideoMetaRef.current;
         const trimmed = getValidVideoTrimFromFields(
           sendVm?.video_start_ms ?? null,
@@ -1273,6 +1385,20 @@ export default function CreationModal({
         mediaType === 'video' &&
         typeof videoUri === 'string' &&
         (videoUri.startsWith('http://') || videoUri.startsWith('https://'));
+      if (
+        mediaType === 'video' &&
+        videoUri &&
+        !skipVideoMasterReupload &&
+        !videoUri.startsWith('http://') &&
+        !videoUri.startsWith('https://') &&
+        hasKnownNonMp4VideoExtension(videoUri)
+      ) {
+        Alert.alert(
+          'Can\'t prepare this video',
+          'Reflections Connect could not prepare this video as an MP4. Please trim or export it from Photos and try again.'
+        );
+        return;
+      }
       debugLog(`📡 uploadEventBundle: Starting for EventID: ${eventID}. Needs enhancement? ${needsDeepDive || needsCaptionAudio}`);
       const timestamp = new Date().toISOString();
 
@@ -1482,14 +1608,14 @@ export default function CreationModal({
       if (mediaType === 'video' && (!vmMeta || vmMeta.video_end_ms <= vmMeta.video_start_ms)) {
         let durSec = probedLocalVideoDurationSec;
         if (
-          durSec <= 0 &&
+          !isUsableVideoDurationSeconds(durSec) &&
           videoUri &&
           !videoUri.startsWith('http://') &&
           !videoUri.startsWith('https://')
         ) {
           durSec = await probeLocalVideoDurationSeconds(videoUri);
         }
-        if (durSec > 0) {
+        if (isUsableVideoDurationSeconds(durSec)) {
           const endMs = Math.round(durSec * 1000);
           if (endMs > 0) {
             vmMeta = {
@@ -1953,6 +2079,10 @@ export default function CreationModal({
 
   const handleClose = () => {
     suppressPickerRecoveryRef.current = false;
+    if (pickerRecoveryTimerRef.current) {
+      clearTimeout(pickerRecoveryTimerRef.current);
+      pickerRecoveryTimerRef.current = null;
+    }
     if (confirming && photo) {
       pendingMediaApplyGenerationRef.current += 1;
       void safeDeleteCacheFile(photo?.uri ?? null);
@@ -1960,6 +2090,8 @@ export default function CreationModal({
       void cleanupConditionedScratchFiles();
       setConditioningMediaKind(null);
       setConditioningLargeVideo(false);
+      setConditioningStatus('Opening creation tools...');
+      setConditioningProgress(null);
       setConfirming(false);
       setPhoto(null);
       setVideoUri(null);
@@ -1971,6 +2103,8 @@ export default function CreationModal({
       void cleanupConditionedScratchFiles();
       setConditioningMediaKind(null);
       setConditioningLargeVideo(false);
+      setConditioningStatus('Opening creation tools...');
+      setConditioningProgress(null);
     }
     // Do NOT reset phase to 'picker' here — that would briefly make showPicker
     // true before onClose() propagates visible=false from the parent, causing
@@ -2068,7 +2202,9 @@ export default function CreationModal({
   const showConfirmation = confirming && !!photoUri;
   const showComposer = showDescriptionInput && !!activeMediaUri && !confirming;
   const showCreatingWait = phase === 'creating' && !showComposer && !showConfirmation;
-  const showFullScreenOverlay = visible && isFocused && (showComposer || showCreatingWait || showConfirmation);
+  // Keep the overlay mounted during route focus handoff from Gallery/Camera back to the timeline.
+  // Otherwise React Navigation can expose one frame of the timeline/source sheet before Workbench paints.
+  const showFullScreenOverlay = visible && (showComposer || showCreatingWait || showConfirmation);
   const showPicker = visible && phase === 'picker' && !showFullScreenOverlay;
 
   const confirmationPosterRemote = useMemo(() => {
@@ -2359,16 +2495,25 @@ export default function CreationModal({
                   </View>
                   <ActivityIndicator color="#f39c12" size="large" />
                   <Text style={styles.creatingWaitText}>
-                  {conditioningMediaKind === 'video'
-                    ? 'Loading video for your Reflection...'
-                    : conditioningMediaKind === 'photo'
-                      ? 'Loading photo for your Reflection...'
-                      : 'Opening creation tools...'}
+                    {conditioningStatus}
                   </Text>
+                  <View style={styles.creatingProgressTrack}>
+                    <View
+                      style={[
+                        styles.creatingProgressFill,
+                        {
+                          width: `${Math.max(
+                            10,
+                            Math.min(100, Math.round((conditioningProgress ?? 0.18) * 100))
+                          )}%`,
+                        },
+                      ]}
+                    />
+                  </View>
                   {conditioningMediaKind === 'video' ? (
                     <>
                       <Text style={styles.creatingWaitSubText}>
-                        This makes the video play smoothly for Cole. Just a moment!
+                        This makes the video play smoothly for the Explorer. Just a moment!
                       </Text>
                       {conditioningLargeVideo ? (
                         <Text style={styles.creatingWaitHint}>Please stay on WiFi</Text>
@@ -2496,6 +2641,18 @@ var styles = StyleSheet.create({
     fontWeight: '700',
     color: '#f39c12',
     textAlign: 'center',
+  },
+  creatingProgressTrack: {
+    width: '100%',
+    height: 6,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(148, 163, 184, 0.22)',
+  },
+  creatingProgressFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#f39c12',
   },
   creatingWaitSubText: {
     fontSize: 13,
