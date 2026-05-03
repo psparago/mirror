@@ -16,6 +16,9 @@ interface ReplayModalProps {
   visible: boolean;
   event: Event | null;
   onClose: () => void;
+  likedBy?: string[];
+  currentUserId?: string | null;
+  onToggleLike?: (eventId: string, isAdd: boolean) => void;
   /** When set, shows a Send control in the header (Reflections Companion preview). */
   onSend?: () => void;
   isSending?: boolean;
@@ -31,6 +34,9 @@ export function ReplayModal({
   visible,
   event,
   onClose,
+  likedBy = [],
+  currentUserId,
+  onToggleLike,
   onSend,
   isSending = false,
   isSendDisabled = false,
@@ -535,6 +541,8 @@ export function ReplayModal({
   const isSpeaking = state.hasTag('speaking');
   const isPlaying = state.hasTag('playing');
   const isAnyAudioPlaying = isSpeaking || isPlaying || (captionSound !== null) || isDirectDeepDivePlaying;
+  const likedByMe = !!currentUserId && likedBy.includes(currentUserId);
+  const likeCount = likedBy.length;
 
   const handleSwipeClose = () => {
     sendRef.current({ type: 'CLOSE' });
@@ -555,6 +563,11 @@ export function ReplayModal({
       event: event,
       metadata: event.metadata || ({} as EventMetadata)
     });
+  };
+
+  const handleToggleLike = () => {
+    if (!event?.event_id || !currentUserId || !onToggleLike) return;
+    onToggleLike(event.event_id, !likedByMe);
   };
 
   const showReplayOverlay =
@@ -680,6 +693,22 @@ export function ReplayModal({
                   </View>
                 )}
               </View>
+
+              <TouchableOpacity
+                style={[styles.likeButton, likedByMe && styles.likeButtonActive]}
+                onPress={handleToggleLike}
+                activeOpacity={0.75}
+                accessibilityLabel={likedByMe ? 'Unlike this Reflection' : 'Like this Reflection'}
+              >
+                <FontAwesome
+                  name={likeCount > 0 ? 'heart' : 'heart-o'}
+                  size={18}
+                  color={likedByMe ? '#4FC3F7' : likeCount > 0 ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.82)'}
+                />
+                {likeCount > 0 ? (
+                  <Text style={[styles.likeButtonCount, likedByMe && styles.likeButtonCountActive]}>{likeCount}</Text>
+                ) : null}
+              </TouchableOpacity>
 
               {(event?.audio_url || event?.metadata?.description) && (
                 <TouchableOpacity
@@ -864,6 +893,32 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: '600',
+  },
+  likeButton: {
+    minWidth: 42,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 11,
+    marginLeft: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  likeButtonActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.16)',
+    borderColor: 'rgba(79, 195, 247, 0.45)',
+  },
+  likeButtonCount: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  likeButtonCountActive: {
+    color: '#4FC3F7',
   },
   mediaContainer: {
     flex: 1,

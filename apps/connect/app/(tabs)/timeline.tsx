@@ -276,6 +276,26 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
     toggleReflectionLike(item.event_id, userId, !isLiked);
   }, [authUser?.uid, showToast, updateReflectionLikedBy]);
 
+  const handleReplayToggleLike = useCallback((eventId: string, isAdd: boolean) => {
+    const userId = authUser?.uid;
+    if (!userId) {
+      showToast('Sign in to like Reflections');
+      return;
+    }
+    const currentLikedBy = reflections.find((reflection) => reflection.event_id === eventId)?.likedBy ?? [];
+    const nextLikedBy = isAdd
+      ? (currentLikedBy.includes(userId) ? currentLikedBy : [...currentLikedBy, userId])
+      : currentLikedBy.filter((uid) => uid !== userId);
+    updateReflectionLikedBy(eventId, nextLikedBy);
+    toggleReflectionLike(eventId, userId, isAdd);
+  }, [authUser?.uid, reflections, showToast, updateReflectionLikedBy]);
+
+  const selectedReflectionLikedBy = useMemo(() => (
+    selectedReflection
+      ? reflections.find((reflection) => reflection.event_id === selectedReflection.event_id)?.likedBy ?? []
+      : []
+  ), [reflections, selectedReflection]);
+
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
   // SORTED BY: Response timestamp (viewed) first, so most recently viewed are at top
@@ -1358,6 +1378,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       <ReplayModal
         visible={!!selectedReflection}
         event={selectedReflection}
+        likedBy={selectedReflectionLikedBy}
+        currentUserId={authUser?.uid ?? null}
+        onToggleLike={handleReplayToggleLike}
         onClose={() => setSelectedReflection(null)}
       />
 
