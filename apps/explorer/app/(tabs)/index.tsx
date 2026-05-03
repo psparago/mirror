@@ -126,6 +126,7 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
 const EVENT_DATE_MONTHS = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ] as const;
+const STATIC_BLUR_INTENSITY = 20;
 
 /** Avoid Intl / toLocaleDateString on hot paths (large reflection lists). */
 function formatEventDateFromId(eventId: string): string {
@@ -1472,7 +1473,7 @@ export default function HomeScreen() {
               style={styles.newArrivalPill}
               activeOpacity={0.7}
             >
-              <BlurView intensity={80} style={styles.newArrivalPillBlur}>
+              <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.newArrivalPillBlur}>
                 <Text style={styles.newArrivalPillText}>
                   ✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}
                 </Text>
@@ -1570,7 +1571,7 @@ export default function HomeScreen() {
           style={[styles.clipboardToastRoot, { bottom: insets.bottom + 20 }]}
           pointerEvents="none"
         >
-          <BlurView intensity={80} style={styles.clipboardToastBlur}>
+          <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.clipboardToastBlur}>
             <Text style={styles.clipboardToastText}>{copyToastMessage}</Text>
           </BlurView>
         </View>
@@ -1639,7 +1640,9 @@ const styles = StyleSheet.create({
     color: '#FFD700',
     fontWeight: 'bold',
     fontSize: 16,
-    textShadow: '0px 1px 2px rgba(0, 0, 0, 0.75)',
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   listContainer: {
     paddingHorizontal: 8,

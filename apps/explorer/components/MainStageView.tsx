@@ -120,6 +120,38 @@ const UP_NEXT_FALLBACK_ITEM_HEIGHT = 200;
  * Default (~500ms iOS) progress ticks add JS work and contribute to Now Playing metadata churn.
  */
 const EXPO_AV_PROGRESS_INTERVAL_MS = 60_000;
+const STATIC_BLUR_INTENSITY = 20;
+
+type StageVideoViewProps = {
+  player: React.ComponentProps<typeof VideoView>['player'];
+  sourceKey: string;
+};
+
+function getVideoPlayerId(player: StageVideoViewProps['player']): string | number | undefined {
+  const id = (player as { id?: unknown }).id;
+  return typeof id === 'string' || typeof id === 'number' ? id : undefined;
+}
+
+const StableStageVideoView = React.memo(function StableStageVideoView({ player }: StageVideoViewProps) {
+  return (
+    <VideoView
+      player={player}
+      style={StyleSheet.absoluteFill}
+      nativeControls={false}
+      contentFit="contain"
+      allowsFullscreen={false}
+      allowsPictureInPicture={false}
+    />
+  );
+}, (prev, next) => {
+  const prevId = getVideoPlayerId(prev.player);
+  const nextId = getVideoPlayerId(next.player);
+  const samePlayer = prevId !== undefined || nextId !== undefined
+    ? prevId === nextId
+    : prev.player === next.player;
+
+  return samePlayer && prev.sourceKey === next.sourceKey;
+});
 
 function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
   const mCap = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
@@ -219,6 +251,7 @@ export default function MainStageView({
   const selfieMirrorOpacity = useSharedValue(0);
   const audioIndicatorAnim = useSharedValue(0.7);
   const tellMeMorePulse = useSharedValue(1);
+  const tellMeMoreBlurOpacity = useSharedValue(1);
 
   // Swipe-to-minimize shared values
   const translateY = useSharedValue(0);
@@ -252,6 +285,10 @@ export default function MainStageView({
   useEffect(() => {
     setIsCaptionOrSparklePlayingRef.current = setIsCaptionOrSparklePlaying;
   }, []);
+
+  useEffect(() => {
+    tellMeMoreBlurOpacity.value = withTiming(isCaptionOrSparklePlaying ? 0.56 : 1, { duration: 150 });
+  }, [isCaptionOrSparklePlaying, tellMeMoreBlurOpacity]);
 
   // Prefer merged Firestore/list map; fall back to embedded Event.metadata or a minimal
   // bundle so play / narration / refs never stall when the map is briefly empty (OTA timing).
@@ -469,7 +506,7 @@ export default function MainStageView({
         controlsOpacity.value = withTiming(0, { duration: 300 });
 
         if (audioUrl) {
-          const playAudioWithRetry = async (retryCount = 0) => {
+          const playAudioWithRetry = async (retryCount = 0): Promise<void> => {
             try {
               debugLog(`🎧 Loading narration [Session: ${thisSession}] (Attempt ${retryCount + 1}): ${audioUrl.substring(0, 50)}...`);
 
@@ -594,7 +631,7 @@ export default function MainStageView({
       },
 
       playAudio: async () => {
-        const playWithRetry = async (retryCount = 0) => {
+        const playWithRetry = async (retryCount = 0): Promise<void> => {
           try {
             if (soundRef.current) await soundRef.current.unloadAsync();
 
@@ -660,7 +697,7 @@ export default function MainStageView({
           captionSoundRefForActions.current = null;
         }
 
-        const playDeepDiveWithRetry = async (retryCount = 0) => {
+        const playDeepDiveWithRetry = async (retryCount = 0): Promise<void> => {
           try {
             if (soundRef.current) await soundRef.current.unloadAsync();
 
@@ -2210,6 +2247,10 @@ export default function MainStageView({
     transform: [{ scale: tellMeMorePulse.value }],
   }));
 
+  const tellMeMoreBlurOpacityAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: tellMeMoreBlurOpacity.value,
+  }));
+
   const toastAnimatedStyle = useAnimatedStyle(() => ({
     opacity: toastOpacityShared.value,
   }));
@@ -2239,7 +2280,7 @@ export default function MainStageView({
                         style={styles.newArrivalNotification}
                         activeOpacity={0.7}
                       >
-                        <BlurView intensity={80} style={styles.notificationBlur}>
+                        <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.notificationBlur}>
                           <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
                         </BlurView>
                       </TouchableOpacity>
@@ -2276,17 +2317,13 @@ export default function MainStageView({
               <View style={styles.mediaContainer}>
                 <GestureDetector gesture={verticalSwipeGesture}>
                   <Animated.View style={styles.mediaFrame}>
-                    {/* Layer 1: Video Player (Always rendered if source exists, sits at the bottom) */}
-                    {videoSource && (
-                      <VideoView
+                    {/* Layer 1: stage video player, rendered only after a Reflection has a valid source. */}
+                    {videoSource && player ? (
+                      <StableStageVideoView
                         player={player}
-                        style={StyleSheet.absoluteFill}
-                        nativeControls={false}
-                        contentFit="contain"
-                        allowsFullscreen={false}
-                        allowsPictureInPicture={false}
+                        sourceKey={videoSource}
                       />
-                    )}
+                    ) : null}
 
                     {/* Layer 2: Thumbnail Shield (Rendered ON TOP until video is ready) */}
                     {/* We keep this visible if: (1) It's a photo OR (2) It's a video that hasn't started playing yet */}
@@ -2307,14 +2344,14 @@ export default function MainStageView({
                     >
                       {showPlayOverlay ? (
                         <TouchableOpacity onPress={throttledSingleTap} style={styles.playButton}>
-                          <BlurView intensity={30} style={styles.playOverlayBlur}>
+                          <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
                             <FontAwesome name="play" size={64} color="rgba(255, 255, 255, 0.95)" />
                           </BlurView>
                         </TouchableOpacity>
                       ) : null}
                       {showReplayOverlay ? (
                         <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                          <BlurView intensity={30} style={styles.playOverlayBlur}>
+                          <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
                             <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
                           </BlurView>
                         </TouchableOpacity>
@@ -2444,15 +2481,17 @@ export default function MainStageView({
                         disabled={isSparkleDisabled}
                         activeOpacity={isSparkleDisabled ? 1 : 0.7}
                       >
-                        <BlurView
-                          intensity={isCaptionOrSparklePlaying ? 28 : 50}
-                          style={[
-                            styles.tellMeMoreBlur,
-                            isCaptionOrSparklePlaying && styles.tellMeMoreBlurDimmed,
-                          ]}
-                        >
-                          <Text style={{ fontSize: 32, opacity: isCaptionOrSparklePlaying ? 0.5 : 1 }}>✨</Text>
-                        </BlurView>
+                        <Animated.View style={[styles.tellMeMoreBlurOpacity, tellMeMoreBlurOpacityAnimatedStyle]}>
+                          <BlurView
+                            intensity={STATIC_BLUR_INTENSITY}
+                            style={[
+                              styles.tellMeMoreBlur,
+                              isCaptionOrSparklePlaying && styles.tellMeMoreBlurDimmed,
+                            ]}
+                          >
+                            <Text style={{ fontSize: 32, opacity: isCaptionOrSparklePlaying ? 0.5 : 1 }}>✨</Text>
+                          </BlurView>
+                        </Animated.View>
                       </TouchableOpacity>
                     </Animated.View>
                   );
@@ -2493,6 +2532,7 @@ export default function MainStageView({
                 data={upNextEvents}
                 renderItem={renderUpNextItem}
                 keyExtractor={(item) => item.event_id}
+                // Up Next stays thumbnail-only; the video player is initialized only on Stage.
                 // NOTE: Avoid `onEndReached` for wrapping (it fires early and inconsistently).
                 onScroll={(e) => {
                   const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -2765,6 +2805,7 @@ const styles = StyleSheet.create({
   tellMeMoreFABNarration: {
     opacity: 0.88,
   },
+  tellMeMoreBlurOpacity: { flex: 1, width: '100%' },
   tellMeMoreBlur: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
   tellMeMoreBlurDimmed: {
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
