@@ -71,6 +71,20 @@ export interface Event {
   refreshedAt?: number; // Local timestamp when URLs were last refreshed
 }
 
+export interface ReflectionDocument {
+  explorerId: string;
+  event_id: string;
+  sender?: string;
+  sender_id?: string;
+  status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
+  timestamp?: unknown;
+  type?: 'mirror_event' | 'engagement_heartbeat' | string;
+  metadata?: EventMetadata;
+  engagement_count?: number;
+  deleted_at?: unknown;
+  likedBy?: string[]; // UIDs that liked this Reflection.
+}
+
 export interface ListEventsResponse {
   events: Event[];
 }

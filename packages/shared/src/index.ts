@@ -31,6 +31,7 @@ export type { AvatarFilterBarProps } from './components/AvatarFilterBar';
 
 // Utilities
 export * from './utils/avatarDefaults';
+export * from './reflections/likes';
 
 // State machines
 export * from './machines/playerMachine';

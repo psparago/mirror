@@ -1,6 +1,7 @@
 import { FontAwesome } from '@expo/vector-icons';
 import {
   coerceThumbnailTimeMs,
+  CompanionAvatar,
   Event,
   EventMetadata,
   getCloudMasterTrimWindow,
@@ -172,6 +173,11 @@ interface MainStageProps {
   startIdleOnInitialSelection?: boolean;
   events: Event[];
   eventMetadata: { [key: string]: EventMetadata };
+  likedBy?: string[];
+  reflectionLikes?: Record<string, string[]>;
+  currentUserId?: string | null;
+  companions?: CompanionAvatar[];
+  onToggleLike?: (eventId: string, userId: string, isAdd: boolean) => void;
   onClose: () => void;
   onEventSelect: (event: Event) => void;
   onDelete: (event: Event) => void;
@@ -210,6 +216,11 @@ export default function MainStageView({
   startIdleOnInitialSelection = false,
   events,
   eventMetadata,
+  likedBy = [],
+  reflectionLikes = {},
+  currentUserId,
+  companions = [],
+  onToggleLike,
   onClose,
   onEventSelect,
   onDelete,
@@ -252,6 +263,7 @@ export default function MainStageView({
   const audioIndicatorAnim = useSharedValue(0.7);
   const tellMeMorePulse = useSharedValue(1);
   const tellMeMoreBlurOpacity = useSharedValue(1);
+  const heartScale = useSharedValue(1);
 
   // Swipe-to-minimize shared values
   const translateY = useSharedValue(0);
@@ -275,6 +287,8 @@ export default function MainStageView({
 
   // Toast state
   const [toastMessage, setToastMessage] = useState<string>('');
+  const [showLikeFaces, setShowLikeFaces] = useState(false);
+  const [likeFacesLikedBy, setLikeFacesLikedBy] = useState<string[] | null>(null);
 
   // Track when caption OR sparkle (Tell Me More) is playing - disable both buttons to prevent impatient multiple taps
   const [isCaptionOrSparklePlaying, setIsCaptionOrSparklePlaying] = useState(false);
@@ -377,6 +391,38 @@ export default function MainStageView({
       ...(!selectedEvent.video_url && selectedEvent.audio_url ? { content_type: 'audio' as const } : {}),
     };
   }, [selectedEvent, eventMetadata]);
+
+  const likedByCurrentUser = !!currentUserId && likedBy.includes(currentUserId);
+  const likeCount = likedBy.length;
+  const displayedLikeFaces = likeFacesLikedBy ?? likedBy;
+  const likerFaces = useMemo(() => {
+    return displayedLikeFaces.map((uid) => {
+      const companion = companions.find((c) => c.userId === uid);
+      const fallbackName = uid === currentUserId ? explorerDisplayName || 'Explorer' : 'Explorer';
+      return {
+        uid,
+        avatarUrl: companion?.avatarUrl ?? null,
+        initial: (companion?.initial ?? fallbackName.trim().charAt(0).toUpperCase()) || '?',
+        color: companion?.color ?? '#4FC3F7',
+        isCaregiver: !!companion?.isCaregiver,
+      };
+    });
+  }, [companions, currentUserId, displayedLikeFaces, explorerDisplayName]);
+
+  const handleLikePress = useCallback(() => {
+    if (!selectedEvent?.event_id || !currentUserId || !onToggleLike) {
+      return;
+    }
+    heartScale.value = withSpring(1.28, { damping: 8, stiffness: 260 }, () => {
+      heartScale.value = withSpring(1, { damping: 10, stiffness: 240 });
+    });
+    onToggleLike(selectedEvent.event_id, currentUserId, !likedByCurrentUser);
+  }, [currentUserId, heartScale, likedByCurrentUser, onToggleLike, selectedEvent?.event_id]);
+
+  useEffect(() => {
+    setShowLikeFaces(false);
+    setLikeFacesLikedBy(null);
+  }, [selectedEvent?.event_id]);
 
   const positionText = useMemo(() => {
     if (!selectedEvent || events.length === 0) return '';
@@ -2105,6 +2151,9 @@ export default function MainStageView({
     const isNowPlaying = item.event_id === selectedEvent?.event_id;
     const isRead = readEventIds.includes(item.event_id);
     const isNewArrival = recentlyArrivedIds.includes(item.event_id);
+    const itemLikedBy = reflectionLikes[item.event_id] ?? [];
+    const itemLikedByMe = !!currentUserId && itemLikedBy.includes(currentUserId);
+    const itemLikeCount = itemLikedBy.length;
 
     return (
       <View style={[styles.upNextItemContainer, !isLandscape && { flex: 1 }]}>
@@ -2166,6 +2215,37 @@ export default function MainStageView({
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
               {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDateFromId(item.event_id)}
             </Text>
+
+            <Pressable
+              onPress={(event) => {
+                event.stopPropagation();
+                if (!currentUserId || !onToggleLike) return;
+                onToggleLike(item.event_id, currentUserId, !itemLikedByMe);
+              }}
+              onLongPress={(event) => {
+                event.stopPropagation();
+                if (itemLikeCount > 0) {
+                  setLikeFacesLikedBy(itemLikedBy);
+                  setShowLikeFaces(true);
+                }
+              }}
+              style={({ pressed }) => [
+                styles.upNextLikeControl,
+                itemLikedByMe && styles.upNextLikeControlActive,
+                pressed && styles.upNextLikeControlPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={itemLikedByMe ? 'Unlike this Reflection' : 'Like this Reflection'}
+            >
+              <FontAwesome
+                name={itemLikeCount > 0 ? 'heart' : 'heart-o'}
+                size={12}
+                color={itemLikedByMe ? '#4FC3F7' : itemLikeCount > 0 ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.75)'}
+              />
+              {itemLikeCount > 0 ? (
+                <Text style={[styles.upNextLikeCount, itemLikedByMe && styles.upNextLikeCountActive]}>{itemLikeCount}</Text>
+              ) : null}
+            </Pressable>
 
             <Text style={styles.reflectionId}>
               Reflection ID: {item.event_id}
@@ -2245,6 +2325,10 @@ export default function MainStageView({
 
   const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: tellMeMorePulse.value }],
+  }));
+
+  const heartAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: heartScale.value }],
   }));
 
   const tellMeMoreBlurOpacityAnimatedStyle = useAnimatedStyle(() => ({
@@ -2392,6 +2476,49 @@ export default function MainStageView({
                         )}
                       </View>
                     )}
+
+                    {selectedEvent?.event_id ? (
+                      <View style={styles.stageLikeRow}>
+                        <Animated.View style={heartAnimatedStyle}>
+                          <TouchableOpacity
+                            style={[styles.stageLikeButton, likedByCurrentUser && styles.stageLikeButtonActive]}
+                            onPress={handleLikePress}
+                            onLongPress={() => {
+                              if (likeCount > 0) {
+                                setLikeFacesLikedBy(null);
+                                setShowLikeFaces(true);
+                              }
+                            }}
+                            activeOpacity={0.72}
+                            accessibilityLabel={likedByCurrentUser ? 'Unlike this Reflection' : 'Like this Reflection'}
+                          >
+                            <FontAwesome
+                              name={likeCount > 0 ? 'heart' : 'heart-o'}
+                              size={16}
+                              color={likedByCurrentUser ? '#4FC3F7' : likeCount > 0 ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.82)'}
+                            />
+                          </TouchableOpacity>
+                        </Animated.View>
+                        {likeCount > 0 ? (
+                          <Pressable
+                            onPress={() => {
+                              setLikeFacesLikedBy(null);
+                              setShowLikeFaces(true);
+                            }}
+                            onLongPress={() => {
+                              setLikeFacesLikedBy(null);
+                              setShowLikeFaces(true);
+                            }}
+                            hitSlop={12}
+                            style={({ pressed }) => [styles.stageLikeCountButton, pressed && styles.stageLikeCountButtonPressed]}
+                            accessibilityRole="button"
+                            accessibilityLabel="Show who liked this Reflection"
+                          >
+                            <Text style={styles.stageLikeCount}>{likeCount}</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : null}
 
                     {selectedEvent?.event_id ? (
                       <Pressable
@@ -2613,6 +2740,66 @@ export default function MainStageView({
             </Animated.View>
           ) : null}
 
+          <Modal
+            visible={showLikeFaces}
+            transparent
+            animationType="fade"
+            onRequestClose={() => {
+              setShowLikeFaces(false);
+              setLikeFacesLikedBy(null);
+            }}
+          >
+            <View style={styles.facesModalOverlay}>
+              <Pressable
+                style={StyleSheet.absoluteFill}
+                onPress={() => {
+                  setShowLikeFaces(false);
+                  setLikeFacesLikedBy(null);
+                }}
+              />
+              <View style={styles.facesModalCard}>
+                <TouchableOpacity
+                  style={styles.facesCloseButton}
+                  onPress={() => {
+                    setShowLikeFaces(false);
+                    setLikeFacesLikedBy(null);
+                  }}
+                  hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+                  accessibilityLabel="Close faces"
+                >
+                  <FontAwesome name="close" size={18} color="#fff" />
+                </TouchableOpacity>
+                <FlatList
+                  data={likerFaces}
+                  keyExtractor={(item) => item.uid}
+                  numColumns={3}
+                  contentContainerStyle={styles.facesGrid}
+                  renderItem={({ item }) => (
+                    <View style={styles.faceGridItem}>
+                      {item.avatarUrl ? (
+                        <Image
+                          source={{ uri: item.avatarUrl }}
+                          style={styles.faceAvatar}
+                          contentFit="cover"
+                          recyclingKey={`face-${item.uid}`}
+                        />
+                      ) : (
+                        <View style={[styles.faceAvatarFallback, { backgroundColor: item.color }]}>
+                          <Text style={styles.faceAvatarInitial}>{item.initial}</Text>
+                        </View>
+                      )}
+                      {item.isCaregiver ? (
+                        <View style={styles.faceCaregiverBadge}>
+                          <FontAwesome name="shield" size={12} color="#fff" />
+                        </View>
+                      ) : null}
+                    </View>
+                  )}
+                />
+              </View>
+            </View>
+          </Modal>
+
           {/* Admin Challenge Modal */}
           <Modal
             visible={showAdminChallenge}
@@ -2775,6 +2962,43 @@ const styles = StyleSheet.create({
     color: 'rgba(200, 210, 220, 0.9)',
     fontVariant: ['tabular-nums'],
   },
+  stageLikeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  stageLikeButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  stageLikeButtonActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.2)',
+    borderColor: 'rgba(79, 195, 247, 0.55)',
+  },
+  stageLikeCountButton: {
+    minWidth: 30,
+    height: 30,
+    paddingHorizontal: 9,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  stageLikeCountButtonPressed: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  stageLikeCount: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
   descriptionText: { color: '#fff', fontSize: 18, lineHeight: 24 },
   playCaptionButton: {
     width: 40,
@@ -2831,6 +3055,34 @@ const styles = StyleSheet.create({
   upNextMeta: { color: '#aaa', fontSize: 12, marginTop: 2 },
   upNextMetaNowPlaying: { color: '#4FC3F7', fontWeight: 'bold' },
   reflectionId: { fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'Courier' },
+  upNextLikeControl: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  upNextLikeControlActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.16)',
+    borderColor: 'rgba(79, 195, 247, 0.45)',
+  },
+  upNextLikeControlPressed: {
+    opacity: 0.75,
+  },
+  upNextLikeCount: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  upNextLikeCountActive: {
+    color: '#4FC3F7',
+  },
   upNextInfo: { flex: 1, justifyContent: 'center' },
   upNextItemNewArrival: {
     backgroundColor: 'rgba(255, 215, 0, 0.15)', // Soft gold tint
@@ -2890,6 +3142,79 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 18,
     fontWeight: '600',
+  },
+  facesModalOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+  },
+  facesModalCard: {
+    width: '100%',
+    maxWidth: 430,
+    maxHeight: '72%',
+    paddingTop: 48,
+    paddingHorizontal: 22,
+    paddingBottom: 22,
+    borderRadius: 28,
+    backgroundColor: 'rgba(18, 28, 34, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  facesCloseButton: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    zIndex: 2,
+  },
+  facesGrid: {
+    alignItems: 'center',
+    gap: 18,
+  },
+  faceGridItem: {
+    width: 108,
+    height: 108,
+    margin: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceAvatar: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  faceAvatarFallback: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  faceAvatarInitial: {
+    color: '#fff',
+    fontSize: 38,
+    fontWeight: '900',
+  },
+  faceCaregiverBadge: {
+    position: 'absolute',
+    right: 10,
+    bottom: 12,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(79, 195, 247, 0.95)',
+    borderWidth: 2,
+    borderColor: 'rgba(18, 28, 34, 0.96)',
   },
   // --- Admin Styles ---
   lockBadge: {

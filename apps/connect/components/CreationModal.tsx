@@ -1749,6 +1749,7 @@ export default function CreationModal({
       };
       if (!startedAsEditBundle) {
         firestorePayload.engagement_count = 0;
+        firestorePayload.likedBy = [];
       }
       const eventDocRef = doc(collection(db, ExplorerConfig.collections.reflections), eventID);
       setDoc(eventDocRef, firestorePayload, {

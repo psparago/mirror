@@ -14,6 +14,8 @@ import { getAvatarColor, getAvatarInitial } from '../utils/avatarDefaults';
 export interface CompanionAvatar {
   userId: string;
   companionName: string;
+  role: string | null;
+  isCaregiver: boolean;
   avatarUrl: string | null;
   avatarS3Key: string | null;
   color: string;
@@ -50,6 +52,7 @@ export function useCompanionAvatars(explorerId: string | null): {
         return {
           userId: data.userId as string,
           companionName: (data.companionName as string) || 'Companion',
+          role: typeof data.role === 'string' ? data.role : null,
           avatarS3Key: (data.companionAvatarS3Key as string) || null,
         };
       });
@@ -71,6 +74,8 @@ export function useCompanionAvatars(explorerId: string | null): {
           return {
             userId: c.userId,
             companionName: c.companionName,
+            role: c.role,
+            isCaregiver: c.role === 'caregiver',
             avatarUrl,
             avatarS3Key: c.avatarS3Key,
             color: getAvatarColor(c.userId),

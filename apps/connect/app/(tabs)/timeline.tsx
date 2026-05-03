@@ -7,6 +7,7 @@ import {
   EventMetadata,
   ExplorerConfig,
   getValidVideoTrimFromFields,
+  toggleReflectionLike,
   useAuth,
   useCompanionAvatars,
   useExplorer,
@@ -43,6 +44,7 @@ interface SentReflection {
   status?: 'ready' | 'engaged' | 'replayed' | 'deleted';
   engagementTimestamp?: any;
   engagementCount?: number;
+  likedBy: string[];
   deletedAt?: any;
   hasResponse?: boolean;
   responseImageUrl?: string;
@@ -59,6 +61,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const asOptionalString = (value: unknown): string | null =>
   typeof value === 'string' && value.length > 0 ? value : null;
+
+const coerceLikedBy = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
 
 function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMetadata | undefined {
   if (!isRecord(raw)) return undefined;
@@ -220,12 +225,13 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
+  const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
   /** True total Firestore reflection signals for this Explorer (list query is capped at 100). */
   const [totalReflectionCount, setTotalReflectionCount] = useState<number | null>(null);
   const countRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { currentExplorerId, activeRelationship, loading: explorerLoading } = useExplorer();
+  const { currentExplorerId, activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
   const { user: authUser } = useAuth();
   const currentIdentity = activeRelationship?.companionName || null;
   const snapshotGenRef = useRef(0);
@@ -233,6 +239,42 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
   // Companion avatar filter
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
+  const companionById = useMemo(() => new Map(companions.map((companion) => [companion.userId, companion])), [companions]);
+
+  // Toast state
+  const [toastMessage, setToastMessage] = useState('');
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    Animated.sequence([
+      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(2000),
+      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
+    ]).start(() => setToastMessage(''));
+  }, [toastOpacity]);
+
+  const updateReflectionLikedBy = useCallback((eventId: string, likedBy: string[]) => {
+    setReflections((prev) => prev.map((reflection) => (
+      reflection.event_id === eventId ? { ...reflection, likedBy } : reflection
+    )));
+    setLikesModalReflection((current) => (
+      current?.event_id === eventId ? { ...current, likedBy } : current
+    ));
+  }, []);
+
+  const handleToggleLike = useCallback((item: SentReflection) => {
+    const userId = authUser?.uid;
+    if (!userId) {
+      showToast('Sign in to like Reflections');
+      return;
+    }
+    const likedBy = Array.isArray(item.likedBy) ? item.likedBy : [];
+    const isLiked = likedBy.includes(userId);
+    const nextLikedBy = isLiked ? likedBy.filter((uid) => uid !== userId) : [...likedBy, userId];
+    updateReflectionLikedBy(item.event_id, nextLikedBy);
+    toggleReflectionLike(item.event_id, userId, !isLiked);
+  }, [authUser?.uid, showToast, updateReflectionLikedBy]);
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
@@ -338,20 +380,6 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
       }
     }, 350);
   }, [currentExplorerId]);
-
-  // Toast state
-  const [toastMessage, setToastMessage] = useState('');
-  const toastOpacity = useRef(new Animated.Value(0)).current;
-
-  // Show toast notification
-  const showToast = (message: string) => {
-    setToastMessage(message);
-    Animated.sequence([
-      Animated.timing(toastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.delay(2000),
-      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true })
-    ]).start(() => setToastMessage(''));
-  };
 
   // Listen to reflection_responses collection to detect new selfie responses
   useEffect(() => {
@@ -488,6 +516,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
               status: currentStatus,
               engagementTimestamp: (currentStatus === 'engaged' || currentStatus === 'replayed') ? data.timestamp : undefined,
               engagementCount: typeof data.engagement_count === 'number' ? data.engagement_count : 0,
+              likedBy: coerceLikedBy(data.likedBy),
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
               sender: asOptionalString(data?.sender) ?? undefined,
               sender_id: asOptionalString(data?.sender_id) ?? undefined,
@@ -570,6 +599,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
           const row = reflectionMap.get(actualEventId);
           if (row) {
+            row.likedBy = coerceLikedBy(data.likedBy);
             const m = coerceEmbeddedMetadata(data.metadata, actualEventId);
             if (m) {
               row.metadata = m;
@@ -1061,6 +1091,10 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
             const isTopRanked = sortBy === 'impact' && index < 3 && engagementCount > 0;
             const rankColor = isTopRanked ? '#facc15' : '#cbd5e1';
+            const likedBy = Array.isArray(item.likedBy) ? item.likedBy : [];
+            const likeCount = likedBy.length;
+            const likedByMe = !!authUser?.uid && likedBy.includes(authUser.uid);
+            const likedByOthers = likeCount > 0 && !likedByMe;
 
             return (
               <TouchableOpacity
@@ -1239,14 +1273,36 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
                       )}
                     </View>
 
-                    {/* ROW 3 — Engagement metrics */}
-                    {engagementCount > 0 && (
-                      <View style={styles.engagementMetaRow}>
+                    {/* ROW 3 — Likes + engagement metrics */}
+                    <View style={styles.engagementMetaRow}>
+                      <Pressable
+                        onPress={() => handleToggleLike(item)}
+                        onLongPress={() => likeCount > 0 && setLikesModalReflection(item)}
+                        delayLongPress={250}
+                        style={({ pressed }) => [
+                          styles.likeControl,
+                          likedByMe && styles.likeControlActive,
+                          pressed && styles.likeControlPressed,
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel={likedByMe ? 'Unlike this Reflection' : 'Like this Reflection'}
+                        accessibilityHint="Long press to see who liked this Reflection"
+                      >
+                        <FontAwesome
+                          name={likeCount > 0 ? 'heart' : 'heart-o'}
+                          size={16}
+                          color={likedByMe ? '#4FC3F7' : likedByOthers ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.7)'}
+                        />
+                        {likeCount > 0 ? (
+                          <Text style={[styles.likeCountText, likedByMe && styles.likeCountTextActive]}>{likeCount}</Text>
+                        ) : null}
+                      </Pressable>
+                      {engagementCount > 0 ? (
                         <Text style={styles.engagementMetaText}>
                           Engagements: {engagementCount}
                         </Text>
-                      </View>
-                    )}
+                      ) : null}
+                    </View>
 
                     {/* ROW 4 — Sent by / date */}
                     <Text style={styles.sentDate}>
@@ -1304,6 +1360,49 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         event={selectedReflection}
         onClose={() => setSelectedReflection(null)}
       />
+
+      <Modal
+        visible={!!likesModalReflection}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setLikesModalReflection(null)}
+      >
+        <View style={styles.likesModalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setLikesModalReflection(null)} />
+          <View style={styles.likesModalSheet}>
+            <Text style={styles.likesModalTitle}>Liked by</Text>
+            {(likesModalReflection?.likedBy ?? []).map((uid) => {
+              const companion = companionById.get(uid);
+              const fallbackName =
+                uid === authUser?.uid
+                  ? currentIdentity || 'You'
+                  : explorerName || 'Explorer';
+              const displayName = companion?.companionName || fallbackName;
+              const initial = displayName.trim().charAt(0).toUpperCase() || '?';
+              return (
+                <View key={uid} style={styles.likePersonRow}>
+                  {companion?.avatarUrl ? (
+                    <Image
+                      source={{ uri: companion.avatarUrl }}
+                      style={styles.likePersonAvatar}
+                      contentFit="cover"
+                      recyclingKey={`like-${uid}`}
+                    />
+                  ) : (
+                    <View style={[styles.likePersonAvatarFallback, { backgroundColor: companion?.color || '#4FC3F7' }]}>
+                      <Text style={styles.likePersonAvatarInitial}>{companion?.initial || initial}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.likePersonName} numberOfLines={1}>{displayName}</Text>
+                  {companion?.isCaregiver ? (
+                    <FontAwesome name="shield" size={13} color="rgba(255,255,255,0.58)" />
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={!!reflectionActionMenu}
@@ -1709,6 +1808,80 @@ const styles = StyleSheet.create({
   engagementMetaText: {
     fontSize: 12,
     color: '#fbbf24',
+  },
+  likeControl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  likeControlActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.16)',
+    borderColor: 'rgba(79, 195, 247, 0.45)',
+  },
+  likeControlPressed: {
+    opacity: 0.75,
+  },
+  likeCountText: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  likeCountTextActive: {
+    color: '#4FC3F7',
+  },
+  likesModalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  likesModalSheet: {
+    margin: 14,
+    padding: 18,
+    borderRadius: 18,
+    backgroundColor: 'rgba(26, 26, 26, 0.98)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    gap: 12,
+  },
+  likesModalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  likePersonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  likePersonAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  likePersonAvatarFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  likePersonAvatarInitial: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  likePersonName: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   tabContainer: {
     flexDirection: 'row',

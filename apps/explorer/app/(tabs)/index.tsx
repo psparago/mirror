@@ -11,10 +11,12 @@ import {
   ExplorerConfig,
   getValidVideoTrimFromFields,
   ListEventsResponse,
+  toggleReflectionLike,
   useCompanionAvatars,
   useThrottledCallback,
 } from '@projectmirror/shared';
 import {
+  auth,
   collection,
   db,
   deleteDoc,
@@ -43,7 +45,7 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Modal, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useExplorerSelf } from '../../context/ExplorerSelfContext';
 
@@ -57,6 +59,9 @@ function eventHasEmbeddedMetadata(event: Event): boolean {
     typeof m.deep_dive === 'string'
   );
 }
+
+const coerceLikedBy = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
 
 /** Coerce Firestore `metadata` field (plain JSON / Timestamp) into EventMetadata. */
 function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): EventMetadata | null {
@@ -158,6 +163,8 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
+  const [reflectionLikes, setReflectionLikes] = useState<Record<string, string[]>>({});
+  const [gridLikeFacesLikedBy, setGridLikeFacesLikedBy] = useState<string[] | null>(null);
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const selfieUploadInFlightRef = useRef(false);
 
@@ -211,6 +218,19 @@ export default function HomeScreen() {
   // Companion avatar filter
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
+  const gridLikeFaces = useMemo(() => {
+    return (gridLikeFacesLikedBy ?? []).map((uid) => {
+      const companion = companions.find((c) => c.userId === uid);
+      const fallbackName = explorerDisplayName || 'Explorer';
+      return {
+        uid,
+        avatarUrl: companion?.avatarUrl ?? null,
+        initial: (companion?.initial ?? fallbackName.trim().charAt(0).toUpperCase()) || '?',
+        color: companion?.color ?? '#4FC3F7',
+        isCaregiver: !!companion?.isCaregiver,
+      };
+    });
+  }, [companions, explorerDisplayName, gridLikeFacesLikedBy]);
 
   const filteredEvents = useMemo(() => {
     if (!selectedCompanionId) return events;
@@ -584,6 +604,17 @@ export default function HomeScreen() {
   // Get metadata for selected event  
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
 
+  const handleToggleReflectionLike = useCallback((eventId: string, userId: string, isAdd: boolean) => {
+    setReflectionLikes((prev) => {
+      const current = prev[eventId] ?? [];
+      const next = isAdd
+        ? (current.includes(userId) ? current : [...current, userId])
+        : current.filter((uid) => uid !== userId);
+      return { ...prev, [eventId]: next };
+    });
+    toggleReflectionLike(eventId, userId, isAdd);
+  }, []);
+
   // Track engagement: send signal if Explorer views Reflection for > 5 seconds
   useEffect(() => {
     // Clear any existing timer
@@ -711,14 +742,18 @@ export default function HomeScreen() {
         // One setEventMetadata per snapshot — docChanges metadata is redundant with this full pass
         // but we still walk docChanges for arrival/delete signals and list-vs-Firestore merge hints.
         const metadataFromFirestore: Record<string, EventMetadata> = {};
+        const likesFromFirestore: Record<string, string[]> = {};
         for (const docSnap of snapshot.docs) {
           const id = docSnap.id;
-          const meta = normalizeFirestoreMetadata(docSnap.data()?.metadata, id);
+          const data = docSnap.data();
+          const meta = normalizeFirestoreMetadata(data?.metadata, id);
           if (meta) metadataFromFirestore[id] = meta;
+          likesFromFirestore[id] = coerceLikedBy(data?.likedBy);
         }
         if (Object.keys(metadataFromFirestore).length > 0) {
           setEventMetadata((prev) => ({ ...prev, ...metadataFromFirestore }));
         }
+        setReflectionLikes((prev) => ({ ...prev, ...likesFromFirestore }));
 
         if (isInitialLoad) {
           isInitialLoad = false;
@@ -751,6 +786,13 @@ export default function HomeScreen() {
             (e) => !removedReflectionIds.includes(e.event_id)
           );
           setEvents(remaining);
+          setReflectionLikes((prev) => {
+            const next = { ...prev };
+            removedReflectionIds.forEach((id) => {
+              delete next[id];
+            });
+            return next;
+          });
           setSelectedEvent((current) => {
             if (!current || !removedReflectionIds.includes(current.event_id)) return current;
             return remaining.length > 0 ? remaining[0] : null;
@@ -984,6 +1026,10 @@ export default function HomeScreen() {
     const metadata = eventMetadata[item.event_id];
     const isRead = readEventIds.includes(item.event_id);
     const isNewArrival = recentlyArrivedIds.includes(item.event_id);
+    const likedBy = reflectionLikes[item.event_id] ?? [];
+    const currentUserId = auth.currentUser?.uid ?? null;
+    const likedByMe = !!currentUserId && likedBy.includes(currentUserId);
+    const likeCount = likedBy.length;
 
     // Don't render if no image URL
     if (!item.image_url || item.image_url === '') {
@@ -1032,6 +1078,36 @@ export default function HomeScreen() {
               <FontAwesome name="camera" size={12} color="#fff" />
             )}
           </View>
+          <Pressable
+            onPress={(event) => {
+              event.stopPropagation();
+              if (!currentUserId) return;
+              handleToggleReflectionLike(item.event_id, currentUserId, !likedByMe);
+            }}
+            onLongPress={(event) => {
+              event.stopPropagation();
+              if (likeCount > 0) {
+                setGridLikeFacesLikedBy(likedBy);
+              }
+            }}
+            delayLongPress={250}
+            style={({ pressed }) => [
+              styles.gridLikeBadge,
+              likedByMe && styles.gridLikeBadgeActive,
+              pressed && styles.gridLikeBadgePressed,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={likedByMe ? 'Unlike this Reflection' : 'Like this Reflection'}
+          >
+            <FontAwesome
+              name={likeCount > 0 ? 'heart' : 'heart-o'}
+              size={13}
+              color={likedByMe ? '#4FC3F7' : likeCount > 0 ? 'rgba(255,255,255,0.72)' : 'rgba(255,255,255,0.88)'}
+            />
+            {likeCount > 0 ? (
+              <Text style={[styles.gridLikeCount, likedByMe && styles.gridLikeCountActive]}>{likeCount}</Text>
+            ) : null}
+          </Pressable>
         </View>
 
         {/* Card Content */}
@@ -1546,6 +1622,11 @@ export default function HomeScreen() {
               ) : undefined
             }
             eventMetadata={eventMetadata}
+            likedBy={reflectionLikes[selectedEvent.event_id] ?? []}
+            reflectionLikes={reflectionLikes}
+            currentUserId={auth.currentUser?.uid ?? null}
+            companions={companions}
+            onToggleLike={handleToggleReflectionLike}
             onClose={closeFullScreen}
             onEventSelect={throttledHandleEventPress}
             onDelete={deleteEvent}
@@ -1576,6 +1657,54 @@ export default function HomeScreen() {
           </BlurView>
         </View>
       ) : null}
+
+      <Modal
+        visible={!!gridLikeFacesLikedBy}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setGridLikeFacesLikedBy(null)}
+      >
+        <View style={styles.gridFacesModalOverlay}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setGridLikeFacesLikedBy(null)} />
+          <View style={styles.gridFacesModalCard}>
+            <TouchableOpacity
+              style={styles.gridFacesCloseButton}
+              onPress={() => setGridLikeFacesLikedBy(null)}
+              hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+              accessibilityLabel="Close faces"
+            >
+              <FontAwesome name="close" size={18} color="#fff" />
+            </TouchableOpacity>
+            <FlatList
+              data={gridLikeFaces}
+              keyExtractor={(item) => item.uid}
+              numColumns={3}
+              contentContainerStyle={styles.gridFacesList}
+              renderItem={({ item }) => (
+                <View style={styles.gridFaceItem}>
+                  {item.avatarUrl ? (
+                    <Image
+                      source={{ uri: item.avatarUrl }}
+                      style={styles.gridFaceAvatar}
+                      contentFit="cover"
+                      recyclingKey={`grid-face-${item.uid}`}
+                    />
+                  ) : (
+                    <View style={[styles.gridFaceAvatarFallback, { backgroundColor: item.color }]}>
+                      <Text style={styles.gridFaceAvatarInitial}>{item.initial}</Text>
+                    </View>
+                  )}
+                  {item.isCaregiver ? (
+                    <View style={styles.gridFaceCaregiverBadge}>
+                      <FontAwesome name="shield" size={12} color="#fff" />
+                    </View>
+                  ) : null}
+                </View>
+              )}
+            />
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2012,6 +2141,37 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 8,
   },
+  gridLikeBadge: {
+    position: 'absolute',
+    left: 8,
+    bottom: 8,
+    minWidth: 30,
+    minHeight: 24,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  gridLikeBadgeActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.22)',
+    borderColor: 'rgba(79, 195, 247, 0.55)',
+  },
+  gridLikeBadgePressed: {
+    opacity: 0.75,
+  },
+  gridLikeCount: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  gridLikeCountActive: {
+    color: '#4FC3F7',
+  },
   gridCardContent: {
     padding: 12,
   },
@@ -2086,5 +2246,78 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  gridFacesModalOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+  },
+  gridFacesModalCard: {
+    width: '100%',
+    maxWidth: 430,
+    maxHeight: '72%',
+    paddingTop: 48,
+    paddingHorizontal: 22,
+    paddingBottom: 22,
+    borderRadius: 28,
+    backgroundColor: 'rgba(18, 28, 34, 0.96)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  gridFacesCloseButton: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    zIndex: 2,
+  },
+  gridFacesList: {
+    alignItems: 'center',
+    gap: 18,
+  },
+  gridFaceItem: {
+    width: 108,
+    height: 108,
+    margin: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gridFaceAvatar: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  gridFaceAvatarFallback: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gridFaceAvatarInitial: {
+    color: '#fff',
+    fontSize: 38,
+    fontWeight: '900',
+  },
+  gridFaceCaregiverBadge: {
+    position: 'absolute',
+    right: 10,
+    bottom: 12,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(79, 195, 247, 0.95)',
+    borderWidth: 2,
+    borderColor: 'rgba(18, 28, 34, 0.96)',
   },
 });
