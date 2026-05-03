@@ -1,16 +1,17 @@
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { ThemeProvider } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { useFonts } from 'expo-font';
 import { Stack, useRootNavigationState, useRouter, useSegments } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
-import { useColorScheme } from '@/components/useColorScheme';
+import { ReflectionsNavigationTheme } from '@/constants/NavigationTheme';
 import { ReflectionMediaProvider } from '@/context/ReflectionMediaContext';
 import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
 import { SystemUpdateModal } from '../components/SystemUpdateModel';
@@ -38,7 +39,6 @@ function AuthenticatedLayout() {
   const segments = useSegments() as string[];
   const router = useRouter();
   const rootNavigationState = useRootNavigationState();
-  const colorScheme = useColorScheme();
   const handledNotificationIdsRef = useRef<Set<string>>(new Set());
 
   const routeFromNotificationData = useCallback(
@@ -195,7 +195,8 @@ function AuthenticatedLayout() {
     <ExplorerProvider key={user?.uid || 'guest'}>
       <ReflectionMediaProvider>
         <GestureHandlerRootView style={{ flex: 1 }}>
-          <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+          <ThemeProvider value={ReflectionsNavigationTheme}>
+            <StatusBar style="light" backgroundColor={ReflectionsNavigationTheme.colors.card} />
             <Stack screenOptions={{ headerShown: false }}>
               <Stack.Screen name="index" />
               <Stack.Screen name="(tabs)" />

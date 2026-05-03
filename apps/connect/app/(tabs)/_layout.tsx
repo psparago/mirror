@@ -1,6 +1,5 @@
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
-import { useColorScheme } from '@/components/useColorScheme';
-import Colors from '@/constants/Colors';
+import { NAV_COLORS } from '@/constants/NavigationTheme';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, onSnapshot } from '@projectmirror/shared/firebase';
@@ -18,7 +17,6 @@ function TabBarIcon(props: {
 }
 
 export default function TabLayout() {
-  const colorScheme = useColorScheme();
   const { explorerName, activeRelationship } = useExplorer();
   const { user } = useAuth();
   const router = useRouter();
@@ -93,8 +91,24 @@ export default function TabLayout() {
     <Tabs
       initialRouteName="index"
       screenOptions={{
-        tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
         headerShown: useClientOnlyValue(false, true),
+        headerStyle: {
+          backgroundColor: NAV_COLORS.header,
+        },
+        headerShadowVisible: false,
+        headerTintColor: NAV_COLORS.text,
+        headerTitleStyle: {
+          color: NAV_COLORS.text,
+        },
+        tabBarActiveTintColor: NAV_COLORS.tabActive,
+        tabBarInactiveTintColor: NAV_COLORS.tabInactive,
+        tabBarStyle: {
+          backgroundColor: NAV_COLORS.card,
+          borderTopColor: NAV_COLORS.tabBorder,
+        },
+        sceneStyle: {
+          backgroundColor: NAV_COLORS.background,
+        },
       }}>
       <Tabs.Screen
         name="index"
@@ -166,7 +180,7 @@ const layoutStyles = StyleSheet.create({
   headerTitleText: {
     fontSize: 17,
     fontWeight: '600',
-    color: '#fff',
+    color: NAV_COLORS.text,
     flexShrink: 1,
   },
 });
