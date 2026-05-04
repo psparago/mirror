@@ -1,5 +1,5 @@
 import { FontAwesome } from '@expo/vector-icons';
-import { Event } from '@projectmirror/shared';
+import { Event, WaitOverlay } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
 import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
@@ -275,10 +275,9 @@ function ReflectionComposerInner({
   const isBlockedByAi = isAiThinking && !isAiCancelled;
   const hasRecordedAudio = !!audioUri;
 
-  // Sparkle animation: rotating star + pulsing text
+  // Sparkle animation: rotating and pulsing star
   const sparkleRotation = useSharedValue(0);
   const sparkleScale = useSharedValue(1);
-  const textOpacity = useSharedValue(1);
 
   useEffect(() => {
     if (isBlockedByAi) {
@@ -295,18 +294,9 @@ function ReflectionComposerInner({
         -1,
         true,
       );
-      textOpacity.value = withRepeat(
-        withSequence(
-          withTiming(0.5, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
-          withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
-        ),
-        -1,
-        true,
-      );
     } else {
       sparkleRotation.value = 0;
       sparkleScale.value = 1;
-      textOpacity.value = 1;
     }
   }, [isBlockedByAi]);
 
@@ -315,10 +305,6 @@ function ReflectionComposerInner({
       { rotate: `${sparkleRotation.value}deg` },
       { scale: sparkleScale.value },
     ],
-  }));
-
-  const sparkleTextStyle = useAnimatedStyle(() => ({
-    opacity: textOpacity.value,
   }));
 
   // Track last AI caption for display (no auto-regen)
@@ -2030,39 +2016,31 @@ function ReflectionComposerInner({
       {/* 2. AI SPARKLE OVERLAY — rendered outside the bottom sheet */}
       {isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
-          <View style={[styles.sparkleCard, styles.sendingCard]}>
-            <Animated.View style={[styles.sendingIconWrap, sparkleIconStyle]}>
+          <WaitOverlay
+            title="Adding Sparkle to your Reflection..."
+            detail="Please keep the app open while Sparkle prepares your Reflection."
+            icon={
+              <Animated.View style={sparkleIconStyle}>
               <FontAwesome name="magic" size={20} color="#fcd34d" />
-            </Animated.View>
-            <ActivityIndicator color="#f39c12" size="large" />
-            <Animated.Text style={[styles.aiOverlayText, sparkleTextStyle]}>
-              Adding Sparkle to your Reflection...
-            </Animated.Text>
-            <Text style={styles.aiOverlaySubText}>
-              Please keep the app open while Sparkle prepares your Reflection.
-            </Text>
-            <TouchableOpacity
-              style={styles.cancelAiButton}
-              onPress={() => setIsAiCancelled(true)}
-            >
-              <Text style={styles.cancelAiText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+              </Animated.View>
+            }
+            tone="sparkle"
+            actionLabel="Cancel"
+            onAction={() => setIsAiCancelled(true)}
+            containerStyle={styles.waitOverlayPanel}
+          />
         </Animated.View>
       )}
 
       {isSending && !isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
-          <View style={[styles.sparkleCard, styles.sendingCard]}>
-            <View style={styles.sendingIconWrap}>
-              <FontAwesome name="cloud-upload" size={20} color="#dbeafe" />
-            </View>
-            <ActivityIndicator color="#f39c12" size="large" />
-            <Text style={styles.aiOverlayText}>Sending to the Cloud...</Text>
-            <Text style={styles.aiOverlaySubText}>
-              Please keep the app open and stay on WiFi for a fast delivery!
-            </Text>
-          </View>
+          <WaitOverlay
+            title="Sending to the Cloud..."
+            detail="Please keep the app open and stay on WiFi for a fast delivery!"
+            icon={<FontAwesome name="cloud-upload" size={20} color="#dbeafe" />}
+            tone="upload"
+            containerStyle={styles.waitOverlayPanel}
+          />
         </Animated.View>
       )}
 
@@ -3236,63 +3214,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
-  sparkleCard: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    borderRadius: 20,
-    paddingVertical: 36,
-    paddingHorizontal: 40,
-    gap: 16,
-  },
-  sendingCard: {
-    width: '86%',
-    maxWidth: 360,
-    paddingVertical: 28,
-    paddingHorizontal: 24,
-    borderRadius: 24,
-    backgroundColor: 'rgba(15, 23, 42, 0.96)',
-    borderWidth: 1,
-    borderColor: 'rgba(148, 163, 184, 0.45)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.26,
-    shadowRadius: 18,
-    elevation: 10,
-  },
-  sendingIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(191, 219, 254, 0.45)',
-  },
-  aiOverlayText: {
-    color: '#f39c12', // Gold/Orange for visibility on dark
-    fontWeight: '700',
-    fontSize: 18,
-    textAlign: 'center',
-  },
-  aiOverlaySubText: {
-    color: 'rgba(255,255,255,0.82)',
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
-  },
-  cancelAiButton: {
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-    backgroundColor: '#333', // Dark grey button
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#666',
-  },
-  cancelAiText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#fff',
+  waitOverlayPanel: {
+    backgroundColor: 'transparent',
   },
 
 // Floating Buttons Column

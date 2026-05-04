@@ -27,6 +27,7 @@ import {
   ExplorerConfig,
   coerceThumbnailTimeMs,
   getValidVideoTrimFromFields,
+  WaitOverlay,
   useAuth,
   useExplorer,
 } from '@projectmirror/shared';
@@ -42,7 +43,6 @@ import { useIsFocused } from '@react-navigation/native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
-  ActivityIndicator,
   Alert,
   Animated,
   AppState,
@@ -81,6 +81,14 @@ type AiDescriptionResponse = {
   deep_dive_audio_s3_key?: string | null;
   staging_event_id?: string | null;
   _stagingId?: string | null;
+};
+
+type CreationWaitPrompt = {
+  title: string;
+  detail: string;
+  iconName: React.ComponentProps<typeof FontAwesome>['name'];
+  actionLabel: string;
+  onAction: () => void;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -240,6 +248,7 @@ export default function CreationModal({
   const [conditioningLargeVideo, setConditioningLargeVideo] = useState(false);
   const [conditioningStatus, setConditioningStatus] = useState('Opening creation tools...');
   const [conditioningProgress, setConditioningProgress] = useState<number | null>(null);
+  const [waitPrompt, setWaitPrompt] = useState<CreationWaitPrompt | null>(null);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<'picker' | 'creating'>('picker');
@@ -273,7 +282,13 @@ export default function CreationModal({
       lastSourceForRecoveryRef.current = route;
       sourceTransitionLockRef.current = true;
       pendingRouteRef.current = route;
-      setConditioningStatus('Opening creation tools...');
+      setConditioningStatus(
+        route === '/gallery'
+          ? 'Waiting for media library...'
+          : route === '/camera'
+            ? 'Waiting for camera...'
+            : 'Waiting for media search...'
+      );
       setConditioningProgress(null);
       sheetRef.current?.close();
       setPhase('creating');
@@ -489,11 +504,16 @@ export default function CreationModal({
       pendingRouteRef.current = null;
       setConditioningStatus('Media selection cancelled.');
       setConditioningProgress(null);
-      Alert.alert(
-        'Video preparation didn\'t finish',
-        'Reflections Connect didn\'t receive the selected media in time. Please try again, and keep the app open while the Reflection is being prepared.',
-        [{ text: 'OK', onPress: onClose }]
-      );
+      setWaitPrompt({
+        title: 'Video preparation didn\'t finish',
+        detail: 'Reflections Connect didn\'t receive the selected media in time. Please try again, and keep the app open while the Reflection is being prepared.',
+        iconName: 'exclamation-triangle',
+        actionLabel: 'OK',
+        onAction: () => {
+          setWaitPrompt(null);
+          onClose();
+        },
+      });
     }, 5000);
 
     return () => {
@@ -530,6 +550,14 @@ export default function CreationModal({
     const route = `/${initialAction}` as '/camera' | '/gallery' | '/search';
     pendingRouteRef.current = route;
     lastSourceForRecoveryRef.current = route;
+    setConditioningStatus(
+      route === '/gallery'
+        ? 'Waiting for media library...'
+        : route === '/camera'
+          ? 'Waiting for camera...'
+          : 'Waiting for media search...'
+    );
+    setConditioningProgress(null);
     setPhase('creating');
     onActionTriggered?.();
   }, [visible, initialAction, editEvent?.event_id, router, onActionTriggered]);
@@ -717,6 +745,33 @@ export default function CreationModal({
     if (!pendingMedia) return;
     const media = consumePendingMedia();
     if (!media) return;
+    if (media.cancelled) {
+      if (pickerRecoveryTimerRef.current) {
+        clearTimeout(pickerRecoveryTimerRef.current);
+        pickerRecoveryTimerRef.current = null;
+      }
+      pendingMediaApplyGenerationRef.current += 1;
+      lastSourceForRecoveryRef.current = null;
+      pendingRouteRef.current = null;
+      sourceTransitionLockRef.current = false;
+      setConditioningMediaKind(null);
+      setConditioningLargeVideo(false);
+      setConditioningStatus('Media selection cancelled.');
+      setConditioningProgress(null);
+      setPhase('creating');
+      setTransitionUnlockTick((v) => v + 1);
+      setWaitPrompt({
+        title: media.cancelTitle ?? 'Video preparation didn\'t finish',
+        detail: media.cancelDetail ?? 'Reflections Connect didn\'t receive the selected media in time. Please try again, and keep the app open while the Reflection is being prepared.',
+        iconName: 'exclamation-triangle',
+        actionLabel: 'OK',
+        onAction: () => {
+          setWaitPrompt(null);
+          onClose();
+        },
+      });
+      return;
+    }
     const mediaUri = asOptionalString(media?.uri);
     if (!mediaUri) {
       console.warn('[CreationModal] pending media missing uri; ignoring lifecycle resume payload');
@@ -813,12 +868,18 @@ export default function CreationModal({
           setConditioningLargeVideo(false);
           setConditioningStatus('Opening creation tools...');
           setConditioningProgress(null);
-          Alert.alert(
-            'Can\'t prepare this video',
-            error instanceof VideoPreparationError
+          setWaitPrompt({
+            title: 'Can\'t prepare this video',
+            detail: error instanceof VideoPreparationError
               ? error.message
-              : 'Reflections Connect could not prepare this video. Please trim or export it from Photos and try again.'
-          );
+              : 'Reflections Connect could not prepare this video. Please trim or export it from Photos and try again.',
+            iconName: 'exclamation-triangle',
+            actionLabel: 'OK',
+            onAction: () => {
+              setWaitPrompt(null);
+              onClose();
+            },
+          });
           return;
         }
       }
@@ -2473,58 +2534,50 @@ export default function CreationModal({
             </View>
           ) : (
             <LinearGradient colors={[...CREATION_SURFACE_GRADIENT]} style={styles.creatingWaitContainer}>
+              <WaitOverlay
+                title={conditioningStatus}
+                detail={
+                  conditioningMediaKind === 'video'
+                    ? 'This makes the video play smoothly for the Explorer. Just a moment!'
+                    : undefined
+                }
+                hint={conditioningLargeVideo ? 'Please stay on WiFi' : undefined}
+                icon={
+                  <FontAwesome
+                    name={
+                      conditioningMediaKind === 'video'
+                        ? 'video-camera'
+                        : conditioningMediaKind === 'photo'
+                          ? 'photo'
+                          : 'magic'
+                    }
+                    size={20}
+                    color="#dbeafe"
+                  />
+                }
+                progress={conditioningProgress ?? 0.18}
+                tone="media"
+                containerStyle={styles.creatingWaitContent}
+              />
               <View style={[styles.modalCloseBar, { paddingTop: insets.top + 8 }]}>
                 <TouchableOpacity onPress={handleClose} style={styles.modalCloseButtonDark}>
                   <FontAwesome name="times" size={24} color="#f1f5f9" />
                   <Text style={styles.modalCloseTextDark}>Close</Text>
                 </TouchableOpacity>
               </View>
-              <View style={styles.creatingWaitContent}>
-                <View style={styles.creatingWaitCard}>
-                  <View style={styles.creatingWaitIconWrap}>
-                    <FontAwesome
-                      name={
-                        conditioningMediaKind === 'video'
-                          ? 'video-camera'
-                          : conditioningMediaKind === 'photo'
-                            ? 'photo'
-                            : 'magic'
-                      }
-                      size={20}
-                      color="#dbeafe"
-                    />
-                  </View>
-                  <ActivityIndicator color="#f39c12" size="large" />
-                  <Text style={styles.creatingWaitText}>
-                    {conditioningStatus}
-                  </Text>
-                  <View style={styles.creatingProgressTrack}>
-                    <View
-                      style={[
-                        styles.creatingProgressFill,
-                        {
-                          width: `${Math.max(
-                            10,
-                            Math.min(100, Math.round((conditioningProgress ?? 0.18) * 100))
-                          )}%`,
-                        },
-                      ]}
-                    />
-                  </View>
-                  {conditioningMediaKind === 'video' ? (
-                    <>
-                      <Text style={styles.creatingWaitSubText}>
-                        This makes the video play smoothly for the Explorer. Just a moment!
-                      </Text>
-                      {conditioningLargeVideo ? (
-                        <Text style={styles.creatingWaitHint}>Please stay on WiFi</Text>
-                      ) : null}
-                    </>
-                  ) : null}
-                </View>
-              </View>
             </LinearGradient>
           )}
+          {waitPrompt ? (
+            <WaitOverlay
+              title={waitPrompt.title}
+              detail={waitPrompt.detail}
+              icon={<FontAwesome name={waitPrompt.iconName} size={20} color="#dbeafe" />}
+              isLoading={false}
+              tone="media"
+              actionLabel={waitPrompt.actionLabel}
+              onAction={waitPrompt.onAction}
+            />
+          ) : null}
         </View>
       )}
 
@@ -2609,64 +2662,6 @@ var styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 24,
-  },
-  creatingWaitCard: {
-    width: '86%',
-    maxWidth: 360,
-    alignItems: 'center',
-    borderRadius: 24,
-    paddingVertical: 28,
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(15, 23, 42, 0.96)',
-    borderWidth: 1,
-    borderColor: 'rgba(148, 163, 184, 0.45)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.26,
-    shadowRadius: 18,
-    elevation: 10,
-    gap: 12,
-  },
-  creatingWaitIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(191, 219, 254, 0.45)',
-  },
-  creatingWaitText: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#f39c12',
-    textAlign: 'center',
-  },
-  creatingProgressTrack: {
-    width: '100%',
-    height: 6,
-    borderRadius: 999,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(148, 163, 184, 0.22)',
-  },
-  creatingProgressFill: {
-    height: '100%',
-    borderRadius: 999,
-    backgroundColor: '#f39c12',
-  },
-  creatingWaitSubText: {
-    fontSize: 13,
-    lineHeight: 18,
-    color: 'rgba(255,255,255,0.82)',
-    textAlign: 'center',
-  },
-  creatingWaitHint: {
-    marginTop: 2,
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#bfdbfe',
-    textAlign: 'center',
   },
   modalCloseBar: {
     flexDirection: 'row',

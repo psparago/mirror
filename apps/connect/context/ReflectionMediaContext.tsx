@@ -4,6 +4,10 @@ export type PendingMedia = {
   uri: string;
   type: 'photo' | 'video';
   source: 'camera' | 'gallery' | 'search';
+  /** Source screens can return an explicit cancellation so CreationModal does not wait for timeout recovery. */
+  cancelled?: boolean;
+  cancelTitle?: string;
+  cancelDetail?: string;
   /** When true, reflection metadata marks this as a companion selfie for the Explorer. */
   isSelfie?: boolean;
   searchQuery?: string;

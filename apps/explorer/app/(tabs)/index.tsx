@@ -14,6 +14,7 @@ import {
   toggleReflectionLike,
   useCompanionAvatars,
   useThrottledCallback,
+  WaitOverlay,
 } from '@projectmirror/shared';
 import {
   auth,
@@ -1480,18 +1481,19 @@ export default function HomeScreen() {
     return (
       <View style={styles.container}>
         <ExplorerGradientBackdrop layout="screen" />
-        <View style={styles.centerContainer} pointerEvents="box-none">
-          <TouchableOpacity
-            onPress={() => router.push('/settings')}
-            style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
-            hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
-          >
-            <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
-          </TouchableOpacity>
-
-          <ActivityIndicator size="large" color="#fff" />
-          <Text style={[styles.loadingText, { color: '#fff' }]}>Loading Reflections...</Text>
-        </View>
+        <WaitOverlay
+          title="Loading Reflections..."
+          detail="Checking for new Reflections from your Companions."
+          icon={<FontAwesome name="cloud-download" size={20} color="#dbeafe" />}
+          tone="media"
+        />
+        <TouchableOpacity
+          onPress={() => router.push('/settings')}
+          style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
+        >
+          <FontAwesome name="info-circle" size={24} color="rgba(255, 255, 255, 0.4)" />
+        </TouchableOpacity>
       </View>
     );
   }

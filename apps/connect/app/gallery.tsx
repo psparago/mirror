@@ -14,15 +14,22 @@ import * as FileSystem from 'expo-file-system';
 import { useNavigation, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
   PermissionsAndroid,
   Platform,
   StyleSheet,
-  Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
+import { WaitOverlay } from '@projectmirror/shared';
+
+type GalleryPrompt = {
+  title: string;
+  detail: string;
+  icon: React.ReactNode;
+  actionLabel: string;
+  onAction: () => void;
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
+};
 
 async function ensureAndroidGalleryPermissions(): Promise<boolean> {
   if (Platform.OS !== 'android') return true;
@@ -58,11 +65,37 @@ export default function GalleryScreen() {
   const { setPendingMedia } = useReflectionMedia();
   const hasLaunched = useRef(false);
   const cancelledRef = useRef(false);
-  const [statusLine, setStatusLine] = useState('Loading media library…');
+  const [statusLine, setStatusLine] = useState('Loading from media library…');
   const [statusDetail, setStatusDetail] = useState('Thanks for your patience. Larger videos can take a little while to get ready.');
   const [prepStep, setPrepStep] = useState(0);
   const [waitIcon, setWaitIcon] = useState<'folder-open' | 'photo' | 'video-camera' | 'cloud-upload'>('folder-open');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [prompt, setPrompt] = useState<GalleryPrompt | null>(null);
+
+  const returnCancelledSelection = (title: string, detail: string) => {
+    setPendingMedia({
+      uri: 'cancelled://gallery',
+      type: 'video',
+      source: 'gallery',
+      cancelled: true,
+      cancelTitle: title,
+      cancelDetail: detail,
+    });
+    router.back();
+  };
+
+  const closeWithPrompt = (title: string, detail: string, iconName: React.ComponentProps<typeof FontAwesome>['name']) => {
+    setPrompt({
+      title,
+      detail,
+      icon: <FontAwesome name={iconName} size={20} color="#dbeafe" />,
+      actionLabel: 'OK',
+      onAction: () => {
+        setPrompt(null);
+        router.back();
+      },
+    });
+  };
 
   const confirmLargeVideoAsync = async (sizeBytes?: number | null): Promise<boolean> => {
     if (typeof sizeBytes === 'number' && sizeBytes < LARGE_VIDEO_WARN_BYTES) return true;
@@ -72,15 +105,21 @@ export default function GalleryScreen() {
         ? `This Reflection video is about ${sizeMb} MB. It may take a minute or more to polish for smooth playback, so please keep Reflections Connect open. Continue?`
         : 'This video may take a minute or more to polish for smooth playback, so please keep Reflections Connect open. Continue?';
     return await new Promise((resolve) => {
-      Alert.alert(
-        'Large video selected',
-        message,
-        [
-          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-          { text: 'Continue', onPress: () => resolve(true) },
-        ],
-        { cancelable: true, onDismiss: () => resolve(false) }
-      );
+      setPrompt({
+        title: 'Large video selected',
+        detail: message,
+        icon: <FontAwesome name="video-camera" size={20} color="#dbeafe" />,
+        secondaryActionLabel: 'Cancel',
+        onSecondaryAction: () => {
+          setPrompt(null);
+          resolve(false);
+        },
+        actionLabel: 'Continue',
+        onAction: () => {
+          setPrompt(null);
+          resolve(true);
+        },
+      });
     });
   };
 
@@ -113,25 +152,25 @@ export default function GalleryScreen() {
     try {
       const granted = await ensureAndroidGalleryPermissions();
       if (!granted) {
-        Alert.alert(
+        closeWithPrompt(
           'Permission Required',
           'Reflections Connect needs access to your photos and videos to pick from the gallery.',
-          [{ text: 'OK', onPress: () => router.back() }]
+          'lock'
         );
         return;
       }
 
       const libPerm = await ExpoImagePicker.requestMediaLibraryPermissionsAsync();
       if (!libPerm.granted) {
-        Alert.alert(
+        closeWithPrompt(
           'Permission Required',
           'We need access to your photo library to choose images and videos for your Reflections.',
-          [{ text: 'OK', onPress: () => router.back() }]
+          'lock'
         );
         return;
       }
 
-      setStatusLine('Loading media library…');
+      setStatusLine('Loading from media library…');
       setStatusDetail('Thanks for your patience. Larger videos can take a little while to get ready.');
       setPrepStep(1);
       setWaitIcon('folder-open');
@@ -187,7 +226,10 @@ export default function GalleryScreen() {
         let largeVideoConfirmed = false;
         const shouldContinue = await confirmLargeVideoAsync(detectedSizeBytes);
         if (!shouldContinue) {
-          router.back();
+          returnCancelledSelection(
+            'Video preparation didn\'t finish',
+            'Reflections Connect didn\'t prepare the selected large video. Choose a smaller clip, trim/export this video from Photos, or try again when you have time to keep the app open.'
+          );
           return;
         }
         largeVideoConfirmed =
@@ -214,7 +256,10 @@ export default function GalleryScreen() {
                 : null;
             const shouldContinueMaterialized = await confirmLargeVideoAsync(materializedSize);
             if (!shouldContinueMaterialized) {
-              router.back();
+              returnCancelledSelection(
+                'Video preparation didn\'t finish',
+                'Reflections Connect didn\'t prepare the selected large video. Choose a smaller clip, trim/export this video from Photos, or try again when you have time to keep the app open.'
+              );
               return;
             }
             if (materializedSize && materializedSize >= LARGE_VIDEO_WARN_BYTES) {
@@ -230,10 +275,10 @@ export default function GalleryScreen() {
         setPrepStep(5);
         const durationSec = await probeLocalVideoDurationSeconds(fileUri);
         if (!isUsableVideoDurationSeconds(durationSec)) {
-          Alert.alert(
+          closeWithPrompt(
             'Can\'t use this clip',
             'Reflections Connect couldn’t read this video. Try another video, or trim/export it from Photos first.',
-            [{ text: 'OK', onPress: () => router.back() }]
+            'exclamation-triangle'
           );
           return;
         }
@@ -285,13 +330,15 @@ export default function GalleryScreen() {
         return;
       }
       if (err?.code === 'E_NO_LIBRARY_PERMISSION') {
-        Alert.alert('Permission Required', 'We need access to your photos to select media for your Reflections.');
-        router.back();
+        closeWithPrompt(
+          'Permission Required',
+          'We need access to your photos to select media for your Reflections.',
+          'lock'
+        );
         return;
       }
       console.error('Gallery picker error:', error);
-      Alert.alert('Error', 'Failed to pick media from gallery');
-      router.back();
+      closeWithPrompt('Error', 'Failed to pick media from gallery', 'exclamation-triangle');
     } finally {
       setIsProcessing(false);
     }
@@ -299,29 +346,36 @@ export default function GalleryScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.waitCard}>
-        <View style={styles.waitIconWrap}>
-          <FontAwesome name={waitIcon} size={20} color="#dbeafe" />
-        </View>
-        <ActivityIndicator size="large" color="#f39c12" />
-        <Text style={styles.text}>{statusLine}</Text>
-        <Text style={styles.detailText}>{statusDetail}</Text>
-        <View style={styles.stepTrack}>
-          <View style={[styles.stepFill, { width: `${Math.max(12, Math.min(100, (prepStep / 7) * 100))}%` }]} />
-        </View>
-        {isProcessing ? (
-          <TouchableOpacity
-            style={styles.cancelBtn}
-            onPress={() => {
-              cancelledRef.current = true;
-              router.back();
-            }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.cancelBtnText}>Cancel</Text>
-          </TouchableOpacity>
-        ) : null}
-      </View>
+      {prompt ? (
+        <WaitOverlay
+          title={prompt.title}
+          detail={prompt.detail}
+          icon={prompt.icon}
+          isLoading={false}
+          tone="media"
+          actionLabel={prompt.actionLabel}
+          onAction={prompt.onAction}
+          secondaryActionLabel={prompt.secondaryActionLabel}
+          onSecondaryAction={prompt.onSecondaryAction}
+        />
+      ) : (
+        <WaitOverlay
+          title={statusLine}
+          detail={statusDetail}
+          icon={<FontAwesome name={waitIcon} size={20} color="#dbeafe" />}
+          progress={prepStep / 7}
+          tone="media"
+          actionLabel={isProcessing ? 'Cancel' : undefined}
+          onAction={
+            isProcessing
+              ? () => {
+                  cancelledRef.current = true;
+                  router.back();
+                }
+              : undefined
+          }
+        />
+      )}
     </View>
   );
 }
@@ -329,74 +383,5 @@ export default function GalleryScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 20,
-  },
-  waitCard: {
-    width: '86%',
-    maxWidth: 360,
-    alignItems: 'center',
-    borderRadius: 24,
-    paddingVertical: 28,
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(15, 23, 42, 0.96)',
-    borderWidth: 1,
-    borderColor: 'rgba(148, 163, 184, 0.45)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.26,
-    shadowRadius: 18,
-    elevation: 10,
-    gap: 12,
-  },
-  waitIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(191, 219, 254, 0.45)',
-  },
-  text: {
-    color: '#f39c12',
-    fontSize: 18,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  detailText: {
-    color: '#cbd5e1',
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
-  },
-  stepTrack: {
-    width: '100%',
-    height: 5,
-    borderRadius: 999,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(148, 163, 184, 0.22)',
-  },
-  stepFill: {
-    height: '100%',
-    borderRadius: 999,
-    backgroundColor: '#f39c12',
-  },
-  cancelBtn: {
-    marginTop: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(191, 219, 254, 0.6)',
-    backgroundColor: 'rgba(59, 130, 246, 0.18)',
-  },
-  cancelBtnText: {
-    color: '#e2e8f0',
-    fontSize: 14,
-    fontWeight: '700',
   },
 });

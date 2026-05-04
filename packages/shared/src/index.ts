@@ -28,6 +28,8 @@ export * from './hooks/useThrottledCallback';
 export { default as VersionDisplay } from './components/VersionDisplay';
 export { AvatarFilterBar } from './components/AvatarFilterBar';
 export type { AvatarFilterBarProps } from './components/AvatarFilterBar';
+export { WaitOverlay } from './components/WaitOverlay';
+export type { WaitOverlayProps } from './components/WaitOverlay';
 
 // Utilities
 export * from './utils/avatarDefaults';
