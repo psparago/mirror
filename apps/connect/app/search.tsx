@@ -1,10 +1,10 @@
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
 import { prepareImageForUpload } from '@/utils/mediaProcessor';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS } from '@projectmirror/shared';
+import { API_ENDPOINTS, useWaitOverlay } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -22,10 +22,32 @@ export default function SearchScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { setPendingMedia } = useReflectionMedia();
+  const waitOverlay = useWaitOverlay();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingImage, setIsLoadingImage] = useState(false);
+
+  useEffect(() => {
+    if (isLoadingImage) {
+      waitOverlay.show(
+        {
+          title: 'Preparing image...',
+          detail: 'Optimizing this image for your Reflection.',
+          icon: <FontAwesome name="photo" size={20} color="#dbeafe" />,
+          tone: 'media',
+        },
+        'connect-search-image-wait-overlay'
+      );
+      return;
+    }
+
+    waitOverlay.hide('connect-search-image-wait-overlay');
+  }, [isLoadingImage, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide('connect-search-image-wait-overlay');
+  }, [waitOverlay]);
 
   const searchUnsplash = async (query: string) => {
     if (!query.trim()) return;
@@ -77,14 +99,6 @@ export default function SearchScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Loading overlay */}
-      {isLoadingImage && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#fff" />
-          <Text style={styles.loadingOverlayText}>Preparing image...</Text>
-        </View>
-      )}
-
       {/* Fixed Header Section */}
       <View style={[styles.fixedHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.header}>
@@ -190,18 +204,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#1a1a2e',
-  },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  loadingOverlayText: {
-    color: '#fff',
-    marginTop: 12,
-    fontSize: 14,
   },
   fixedHeader: {
     backgroundColor: '#1a1a2e',

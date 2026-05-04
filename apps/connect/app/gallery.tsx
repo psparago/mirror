@@ -19,7 +19,7 @@ import {
   StyleSheet,
   View,
 } from 'react-native';
-import { WaitOverlay } from '@projectmirror/shared';
+import { useWaitOverlay } from '@projectmirror/shared';
 
 type GalleryPrompt = {
   title: string;
@@ -63,14 +63,61 @@ export default function GalleryScreen() {
   const router = useRouter();
   const navigation = useNavigation();
   const { setPendingMedia } = useReflectionMedia();
+  const waitOverlay = useWaitOverlay();
   const hasLaunched = useRef(false);
   const cancelledRef = useRef(false);
+  const waitOverlayIdRef = useRef('connect-gallery-wait-overlay');
   const [statusLine, setStatusLine] = useState('Loading from media library…');
   const [statusDetail, setStatusDetail] = useState('Thanks for your patience. Larger videos can take a little while to get ready.');
   const [prepStep, setPrepStep] = useState(0);
   const [waitIcon, setWaitIcon] = useState<'folder-open' | 'photo' | 'video-camera' | 'cloud-upload'>('folder-open');
   const [isProcessing, setIsProcessing] = useState(false);
   const [prompt, setPrompt] = useState<GalleryPrompt | null>(null);
+
+  useEffect(() => {
+    if (prompt) {
+      waitOverlay.show(
+        {
+          title: prompt.title,
+          detail: prompt.detail,
+          icon: prompt.icon,
+          isLoading: false,
+          tone: 'media',
+          actionLabel: prompt.actionLabel,
+          onAction: prompt.onAction,
+          secondaryActionLabel: prompt.secondaryActionLabel,
+          onSecondaryAction: prompt.onSecondaryAction,
+        },
+        waitOverlayIdRef.current
+      );
+      return;
+    }
+
+    if (isProcessing) {
+      waitOverlay.show(
+        {
+          title: statusLine,
+          detail: statusDetail,
+          icon: <FontAwesome name={waitIcon} size={20} color="#dbeafe" />,
+          progress: prepStep / 7,
+          tone: 'media',
+          actionLabel: 'Cancel',
+          onAction: () => {
+            cancelledRef.current = true;
+            router.back();
+          },
+        },
+        waitOverlayIdRef.current
+      );
+      return;
+    }
+
+    waitOverlay.hide(waitOverlayIdRef.current);
+  }, [isProcessing, prepStep, prompt, router, statusDetail, statusLine, waitIcon, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide(waitOverlayIdRef.current);
+  }, [waitOverlay]);
 
   const returnCancelledSelection = (title: string, detail: string) => {
     setPendingMedia({
@@ -345,38 +392,7 @@ export default function GalleryScreen() {
   };
 
   return (
-    <View style={styles.container}>
-      {prompt ? (
-        <WaitOverlay
-          title={prompt.title}
-          detail={prompt.detail}
-          icon={prompt.icon}
-          isLoading={false}
-          tone="media"
-          actionLabel={prompt.actionLabel}
-          onAction={prompt.onAction}
-          secondaryActionLabel={prompt.secondaryActionLabel}
-          onSecondaryAction={prompt.onSecondaryAction}
-        />
-      ) : (
-        <WaitOverlay
-          title={statusLine}
-          detail={statusDetail}
-          icon={<FontAwesome name={waitIcon} size={20} color="#dbeafe" />}
-          progress={prepStep / 7}
-          tone="media"
-          actionLabel={isProcessing ? 'Cancel' : undefined}
-          onAction={
-            isProcessing
-              ? () => {
-                  cancelledRef.current = true;
-                  router.back();
-                }
-              : undefined
-          }
-        />
-      )}
-    </View>
+    <View style={styles.container} />
   );
 }
 

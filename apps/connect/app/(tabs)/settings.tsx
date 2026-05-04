@@ -1,7 +1,7 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
+import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
 import { db, doc, getDoc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -86,6 +86,7 @@ export default function SettingsScreen() {
   const colorScheme = useColorScheme();
   const tintColor = Colors[colorScheme ?? 'light'].tint;
   const router = useRouter();
+  const waitOverlay = useWaitOverlay();
 
   // AUTH & CONTEXT
   const { user, signOut } = useAuth();
@@ -114,6 +115,53 @@ export default function SettingsScreen() {
   const avatarColor = getAvatarColor(user?.uid || '');
   const explorerAvatarInitial = getAvatarInitial(explorerName || activeRelationship?.explorerId || '');
   const explorerAvatarColor = getAvatarColor(activeRelationship?.explorerId || '');
+
+  useEffect(() => {
+    if (uploadingAvatar) {
+      waitOverlay.show(
+        {
+          title: 'Updating profile...',
+          detail: 'Saving your Companion photo.',
+          icon: <FontAwesome name="user" size={20} color="#fcd34d" />,
+          tone: 'sparkle',
+        },
+        'connect-settings-wait-overlay'
+      );
+      return;
+    }
+
+    if (uploadingExplorerAvatar) {
+      waitOverlay.show(
+        {
+          title: 'Updating profile...',
+          detail: `Saving ${explorerName || 'the Explorer'}'s photo.`,
+          icon: <FontAwesome name="heart" size={20} color="#fcd34d" />,
+          tone: 'sparkle',
+        },
+        'connect-settings-wait-overlay'
+      );
+      return;
+    }
+
+    if (saving) {
+      waitOverlay.show(
+        {
+          title: 'Updating profile...',
+          detail: 'Saving your Companion name.',
+          icon: <FontAwesome name="pencil" size={20} color="#fcd34d" />,
+          tone: 'sparkle',
+        },
+        'connect-settings-wait-overlay'
+      );
+      return;
+    }
+
+    waitOverlay.hide('connect-settings-wait-overlay');
+  }, [explorerName, saving, uploadingAvatar, uploadingExplorerAvatar, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide('connect-settings-wait-overlay');
+  }, [waitOverlay]);
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
@@ -454,9 +502,7 @@ export default function SettingsScreen() {
               <View style={styles.avatarRow}>
                 <TouchableOpacity onPress={showAvatarPicker} disabled={uploadingAvatar} activeOpacity={0.7} style={styles.avatarTouchable}>
                   <View style={[styles.avatarCircle, !avatarUrl && !uploadingAvatar && { backgroundColor: avatarColor }]}>
-                    {uploadingAvatar ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : avatarUrl ? (
+                    {avatarUrl ? (
                       <Image source={{ uri: avatarUrl }} style={styles.avatarImage} contentFit="cover" />
                     ) : (
                       <Text style={styles.avatarInitial}>{avatarInitial}</Text>
@@ -493,11 +539,7 @@ export default function SettingsScreen() {
                 onPress={saveCompanionName}
                 disabled={!nameInput.trim() || saving}
               >
-                {saving ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.saveButtonText}>Save Name</Text>
-                )}
+                <Text style={styles.saveButtonText}>Save Name</Text>
               </TouchableOpacity>
             </>
           ) : (
@@ -518,9 +560,7 @@ export default function SettingsScreen() {
             <View style={styles.avatarRow}>
               <TouchableOpacity onPress={showExplorerAvatarPicker} disabled={uploadingExplorerAvatar} activeOpacity={0.7} style={styles.avatarTouchable}>
                 <View style={[styles.avatarCircle, !explorerAvatarUrl && !uploadingExplorerAvatar && { backgroundColor: explorerAvatarColor }]}>
-                  {uploadingExplorerAvatar ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : explorerAvatarUrl ? (
+                  {explorerAvatarUrl ? (
                     <Image source={{ uri: explorerAvatarUrl }} style={styles.avatarImage} contentFit="cover" />
                   ) : (
                     <Text style={styles.avatarInitial}>{explorerAvatarInitial}</Text>

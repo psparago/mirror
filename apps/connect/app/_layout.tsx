@@ -13,7 +13,7 @@ import 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
 import { ReflectionsNavigationTheme } from '@/constants/NavigationTheme';
 import { ReflectionMediaProvider } from '@/context/ReflectionMediaContext';
-import { AuthProvider, ExplorerProvider, useAuth } from '@projectmirror/shared';
+import { AuthProvider, ExplorerProvider, WaitOverlayProvider, useAuth } from '@projectmirror/shared';
 import { SystemUpdateModal } from '../components/SystemUpdateModel';
 
 export { ErrorBoundary } from 'expo-router';
@@ -195,18 +195,20 @@ function AuthenticatedLayout() {
     <ExplorerProvider key={user?.uid || 'guest'}>
       <ReflectionMediaProvider>
         <GestureHandlerRootView style={{ flex: 1 }}>
-          <ThemeProvider value={ReflectionsNavigationTheme}>
-            <StatusBar style="light" backgroundColor={ReflectionsNavigationTheme.colors.card} />
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="index" />
-              <Stack.Screen name="(tabs)" />
-              <Stack.Screen name="join" />
-              <Stack.Screen name="(auth)/login" />
-              <Stack.Screen name="camera" options={{ presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
-              <Stack.Screen name="gallery" options={{ animation: 'none' }} />
-              <Stack.Screen name="search" options={{ presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
-            </Stack>
-          </ThemeProvider>
+          <WaitOverlayProvider>
+            <ThemeProvider value={ReflectionsNavigationTheme}>
+              <StatusBar style="light" backgroundColor={ReflectionsNavigationTheme.colors.card} />
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="index" />
+                <Stack.Screen name="(tabs)" />
+                <Stack.Screen name="join" />
+                <Stack.Screen name="(auth)/login" />
+                <Stack.Screen name="camera" options={{ presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
+                <Stack.Screen name="gallery" options={{ animation: 'none' }} />
+                <Stack.Screen name="search" options={{ presentation: 'fullScreenModal', animation: 'slide_from_bottom' }} />
+              </Stack>
+            </ThemeProvider>
+          </WaitOverlayProvider>
         </GestureHandlerRootView>
       </ReflectionMediaProvider>
     </ExplorerProvider>

@@ -1,7 +1,8 @@
 import { FontAwesome } from '@expo/vector-icons';
+import { WaitOverlay } from '@projectmirror/shared';
 import { CameraType, CameraView } from 'expo-camera';
 import React from 'react';
-import { ActivityIndicator, Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface CameraModalProps {
@@ -94,18 +95,12 @@ export default function CameraModal({
         </View>
 
         {uploading ? (
-          <View style={styles.waitOverlay}>
-            <View style={styles.waitCard}>
-              <View style={styles.waitIconWrap}>
-                <FontAwesome name="cloud-upload" size={20} color="#dbeafe" />
-              </View>
-              <ActivityIndicator size="large" color="#f39c12" />
-              <Text style={styles.waitTitle}>Sending to the Cloud...</Text>
-              <Text style={styles.waitSubText}>
-                Please keep the app open and stay on WiFi for a fast delivery!
-              </Text>
-            </View>
-          </View>
+          <WaitOverlay
+            title="Sending to the Cloud..."
+            detail="Please keep the app open and stay on WiFi for a fast delivery!"
+            icon={<FontAwesome name="cloud-upload" size={20} color="#dbeafe" />}
+            tone="upload"
+          />
         ) : null}
       </View>
     </Modal>
@@ -196,53 +191,6 @@ const styles = StyleSheet.create({
     color: 'white',
     fontSize: 16,
     fontWeight: 'bold',
-  },
-  waitOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    paddingHorizontal: 20,
-  },
-  waitCard: {
-    width: '86%',
-    maxWidth: 360,
-    alignItems: 'center',
-    borderRadius: 24,
-    paddingVertical: 28,
-    paddingHorizontal: 24,
-    backgroundColor: 'rgba(15, 23, 42, 0.96)',
-    borderWidth: 1,
-    borderColor: 'rgba(148, 163, 184, 0.45)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.26,
-    shadowRadius: 18,
-    elevation: 10,
-    gap: 12,
-  },
-  waitIconWrap: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.22)',
-    borderWidth: 1,
-    borderColor: 'rgba(191, 219, 254, 0.45)',
-  },
-  waitTitle: {
-    color: '#f39c12',
-    fontSize: 18,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  waitSubText: {
-    color: 'rgba(255,255,255,0.82)',
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
   },
 });
 

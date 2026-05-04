@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   StyleProp,
@@ -28,6 +28,18 @@ export type WaitOverlayProps = {
   cardStyle?: StyleProp<ViewStyle>;
   titleStyle?: StyleProp<TextStyle>;
 };
+
+type GlobalWaitOverlayState = WaitOverlayProps & {
+  id: string;
+};
+
+type WaitOverlayContextValue = {
+  show: (props: WaitOverlayProps, id?: string) => string;
+  update: (id: string, props: WaitOverlayProps) => void;
+  hide: (id?: string) => void;
+};
+
+const WaitOverlayContext = createContext<WaitOverlayContextValue | null>(null);
 
 const toneColors: Record<WaitOverlayTone, { accent: string; iconBg: string; iconBorder: string }> = {
   default: {
@@ -127,7 +139,53 @@ export function WaitOverlay({
   );
 }
 
+export function WaitOverlayProvider({ children }: { children: React.ReactNode }) {
+  const [currentOverlay, setCurrentOverlay] = useState<GlobalWaitOverlayState | null>(null);
+
+  const show = useCallback((props: WaitOverlayProps, id = `wait-${Date.now()}-${Math.random()}`) => {
+    setCurrentOverlay({ ...props, id });
+    return id;
+  }, []);
+
+  const update = useCallback((id: string, props: WaitOverlayProps) => {
+    setCurrentOverlay((current) => {
+      if (!current || current.id !== id) return current;
+      return { ...props, id };
+    });
+  }, []);
+
+  const hide = useCallback((id?: string) => {
+    setCurrentOverlay((current) => {
+      if (!current) return null;
+      if (id && current.id !== id) return current;
+      return null;
+    });
+  }, []);
+
+  const value = useMemo(() => ({ show, update, hide }), [hide, show, update]);
+
+  return (
+    <WaitOverlayContext.Provider value={value}>
+      <View style={styles.hostRoot}>
+        {children}
+        {currentOverlay ? <WaitOverlay {...currentOverlay} /> : null}
+      </View>
+    </WaitOverlayContext.Provider>
+  );
+}
+
+export function useWaitOverlay() {
+  const context = useContext(WaitOverlayContext);
+  if (!context) {
+    throw new Error('useWaitOverlay must be used within a WaitOverlayProvider');
+  }
+  return context;
+}
+
 const styles = StyleSheet.create({
+  hostRoot: {
+    flex: 1,
+  },
   container: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',

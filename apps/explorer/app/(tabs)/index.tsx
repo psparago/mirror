@@ -14,7 +14,7 @@ import {
   toggleReflectionLike,
   useCompanionAvatars,
   useThrottledCallback,
-  WaitOverlay,
+  useWaitOverlay,
 } from '@projectmirror/shared';
 import {
   auth,
@@ -175,6 +175,8 @@ export default function HomeScreen() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
+  const waitOverlay = useWaitOverlay();
+  const waitOverlayIdRef = useRef('explorer-home-wait-overlay');
   const engagementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasEngagedRef = useRef<{ [eventId: string]: boolean }>({});
   const selectedEventIdRef = useRef<string | null>(null);
@@ -1477,16 +1479,31 @@ export default function HomeScreen() {
     processSelfieQueue();
   }, [processSelfieQueue]);
 
+  useEffect(() => {
+    if (loading) {
+      waitOverlay.show(
+        {
+          title: 'Loading Reflections...',
+          detail: 'Checking for new Reflections from your Companions.',
+          icon: <FontAwesome name="cloud-download" size={20} color="#dbeafe" />,
+          tone: 'media',
+        },
+        waitOverlayIdRef.current
+      );
+      return;
+    }
+
+    waitOverlay.hide(waitOverlayIdRef.current);
+  }, [loading, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide(waitOverlayIdRef.current);
+  }, [waitOverlay]);
+
   if (loading) {
     return (
       <View style={styles.container}>
         <ExplorerGradientBackdrop layout="screen" />
-        <WaitOverlay
-          title="Loading Reflections..."
-          detail="Checking for new Reflections from your Companions."
-          icon={<FontAwesome name="cloud-download" size={20} color="#dbeafe" />}
-          tone="media"
-        />
         <TouchableOpacity
           onPress={() => router.push('/settings')}
           style={{ position: 'absolute', top: insets.top + 10, right: 20, padding: 10, zIndex: 100 }}

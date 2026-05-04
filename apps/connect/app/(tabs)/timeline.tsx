@@ -11,6 +11,7 @@ import {
   useAuth,
   useCompanionAvatars,
   useExplorer,
+  useWaitOverlay,
 } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -233,6 +234,8 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
 
   const { currentExplorerId, activeRelationship, explorerName, loading: explorerLoading } = useExplorer();
   const { user: authUser } = useAuth();
+  const waitOverlay = useWaitOverlay();
+  const waitOverlayIdRef = useRef('connect-timeline-wait-overlay');
   const currentIdentity = activeRelationship?.companionName || null;
   const snapshotGenRef = useRef(0);
 
@@ -240,6 +243,27 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
   const companionById = useMemo(() => new Map(companions.map((companion) => [companion.userId, companion])), [companions]);
+
+  useEffect(() => {
+    if (loading || explorerLoading || !currentExplorerId) {
+      waitOverlay.show(
+        {
+          title: 'Loading timeline...',
+          detail: 'Gathering recent Reflections and responses.',
+          icon: <FontAwesome name="list" size={20} color="#dbeafe" />,
+          tone: 'sparkle',
+        },
+        waitOverlayIdRef.current
+      );
+      return;
+    }
+
+    waitOverlay.hide(waitOverlayIdRef.current);
+  }, [currentExplorerId, explorerLoading, loading, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide(waitOverlayIdRef.current);
+  }, [waitOverlay]);
 
   // Toast state
   const [toastMessage, setToastMessage] = useState('');
@@ -901,12 +925,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
   if (loading || explorerLoading || !currentExplorerId) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.gradient}>
-          <View style={styles.centerContainer}>
-            <ActivityIndicator size="large" color="#4FC3F7" />
-            <Text style={styles.loadingText}>Loading timeline...</Text>
-          </View>
-        </View>
+        <View style={styles.gradient} />
       </SafeAreaView>
     );
   }

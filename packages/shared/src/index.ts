@@ -29,6 +29,7 @@ export { default as VersionDisplay } from './components/VersionDisplay';
 export { AvatarFilterBar } from './components/AvatarFilterBar';
 export type { AvatarFilterBarProps } from './components/AvatarFilterBar';
 export { WaitOverlay } from './components/WaitOverlay';
+export { WaitOverlayProvider, useWaitOverlay } from './components/WaitOverlay';
 export type { WaitOverlayProps } from './components/WaitOverlay';
 
 // Utilities

@@ -1,12 +1,14 @@
-import { useAuth } from '@projectmirror/shared';
+import { useAuth, useWaitOverlay } from '@projectmirror/shared';
 import { useRelationships } from '@projectmirror/shared/hooks/useRelationships';
 import { usePathname, useRouter } from 'expo-router';
 import { useEffect } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { View } from 'react-native';
+import { FontAwesome } from '@expo/vector-icons';
 
 export default function BootScreen() {
   const router = useRouter();
   const pathname = usePathname();
+  const waitOverlay = useWaitOverlay();
   const { user, loading: authLoading } = useAuth();
   // We can safely fetch relationships here because we are inside the Provider
   const { relationships, loading: relLoading } = useRelationships(user?.uid);
@@ -39,9 +41,28 @@ export default function BootScreen() {
     
   }, [user, authLoading, relationships, relLoading, pathname]);
 
+  useEffect(() => {
+    if (authLoading || relLoading) {
+      waitOverlay.show(
+        {
+          title: 'Opening Reflections Connect...',
+          detail: 'Checking your account and Explorer connections.',
+          icon: <FontAwesome name="users" size={20} color="#dbeafe" />,
+          tone: 'sparkle',
+        },
+        'connect-boot-wait-overlay'
+      );
+      return;
+    }
+
+    waitOverlay.hide('connect-boot-wait-overlay');
+  }, [authLoading, relLoading, waitOverlay]);
+
+  useEffect(() => {
+    return () => waitOverlay.hide('connect-boot-wait-overlay');
+  }, [waitOverlay]);
+
   return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#121212' }}>
-      <ActivityIndicator size="large" color="#ffffff" />
-    </View>
+    <View style={{ flex: 1, backgroundColor: '#121212' }} />
   );
 }

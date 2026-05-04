@@ -1,4 +1,5 @@
 import { auth, onAuthStateChanged, signInAnonymously } from '@projectmirror/shared/firebase';
+import { WaitOverlayProvider } from '@projectmirror/shared';
 import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { Stack } from 'expo-router';
@@ -77,10 +78,12 @@ function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ExplorerSelfProvider>
-        <ExplorerAppContent />
-        <SystemUpdateModal />
-      </ExplorerSelfProvider>
+      <WaitOverlayProvider>
+        <ExplorerSelfProvider>
+          <ExplorerAppContent />
+          <SystemUpdateModal />
+        </ExplorerSelfProvider>
+      </WaitOverlayProvider>
     </GestureHandlerRootView>
   );
 }
