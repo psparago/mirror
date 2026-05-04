@@ -135,7 +135,7 @@ export default function SettingsScreen() {
                             <View style={styles.settingInfo}>
                                 <Text style={styles.settingLabel}>Autoplay on Open</Text>
                                 <Text style={styles.settingDescription}>
-                                    Open the newest Reflection automatically when Explorer starts
+                                    Open the newest Reflection automatically when Reflections Explorer starts
                                 </Text>
                             </View>
                             <Switch
@@ -149,7 +149,7 @@ export default function SettingsScreen() {
                             <View style={styles.settingInfo}>
                                 <Text style={styles.settingLabel}>Instant Video Playback</Text>
                                 <Text style={styles.settingDescription}>
-                                    Start videos immediately without reading caption
+                                    Skip the spoken intro and start videos right away
                                 </Text>
                             </View>
                             <Switch
@@ -163,7 +163,7 @@ export default function SettingsScreen() {
                             <View style={styles.settingInfo}>
                                 <Text style={styles.settingLabel}>Take Selfie</Text>
                                 <Text style={styles.settingDescription}>
-                                    After a reflection, capture your selfie response automatically (turn off to browse without sending your selfie)
+                                    After a Reflection, capture a selfie response automatically. Turn off to browse without sending one.
                                 </Text>
                             </View>
                             <Switch
@@ -184,7 +184,7 @@ export default function SettingsScreen() {
                 </TouchableOpacity>
 
                 <View style={styles.footer}>
-                    <Text style={styles.footerText}>Reflection Explorer</Text>
+                    <Text style={styles.footerText}>Reflections Explorer</Text>
                     <Text style={styles.footerSubtext}>by Angelware</Text>
                 </View>
             </ScrollView>
@@ -195,7 +195,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
     container: {
         flex: 1,
-        backgroundColor: '#0f2027', // Match LG dark theme
+        backgroundColor: '#0f2027',
     },
     scrollContent: {
         padding: 32,

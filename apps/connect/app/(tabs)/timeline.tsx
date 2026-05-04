@@ -1380,6 +1380,9 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
         event={selectedReflection}
         likedBy={selectedReflectionLikedBy}
         currentUserId={authUser?.uid ?? null}
+        currentIdentity={currentIdentity}
+        explorerName={explorerName}
+        companions={companions}
         onToggleLike={handleReplayToggleLike}
         onClose={() => setSelectedReflection(null)}
       />

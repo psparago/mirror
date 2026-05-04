@@ -1,6 +1,7 @@
 import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '@/components/ReflectionComposer';
 import { CreationModalConfirmationVideo } from '@/components/CreationModalConfirmationVideo';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
+import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
 import {
   deleteScratchMediaFile,
   ensureFileUri,
@@ -1060,12 +1061,7 @@ export default function CreationModal({
     try {
       await audioRecorder.stop();
 
-      // Disable recording mode after stopping
-      // Note: playsInSilentMode must be true when staysActiveInBackground is true (iOS default)
-      await setAudioModeAsync({
-        allowsRecording: false,
-        playsInSilentMode: true,
-      });
+      await configureConnectPlaybackAudioSessionAsync();
 
       // Persist the recording to a stable location so it won't be cleaned from cache
       const recordingUri = audioRecorder.uri;

@@ -1,5 +1,6 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
-import { Event, EventMetadata, getCloudMasterTrimWindow, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
+import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
+import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
@@ -7,7 +8,7 @@ import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -18,6 +19,9 @@ interface ReplayModalProps {
   onClose: () => void;
   likedBy?: string[];
   currentUserId?: string | null;
+  currentIdentity?: string | null;
+  explorerName?: string | null;
+  companions?: CompanionAvatar[];
   onToggleLike?: (eventId: string, isAdd: boolean) => void;
   /** When set, shows a Send control in the header (Reflections Companion preview). */
   onSend?: () => void;
@@ -36,6 +40,9 @@ export function ReplayModal({
   onClose,
   likedBy = [],
   currentUserId,
+  currentIdentity,
+  explorerName,
+  companions = [],
   onToggleLike,
   onSend,
   isSending = false,
@@ -58,6 +65,7 @@ export function ReplayModal({
   const [captionSound, setCaptionSound] = useState<Audio.Sound | null>(null);
   const [isDeepDivePending, setIsDeepDivePending] = useState(false);
   const [isDirectDeepDivePlaying, setIsDirectDeepDivePlaying] = useState(false);
+  const [showLikesModal, setShowLikesModal] = useState(false);
   const hasAutoPlayedDeepDiveRef = useRef(false);
   const deepDiveBreathTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -86,13 +94,7 @@ export function ReplayModal({
     const configureAudioSession = async () => {
       try {
         debugLog('🔊 Configuring Audio Session for Playback...');
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: false, // Critical: Turn off recording mode
-          playsInSilentModeIOS: true, // Critical: Play even if mute switch is on
-          staysActiveInBackground: false,
-          shouldDuckAndroid: true,
-          playThroughEarpieceAndroid: false, // Critical: Force speaker on Android
-        });
+        await configureConnectPlaybackAudioSessionAsync();
       } catch (error) {
         console.error('Failed to configure audio session:', error);
       }
@@ -119,11 +121,31 @@ export function ReplayModal({
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
     setIsDirectDeepDivePlaying(false);
+    setShowLikesModal(false);
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
     }
   }, [event?.event_id, visible]);
+
+  const likedByPeople = useMemo(() => {
+    return likedBy.map((uid) => {
+      const companion = companions.find((c) => c.userId === uid);
+      const fallbackName =
+        uid === currentUserId
+          ? currentIdentity || 'You'
+          : explorerName || 'Explorer';
+      const displayName = companion?.companionName || fallbackName;
+      return {
+        uid,
+        displayName,
+        avatarUrl: companion?.avatarUrl ?? null,
+        initial: companion?.initial || displayName.trim().charAt(0).toUpperCase() || '?',
+        color: companion?.color || '#4FC3F7',
+        isCaregiver: !!companion?.isCaregiver,
+      };
+    });
+  }, [companions, currentIdentity, currentUserId, explorerName, likedBy]);
 
   const machine = useMemo(() => playerMachine.provide({
     actions: {
@@ -336,16 +358,27 @@ export function ReplayModal({
   }, [send]);
 
   useEffect(() => {
+    let cancelled = false;
     if (visible && event) {
-      sendRef.current({ 
-        type: 'SELECT_EVENT_INSTANT', 
-        event: event, 
-        metadata: event.metadata || ({} as EventMetadata)
-      });
+      configureConnectPlaybackAudioSessionAsync()
+        .catch((error) => {
+          console.error('Failed to prepare playback audio session:', error);
+        })
+        .finally(() => {
+          if (cancelled) return;
+          sendRef.current({
+            type: 'SELECT_EVENT_INSTANT',
+            event: event,
+            metadata: event.metadata || ({} as EventMetadata)
+          });
+        });
     } else {
       sendRef.current({ type: 'CLOSE' });
     }
-    return () => { sendRef.current({ type: 'CLOSE' }); };
+    return () => {
+      cancelled = true;
+      sendRef.current({ type: 'CLOSE' });
+    };
   }, [visible, event, send]);
 
   useEffect(() => {
@@ -570,6 +603,10 @@ export function ReplayModal({
     onToggleLike(event.event_id, !likedByMe);
   };
 
+  const handleShowLikes = () => {
+    if (likeCount > 0) setShowLikesModal(true);
+  };
+
   const showReplayOverlay =
     !isDeepDivePending &&
     !isDirectDeepDivePlaying &&
@@ -697,8 +734,11 @@ export function ReplayModal({
               <TouchableOpacity
                 style={[styles.likeButton, likedByMe && styles.likeButtonActive]}
                 onPress={handleToggleLike}
+                onLongPress={handleShowLikes}
+                delayLongPress={250}
                 activeOpacity={0.75}
                 accessibilityLabel={likedByMe ? 'Unlike this Reflection' : 'Like this Reflection'}
+                accessibilityHint="Long press to see who liked this Reflection"
               >
                 <FontAwesome
                   name={likeCount > 0 ? 'heart' : 'heart-o'}
@@ -817,6 +857,35 @@ export function ReplayModal({
             </TouchableOpacity>
           </View>
 
+          {showLikesModal ? (
+            <View style={styles.likesOverlay}>
+              <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowLikesModal(false)} />
+              <View style={styles.likesSheet}>
+                <Text style={styles.likesTitle}>Liked by</Text>
+                {likedByPeople.map((person) => (
+                  <View key={person.uid} style={styles.likePersonRow}>
+                    {person.avatarUrl ? (
+                      <Image
+                        source={{ uri: person.avatarUrl }}
+                        style={styles.likePersonAvatar}
+                        contentFit="cover"
+                        recyclingKey={`replay-like-${person.uid}`}
+                      />
+                    ) : (
+                      <View style={[styles.likePersonAvatarFallback, { backgroundColor: person.color }]}>
+                        <Text style={styles.likePersonAvatarInitial}>{person.initial}</Text>
+                      </View>
+                    )}
+                    <Text style={styles.likePersonName} numberOfLines={1}>{person.displayName}</Text>
+                    {person.isCaregiver ? (
+                      <FontAwesome name="shield" size={13} color="rgba(255,255,255,0.58)" />
+                    ) : null}
+                  </View>
+                ))}
+              </View>
+            </View>
+          ) : null}
+
         </View>
       </GestureDetector>
     </Modal>
@@ -919,6 +988,56 @@ const styles = StyleSheet.create({
   },
   likeButtonCountActive: {
     color: '#4FC3F7',
+  },
+  likesOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    zIndex: 1200,
+    elevation: 1200,
+  },
+  likesSheet: {
+    margin: 14,
+    padding: 18,
+    borderRadius: 18,
+    backgroundColor: 'rgba(26, 26, 26, 0.98)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    gap: 12,
+  },
+  likesTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  likePersonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  likePersonAvatar: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  likePersonAvatarFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  likePersonAvatarInitial: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  likePersonName: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   mediaContainer: {
     flex: 1,

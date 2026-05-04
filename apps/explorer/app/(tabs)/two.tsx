@@ -92,7 +92,7 @@ export default function TabTwoScreen() {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#2e78b7" />
-        <Text style={styles.loadingText}>Loading Cole's inbox...</Text>
+        <Text style={styles.loadingText}>Loading Reflections...</Text>
       </View>
     );
   }
@@ -111,8 +111,8 @@ export default function TabTwoScreen() {
   if (events.length === 0) {
     return (
       <View style={styles.centerContainer}>
-        <Text style={styles.emptyText}>No photos in Cole's inbox yet</Text>
-        <Text style={styles.emptySubtext}>Photos from companions will appear here</Text>
+        <Text style={styles.emptyText}>No Reflections yet</Text>
+        <Text style={styles.emptySubtext}>Reflections from Companions will appear here</Text>
       </View>
     );
   }
@@ -121,7 +121,7 @@ export default function TabTwoScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Cole's Inbox</Text>
+      <Text style={styles.title}>Reflections</Text>
       <FlatList
         key={numColumns}
         data={events}

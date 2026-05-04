@@ -2,6 +2,7 @@ import { FontAwesome } from '@expo/vector-icons';
 import { Event } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
+import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView, type VideoPlayer } from 'expo-video';
@@ -1100,13 +1101,7 @@ function ReflectionComposerInner({
   }, [previewSound]);
 
   const ensureSpeakerMode = useCallback(async () => {
-    await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: false,
-      playThroughEarpieceAndroid: false,
-    });
+    await configureConnectPlaybackAudioSessionAsync();
   }, []);
 
   const playOneClip = useCallback((uri: string): Promise<'finished' | 'stopped'> => {
@@ -2213,6 +2208,9 @@ function ReflectionComposerInner({
                     Top-left chip re-opens where you picked media (Camera, Library, or Search). Top-right is Sparkle and X. X always closes to the timeline. Nothing sends until Preview & Send.
                   </Text>
                   <Text style={styles.infoProTip}>
+                    After a Reflection is sent, Companions can like it from the timeline or playback screen. Those hearts appear for the Explorer too.
+                  </Text>
+                  <Text style={styles.infoProTip}>
                     {mediaType === 'video'
                       ? 'Video pauses when you leave Workbench for Sparkle.'
                       : 'Reset snaps back to the original framing.'}
@@ -2276,6 +2274,9 @@ function ReflectionComposerInner({
                   <Text style={styles.infoProTip}>
                     A recorded voice intro always takes priority over AI voice.
                   </Text>
+                  <Text style={styles.infoProTip}>
+                    Likes are social warmth for the Explorer: tap a heart to like a Reflection, or long-press it later to see who liked it.
+                  </Text>
                 </>
               ) : (
                 <>
@@ -2292,8 +2293,8 @@ function ReflectionComposerInner({
                       <Text style={styles.infoLabel}>Preview</Text>
                       <Text style={styles.infoDesc}>
                         {mediaType === 'video'
-                          ? 'Plays in order: poster frame, then your voice or AI intro audio, then the trimmed video. Nothing is sent yet.'
-                          : 'Shows your cropped photo, then plays your voice or AI intro audio. Nothing is sent yet.'}
+                          ? 'Plays in order: poster frame, then your voice or AI intro audio, then the trimmed video. You can like from the heart control, but nothing is sent until you tap Send.'
+                          : 'Shows your cropped photo, then plays your voice or AI intro audio. You can like from the heart control, but nothing is sent until you tap Send.'}
                       </Text>
                     </View>
                   </View>
@@ -2318,6 +2319,9 @@ function ReflectionComposerInner({
                   </Text>
                   <Text style={styles.infoProTip}>
                     A recorded voice intro always takes priority over the AI voice.
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    On sent Reflections, tap the heart to like and long-press it to see the faces of everyone who liked it.
                   </Text>
                 </>
               )}
