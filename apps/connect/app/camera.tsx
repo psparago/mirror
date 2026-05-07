@@ -120,7 +120,13 @@ export default function CameraScreen() {
         <TouchableOpacity onPress={requestPermission} style={styles.permissionButton}>
           <Text style={styles.permissionButtonText}>Grant Permission</Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={() => router.back()} style={[styles.permissionButton, { marginTop: 12, backgroundColor: '#555' }]}>
+        <TouchableOpacity
+          onPress={() => {
+            setPendingMedia({ uri: 'cancelled://camera', type: 'photo', source: 'camera', cancelled: true, silentCancel: true });
+            router.back();
+          }}
+          style={[styles.permissionButton, { marginTop: 12, backgroundColor: '#555' }]}
+        >
           <Text style={styles.permissionButtonText}>Go Back</Text>
         </TouchableOpacity>
       </View>
@@ -137,7 +143,13 @@ export default function CameraScreen() {
       />
 
       <View style={[styles.topControls, { top: topBarTop }]}>
-        <TouchableOpacity style={styles.controlButton} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.controlButton}
+          onPress={() => {
+            setPendingMedia({ uri: 'cancelled://camera', type: 'photo', source: 'camera', cancelled: true, silentCancel: true });
+            router.back();
+          }}
+        >
           <FontAwesome name="times" size={24} color="white" />
         </TouchableOpacity>
         <TouchableOpacity style={styles.controlButton} onPress={toggleCameraFacing} disabled={capturing}>

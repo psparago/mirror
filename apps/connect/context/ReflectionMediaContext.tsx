@@ -8,6 +8,11 @@ export type PendingMedia = {
   cancelled?: boolean;
   cancelTitle?: string;
   cancelDetail?: string;
+  /**
+   * When true, the cancellation was a clean user-initiated exit (e.g. pressed X or native picker
+   * Cancel) and CreationModal should close silently without showing any error dialog.
+   */
+  silentCancel?: boolean;
   /** When true, reflection metadata marks this as a companion selfie for the Explorer. */
   isSelfie?: boolean;
   searchQuery?: string;

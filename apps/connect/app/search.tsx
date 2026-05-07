@@ -102,7 +102,13 @@ export default function SearchScreen() {
       {/* Fixed Header Section */}
       <View style={[styles.fixedHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.header}>
-          <TouchableOpacity style={styles.closeButton} onPress={() => router.back()}>
+          <TouchableOpacity
+            style={styles.closeButton}
+            onPress={() => {
+              setPendingMedia({ uri: 'cancelled://search', type: 'photo', source: 'search', cancelled: true, silentCancel: true });
+              router.back();
+            }}
+          >
             <FontAwesome name="times" size={24} color="white" />
           </TouchableOpacity>
           <Text style={styles.title}>Search Images</Text>

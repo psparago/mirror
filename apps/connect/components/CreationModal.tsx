@@ -756,10 +756,17 @@ export default function CreationModal({
       sourceTransitionLockRef.current = false;
       setConditioningMediaKind(null);
       setConditioningLargeVideo(false);
-      setConditioningStatus('Media selection cancelled.');
+      setConditioningStatus('Opening creation tools...');
       setConditioningProgress(null);
       setPhase('creating');
       setTransitionUnlockTick((v) => v + 1);
+      // A silentCancel means the user explicitly closed/cancelled the source screen — just exit
+      // without showing any error dialog. Only show the recovery prompt for genuine handoff
+      // failures (e.g. large-video transfer interrupted by backgrounding).
+      if (media.silentCancel) {
+        onClose();
+        return;
+      }
       setWaitPrompt({
         title: media.cancelTitle ?? 'Video preparation didn\'t finish',
         detail: media.cancelDetail ?? 'Reflections Connect didn\'t receive the selected media in time. Please try again, and keep the app open while the Reflection is being prepared.',
@@ -2159,7 +2166,6 @@ export default function CreationModal({
       setVideoUri(null);
     } else if (showDescriptionInput && photo) {
       void cancelPhoto();
-      return;
     } else {
       pendingMediaApplyGenerationRef.current += 1;
       void cleanupConditionedScratchFiles();

@@ -225,6 +225,7 @@ function ReflectionComposerInner({
   const [caption, setCaption] = useState(initialCaption);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isCaptionFocused, setIsCaptionFocused] = useState(false);
+  const [isContextFocused, setIsContextFocused] = useState(false);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
@@ -240,6 +241,7 @@ function ReflectionComposerInner({
   const [playheadMs, setPlayheadMs] = useState(0);
   const [sourceVideoDurationMs, setSourceVideoDurationMs] = useState(0);
   const lastSendAtRef = useRef(0);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   const photoExportStageRef = useRef<View>(null);
 
@@ -1060,6 +1062,15 @@ function ReflectionComposerInner({
     onStageChange('send');
   }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, caption]);
 
+  // Confirm before discarding whenever the user has Sparkle results, regardless of stage.
+  const handleRequestClose = useCallback(() => {
+    if (hasAnyAiArtifacts || stage === 'send') {
+      setShowDiscardConfirm(true);
+    } else {
+      onRetake();
+    }
+  }, [stage, hasAnyAiArtifacts, onRetake]);
+
   const openHowItWorks = useCallback(() => {
     Keyboard.dismiss();
     setIsInfoOpen(true);
@@ -1491,7 +1502,7 @@ function ReflectionComposerInner({
             </Text>
             <TouchableOpacity
               style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onRetake}
+              onPress={handleRequestClose}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
@@ -1535,7 +1546,7 @@ function ReflectionComposerInner({
         </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.toolbarCloseBtn, styles.toolbarCloseBtnWorkbench, isBlockedByAi && { opacity: 0.35 }]}
-                onPress={onRetake}
+                onPress={handleRequestClose}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
                 accessibilityRole="button"
@@ -1579,7 +1590,7 @@ function ReflectionComposerInner({
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.toolbarCloseBtn, styles.toolbarCloseBtnWorkbench, isBlockedByAi && { opacity: 0.35 }]}
-                onPress={onRetake}
+                onPress={handleRequestClose}
                 disabled={isSending || isBlockedByAi}
                 activeOpacity={0.7}
                 accessibilityRole="button"
@@ -1698,7 +1709,7 @@ function ReflectionComposerInner({
               styles.toolbarCloseBtnWorkbench,
               (isSending || isBlockedByAi) && { opacity: 0.35 },
             ]}
-            onPress={onRetake}
+            onPress={handleRequestClose}
             disabled={isSending || isBlockedByAi}
             activeOpacity={0.7}
             accessibilityRole="button"
@@ -1773,18 +1784,31 @@ function ReflectionComposerInner({
            </View>
           <Text style={styles.aiHintLabel}>Context for AI</Text>
           <View style={styles.aiInputRow}>
-            <FontAwesome name="users" size={13} color="rgba(255,255,255,0.35)" style={{ marginTop: 10 }} />
+            <FontAwesome name="users" size={13} color="rgba(255,255,255,0.35)" style={{ marginTop: 12 }} />
             <TextInput
               style={styles.aiHintInput}
               placeholder="Names, pets, places, what's happening..."
               placeholderTextColor="rgba(255,255,255,0.28)"
               value={peopleContext ?? ''}
               onChangeText={(t) => onPeopleContextChange?.(t)}
-              returnKeyType="done"
+              onFocus={() => setIsContextFocused(true)}
+              onBlur={() => setIsContextFocused(false)}
+              multiline
+              textAlignVertical="top"
               autoCorrect={false}
               autoCapitalize="words"
             />
           </View>
+          {isContextFocused ? (
+            <TouchableOpacity
+              style={styles.aiCaptionDoneBtn}
+              onPress={() => Keyboard.dismiss()}
+              activeOpacity={0.75}
+            >
+              <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
+              <Text style={styles.aiCaptionDoneText}>Done editing</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
 
         {/* SECTION: Caption */}
@@ -2039,6 +2063,31 @@ function ReflectionComposerInner({
             detail="Please keep the app open and stay on WiFi for a fast delivery!"
             icon={<FontAwesome name="cloud-upload" size={20} color="#dbeafe" />}
             tone="upload"
+            containerStyle={styles.waitOverlayPanel}
+          />
+        </Animated.View>
+      )}
+
+      {/* 2c. DISCARD CONFIRMATION — shown when X is pressed on Sparkle or Preview & Send */}
+      {showDiscardConfirm && (
+        <Animated.View entering={FadeIn.duration(200)} style={styles.sparkleOverlay}>
+          <WaitOverlay
+            title="Discard this Reflection?"
+            detail={
+              stage === 'send'
+                ? "Your Reflection won't be sent. All your Sparkle work will be lost."
+                : "Your Sparkle work will be lost."
+            }
+            icon={<FontAwesome name="question-circle" size={20} color="#fcd34d" />}
+            isLoading={false}
+            tone="sparkle"
+            secondaryActionLabel="Keep Working"
+            onSecondaryAction={() => setShowDiscardConfirm(false)}
+            actionLabel="Discard"
+            onAction={() => {
+              setShowDiscardConfirm(false);
+              onRetake();
+            }}
             containerStyle={styles.waitOverlayPanel}
           />
         </Animated.View>
@@ -2961,10 +3010,14 @@ const styles = StyleSheet.create({
     flex: 1,
     color: '#fff',
     fontSize: 14,
+    lineHeight: 20,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(255,255,255,0.15)',
-    paddingVertical: 8,
+    paddingTop: 6,
+    paddingBottom: 6,
     marginBottom: 4,
+    minHeight: 46,
+    maxHeight: 90,
   },
   aiSparkleBtn: {
     flex: 1,
@@ -3042,19 +3095,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     alignSelf: 'flex-end',
-    marginTop: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 14,
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
     backgroundColor: 'rgba(59, 130, 246, 0.2)',
     borderWidth: 1,
     borderColor: 'rgba(191, 219, 254, 0.45)',
   },
   aiCaptionDoneText: {
     color: '#dbeafe',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   aiFooter: {

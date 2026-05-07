@@ -228,6 +228,13 @@ export default function GalleryScreen() {
       });
 
       if (result.canceled || !result.assets?.[0]) {
+        setPendingMedia({
+          uri: 'cancelled://gallery',
+          type: 'photo',
+          source: 'gallery',
+          cancelled: true,
+          silentCancel: true,
+        });
         router.back();
         return;
       }
