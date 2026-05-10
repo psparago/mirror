@@ -1,4 +1,4 @@
-import { ExplorerConfig, useAuth } from '@projectmirror/shared';
+import { ExplorerConfig, useAuth, useWaitOverlay } from '@projectmirror/shared';
 import {
     addDoc,
     collection,
@@ -22,8 +22,19 @@ import {
 } from 'react-native';
 
 export function JoinExplorerScreen() {
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
   const router = useRouter();
+  const waitOverlay = useWaitOverlay();
+
+  const handleSignOut = async () => {
+    try {
+      await signOut();
+      router.replace('/(auth)/login');
+    } catch {
+      // navigate away regardless
+      router.replace('/(auth)/login');
+    }
+  };
   const [explorerIdInput, setExplorerIdInput] = useState('');
   const [nameInput, setNameInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -125,6 +136,10 @@ export function JoinExplorerScreen() {
             <Text style={styles.buttonText}>Join Explorer</Text>
           )}
         </TouchableOpacity>
+
+        <TouchableOpacity style={styles.signOutLink} onPress={handleSignOut}>
+          <Text style={styles.signOutText}>Sign Out</Text>
+        </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
   );
@@ -203,5 +218,13 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: '600',
+  },
+  signOutLink: {
+    marginTop: 20,
+    paddingVertical: 8,
+  },
+  signOutText: {
+    color: '#666',
+    fontSize: 14,
   },
 });

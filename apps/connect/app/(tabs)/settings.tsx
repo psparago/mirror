@@ -498,6 +498,10 @@ export default function SettingsScreen() {
 
       // Step B — delete Firebase Auth record
       await user.delete();
+      // Explicitly sign out so Firebase clears its local session cache.
+      // Without this, a stale token can survive a cold restart and route
+      // the user to the Welcome/Join screen instead of Login.
+      try { await signOut(); } catch { /* no-op: already signed out by delete */ }
 
       // Step D — success: drop overlay, clear local storage, return to login
       setIsDeletingAccount(false);
