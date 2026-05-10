@@ -121,6 +121,7 @@ export default function SettingsScreen() {
 
   // DEVELOPER TOOLS
   const [resettingOnboarding, setResettingOnboarding] = useState(false);
+  const [developerToolsEnabled, setDeveloperToolsEnabled] = useState(false);
 
   // TUTORIAL MODAL
   const [tutorialModalVisible, setTutorialModalVisible] = useState(false);
@@ -200,6 +201,15 @@ export default function SettingsScreen() {
   useEffect(() => {
     return () => waitOverlay.hide('connect-settings-wait-overlay');
   }, [waitOverlay]);
+
+  // Listen for developer_tools_enabled flag on the user's profile document
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = onSnapshot(doc(db, 'users', user.uid), (snap) => {
+      setDeveloperToolsEnabled(snap.data()?.developer_tools_enabled === true);
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
@@ -931,7 +941,7 @@ export default function SettingsScreen() {
       </View>
 
       {/* Developer Actions — only visible to @sparago.com accounts */}
-      {user?.email?.endsWith('@sparago.com') && (
+      {developerToolsEnabled && (
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: '#f59e0b' }]}>Developer Actions</Text>
           <View style={styles.card}>

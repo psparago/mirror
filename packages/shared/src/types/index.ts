@@ -108,6 +108,7 @@ export interface UserProfile {
   photo_url?: string;    // Google/Apple profile pic
   connected_explorers: ExplorerConnection[]; // The list of Explorers this user can access
   created_at: string;
+  developer_tools_enabled?: boolean;
 }
 
 // The Explorer (Device/Context) Document
