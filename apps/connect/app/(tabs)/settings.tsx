@@ -12,6 +12,7 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { TutorialCarousel } from '../../components/TutorialCarousel';
 import {
     ActivityIndicator,
     Alert,
@@ -120,6 +121,9 @@ export default function SettingsScreen() {
 
   // DEVELOPER TOOLS
   const [resettingOnboarding, setResettingOnboarding] = useState(false);
+
+  // TUTORIAL MODAL
+  const [tutorialModalVisible, setTutorialModalVisible] = useState(false);
 
   const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
   const avatarColor = getAvatarColor(user?.uid || '');
@@ -808,6 +812,21 @@ export default function SettingsScreen() {
           </Text>
         </View>
       </View>
+
+      {/* Learn */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>Learn</Text>
+        <View style={styles.card}>
+          <TouchableOpacity
+            style={[styles.row, { marginBottom: 0 }]}
+            onPress={() => setTutorialModalVisible(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.rowLabel}>Watch App Tutorial</Text>
+            <FontAwesome name="chevron-right" size={14} color="#555" />
+          </TouchableOpacity>
+        </View>
+      </View>
     </>
   );
 
@@ -1128,6 +1147,19 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           </View>
         </View>
+      </Modal>
+
+      {/* Tutorial Modal */}
+      <Modal
+        visible={tutorialModalVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setTutorialModalVisible(false)}
+      >
+        <TutorialCarousel
+          showSkip
+          onFinish={() => setTutorialModalVisible(false)}
+        />
       </Modal>
     </View>
   );

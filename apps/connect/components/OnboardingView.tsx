@@ -16,8 +16,11 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { TutorialCarousel } from './TutorialCarousel';
 
 const OVERLAY_ID = 'connect-onboarding-wait-overlay';
+
+type OnboardingView = 'identity' | 'tutorial_prompt' | 'carousel';
 
 export function OnboardingView() {
   const { user } = useAuth();
@@ -26,6 +29,7 @@ export function OnboardingView() {
 
   const explorerLabel = explorerName || 'the Explorer';
 
+  const [view, setView] = useState<OnboardingView>('identity');
   const [name, setName] = useState(activeRelationship?.companionName || '');
   const [localAvatarUri, setLocalAvatarUri] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -33,6 +37,8 @@ export function OnboardingView() {
   const explorerId = activeRelationship?.explorerId || '';
   const displayInitial = getAvatarInitial(name || user?.email || '');
   const avatarColor = getAvatarColor(user?.uid || '');
+
+  // --- AVATAR PICKER ---
 
   const pickAvatar = async (source: 'camera' | 'library') => {
     const result = source === 'camera'
@@ -61,6 +67,8 @@ export function OnboardingView() {
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
+
+  // --- PHASE A: Save identity, then advance to tutorial prompt ---
 
   const handleFinish = async () => {
     const trimmedName = name.trim();
@@ -96,20 +104,20 @@ export function OnboardingView() {
         companionAvatarS3Key = `${explorerId}/avatars/${user.uid}/avatar.jpg`;
       }
 
+      // Phase A: save identity only — onboarding_complete stays false
       await setDoc(
         doc(db, 'relationships', activeRelationship.id),
         {
           companionName: trimmedName,
           ...(companionAvatarS3Key ? { companionAvatarS3Key } : {}),
-          onboarding_complete: true,
           updatedAt: serverTimestamp(),
         },
         { merge: true }
       );
-      // The onSnapshot in useRelationships picks up onboarding_complete: true
-      // and the gate in (tabs)/_layout.tsx reactively shows <Tabs />.
+
+      setView('tutorial_prompt');
     } catch (err: any) {
-      console.error('[OnboardingView] Save failed:', err);
+      console.error('[OnboardingView] Identity save failed:', err);
       Alert.alert('Error', 'Could not save your profile. Please try again.');
     } finally {
       setSubmitting(false);
@@ -117,6 +125,83 @@ export function OnboardingView() {
     }
   };
 
+  // --- PHASE B: Lift the gate ---
+
+  const completeonboarding = async (tutorialViewed: boolean) => {
+    if (!activeRelationship?.id) return;
+
+    waitOverlay.show(
+      { title: 'All set!', detail: 'Getting things ready…', tone: 'sparkle' },
+      OVERLAY_ID
+    );
+
+    try {
+      await setDoc(
+        doc(db, 'relationships', activeRelationship.id),
+        {
+          onboarding_complete: true,
+          tutorial_asked: true,
+          ...(tutorialViewed ? { tutorial_viewed: true } : {}),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      // onSnapshot in useRelationships picks up onboarding_complete: true → gate lifts
+    } catch (err: any) {
+      console.error('[OnboardingView] Gate lift failed:', err);
+      Alert.alert('Error', 'Something went wrong. Please try again.');
+    } finally {
+      waitOverlay.hide(OVERLAY_ID);
+    }
+  };
+
+  // --- RENDERS ---
+
+  if (view === 'carousel') {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#121212' }}>
+        <TutorialCarousel onFinish={(didView) => completeonboarding(didView)} />
+      </View>
+    );
+  }
+
+  if (view === 'tutorial_prompt') {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.promptContainer}>
+          <View style={styles.promptContent}>
+            <View style={styles.promptIconCircle}>
+              <Text style={styles.promptIcon}>✦</Text>
+            </View>
+            <Text style={styles.promptHeadline}>One more thing…</Text>
+            <Text style={styles.promptBody}>
+              Would you like a 30-second tour of how Reflections works?
+            </Text>
+          </View>
+
+          <View style={styles.promptActions}>
+            <TouchableOpacity
+              style={styles.showMeButton}
+              onPress={() => setView('carousel')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.showMeText}>Show Me</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.maybeLaterButton}
+              onPress={() => completeonboarding(false)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.maybeLaterText}>Maybe Later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // Default: identity view
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -306,5 +391,68 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 17,
     fontWeight: '700',
+  },
+
+  // Tutorial prompt view
+  promptContainer: {
+    flex: 1,
+    paddingHorizontal: 28,
+    paddingBottom: 40,
+    justifyContent: 'space-between',
+  },
+  promptContent: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 20,
+  },
+  promptIconCircle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(252, 211, 77, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  promptIcon: {
+    fontSize: 44,
+    color: '#fcd34d',
+  },
+  promptHeadline: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: '#fff',
+    textAlign: 'center',
+  },
+  promptBody: {
+    fontSize: 17,
+    color: '#aaa',
+    lineHeight: 26,
+    textAlign: 'center',
+    maxWidth: 300,
+  },
+  promptActions: {
+    gap: 12,
+  },
+  showMeButton: {
+    backgroundColor: '#2e78b7',
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  showMeText: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  maybeLaterButton: {
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+  maybeLaterText: {
+    color: '#666',
+    fontSize: 15,
+    fontWeight: '500',
   },
 });
