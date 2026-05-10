@@ -221,6 +221,27 @@ else
   echo ""
 fi
 
+# Function 8: delete-companion-account
+echo -e "${YELLOW}Deploying delete-companion-account...${NC}"
+gcloud functions deploy delete-companion-account \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=DeleteCompanionAccount \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars ${ENV_VARS} \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ delete-companion-account deployed successfully${NC}"
+else
+  echo -e "${RED}✗ delete-companion-account deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
 # Function 6: generate-ai-description
 if [ "$SKIP_AI" = false ]; then
   echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
@@ -257,6 +278,7 @@ echo "  • delete-mirror-event"
 echo "  • get-batch-s3-upload-urls"
 echo "  • get-event-bundle"
 echo "  • get-voice-sample"
+echo "  • delete-companion-account"
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo "  • unsplash-search"
 fi
