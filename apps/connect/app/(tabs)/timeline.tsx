@@ -1053,6 +1053,7 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
             selectedId={selectedCompanionId}
             onSelect={setSelectedCompanionId}
             loading={companionsLoading}
+            currentUserId={authUser?.uid}
           />
         )}
 

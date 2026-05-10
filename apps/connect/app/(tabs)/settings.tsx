@@ -118,6 +118,9 @@ export default function SettingsScreen() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
 
+  // DEVELOPER TOOLS
+  const [resettingOnboarding, setResettingOnboarding] = useState(false);
+
   const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
   const avatarColor = getAvatarColor(user?.uid || '');
   const explorerAvatarInitial = getAvatarInitial(explorerName || activeRelationship?.explorerId || '');
@@ -130,6 +133,18 @@ export default function SettingsScreen() {
           title: 'Saying Goodbye...',
           detail: 'Cleaning up your Reflections...',
           tone: 'default',
+        },
+        'connect-settings-wait-overlay'
+      );
+      return;
+    }
+
+    if (resettingOnboarding) {
+      waitOverlay.show(
+        {
+          title: 'Resetting...',
+          detail: 'Clearing onboarding state.',
+          tone: 'sparkle',
         },
         'connect-settings-wait-overlay'
       );
@@ -176,7 +191,7 @@ export default function SettingsScreen() {
     }
 
     waitOverlay.hide('connect-settings-wait-overlay');
-  }, [explorerName, isDeletingAccount, saving, uploadingAvatar, uploadingExplorerAvatar, waitOverlay]);
+  }, [explorerName, isDeletingAccount, resettingOnboarding, saving, uploadingAvatar, uploadingExplorerAvatar, waitOverlay]);
 
   useEffect(() => {
     return () => waitOverlay.hide('connect-settings-wait-overlay');
@@ -476,6 +491,23 @@ export default function SettingsScreen() {
       await signOut();
     } catch (error) {
       Alert.alert('Error', 'Failed to log out');
+    }
+  };
+
+  const handleResetOnboarding = async () => {
+    if (!activeRelationship?.id) return;
+    setResettingOnboarding(true);
+    try {
+      await setDoc(
+        doc(db, 'relationships', activeRelationship.id),
+        { onboarding_complete: false, tutorial_viewed: false, tutorial_asked: false, updatedAt: serverTimestamp() },
+        { merge: true }
+      );
+    } catch (err) {
+      console.error('Failed to reset onboarding state:', err);
+      Alert.alert('Error', 'Could not reset onboarding state.');
+    } finally {
+      setResettingOnboarding(false);
     }
   };
 
@@ -878,6 +910,23 @@ export default function SettingsScreen() {
           ) : null}
         </View>
       </View>
+
+      {/* Developer Actions — only visible to @sparago.com accounts */}
+      {user?.email?.endsWith('@sparago.com') && (
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: '#f59e0b' }]}>Developer Actions</Text>
+          <View style={styles.card}>
+            <TouchableOpacity
+              onPress={handleResetOnboarding}
+              disabled={resettingOnboarding || !activeRelationship}
+              style={[styles.saveButton, (resettingOnboarding || !activeRelationship) && styles.saveButtonDisabled]}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.saveButtonText}>Reset Onboarding State</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
     </>
   );
 

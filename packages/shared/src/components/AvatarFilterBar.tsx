@@ -16,12 +16,13 @@ export interface AvatarFilterBarProps {
   selectedId: string | null;
   onSelect: (userId: string | null) => void;
   loading?: boolean;
+  currentUserId?: string;
 }
 
 const AVATAR_SIZE = 48;
 const RING_SIZE = AVATAR_SIZE + 6;
 
-export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: AvatarFilterBarProps) {
+export function AvatarFilterBar({ companions, selectedId, onSelect, loading, currentUserId }: AvatarFilterBarProps) {
   const throttledOnSelect = useThrottledCallback((userId: string | null) => {
     onSelect(userId);
   });
@@ -63,6 +64,7 @@ export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: A
 
       {companions.map((c) => {
         const isSelected = selectedId === c.userId;
+        const isMe = currentUserId !== undefined && c.userId === currentUserId;
         return (
           <TouchableOpacity
             key={c.userId}
@@ -70,7 +72,11 @@ export function AvatarFilterBar({ companions, selectedId, onSelect, loading }: A
             onPress={() => throttledOnSelect(isSelected ? null : c.userId)}
             activeOpacity={0.7}
           >
-            <View style={[styles.avatarRing, isSelected && styles.avatarRingActive]}>
+            <View style={[
+              styles.avatarRing,
+              isMe && styles.avatarRingMe,
+              isSelected && styles.avatarRingActive,
+            ]}>
               {c.avatarUrl ? (
                 <Image source={{ uri: c.avatarUrl }} style={styles.avatarImage} />
               ) : (
@@ -114,6 +120,9 @@ const styles = StyleSheet.create({
   },
   avatarRingActive: {
     borderColor: '#3897f0',
+  },
+  avatarRingMe: {
+    borderColor: 'rgba(252, 211, 77, 0.55)',
   },
   avatarCircle: {
     width: AVATAR_SIZE,

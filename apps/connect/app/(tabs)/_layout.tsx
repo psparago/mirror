@@ -7,6 +7,7 @@ import { Image } from 'expo-image';
 import { Tabs, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { AppState, AppStateStatus, StyleSheet, Text, View } from 'react-native';
+import { OnboardingView } from '../../components/OnboardingView';
 import { useDailyReminder } from '../../hooks/useDailyReminder';
 
 function TabBarIcon(props: {
@@ -17,7 +18,7 @@ function TabBarIcon(props: {
 }
 
 export default function TabLayout() {
-  const { explorerName, activeRelationship } = useExplorer();
+  const { explorerName, activeRelationship, loading } = useExplorer();
   const { user } = useAuth();
   const router = useRouter();
 
@@ -86,6 +87,14 @@ export default function TabLayout() {
     };
   }, []);
 
+
+  if (!loading && activeRelationship && activeRelationship.onboarding_complete !== true) {
+    return (
+      <View style={{ flex: 1, backgroundColor: '#121212' }}>
+        <OnboardingView />
+      </View>
+    );
+  }
 
   return (
     <Tabs
