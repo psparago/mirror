@@ -1306,6 +1306,9 @@ function ReflectionComposerInner({
         const targetMs = Math.max(rangeStart, Math.min(rangeEnd, posterScrubOriginMs.value + deltaMs));
         posterCurrentMs.value = targetMs;
         runOnJS(seekToMs)(targetMs);
+      })
+      .onEnd(() => {
+        runOnJS(setThumbnailTimeMs)(Math.round(posterCurrentMs.value));
       }),
     [isPosterMode, videoRangeMs, screenWidth, seekToMs, posterScrubOriginMs, posterCurrentMs, videoDurationMs],
   );
@@ -1376,6 +1379,7 @@ function ReflectionComposerInner({
             {isPosterMode && (
               <View style={styles.posterModeIndicator} pointerEvents="none">
                 <Text style={styles.posterModeText}>Use arrows or swipe to find your frame</Text>
+                <Text style={styles.posterModeSubtext}>The AI reads this frame to craft your caption.</Text>
               </View>
             )}
           </View>
@@ -1426,6 +1430,19 @@ function ReflectionComposerInner({
   const renderPosterToolbar = () => (
     <View style={[styles.topToolbar, { top: insets.top }]}>
       <View style={styles.coverToolbarRow}>
+
+        {/* Reset — destructive, left side, dimmed when no poster is set */}
+        <TouchableOpacity
+          style={[styles.coverActionBtn, thumbnailTimeMs === null && styles.coverActionBtnDisabled]}
+          onPress={handleCoverClear}
+          activeOpacity={0.7}
+          disabled={thumbnailTimeMs === null}
+        >
+          <FontAwesome name="eraser" size={16} color={thumbnailTimeMs !== null ? '#fff' : '#555'} />
+          <Text style={[styles.coverActionBtnText, thumbnailTimeMs === null && { color: '#555' }]}>Reset</Text>
+        </TouchableOpacity>
+
+        {/* Step arrows — navigate frames */}
         <View style={styles.coverArrowPair}>
           <TouchableOpacity
             style={styles.coverArrowBtn}
@@ -1442,39 +1459,18 @@ function ReflectionComposerInner({
             <FontAwesome name="forward" size={16} color="#fff" />
           </TouchableOpacity>
         </View>
+
+        {/* Confirm — set current frame and exit, green when poster is locked */}
         <TouchableOpacity
-          style={[styles.coverActionBtn, { borderColor: 'rgba(74, 222, 128, 0.4)' }]}
-          onPress={handleCoverSet}
-            activeOpacity={0.7}
-          >
-          <FontAwesome name="check" size={16} color="#4ade80" />
-          <Text style={[styles.coverActionBtnText, { color: '#4ade80' }]}>Set</Text>
-          </TouchableOpacity>
-            <TouchableOpacity
-          style={styles.coverActionBtn}
-              onPress={handleReplay}
-              activeOpacity={0.7}
-            >
-          <FontAwesome name="repeat" size={16} color="#fff" />
-          <Text style={styles.coverActionBtnText}>Replay</Text>
-            </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.coverActionBtn}
-          onPress={handleCoverClear}
+          style={[styles.coverActionBtn, thumbnailTimeMs !== null ? { borderColor: 'rgba(74, 222, 128, 0.4)' } : { borderColor: 'rgba(255,255,255,0.15)' }]}
+          onPress={() => { handleCoverSet(); exitPosterMode(); }}
           activeOpacity={0.7}
         >
-          <FontAwesome name="eraser" size={16} color="#fff" />
-          <Text style={styles.coverActionBtnText}>Clear</Text>
+          <FontAwesome name="check-circle" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
+          <Text style={[styles.coverActionBtnText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Confirm</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.coverActionBtn, { borderColor: 'rgba(79, 195, 247, 0.4)' }]}
-          onPress={exitPosterMode}
-          activeOpacity={0.7}
-        >
-          <FontAwesome name="check-circle" size={16} color="#4FC3F7" />
-          <Text style={[styles.coverActionBtnText, { color: '#4FC3F7' }]}>Done</Text>
-        </TouchableOpacity>
-        </View>
+
+      </View>
       {thumbnailTimeMs !== null && (
         <Text style={styles.posterTimestamp}>{(thumbnailTimeMs / 1000).toFixed(1)}s</Text>
       )}
@@ -1916,7 +1912,7 @@ function ReflectionComposerInner({
             />
             {isPlayingPreview ? (
               <Text style={styles.aiPlayBtnLabel}>
-                {previewPhase === 'caption' ? 'Caption' : previewPhase === 'deep_dive' ? 'Deep Dive' : '...'}
+                {previewPhase === 'caption' ? 'Caption' : previewPhase === 'deep_dive' ? 'Rich Narration' : '...'}
               </Text>
             ) : null}
           </TouchableOpacity>
@@ -2209,7 +2205,7 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Poster</Text>
                           <Text style={styles.infoDesc}>
-                            The poster is the frame the Explorer sees first. Tap Poster, then use the arrows or swipe the video to scrub. Set locks the frame, Clear restores the default, Done exits poster mode.
+                            The poster is the frame the Explorer sees first. Tap Poster, then use the arrows or swipe the video to scrub to your frame — it locks automatically. Confirm saves and exits, Reset clears the custom poster.
                           </Text>
                         </View>
                       </View>
@@ -2284,7 +2280,7 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
                       <Text style={styles.infoDesc}>
-                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then deep dive. Play re-listens without regenerating. Run Sparkle shows “Up to Date” until you change {mediaType === 'video' ? 'trim, poster, caption, or hints' : 'caption, hints, or framing'}.
+                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. Run Sparkle shows “Up to Date” until you change {mediaType === 'video' ? 'trim, poster, caption, or hints' : 'caption, hints, or framing'}.
                       </Text>
                     </View>
                   </View>
@@ -2727,6 +2723,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.22)',
   },
+  coverActionBtnDisabled: {
+    borderColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(30, 30, 30, 0.5)',
+  },
   coverActionBtnText: {
     color: '#fff',
     fontSize: 10,
@@ -2789,6 +2789,13 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 12,
     fontWeight: '500',
+  },
+  posterModeSubtext: {
+    color: 'rgba(252, 211, 77, 0.7)',
+    fontSize: 11,
+    fontWeight: '400',
+    marginTop: 3,
+    textAlign: 'center',
   },
   previewButton: {
     flexDirection: 'row',

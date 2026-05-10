@@ -801,14 +801,14 @@ export default function SettingsScreen() {
           <View style={styles.divider} />
 
           <View style={[styles.row, { marginBottom: 0 }]}>
-            <Text style={styles.rowLabel}>Deep Dive Voice</Text>
+            <Text style={styles.rowLabel}>Rich Narration Voice</Text>
             <TouchableOpacity onPress={() => setVoicePickerTarget('deep_dive')}>
               <Text style={styles.linkText}>{getVoiceLabel(deepDiveVoice)}</Text>
             </TouchableOpacity>
           </View>
 
           <Text style={[styles.helperText, { marginTop: 12 }]}>
-            Your selected voice is used when AI generates caption and deep dive audio.
+            Your selected voice is used when AI generates caption and Rich Narration audio.
           </Text>
         </View>
       </View>
@@ -1094,7 +1094,7 @@ export default function SettingsScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>
-              {voicePickerTarget === 'caption' ? 'Caption Voice' : 'Deep Dive Voice'}
+              {voicePickerTarget === 'caption' ? 'Caption Voice' : 'Rich Narration Voice'}
             </Text>
 
             <ScrollView style={styles.modalList} showsVerticalScrollIndicator={false}>
