@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/firestore"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -111,11 +112,17 @@ func CleanupCompanionData(ctx context.Context, userID string) error {
 	s3Client := s3.NewFromConfig(awsCfg)
 
 	// --- Firestore client ---------------------------------------------
-	// GCP Cloud Functions Gen2 injects GCP_PROJECT automatically; fall back
-	// to GOOGLE_CLOUD_PROJECT for local/test environments.
+	// Resolve project ID: env vars first (local/CI), then GCP metadata server
+	// (always available on Cloud Functions Gen2 / Cloud Run at runtime).
 	projectID := os.Getenv("GCP_PROJECT")
 	if projectID == "" {
 		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+	if projectID == "" {
+		projectID, err = metadata.ProjectID()
+		if err != nil {
+			return fmt.Errorf("CleanupCompanionData: could not determine GCP project ID: %w", err)
+		}
 	}
 	fsClient, err := firestore.NewClient(ctx, projectID)
 	if err != nil {

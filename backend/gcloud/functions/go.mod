@@ -3,6 +3,7 @@ module mirror.local/functions
 go 1.25.5
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	cloud.google.com/go/firestore v1.18.0
 	cloud.google.com/go/texttospeech v1.16.0
 	github.com/aws/aws-sdk-go-v2 v1.41.0
@@ -17,7 +18,6 @@ require (
 	cloud.google.com/go/ai v0.8.0 // indirect
 	cloud.google.com/go/auth v0.16.4 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.4 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.6 // indirect

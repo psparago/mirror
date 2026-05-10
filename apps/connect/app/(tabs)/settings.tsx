@@ -2,7 +2,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
-import { db, doc, getDoc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { db, doc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -13,20 +13,20 @@ import * as ImagePicker from 'expo-image-picker';
 import { Stack, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  Keyboard,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
-  View
+    ActivityIndicator,
+    Alert,
+    Keyboard,
+    KeyboardAvoidingView,
+    Modal,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Switch,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    TouchableWithoutFeedback,
+    View
 } from 'react-native';
 
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
@@ -499,7 +499,8 @@ export default function SettingsScreen() {
       // Step B — delete Firebase Auth record
       await user.delete();
 
-      // Step D — success: clear local storage and return to root
+      // Step D — success: drop overlay, clear local storage, return to login
+      setIsDeletingAccount(false);
       await AsyncStorage.clear();
       router.replace('/');
     } catch (error: any) {
