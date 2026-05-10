@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -24,6 +25,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View
 } from 'react-native';
 
@@ -111,12 +113,29 @@ export default function SettingsScreen() {
   const [uploadingExplorerAvatar, setUploadingExplorerAvatar] = useState(false);
   const isCaregiver = activeRelationship?.role === 'caregiver';
 
+  // DELETE ACCOUNT FLOW
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
   const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
   const avatarColor = getAvatarColor(user?.uid || '');
   const explorerAvatarInitial = getAvatarInitial(explorerName || activeRelationship?.explorerId || '');
   const explorerAvatarColor = getAvatarColor(activeRelationship?.explorerId || '');
 
   useEffect(() => {
+    if (isDeletingAccount) {
+      waitOverlay.show(
+        {
+          title: 'Saying Goodbye...',
+          detail: 'Cleaning up your Reflections...',
+          tone: 'default',
+        },
+        'connect-settings-wait-overlay'
+      );
+      return;
+    }
+
     if (uploadingAvatar) {
       waitOverlay.show(
         {
@@ -157,7 +176,7 @@ export default function SettingsScreen() {
     }
 
     waitOverlay.hide('connect-settings-wait-overlay');
-  }, [explorerName, saving, uploadingAvatar, uploadingExplorerAvatar, waitOverlay]);
+  }, [explorerName, isDeletingAccount, saving, uploadingAvatar, uploadingExplorerAvatar, waitOverlay]);
 
   useEffect(() => {
     return () => waitOverlay.hide('connect-settings-wait-overlay');
@@ -457,6 +476,46 @@ export default function SettingsScreen() {
       await signOut();
     } catch (error) {
       Alert.alert('Error', 'Failed to log out');
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!user?.uid) return;
+    setDeleteModalVisible(false);
+    setDeleteConfirmText('');
+    setIsDeletingAccount(true);
+    try {
+      // Step A — backend purge
+      const res = await fetch(API_ENDPOINTS.DELETE_COMPANION_ACCOUNT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: user.uid }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Backend cleanup failed: ${body}`);
+      }
+
+      // Step B — delete Firebase Auth record
+      await user.delete();
+
+      // Step D — success: clear local storage and return to root
+      await AsyncStorage.clear();
+      router.replace('/');
+    } catch (error: any) {
+      setIsDeletingAccount(false);
+
+      // Step C — re-auth required
+      if (error?.code === 'auth/requires-recent-login') {
+        Alert.alert(
+          'Re-login Required',
+          'For security, please log out and sign back in before deleting your account.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
+      Alert.alert('Something went wrong', error?.message ?? 'Account deletion failed. Please try again.');
     }
   };
 
@@ -786,6 +845,16 @@ export default function SettingsScreen() {
           >
             <Text style={styles.logoutText}>Log Out</Text>
           </TouchableOpacity>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={styles.deleteAccountButton}
+            onPress={() => setDeleteModalVisible(true)}
+          >
+            <FontAwesome name="trash" size={14} color="#ff4d4d" style={{ marginRight: 8 }} />
+            <Text style={styles.deleteAccountText}>Delete Account</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -888,6 +957,59 @@ export default function SettingsScreen() {
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Delete Account Confirmation Modal */}
+      <Modal
+        visible={deleteModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { Keyboard.dismiss(); setDeleteModalVisible(false); setDeleteConfirmText(''); }}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <View style={styles.deleteModalOverlay}>
+          <View style={styles.deleteModalCard}>
+            <FontAwesome name="exclamation-triangle" size={28} color="#ff4d4d" style={{ marginBottom: 12 }} />
+            <Text style={styles.deleteModalTitle}>Saying Goodbye</Text>
+            <Text style={styles.deleteModalMessage}>
+              This will permanently delete your account and all Reflections you have sent. This cannot be undone.
+            </Text>
+
+            <Text style={styles.deleteModalPrompt}>
+              Type <Text style={{ color: '#fff', fontWeight: '700' }}>{activeRelationship?.companionName || 'your name'}</Text> to confirm.
+            </Text>
+            <TextInput
+              style={styles.deleteModalInput}
+              placeholder={activeRelationship?.companionName || 'Your name'}
+              placeholderTextColor="#555"
+              value={deleteConfirmText}
+              onChangeText={setDeleteConfirmText}
+              autoCapitalize="words"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={Keyboard.dismiss}
+            />
+
+            <TouchableOpacity
+              style={[
+                styles.deleteModalConfirmBtn,
+                deleteConfirmText.trim() !== (activeRelationship?.companionName ?? '') && styles.deleteModalConfirmBtnDisabled,
+              ]}
+              onPress={handleDeleteAccount}
+              disabled={deleteConfirmText.trim() !== (activeRelationship?.companionName ?? '')}
+            >
+              <Text style={styles.deleteModalConfirmText}>Saying Goodbye</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.deleteModalCancelBtn}
+              onPress={() => { Keyboard.dismiss(); setDeleteModalVisible(false); setDeleteConfirmText(''); }}
+            >
+              <Text style={styles.deleteModalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+        </TouchableWithoutFeedback>
+      </Modal>
 
       {/* Voice Picker Modal */}
       <Modal
@@ -1352,5 +1474,96 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+
+  // Delete Account
+  deleteAccountButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  deleteAccountText: {
+    color: '#ff4d4d',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  deleteModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  deleteModalCard: {
+    backgroundColor: '#1e1e1e',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3a1a1a',
+  },
+  deleteModalTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  deleteModalMessage: {
+    color: '#aaa',
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  deleteModalPrompt: {
+    color: '#888',
+    fontSize: 13,
+    marginBottom: 8,
+    alignSelf: 'flex-start',
+  },
+  deleteModalInput: {
+    width: '100%',
+    backgroundColor: '#2c2c2c',
+    borderRadius: 8,
+    padding: 14,
+    fontSize: 16,
+    color: '#fff',
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#444',
+  },
+  deleteModalConfirmBtn: {
+    width: '100%',
+    backgroundColor: '#7f1d1d',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#ff4d4d',
+  },
+  deleteModalConfirmBtnDisabled: {
+    backgroundColor: '#2c2c2c',
+    borderColor: '#444',
+    opacity: 0.5,
+  },
+  deleteModalConfirmText: {
+    color: '#ff4d4d',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  deleteModalCancelBtn: {
+    width: '100%',
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderRadius: 10,
+    backgroundColor: '#2c2c2c',
+  },
+  deleteModalCancelText: {
+    color: '#aaa',
+    fontSize: 16,
+    fontWeight: '500',
   },
 });
