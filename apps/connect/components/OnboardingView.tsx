@@ -1,5 +1,6 @@
 import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
 import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { Camera } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
@@ -7,6 +8,7 @@ import React, { useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -41,32 +43,90 @@ export function OnboardingView() {
   // --- AVATAR PICKER ---
 
   const pickAvatar = async (source: 'camera' | 'library') => {
-    const result = source === 'camera'
-      ? await ImagePicker.launchCameraAsync({
-          allowsEditing: true,
-          aspect: [1, 1],
-          quality: 0.8,
-          cameraType: ImagePicker.CameraType.front,
-        })
-      : await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ImagePicker.MediaTypeOptions.Images,
-          allowsEditing: true,
-          aspect: [1, 1],
-          quality: 0.8,
-        });
+    console.log('[OnboardingView] pickAvatar START source:', source);
+    try {
+      if (source === 'camera') {
+        // 1. Read current status (safe, no dialog, won't hang)
+        const current = await Camera.getCameraPermissionsAsync();
+        console.log('[OnboardingView] current camera perm:', JSON.stringify(current));
 
-    if (!result.canceled && result.assets[0]?.uri) {
-      setLocalAvatarUri(result.assets[0].uri);
+        let granted = current.granted;
+
+        // 2. If not granted but we can still ask, request it.
+        //    Race against a 10s timeout so a stuck Android dialog can't hang us forever.
+        if (!granted && current.canAskAgain) {
+          console.log('[OnboardingView] requesting camera permission...');
+          const requested = await Promise.race([
+            Camera.requestCameraPermissionsAsync(),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+          ]);
+          console.log('[OnboardingView] request result:', JSON.stringify(requested));
+          if (requested === null) {
+            Alert.alert(
+              'Camera Permission Timed Out',
+              'The permission dialog did not respond. Please open Settings and grant camera access manually.',
+              [
+                { text: 'Open Settings', onPress: () => Linking.openSettings() },
+                { text: 'Cancel', style: 'cancel' },
+              ]
+            );
+            return;
+          }
+          granted = requested.granted;
+        }
+
+        // 3. Still no permission → user denied or it's permanently blocked
+        if (!granted) {
+          Alert.alert(
+            'Camera Access Needed',
+            'To take a selfie, grant camera access in Settings.',
+            [
+              { text: 'Open Settings', onPress: () => Linking.openSettings() },
+              { text: 'Cancel', style: 'cancel' },
+            ]
+          );
+          return;
+        }
+      }
+
+      console.log('[OnboardingView] calling launch for source:', source);
+      // allowsEditing on Android triggers ucrop, whose toolbar is hidden by
+      // edgeToEdgeEnabled:true — the user sees no accept button. Disable on Android.
+      const allowsEditing = Platform.OS === 'ios';
+      const result = source === 'camera'
+        ? await ImagePicker.launchCameraAsync({
+            allowsEditing,
+            aspect: [1, 1],
+            quality: 0.8,
+            ...(Platform.OS === 'ios' ? { cameraType: ImagePicker.CameraType.front } : {}),
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            allowsEditing,
+            aspect: [1, 1],
+            quality: 0.8,
+          });
+
+      console.log('[OnboardingView] result canceled:', result.canceled);
+      if (!result.canceled && result.assets[0]?.uri) {
+        setLocalAvatarUri(result.assets[0].uri);
+      }
+    } catch (err) {
+      console.error('[OnboardingView] pickAvatar error:', err);
+      Alert.alert(
+        'Camera Unavailable',
+        'Could not open the camera. You may need to grant permission in Settings.',
+        [
+          { text: 'Open Settings', onPress: () => Linking.openSettings() },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
     }
   };
 
-  const showAvatarPicker = () => {
-    Alert.alert('Add a Photo', 'Choose how to add your profile photo.', [
-      { text: 'Take a Selfie', onPress: () => pickAvatar('camera') },
-      { text: 'Choose from Library', onPress: () => pickAvatar('library') },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  };
+  // showAvatarPicker removed — source buttons are rendered inline to avoid
+  // Android's Alert Dialog timing issue where camera/gallery intents
+  // fire while the Dialog window token is still attached.
 
   // --- PHASE A: Save identity, then advance to tutorial prompt ---
 
@@ -215,24 +275,39 @@ export function OnboardingView() {
 
           {/* Avatar picker */}
           <View style={styles.avatarSection}>
-            <TouchableOpacity onPress={showAvatarPicker} style={styles.avatarTouch} activeOpacity={0.8}>
-              <View style={[styles.avatarCircle, !localAvatarUri && { backgroundColor: avatarColor }]}>
-                {localAvatarUri ? (
-                  <Image source={{ uri: localAvatarUri }} style={styles.avatarImage} contentFit="cover" />
-                ) : (
-                  <Text style={styles.avatarInitial}>{displayInitial}</Text>
-                )}
-              </View>
-              <View style={styles.avatarBadge}>
-                <Text style={styles.avatarBadgeText}>+</Text>
-              </View>
-            </TouchableOpacity>
-            <Text style={styles.avatarHint}>{localAvatarUri ? 'Tap to change' : 'Tap to add a photo'}</Text>
+            <View style={[styles.avatarCircle, !localAvatarUri && { backgroundColor: avatarColor }]}>
+              {localAvatarUri ? (
+                <Image source={{ uri: localAvatarUri }} style={styles.avatarImage} contentFit="cover" />
+              ) : (
+                <Text style={styles.avatarInitial}>{displayInitial}</Text>
+              )}
+            </View>
+            {/* Inline source buttons — avoids Android Alert Dialog timing issues */}
+            <View style={styles.avatarActions}>
+              <TouchableOpacity
+                style={styles.avatarActionBtn}
+                onPress={() => pickAvatar('camera')}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.avatarActionText}>📷  Take Selfie</Text>
+              </TouchableOpacity>
+              <View style={styles.avatarActionDivider} />
+              <TouchableOpacity
+                style={styles.avatarActionBtn}
+                onPress={() => pickAvatar('library')}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.avatarActionText}>🖼  Choose Photo</Text>
+              </TouchableOpacity>
+            </View>
             {!localAvatarUri && (
               <Text style={styles.avatarEmphasis}>
                 A real photo makes a big difference.{'\n'}
                 {explorerLabel} will see your face when your Reflection arrives.
               </Text>
+            )}
+            {localAvatarUri && (
+              <Text style={styles.avatarHint}>Tap an option above to change</Text>
             )}
           </View>
 
@@ -297,10 +372,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 40,
   },
-  avatarTouch: {
-    position: 'relative',
-    marginBottom: 10,
-  },
   avatarCircle: {
     width: 100,
     height: 100,
@@ -320,24 +391,29 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#fff',
   },
-  avatarBadge: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#2e78b7',
+  avatarActions: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#121212',
+    backgroundColor: '#1e1e1e',
+    borderRadius: 10,
+    marginTop: 14,
+    marginBottom: 12,
+    overflow: 'hidden',
   },
-  avatarBadgeText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 22,
+  avatarActionBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    alignItems: 'center',
+  },
+  avatarActionText: {
+    color: '#2e78b7',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  avatarActionDivider: {
+    width: 1,
+    height: '100%',
+    backgroundColor: '#333',
   },
   avatarHint: {
     color: '#666',

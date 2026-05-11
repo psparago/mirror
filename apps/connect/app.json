@@ -70,7 +70,8 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow Reflections Connect to access your photos to create Reflections."
+          "photosPermission": "Allow Reflections Connect to access your photos to create Reflections.",
+          "cameraPermission": "Allow Reflections Connect to access your camera to take a profile photo."
         }
       ],
       [
