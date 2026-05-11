@@ -4,7 +4,7 @@ import { Camera } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -35,6 +35,8 @@ export function OnboardingView() {
   const [name, setName] = useState(activeRelationship?.companionName || '');
   const [localAvatarUri, setLocalAvatarUri] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Guards against double-taps stacking picker invocations while one is mid-launch.
+  const pickingRef = useRef(false);
 
   const explorerId = activeRelationship?.explorerId || '';
   const displayInitial = getAvatarInitial(name || user?.email || '');
@@ -43,24 +45,24 @@ export function OnboardingView() {
   // --- AVATAR PICKER ---
 
   const pickAvatar = async (source: 'camera' | 'library') => {
-    console.log('[OnboardingView] pickAvatar START source:', source);
+    // Debounce: ignore taps while a previous pick is still in flight. Without this,
+    // repeated taps stack camera/library invocations and the OS surfaces them later
+    // (e.g. after a different picker dismisses), causing the "stacked cameras" bug.
+    if (pickingRef.current) return;
+    pickingRef.current = true;
+
     try {
       if (source === 'camera') {
-        // 1. Read current status (safe, no dialog, won't hang)
         const current = await Camera.getCameraPermissionsAsync();
-        console.log('[OnboardingView] current camera perm:', JSON.stringify(current));
-
         let granted = current.granted;
+        let justGranted = false;
 
-        // 2. If not granted but we can still ask, request it.
-        //    Race against a 10s timeout so a stuck Android dialog can't hang us forever.
         if (!granted && current.canAskAgain) {
-          console.log('[OnboardingView] requesting camera permission...');
+          // Race against a 10s timeout so a stuck Android dialog can't hang forever.
           const requested = await Promise.race([
             Camera.requestCameraPermissionsAsync(),
             new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
           ]);
-          console.log('[OnboardingView] request result:', JSON.stringify(requested));
           if (requested === null) {
             Alert.alert(
               'Camera Permission Timed Out',
@@ -73,9 +75,9 @@ export function OnboardingView() {
             return;
           }
           granted = requested.granted;
+          justGranted = granted;
         }
 
-        // 3. Still no permission → user denied or it's permanently blocked
         if (!granted) {
           Alert.alert(
             'Camera Access Needed',
@@ -87,9 +89,16 @@ export function OnboardingView() {
           );
           return;
         }
+
+        // CRITICAL: when permission was just granted, the OS is still dismissing the
+        // permission dialog. Launching the camera picker immediately collides with
+        // that transition and the picker is silently queued. Wait for the dialog to
+        // fully tear down before presenting the camera.
+        if (justGranted) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
       }
 
-      console.log('[OnboardingView] calling launch for source:', source);
       // allowsEditing on Android triggers ucrop, whose toolbar is hidden by
       // edgeToEdgeEnabled:true — the user sees no accept button. Disable on Android.
       const allowsEditing = Platform.OS === 'ios';
@@ -107,7 +116,6 @@ export function OnboardingView() {
             quality: 0.8,
           });
 
-      console.log('[OnboardingView] result canceled:', result.canceled);
       if (!result.canceled && result.assets[0]?.uri) {
         setLocalAvatarUri(result.assets[0].uri);
       }
@@ -121,6 +129,8 @@ export function OnboardingView() {
           { text: 'Cancel', style: 'cancel' },
         ]
       );
+    } finally {
+      pickingRef.current = false;
     }
   };
 
