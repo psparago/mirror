@@ -54,22 +54,10 @@ export function OnboardingView() {
     let granted = current.granted;
 
     if (!granted && current.canAskAgain) {
-      // Race against a 10s timeout so a stuck permission dialog can't hang forever.
-      const requested = await Promise.race([
-        Camera.requestCameraPermissionsAsync(),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
-      ]);
-      if (requested === null) {
-        Alert.alert(
-          'Camera Permission Timed Out',
-          'The permission dialog did not respond. Please open Settings and grant camera access manually.',
-          [
-            { text: 'Open Settings', onPress: () => Linking.openSettings() },
-            { text: 'Cancel', style: 'cancel' },
-          ]
-        );
-        return false;
-      }
+      // Do not timeout the native permission prompt. The user may pause on the
+      // dialog, and racing it can produce a false timeout while Android still
+      // completes the permission grant in the background.
+      const requested = await Camera.requestCameraPermissionsAsync();
       granted = requested.granted;
     }
 

@@ -32,7 +32,8 @@
         "APP_VARIANT": "production"
       },
       "ios": {
-        "resourceClass": "m-medium"
+        "resourceClass": "m-medium",
+        "image": "macos-sequoia-15.5-xcode-26.0"
       }
     }
   },
