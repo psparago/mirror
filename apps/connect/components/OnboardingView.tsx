@@ -1,6 +1,6 @@
 import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
 import { db, doc, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
-import { Camera } from 'expo-camera';
+import { Camera, CameraType, CameraView } from 'expo-camera';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
@@ -9,6 +9,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Linking,
+  Modal,
   Platform,
   SafeAreaView,
   ScrollView,
@@ -35,8 +36,12 @@ export function OnboardingView() {
   const [name, setName] = useState(activeRelationship?.companionName || '');
   const [localAvatarUri, setLocalAvatarUri] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [androidCameraVisible, setAndroidCameraVisible] = useState(false);
+  const [androidCameraFacing, setAndroidCameraFacing] = useState<CameraType>('front');
+  const [androidCameraCapturing, setAndroidCameraCapturing] = useState(false);
   // Guards against double-taps stacking picker invocations while one is mid-launch.
   const pickingRef = useRef(false);
+  const androidCameraRef = useRef<CameraView>(null);
 
   const explorerId = activeRelationship?.explorerId || '';
   const displayInitial = getAvatarInitial(name || user?.email || '');
@@ -44,7 +49,89 @@ export function OnboardingView() {
 
   // --- AVATAR PICKER ---
 
+  const ensureCameraPermission = async () => {
+    const current = await Camera.getCameraPermissionsAsync();
+    let granted = current.granted;
+
+    if (!granted && current.canAskAgain) {
+      // Race against a 10s timeout so a stuck permission dialog can't hang forever.
+      const requested = await Promise.race([
+        Camera.requestCameraPermissionsAsync(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
+      ]);
+      if (requested === null) {
+        Alert.alert(
+          'Camera Permission Timed Out',
+          'The permission dialog did not respond. Please open Settings and grant camera access manually.',
+          [
+            { text: 'Open Settings', onPress: () => Linking.openSettings() },
+            { text: 'Cancel', style: 'cancel' },
+          ]
+        );
+        return false;
+      }
+      granted = requested.granted;
+    }
+
+    if (!granted) {
+      Alert.alert(
+        'Camera Access Needed',
+        'To take a selfie, grant camera access in Settings.',
+        [
+          { text: 'Open Settings', onPress: () => Linking.openSettings() },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
+      return false;
+    }
+
+    return true;
+  };
+
+  const openAndroidCamera = async () => {
+    if (pickingRef.current) return;
+    pickingRef.current = true;
+
+    try {
+      const hadPermission = (await Camera.getCameraPermissionsAsync()).granted;
+      const hasPermission = await ensureCameraPermission();
+      if (!hasPermission) return;
+      if (!hadPermission) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      setAndroidCameraVisible(true);
+    } catch (err) {
+      console.error('[OnboardingView] Android camera open failed:', err);
+      Alert.alert('Camera Unavailable', 'Could not open the camera. Please try again.');
+    } finally {
+      pickingRef.current = false;
+    }
+  };
+
+  const captureAndroidSelfie = async () => {
+    if (!androidCameraRef.current || androidCameraCapturing) return;
+
+    try {
+      setAndroidCameraCapturing(true);
+      const picture = await androidCameraRef.current.takePictureAsync({ quality: 0.8 });
+      if (picture?.uri) {
+        setLocalAvatarUri(picture.uri);
+        setAndroidCameraVisible(false);
+      }
+    } catch (err) {
+      console.error('[OnboardingView] Android selfie capture failed:', err);
+      Alert.alert('Error', 'Could not capture your selfie. Please try again.');
+    } finally {
+      setAndroidCameraCapturing(false);
+    }
+  };
+
   const pickAvatar = async (source: 'camera' | 'library') => {
+    if (source === 'camera' && Platform.OS === 'android') {
+      await openAndroidCamera();
+      return;
+    }
+
     // Debounce: ignore taps while a previous pick is still in flight. Without this,
     // repeated taps stack camera/library invocations and the OS surfaces them later
     // (e.g. after a different picker dismisses), causing the "stacked cameras" bug.
@@ -53,48 +140,13 @@ export function OnboardingView() {
 
     try {
       if (source === 'camera') {
-        const current = await Camera.getCameraPermissionsAsync();
-        let granted = current.granted;
-        let justGranted = false;
+        const hadPermission = (await Camera.getCameraPermissionsAsync()).granted;
+        const hasPermission = await ensureCameraPermission();
+        if (!hasPermission) return;
 
-        if (!granted && current.canAskAgain) {
-          // Race against a 10s timeout so a stuck Android dialog can't hang forever.
-          const requested = await Promise.race([
-            Camera.requestCameraPermissionsAsync(),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000)),
-          ]);
-          if (requested === null) {
-            Alert.alert(
-              'Camera Permission Timed Out',
-              'The permission dialog did not respond. Please open Settings and grant camera access manually.',
-              [
-                { text: 'Open Settings', onPress: () => Linking.openSettings() },
-                { text: 'Cancel', style: 'cancel' },
-              ]
-            );
-            return;
-          }
-          granted = requested.granted;
-          justGranted = granted;
-        }
-
-        if (!granted) {
-          Alert.alert(
-            'Camera Access Needed',
-            'To take a selfie, grant camera access in Settings.',
-            [
-              { text: 'Open Settings', onPress: () => Linking.openSettings() },
-              { text: 'Cancel', style: 'cancel' },
-            ]
-          );
-          return;
-        }
-
-        // CRITICAL: when permission was just granted, the OS is still dismissing the
-        // permission dialog. Launching the camera picker immediately collides with
-        // that transition and the picker is silently queued. Wait for the dialog to
-        // fully tear down before presenting the camera.
-        if (justGranted) {
+        // When permission was just granted, the OS is still dismissing the dialog.
+        // Wait for that transition before using iOS' picker flow.
+        if (!hadPermission) {
           await new Promise((resolve) => setTimeout(resolve, 800));
         }
       }
@@ -268,6 +320,60 @@ export function OnboardingView() {
           </View>
         </View>
       </SafeAreaView>
+    );
+  }
+
+  if (androidCameraVisible) {
+    return (
+      <Modal
+        visible
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setAndroidCameraVisible(false)}
+      >
+        <View style={styles.androidCameraContainer}>
+          <CameraView
+            key={androidCameraFacing}
+            ref={androidCameraRef}
+            style={StyleSheet.absoluteFill}
+            facing={androidCameraFacing}
+          />
+
+          <SafeAreaView style={styles.androidCameraOverlay}>
+            <View style={styles.androidCameraTopControls}>
+              <TouchableOpacity
+                style={styles.androidCameraControl}
+                onPress={() => setAndroidCameraVisible(false)}
+                disabled={androidCameraCapturing}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.androidCameraControlText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.androidCameraControl}
+                onPress={() => setAndroidCameraFacing((current) => current === 'front' ? 'back' : 'front')}
+                disabled={androidCameraCapturing}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.androidCameraControlText}>Flip</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.androidCameraBottomControls}>
+              <TouchableOpacity
+                style={[styles.androidShutterButton, androidCameraCapturing && styles.androidShutterButtonDisabled]}
+                onPress={captureAndroidSelfie}
+                disabled={androidCameraCapturing}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.androidShutterText}>
+                  {androidCameraCapturing ? 'Capturing...' : 'Take Selfie'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
     );
   }
 
@@ -477,6 +583,54 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 17,
     fontWeight: '700',
+  },
+
+  // Android in-app selfie camera
+  androidCameraContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  androidCameraOverlay: {
+    flex: 1,
+    justifyContent: 'space-between',
+  },
+  androidCameraTopControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 12,
+  },
+  androidCameraControl: {
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    borderRadius: 20,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  androidCameraControlText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  androidCameraBottomControls: {
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingBottom: 36,
+  },
+  androidShutterButton: {
+    backgroundColor: '#fff',
+    borderRadius: 28,
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    minWidth: 170,
+    alignItems: 'center',
+  },
+  androidShutterButtonDisabled: {
+    opacity: 0.6,
+  },
+  androidShutterText: {
+    color: '#111',
+    fontSize: 16,
+    fontWeight: '800',
   },
 
   // Tutorial prompt view
