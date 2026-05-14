@@ -15,7 +15,7 @@
     "splash": {
       "image": "./assets/images/explorer-splash.jpg",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#000000"
     },
     "ios": {
       "supportsTablet": true,
