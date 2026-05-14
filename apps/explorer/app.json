@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon-explorer.png",
     "scheme": "reflections-explorer",
     "newArchEnabled": false,
-    "backgroundColor": "#ffffff",
+    "backgroundColor": "#000000",
     "userInterfaceStyle": "automatic",
     "locales": {
       "en": "./assets/locales/en.json"
