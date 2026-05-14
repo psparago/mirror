@@ -8,10 +8,11 @@ import {
 } from '@/utils/mediaProcessor';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { FontAwesome } from '@expo/vector-icons';
+import { useIsFocused } from '@react-navigation/native';
 import { CameraType, CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -25,17 +26,26 @@ export default function CameraScreen() {
   const [facing, setFacing] = useState<CameraType>('front');
   const [cameraMode, setCameraMode] = useState<'photo' | 'video'>('photo');
   const [capturing, setCapturing] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
   const cameraRef = useRef<CameraView>(null);
   const insets = useSafeAreaInsets();
+  const isFocused = useIsFocused();
   const topBarTop = insets.top + 8;
   const modeBarTop = topBarTop + 50 + 12;
 
+  useEffect(() => {
+    if (!isFocused) {
+      setCameraReady(false);
+    }
+  }, [isFocused]);
+
   const toggleCameraFacing = () => {
+    setCameraReady(false);
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   };
 
   const takePhoto = async () => {
-    if (!cameraRef.current || capturing) return;
+    if (!cameraRef.current || capturing || !cameraReady || !isFocused) return;
     try {
       setCapturing(true);
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.5 });
@@ -136,10 +146,16 @@ export default function CameraScreen() {
   return (
     <View style={styles.container}>
       <CameraView
-        key={facing}
+        key={`${facing}-${isFocused ? 'focused' : 'blurred'}`}
         style={StyleSheet.absoluteFill}
         ref={cameraRef}
         facing={facing}
+        active={isFocused}
+        onCameraReady={() => setCameraReady(true)}
+        onMountError={(event) => {
+          console.warn('Camera mount error:', event.message);
+          setCameraReady(false);
+        }}
       />
 
       <View style={[styles.topControls, { top: topBarTop }]}>
@@ -175,9 +191,13 @@ export default function CameraScreen() {
       </View>
 
       <View style={styles.buttonContainer}>
-        <TouchableOpacity style={styles.captureButton} onPress={handleShutterPress} disabled={capturing}>
+        <TouchableOpacity
+          style={styles.captureButton}
+          onPress={handleShutterPress}
+          disabled={capturing || (cameraMode === 'photo' && !cameraReady)}
+        >
           <Text style={styles.captureText}>
-            {capturing ? 'CAPTURING...' : cameraMode === 'video' ? 'RECORD VIDEO' : 'TAKE PHOTO'}
+            {capturing ? 'CAPTURING...' : cameraMode === 'video' ? 'RECORD VIDEO' : cameraReady ? 'TAKE PHOTO' : 'STARTING CAMERA...'}
           </Text>
         </TouchableOpacity>
       </View>

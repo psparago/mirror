@@ -190,6 +190,8 @@ interface MainStageProps {
   cameraPermission: PermissionResponse | null;
   requestCameraPermission: () => Promise<PermissionResponse>;
   isCapturingSelfie: boolean;
+  isSelfieCameraReady: boolean;
+  onSelfieCameraReadyChange: (ready: boolean) => void;
   readEventIds: string[];
   recentlyArrivedIds: string[]; // State for items that arrived during this session
   onReplay?: (event: Event) => void;
@@ -231,6 +233,8 @@ export default function MainStageView({
   cameraPermission,
   requestCameraPermission,
   isCapturingSelfie,
+  isSelfieCameraReady,
+  onSelfieCameraReadyChange,
   readEventIds,
   recentlyArrivedIds,
   onReplay,
@@ -271,6 +275,17 @@ export default function MainStageView({
   const opacity = useSharedValue(1);
 
   const flatListRef = useRef<FlatList>(null);
+  const isSelfieCameraReadyRef = useRef(isSelfieCameraReady);
+
+  useEffect(() => {
+    isSelfieCameraReadyRef.current = isSelfieCameraReady;
+  }, [isSelfieCameraReady]);
+
+  useEffect(() => {
+    if (!visible || !cameraPermission?.granted) {
+      onSelfieCameraReadyChange(false);
+    }
+  }, [visible, cameraPermission?.granted, onSelfieCameraReadyChange]);
 
   // Track if the video has actually buffered and started rendering
   const [videoReady, setVideoReady] = useState(false);
@@ -1414,6 +1429,22 @@ export default function MainStageView({
 
   // --- ACTIONS IMPLEMENTATION ---
 
+  const waitForSelfieCameraReady = useCallback(async (timeoutMs = 2500) => {
+    if (isSelfieCameraReadyRef.current) {
+      return true;
+    }
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (isSelfieCameraReadyRef.current) {
+        return true;
+      }
+    }
+
+    return false;
+  }, []);
+
   // Helper for reused selfie logic
   const performSelfieCapture = useCallback(async (delay = 0) => {
     if (configRef.current?.takeSelfie === false) {
@@ -1443,6 +1474,13 @@ export default function MainStageView({
       clearTimeout(selfieCaptureTimeoutRef.current);
     }
     selfieCaptureTimeoutRef.current = setTimeout(async () => {
+      const cameraReady = await waitForSelfieCameraReady();
+      if (!cameraReady) {
+        debugLog('📸 Helper: Skipping selfie - camera was not ready');
+        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
+        return;
+      }
+
       debugLog('📸 Helper: Snapping now...');
       // Flash
       flashOpacity.value = withTiming(1, { duration: 150 }, () => {
@@ -1461,7 +1499,7 @@ export default function MainStageView({
         selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
       }, 500);
     }, delay);
-  }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity]);
+  }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity, waitForSelfieCameraReady]);
 
   // Update performSelfieCapture ref for machine
   useEffect(() => {
@@ -2728,7 +2766,17 @@ export default function MainStageView({
             right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
           }, selfieMirrorAnimatedStyle]}>
             {cameraPermission?.granted ? (
-              <CameraView ref={cameraRef} style={styles.cameraPreview} facing="front" />
+              <CameraView
+                ref={cameraRef}
+                style={styles.cameraPreview}
+                facing="front"
+                active={visible && cameraPermission.granted}
+                onCameraReady={() => onSelfieCameraReadyChange(true)}
+                onMountError={(event) => {
+                  console.warn('Selfie camera mount error:', event.message);
+                  onSelfieCameraReadyChange(false);
+                }}
+              />
             ) : null}
             <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white' }, flashAnimatedStyle]} />
           </Animated.View>

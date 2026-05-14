@@ -39,6 +39,7 @@ export function OnboardingView() {
   const [androidCameraVisible, setAndroidCameraVisible] = useState(false);
   const [androidCameraFacing, setAndroidCameraFacing] = useState<CameraType>('front');
   const [androidCameraCapturing, setAndroidCameraCapturing] = useState(false);
+  const [androidCameraReady, setAndroidCameraReady] = useState(false);
   // Guards against double-taps stacking picker invocations while one is mid-launch.
   const pickingRef = useRef(false);
   const androidCameraRef = useRef<CameraView>(null);
@@ -87,6 +88,7 @@ export function OnboardingView() {
       if (!hadPermission) {
         await new Promise((resolve) => setTimeout(resolve, 800));
       }
+      setAndroidCameraReady(false);
       setAndroidCameraVisible(true);
     } catch (err) {
       console.error('[OnboardingView] Android camera open failed:', err);
@@ -97,7 +99,7 @@ export function OnboardingView() {
   };
 
   const captureAndroidSelfie = async () => {
-    if (!androidCameraRef.current || androidCameraCapturing) return;
+    if (!androidCameraRef.current || androidCameraCapturing || !androidCameraReady) return;
 
     try {
       setAndroidCameraCapturing(true);
@@ -317,7 +319,10 @@ export function OnboardingView() {
         visible
         animationType="slide"
         presentationStyle="fullScreen"
-        onRequestClose={() => setAndroidCameraVisible(false)}
+        onRequestClose={() => {
+          setAndroidCameraReady(false);
+          setAndroidCameraVisible(false);
+        }}
       >
         <View style={styles.androidCameraContainer}>
           <CameraView
@@ -325,13 +330,22 @@ export function OnboardingView() {
             ref={androidCameraRef}
             style={StyleSheet.absoluteFill}
             facing={androidCameraFacing}
+            active={androidCameraVisible}
+            onCameraReady={() => setAndroidCameraReady(true)}
+            onMountError={(event) => {
+              console.warn('[OnboardingView] Android camera mount error:', event.message);
+              setAndroidCameraReady(false);
+            }}
           />
 
           <SafeAreaView style={styles.androidCameraOverlay}>
             <View style={styles.androidCameraTopControls}>
               <TouchableOpacity
                 style={styles.androidCameraControl}
-                onPress={() => setAndroidCameraVisible(false)}
+                onPress={() => {
+                  setAndroidCameraReady(false);
+                  setAndroidCameraVisible(false);
+                }}
                 disabled={androidCameraCapturing}
                 activeOpacity={0.8}
               >
@@ -339,7 +353,10 @@ export function OnboardingView() {
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.androidCameraControl}
-                onPress={() => setAndroidCameraFacing((current) => current === 'front' ? 'back' : 'front')}
+                onPress={() => {
+                  setAndroidCameraReady(false);
+                  setAndroidCameraFacing((current) => current === 'front' ? 'back' : 'front');
+                }}
                 disabled={androidCameraCapturing}
                 activeOpacity={0.8}
               >
@@ -349,13 +366,16 @@ export function OnboardingView() {
 
             <View style={styles.androidCameraBottomControls}>
               <TouchableOpacity
-                style={[styles.androidShutterButton, androidCameraCapturing && styles.androidShutterButtonDisabled]}
+                style={[
+                  styles.androidShutterButton,
+                  (androidCameraCapturing || !androidCameraReady) && styles.androidShutterButtonDisabled,
+                ]}
                 onPress={captureAndroidSelfie}
-                disabled={androidCameraCapturing}
+                disabled={androidCameraCapturing || !androidCameraReady}
                 activeOpacity={0.85}
               >
                 <Text style={styles.androidShutterText}>
-                  {androidCameraCapturing ? 'Capturing...' : 'Take Selfie'}
+                  {androidCameraCapturing ? 'Capturing...' : androidCameraReady ? 'Take Selfie' : 'Starting Camera...'}
                 </Text>
               </TouchableOpacity>
             </View>

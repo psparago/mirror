@@ -167,6 +167,7 @@ export default function HomeScreen() {
   const [reflectionLikes, setReflectionLikes] = useState<Record<string, string[]>>({});
   const [gridLikeFacesLikedBy, setGridLikeFacesLikedBy] = useState<string[] | null>(null);
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
+  const [isSelfieCameraReady, setIsSelfieCameraReady] = useState(false);
   const selfieUploadInFlightRef = useRef(false);
 
   const SELFIE_QUEUE_KEY = 'selfie_upload_queue';
@@ -197,6 +198,12 @@ export default function HomeScreen() {
       height: Math.max(1, Math.round(thumbnailWidth * 9 / 16)),
     };
   }, [numColumns, width]);
+
+  useEffect(() => {
+    if (!selectedEvent || !cameraPermission?.granted) {
+      setIsSelfieCameraReady(false);
+    }
+  }, [selectedEvent, cameraPermission?.granted]);
 
   // Explorer config with state for toggleable settings
   const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
@@ -1313,6 +1320,11 @@ export default function HomeScreen() {
       }
     }
 
+    if (!isSelfieCameraReady) {
+      debugLog('[Selfie] Skipping capture - camera is not ready');
+      return;
+    }
+
     setIsCapturingSelfie(true);
 
     try {
@@ -1414,7 +1426,7 @@ export default function HomeScreen() {
     } finally {
       setIsCapturingSelfie(false);
     }
-  }, [selectedEvent, cameraPermission, isCapturingSelfie, requestCameraPermission, eventMetadata]);
+  }, [selectedEvent, cameraPermission, isCapturingSelfie, isSelfieCameraReady, requestCameraPermission, eventMetadata]);
 
 
   const deleteEvent = async (event: Event) => {
@@ -1656,6 +1668,8 @@ export default function HomeScreen() {
             cameraPermission={cameraPermission}
             requestCameraPermission={requestCameraPermission}
             isCapturingSelfie={isCapturingSelfie}
+            isSelfieCameraReady={isSelfieCameraReady}
+            onSelfieCameraReadyChange={setIsSelfieCameraReady}
             recentlyArrivedIds={recentlyArrivedIds}
             readEventIds={readEventIds}
             onReplay={(event) => sendReplaySignal(event.event_id)}
