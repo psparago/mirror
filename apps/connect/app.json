@@ -4,7 +4,7 @@
     "slug": "reflections-connect",
     "version": "2.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon-companion.png",
+    "icon": "./assets/images/ios-companion.png",
     "scheme": "reflections-connect",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": false,
@@ -12,9 +12,9 @@
       "en": "./assets/locales/en.json"
     },
     "splash": {
-      "image": "./assets/images/splash-lgc.png",
+      "image": "./assets/images/companion-splash.jpg",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#000000"
     },
     "ios": {
       "bundleIdentifier": "com.psparago.reflections.connect",
@@ -26,7 +26,8 @@
         "NSMicrophoneUsageDescription": "Allow access to the microphone to record audio for your Reflections.",
         "NSCameraUsageDescription": "Allow Reflections Connect to access your camera to capture photos and videos for your Reflections.",
         "NSPhotoLibraryUsageDescription": "Allow Reflections Connect to access your photo library to choose images and videos for your Reflections."
-      }
+      },
+      "icon": "./assets/images/ios-companion.png"
     },
     "config": {
       "usesNonExemptEncryption": false
@@ -34,7 +35,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#000000"
       },
       "package": "com.psparago.reflections.connect",
       "googleServicesFile": "./google-services.json",

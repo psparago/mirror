@@ -13,7 +13,7 @@
       "en": "./assets/locales/en.json"
     },
     "splash": {
-      "image": "./assets/images/splash-lg.png",
+      "image": "./assets/images/explorer-splash.jpg",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
