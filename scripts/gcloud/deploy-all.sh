@@ -1,6 +1,6 @@
 #!/bin/bash
 # Deploy all Cloud Functions for Project Mirror
-# Loads AWS credentials from .env.deploy and deploys all three functions sequentially
+# Loads deployment credentials from .env.deploy and deploys all Cloud Functions sequentially
 
 set -e  # Exit on error
 
@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env.deploy"
 SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/functions"
+NOTIFICATIONS_NODE_SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/notifications-node"
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,6 +29,12 @@ fi
 # Check for go.mod
 if [ ! -f "${SOURCE_DIR}/go.mod" ]; then
   echo -e "${RED}Error: go.mod not found in ${SOURCE_DIR}${NC}"
+  exit 1
+fi
+
+# Check for Node notification package
+if [ ! -f "${NOTIFICATIONS_NODE_SOURCE_DIR}/package.json" ]; then
+  echo -e "${RED}Error: package.json not found in ${NOTIFICATIONS_NODE_SOURCE_DIR}${NC}"
   exit 1
 fi
 
@@ -64,8 +71,9 @@ echo ""
 
 # Common deployment parameters
 REGION="us-central1"
-FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-us-central1}"
+FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-nam5}"
 RUNTIME="go125"
+NODE_RUNTIME="nodejs20"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
 # Function 1: get-s3-url
@@ -313,6 +321,28 @@ else
 fi
 echo ""
 
+# Function 11: send-fast-lane-notification
+echo -e "${YELLOW}Deploying send-fast-lane-notification...${NC}"
+gcloud functions deploy send-fast-lane-notification \
+  --gen2 \
+  --runtime=${NODE_RUNTIME} \
+  --region=${REGION} \
+  --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+  --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+  --entry-point=sendFastLaneNotification \
+  --trigger-event-filters=type=google.cloud.firestore.document.v1.created \
+  --trigger-event-filters=database='(default)' \
+  --trigger-event-filters-path-pattern=document='pending_notifications/{notificationId}' \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ send-fast-lane-notification deployed successfully${NC}"
+else
+  echo -e "${RED}✗ send-fast-lane-notification deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -332,4 +362,5 @@ if [ "$SKIP_AI" = false ]; then
 fi
 echo "  • on-reflection-created"
 echo "  • on-reflection-updated"
+echo "  • send-fast-lane-notification"
 
