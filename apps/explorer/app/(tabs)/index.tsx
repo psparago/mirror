@@ -1037,8 +1037,8 @@ export default function HomeScreen() {
     const isRead = readEventIds.includes(item.event_id);
     const isNewArrival = recentlyArrivedIds.includes(item.event_id);
     const likedBy = reflectionLikes[item.event_id] ?? [];
-    const currentUserId = auth.currentUser?.uid ?? null;
-    const likedByMe = !!currentUserId && likedBy.includes(currentUserId);
+    const explorerLikeId = currentExplorerId ?? null;
+    const likedByMe = !!explorerLikeId && likedBy.includes(explorerLikeId);
     const likeCount = likedBy.length;
 
     // Don't render if no image URL
@@ -1091,8 +1091,8 @@ export default function HomeScreen() {
           <Pressable
             onPress={(event) => {
               event.stopPropagation();
-              if (!currentUserId) return;
-              handleToggleReflectionLike(item.event_id, currentUserId, !likedByMe);
+              if (!explorerLikeId) return;
+              handleToggleReflectionLike(item.event_id, explorerLikeId, !likedByMe);
             }}
             onLongPress={(event) => {
               event.stopPropagation();
@@ -1655,7 +1655,7 @@ export default function HomeScreen() {
             eventMetadata={eventMetadata}
             likedBy={reflectionLikes[selectedEvent.event_id] ?? []}
             reflectionLikes={reflectionLikes}
-            currentUserId={auth.currentUser?.uid ?? null}
+            currentUserId={currentExplorerId ?? null}
             companions={companions}
             onToggleLike={handleToggleReflectionLike}
             onClose={closeFullScreen}

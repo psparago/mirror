@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated
 
 set -e  # Exit on error
 
@@ -29,6 +29,8 @@ if [ -z "$1" ]; then
   echo "  • unsplash-search"
   echo "  • generate-ai-description"
   echo "  • get-event-bundle"
+  echo "  • on-reflection-created"
+  echo "  • on-reflection-updated"
   exit 1
 fi
 
@@ -52,6 +54,7 @@ source "$ENV_FILE"
 
 # Common deployment parameters
 REGION="us-central1"
+FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-us-central1}"
 RUNTIME="go125"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
@@ -148,6 +151,36 @@ case "$FUNCTION_NAME" in
       --set-env-vars ${ENV_VARS} \
       --quiet
     ;;
+
+  on-reflection-created)
+    echo -e "${YELLOW}Deploying on-reflection-created...${NC}"
+    gcloud functions deploy on-reflection-created \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=OnReflectionCreated \
+      --trigger-event-filters=type=google.cloud.firestore.document.v1.created \
+      --trigger-event-filters=database='(default)' \
+      --trigger-event-filters-path-pattern=document='reflections/{reflectionId}' \
+      --quiet
+    ;;
+
+  on-reflection-updated)
+    echo -e "${YELLOW}Deploying on-reflection-updated...${NC}"
+    gcloud functions deploy on-reflection-updated \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=OnReflectionUpdated \
+      --trigger-event-filters=type=google.cloud.firestore.document.v1.updated \
+      --trigger-event-filters=database='(default)' \
+      --trigger-event-filters-path-pattern=document='reflections/{reflectionId}' \
+      --quiet
+    ;;
   
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
@@ -159,6 +192,8 @@ case "$FUNCTION_NAME" in
     echo "  • unsplash-search"
     echo "  • generate-ai-description"
     echo "  • get-event-bundle"
+    echo "  • on-reflection-created"
+    echo "  • on-reflection-updated"
     exit 1
     ;;
 esac

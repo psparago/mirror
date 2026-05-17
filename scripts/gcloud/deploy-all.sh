@@ -64,6 +64,7 @@ echo ""
 
 # Common deployment parameters
 REGION="us-central1"
+FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-us-central1}"
 RUNTIME="go125"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
@@ -268,6 +269,50 @@ else
   echo ""
 fi
 
+# Function 9: on-reflection-created
+echo -e "${YELLOW}Deploying on-reflection-created...${NC}"
+gcloud functions deploy on-reflection-created \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=OnReflectionCreated \
+  --trigger-event-filters=type=google.cloud.firestore.document.v1.created \
+  --trigger-event-filters=database='(default)' \
+  --trigger-event-filters-path-pattern=document='reflections/{reflectionId}' \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ on-reflection-created deployed successfully${NC}"
+else
+  echo -e "${RED}✗ on-reflection-created deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
+# Function 10: on-reflection-updated
+echo -e "${YELLOW}Deploying on-reflection-updated...${NC}"
+gcloud functions deploy on-reflection-updated \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=OnReflectionUpdated \
+  --trigger-event-filters=type=google.cloud.firestore.document.v1.updated \
+  --trigger-event-filters=database='(default)' \
+  --trigger-event-filters-path-pattern=document='reflections/{reflectionId}' \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ on-reflection-updated deployed successfully${NC}"
+else
+  echo -e "${RED}✗ on-reflection-updated deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -285,4 +330,6 @@ fi
 if [ "$SKIP_AI" = false ]; then
   echo "  • generate-ai-description"
 fi
+echo "  • on-reflection-created"
+echo "  • on-reflection-updated"
 

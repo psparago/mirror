@@ -85,6 +85,29 @@ export interface ReflectionDocument {
   likedBy?: string[]; // UIDs that liked this Reflection.
 }
 
+export type PendingNotificationTriggerType = 'companion_upload' | 'cole_like';
+export type PendingNotificationStatus = 'pending';
+
+// Collection: system_config
+// Document ID: explorerId
+export interface SystemConfigDocument {
+  debounce_minutes: number;
+  min_hours_between_digests: number;
+  cole_like_delay_seconds: number;
+}
+
+// Collection: pending_notifications
+export interface PendingNotificationDocument {
+  explorerId: string;
+  broadcastToAllCompanions: boolean;
+  recipientIds: string[];
+  triggerType: PendingNotificationTriggerType;
+  reflectionId: string;
+  senderName: string;
+  status: PendingNotificationStatus;
+  createdAt: unknown;
+}
+
 export interface ListEventsResponse {
   events: Event[];
 }
@@ -109,6 +132,7 @@ export interface UserProfile {
   connected_explorers: ExplorerConnection[]; // The list of Explorers this user can access
   created_at: string;
   developer_tools_enabled?: boolean;
+  push_notifications_enabled?: boolean;
 }
 
 // The Explorer (Device/Context) Document

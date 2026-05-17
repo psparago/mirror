@@ -107,6 +107,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           userData.legalName = u.displayName;
         }
       }
+      if (!userSnap.exists() || userSnap.data()?.push_notifications_enabled === undefined) {
+        userData.push_notifications_enabled = true;
+      }
 
       // Safe Write
       await setDoc(userRef, userData, { merge: true });
@@ -173,6 +176,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // ✅ FIX: Check legalName, not companionName
       if (candidateName && (!userSnap.exists() || !userSnap.data()?.legalName)) {
         userData.legalName = candidateName;
+      }
+      if (!userSnap.exists() || userSnap.data()?.push_notifications_enabled === undefined) {
+        userData.push_notifications_enabled = true;
       }
 
       // Safe Write

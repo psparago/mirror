@@ -11,6 +11,19 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Per-Explorer notification tuning. Clients may read this, but backend
+    // processes should own writes.
+    match /system_config/{explorerId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Server-side notification staging sandbox. Cloud Functions use Admin
+    // credentials and bypass rules; clients should not write directly here.
+    match /pending_notifications/{notificationId} {
+      allow read, write: if false;
+    }
+
   }
 }
 

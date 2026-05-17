@@ -5,5 +5,7 @@ export const ExplorerConfig = {
         relationships: 'relationships',
         users: 'users',
         explorers: 'explorers',
+        systemConfig: 'system_config',
+        pendingNotifications: 'pending_notifications',
     } as const
 };
