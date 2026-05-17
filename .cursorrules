@@ -27,7 +27,7 @@ You must adhere to the following naming conventions in all code, comments, and d
 1. **Reflections Explorer:**
    - **Path:** `apps/explorer`
    - **Identity:** The iPad app used by the primary user (The Explorer).
-   - **Formerly known as:** "Looking Glass Explorer", "Cole's App", "LG".
+   - **Formerly known as:** "Looking Glass Explorer", "LG".
    - **User Role:** "Explorer".
 
 2. **Reflections Connect:**

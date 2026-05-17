@@ -103,7 +103,7 @@ export function JoinExplorerScreen() {
           <Text style={styles.label}>Explorer ID</Text>
           <TextInput
             style={styles.input}
-            placeholder="e.g. COLE-01052010"
+            placeholder="e.g. EXPLORER-01052010"
             placeholderTextColor="#666"
             value={explorerIdInput}
             onChangeText={setExplorerIdInput}

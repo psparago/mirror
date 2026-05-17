@@ -31,11 +31,11 @@ func main() {
 
 	// 1. Migrate 'signals' to 'reflections'
 	fmt.Println("📋 Migrating 'signals' to 'reflections'...")
-	migrateCollection(ctx, client, "signals", "reflections", "cole")
+	migrateCollection(ctx, client, "signals", "reflections", "explorer")
 
 	// 2. Migrate 'reflection_responses' to 'responses'
 	fmt.Println("\n📋 Migrating 'reflection_responses' to 'responses'...")
-	migrateCollection(ctx, client, "reflection_responses", "responses", "cole")
+	migrateCollection(ctx, client, "reflection_responses", "responses", "explorer")
 
 	fmt.Println("\n✨ Migration Complete!")
 }

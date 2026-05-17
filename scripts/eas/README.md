@@ -4,7 +4,7 @@ This directory contains scripts for building and distributing the Reflections  a
 
 ## 📱 Apps Overview
 
-- **Reflections **: The primary app for Cole to view reflections sent by family
+- **Reflections **: The primary app for the Explorer to view reflections sent by family
 - **Reflections Companion (Reflections Companion)**: The companion app for family members to create and send reflections
 
 ## 🏗️ Build Profiles
@@ -196,7 +196,7 @@ If using development builds, you can:
 - **Owner**: psparago
 - **Organization**: Personal account
 - **Projects**:
-  - reflections-cole (Reflections / Reflections)
+  - reflections-explorer (Reflections / Reflections)
   - reflections-companion (Reflections Companion / Reflections Companion)
 
 ## 📚 Additional Resources

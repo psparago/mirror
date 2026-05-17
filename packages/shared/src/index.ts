@@ -1,6 +1,6 @@
 /**
  * @projectmirror/shared
- * Shared code between Cole and Companion apps
+ * Shared code between Explorer and Companion apps
  */
 
 // API endpoints

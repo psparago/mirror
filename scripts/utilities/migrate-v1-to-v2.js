@@ -4,7 +4,7 @@
  * (reflections-1200b, reflections-1200b-storage).
  *
  * - Firestore: signals → reflections, reflection_responses → responses
- * - S3: cole/to/, cole/from/ → COLE-01052010/to/, COLE-01052010/from/
+ * - S3: explorer/to/, explorer/from/ → EXPLORER-01052010/to/, EXPLORER-01052010/from/
  *
  * Idempotent. Excludes orphan responses and deprecated fields (audio_url, deep_dive_audio_url).
  *
@@ -24,8 +24,8 @@ const admin = require('firebase-admin');
 // --- CONFIG ---
 const V1_S3_BUCKET = 'mirror-uploads-sparago-2026';
 const V2_S3_BUCKET = 'reflections-1200b-storage';
-const V1_S3_PREFIX = 'cole';
-const V2_EXPLORER_ID = 'COLE-01052010';
+const V1_S3_PREFIX = 'explorer';
+const V2_EXPLORER_ID = 'EXPLORER-01052010';
 
 const V1_REFLECTIONS_COLLECTION = 'reflections';
 const V1_RESPONSES_COLLECTION = 'responses';
@@ -81,10 +81,10 @@ const s3 = new AWS.S3({
   region: 'us-east-1',
 });
 
-function isColeDoc(data) {
+function isExplorerDoc(data) {
   const eid = (data?.explorerId || '').toString();
   if (/^peter$/i.test(eid)) return false;
-  return eid === 'cole' || eid === 'Cole' || eid === '';
+  return /^explorer$/i.test(eid) || eid === '';
 }
 
 function isPeterDoc(data) {
@@ -103,7 +103,7 @@ async function getAllV1Reflections() {
   const list = [];
   snap.docs.forEach((doc) => {
     const d = doc.data();
-    if (!isColeDoc(d)) return;
+    if (!isExplorerDoc(d)) return;
     list.push({
       id: doc.id,
       data: d,
@@ -119,7 +119,7 @@ async function getAllV1Responses() {
   snap.docs.forEach((doc) => {
     const d = doc.data();
     if (isPeterDoc(d)) return;
-    if (!isColeDoc(d)) return;
+    if (!isExplorerDoc(d)) return;
     list.push({
       id: doc.id,
       data: d,
@@ -164,7 +164,7 @@ async function run() {
   const responsesToMigrate = responses.filter((r) => validReflectionIds.has(r.id));
   const orphanCount = orphansMissing.length + orphansDeleted.length;
 
-  console.log(`📋 V1 Firestore: ${reflections.length} reflections (cole), ${responses.length} responses (cole; peter excluded)`);
+  console.log(`📋 V1 Firestore: ${reflections.length} reflections (explorer), ${responses.length} responses (explorer; peter excluded)`);
   console.log(`   Reflections to migrate: ${reflectionsToMigrate.length}`);
   console.log(`   Responses to migrate: ${responsesToMigrate.length}`);
   console.log(`   Orphans excluded: ${orphanCount} (${orphansMissing.length} reflection missing, ${orphansDeleted.length} reflection deleted)`);
@@ -177,14 +177,14 @@ async function run() {
     responsesToMigrate.map((r) => (r.data?.response_event_id || r.id).toString())
   );
   const fromKeys = fromKeysRaw.filter((key) => {
-    const parts = key.split('/'); // cole/from/{eventId}/filename
+    const parts = key.split('/'); // explorer/from/{eventId}/filename
     if (parts.length < 4) return false;
     const eventId = parts[2];
     return validFromEventIds.has(eventId);
   });
   const fromKeysExcluded = fromKeysRaw.length - fromKeys.length;
   const s3KeysToCopy = [...toKeys, ...fromKeys];
-  console.log(`📋 V1 S3: ${toKeys.length} objects in cole/to/, ${fromKeys.length} in cole/from/ (${fromKeysExcluded} orphan selfies excluded)`);
+  console.log(`📋 V1 S3: ${toKeys.length} objects in explorer/to/, ${fromKeys.length} in explorer/from/ (${fromKeysExcluded} orphan selfies excluded)`);
 
   if (DRY_RUN) {
     // Dry run: check V2 for existence to report accurate would-migrate vs would-skip

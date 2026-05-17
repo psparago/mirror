@@ -26,7 +26,7 @@ if [ ! -z "$1" ]; then
     export EXPLORER_ID="$1"
     echo "👤 Processing Explorer: $EXPLORER_ID"
 else
-    echo "👤 Processing Default Explorer: ${EXPLORER_ID:-cole}"
+    echo "👤 Processing Default Explorer: ${EXPLORER_ID:-explorer}"
 fi
 
 # Navigate to the functions directory where go.mod lives

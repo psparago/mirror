@@ -19,7 +19,7 @@ const (
 	pendingNotificationsCollection = "pending_notifications"
 
 	triggerCompanionUpload = "companion_upload"
-	triggerColeLike        = "cole_like"
+	triggerExplorerLike    = "explorer_like"
 	pendingStatus          = "pending"
 )
 
@@ -234,7 +234,7 @@ func OnReflectionUpdated(ctx context.Context, e event.Event) error {
 
 	recipientID := senderID(after)
 	if recipientID == "" {
-		fmt.Printf("OnReflectionUpdated: skipping cole_like for %s; missing sender_id\n", id)
+		fmt.Printf("OnReflectionUpdated: skipping explorer_like for %s; missing sender_id\n", id)
 		return nil
 	}
 
@@ -248,11 +248,11 @@ func OnReflectionUpdated(ctx context.Context, e event.Event) error {
 		ExplorerID:               explorerID,
 		BroadcastToAllCompanions: false,
 		RecipientIDs:             []string{recipientID},
-		TriggerType:              triggerColeLike,
+		TriggerType:              triggerExplorerLike,
 		ReflectionID:             id,
 		SenderName:               senderName(after),
 		Status:                   pendingStatus,
 		CreatedAt:                firestore.ServerTimestamp,
 	}
-	return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s_%s", triggerColeLike, id, explorerID), notification)
+	return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s_%s", triggerExplorerLike, id, explorerID), notification)
 }

@@ -10,8 +10,8 @@ const SIZE_THRESHOLD_KB = 600; // Only shrink if bigger than this
 
 // The folders you identified
 const PREFIXES = [
-  'cole/to/',
-  'cole/from/',
+  'explorer/to/',
+  'explorer/from/',
   'peter/to/',
   'peter/from/'
 ];

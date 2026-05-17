@@ -19,6 +19,6 @@ func getExplorerName(explorerID string) string {
 	if explorerID == "" {
 		return "the explorer"
 	}
-	// Simple capitalization for now (e.g., "cole" -> "Cole")
+	// Simple capitalization for now (e.g., "explorer" -> "Explorer")
 	return strings.Title(explorerID)
 }

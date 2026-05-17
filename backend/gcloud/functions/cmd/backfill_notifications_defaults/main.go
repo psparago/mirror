@@ -147,9 +147,9 @@ func loadExplorerDevicesAndBackfillConfig(ctx context.Context, client *firestore
 			continue
 		}
 		_, err = configRef.Create(ctx, map[string]any{
-			"debounce_minutes":          15,
-			"min_hours_between_digests": 4,
-			"cole_like_delay_seconds":   60,
+			"debounce_minutes":            15,
+			"min_hours_between_digests":   4,
+			"explorer_like_delay_seconds": 60,
 		})
 		if status.Code(err) == codes.AlreadyExists {
 			s.systemConfigsExisting++

@@ -11,7 +11,7 @@ const TEMP_DIR = './temp_video_processing'; // Local scratch space
 
 // Only these folders (Videos are usually only in "to" folders for reflections)
 const PREFIXES = [
-  'cole/to/',
+  'explorer/to/',
   'peter/to/'
 ];
 

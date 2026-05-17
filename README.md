@@ -1,6 +1,6 @@
 # Project Mirror - Monorepo
 
-Angelshare Companion: A "Directed Social Media" app connecting Cole with his family.
+Angelshare Companion: A "Directed Social Media" app connecting the Explorer with family.
 
 ## Structure
 
@@ -70,16 +70,16 @@ import { API_ENDPOINTS, S3_CONFIG, uploadPhotoToS3 } from '@projectmirror/shared
 ### Workspace Commands
 
 From root:
-- `npm run cole` - Start Cole app
+- `npm run explorer` - Start Explorer app
 - `npm run companion` - Start Companion app
-- `npm run ios:cole` - Start Cole on iOS simulator
+- `npm run ios:explorer` - Start Explorer on iOS simulator
 - `npm run ios:companion` - Start Companion on iOS simulator
 
 ## Backend
 
 Go Cloud Functions are in `backend/gcloud/functions/`:
 - `GetSignedURL` - Generates presigned PUT URLs for S3 uploads (images, metadata, audio)
-- `ListMirrorEvents` - Lists event bundles in Cole's inbox and returns presigned GET URLs for:
+- `ListMirrorEvents` - Lists event bundles in the Explorer's inbox and returns presigned GET URLs for:
   - `image.jpg` - The photo
   - `metadata.json` - Event metadata (description, sender, timestamp, audio_url, content_type)
   - `audio.m4a` - Optional audio recording (if present)

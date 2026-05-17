@@ -15,7 +15,7 @@ export interface Relationship {
   userId: string;
   role: string;
   companionName: string; // "Me" (How you appear to them)
-  explorerName?: string; // The Explorer's display name (e.g. "Cole")
+  explorerName?: string; // The Explorer's display name (e.g. "Explorer")
   companionAvatarS3Key?: string; // S3 key for companion's profile photo
   onboarding_complete?: boolean;
   tutorial_viewed?: boolean;

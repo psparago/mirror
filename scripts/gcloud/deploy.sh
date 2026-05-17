@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification
 
 set -e  # Exit on error
 
@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env.deploy"
 SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/functions"
+NOTIFICATIONS_NODE_SOURCE_DIR="${PROJECT_ROOT}/backend/gcloud/notifications-node"
 
 # Colors for output
 RED='\033[0;31m'
@@ -31,6 +32,7 @@ if [ -z "$1" ]; then
   echo "  • get-event-bundle"
   echo "  • on-reflection-created"
   echo "  • on-reflection-updated"
+  echo "  • send-fast-lane-notification"
   exit 1
 fi
 
@@ -54,8 +56,9 @@ source "$ENV_FILE"
 
 # Common deployment parameters
 REGION="us-central1"
-FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-us-central1}"
+FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-nam5}"
 RUNTIME="go125"
+NODE_RUNTIME="nodejs20"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
 # Deploy based on function name
@@ -181,6 +184,25 @@ case "$FUNCTION_NAME" in
       --trigger-event-filters-path-pattern=document='reflections/{reflectionId}' \
       --quiet
     ;;
+
+  send-fast-lane-notification)
+    if [ ! -f "${NOTIFICATIONS_NODE_SOURCE_DIR}/package.json" ]; then
+      echo -e "${RED}Error: package.json not found in ${NOTIFICATIONS_NODE_SOURCE_DIR}${NC}"
+      exit 1
+    fi
+    echo -e "${YELLOW}Deploying send-fast-lane-notification...${NC}"
+    gcloud functions deploy send-fast-lane-notification \
+      --gen2 \
+      --runtime=${NODE_RUNTIME} \
+      --region=${REGION} \
+      --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+      --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+      --entry-point=sendFastLaneNotification \
+      --trigger-event-filters=type=google.cloud.firestore.document.v1.created \
+      --trigger-event-filters=database='(default)' \
+      --trigger-event-filters-path-pattern=document='pending_notifications/{notificationId}' \
+      --quiet
+    ;;
   
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
@@ -194,6 +216,7 @@ case "$FUNCTION_NAME" in
     echo "  • get-event-bundle"
     echo "  • on-reflection-created"
     echo "  • on-reflection-updated"
+    echo "  • send-fast-lane-notification"
     exit 1
     ;;
 esac

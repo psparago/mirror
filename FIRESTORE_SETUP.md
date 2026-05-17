@@ -34,7 +34,7 @@ Click **Publish** to save the rules.
 The app will automatically create the `reflections` collection when you send your first photo. Each document will have:
 - Document ID: `event_id` (timestamp)
 - Fields:
-  - `explorerId`: string (e.g., "cole" or "peter")
+  - `explorerId`: string (e.g., "explorer" or "peter")
   - `event_id`: string
   - `sender`: "Granddad"
   - `status`: "ready"

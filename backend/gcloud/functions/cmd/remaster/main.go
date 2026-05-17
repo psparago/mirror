@@ -20,7 +20,7 @@ import (
 
 var (
 	BucketName = "reflections-1200b-storage"
-	UserID     = getEnv("EXPLORER_ID", "cole")
+	UserID     = getEnv("EXPLORER_ID", "explorer")
 	Region     = "us-east-1"
 )
 

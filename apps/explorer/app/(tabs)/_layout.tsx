@@ -35,7 +35,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Cole's Inbox",
+          title: "Explorer's Inbox",
           headerShown: false,
         }}
       />

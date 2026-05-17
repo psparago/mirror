@@ -163,7 +163,7 @@ type EventMetadata struct {
 // Event represents a complete event bundle
 type Event struct {
 	EventID          string         `json:"event_id"`
-	ImageURL         string         `json:"image_url"` // Always a thumbnail for video events
+	ImageURL         string         `json:"image_url"`           // Always a thumbnail for video events
 	AudioURL         string         `json:"audio_url,omitempty"` // Optional audio file URL
 	VideoURL         string         `json:"video_url,omitempty"` // Optional video file URL
 	DeepDiveAudioURL string         `json:"deep_dive_audio_url,omitempty"`
@@ -205,7 +205,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. List objects in the "{explorerID}/to/" prefix (Cole's inbox)
+	// 5. List objects in the "{explorerID}/to/" prefix (Explorer's inbox)
 	// Don't use delimiter - we need to see all nested objects.
 	// Paginate: S3 returns at most 1000 keys per ListObjectsV2 call; without this,
 	// newer events disappear from the API while still present in the bucket.
@@ -233,7 +233,7 @@ func ListMirrorEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Extract event_id and filename from path like \"cole/to/{event_id}/image.jpg\"
+			// Extract event_id and filename from path like \"explorer/to/{event_id}/image.jpg\"
 			relativePath := key[len(folderPrefix):]
 			parts := strings.Split(relativePath, "/")
 
@@ -429,7 +429,7 @@ func DeleteMirrorEvent(w http.ResponseWriter, r *http.Request) {
 	// 5. Initialize S3 Client
 	s3Client := s3.NewFromConfig(cfg)
 
-	// 6. Determine path: "to" (companion -> cole), "from" (cole -> companion, selfie responses), or "staging" (temporary)
+	// 6. Determine path: "to" (companion -> explorer), "from" (explorer -> companion, selfie responses), or "staging" (temporary)
 	path := r.URL.Query().Get("path")
 	if path != "to" && path != "from" && path != "staging" {
 		path = "to" // Default to "to" for backward compatibility

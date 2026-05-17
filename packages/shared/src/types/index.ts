@@ -85,7 +85,7 @@ export interface ReflectionDocument {
   likedBy?: string[]; // UIDs that liked this Reflection.
 }
 
-export type PendingNotificationTriggerType = 'companion_upload' | 'cole_like';
+export type PendingNotificationTriggerType = 'companion_upload' | 'explorer_like';
 export type PendingNotificationStatus = 'pending';
 
 // Collection: system_config
@@ -93,7 +93,7 @@ export type PendingNotificationStatus = 'pending';
 export interface SystemConfigDocument {
   debounce_minutes: number;
   min_hours_between_digests: number;
-  cole_like_delay_seconds: number;
+  explorer_like_delay_seconds: number;
 }
 
 // Collection: pending_notifications
@@ -118,7 +118,7 @@ export type UserRole = 'owner' | 'admin' | 'contributor';
 export interface ExplorerConnection {
   explorer_id: string;
   role: UserRole;
-  nickname?: string; // e.g. "Cole" - What the companion calls this explorer locally
+  nickname?: string; // e.g. "Explorer" - What the companion calls this explorer locally
   joined_at: string; // ISO timestamp
 }
 
@@ -138,8 +138,8 @@ export interface UserProfile {
 // The Explorer (Device/Context) Document
 // Collection: explorers
 export interface Explorer {
-  explorer_id: string;   // Unique ID (e.g. "cole_mirror_01")
-  name: string;          // e.g. "Cole's Reflection" (System name)
+  explorer_id: string;   // Unique ID (e.g. "explorer_mirror_01")
+  name: string;          // e.g. "Explorer's Reflection" (System name)
   owner_id: string;      // The Super Admin (You)
   
   // Who can access this? Map for O(1) permission checks.

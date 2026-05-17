@@ -113,7 +113,7 @@ async function listAllFromImages(explorerIds) {
     prefixes = await discoverExplorerPrefixes();
   }
   if (prefixes.length === 0) {
-    prefixes = ['cole', 'peter'];
+    prefixes = ['explorer', 'peter'];
   }
   for (const explorerId of prefixes) {
     let token = null;
@@ -142,7 +142,7 @@ async function listAllImageOriginals(explorerIds) {
     prefixes = await discoverExplorerPrefixes();
   }
   if (prefixes.length === 0) {
-    prefixes = ['cole', 'peter'];
+    prefixes = ['explorer', 'peter'];
   }
   for (const explorerId of prefixes) {
     let token = null;
@@ -163,9 +163,9 @@ async function listAllImageOriginals(explorerIds) {
   return keys;
 }
 
-// Map explorer id (cole, COLE-01052010, etc.) to actual V2 S3 prefix
+// Map explorer id (explorer, EXPLORER-01052010, etc.) to actual V2 S3 prefix
 function resolveS3Prefix(explorerId, discoveredPrefixes) {
-  const eid = (explorerId || 'cole').toString();
+  const eid = (explorerId || 'explorer').toString();
   const exact = discoveredPrefixes.find((p) => p === eid);
   if (exact) return exact;
   const byPrefix = discoveredPrefixes.find((p) => p.toLowerCase().startsWith(eid.toLowerCase()));
@@ -195,8 +195,8 @@ async function run() {
     if (!rid) return;
     const s3Prefix = resolveS3Prefix(r.explorerId, s3Explorers);
     validS3Keys.add(`${s3Prefix}/from/${rid}/image.jpg`);
-    const eid = (r.explorerId || 'cole').toString().toLowerCase();
-    if (eid === 'cole') validS3Keys.add(`cole/from/${rid}/image.jpg`);
+    const eid = (r.explorerId || 'explorer').toString().toLowerCase();
+    if (eid === 'explorer') validS3Keys.add(`explorer/from/${rid}/image.jpg`);
     if (eid === 'peter') validS3Keys.add(`peter/from/${rid}/image.jpg`);
   });
   Object.values(reflections).forEach((r) => {
@@ -212,7 +212,7 @@ async function run() {
   );
   console.log(`📋 Reflections with audio_url/deep_dive_audio_url to strip: ${reflectionsToStripAudio.length}`);
 
-  const allExplorerIds = [...new Set([...explorerIds, ...s3Explorers, 'cole', 'peter'])]; // include legacy
+  const allExplorerIds = [...new Set([...explorerIds, ...s3Explorers, 'explorer', 'peter'])]; // include legacy
   const allFromImages = await listAllFromImages(allExplorerIds);
   const orphanedS3 = allFromImages.filter((k) => !validS3Keys.has(k));
   console.log(`📋 S3 from/ images: ${allFromImages.length} total, ${allFromImages.length - orphanedS3.length} valid, ${orphanedS3.length} orphan (will delete)`);
