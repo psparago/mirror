@@ -74,6 +74,10 @@ REGION="us-central1"
 FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-nam5}"
 RUNTIME="go125"
 NODE_RUNTIME="nodejs20"
+SLOW_LANE_TOPIC="aggregate-slow-lane-notifications"
+SLOW_LANE_SCHEDULER_JOB="aggregate-slow-lane-notifications"
+SLOW_LANE_SCHEDULE="*/15 * * * *"
+SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-${REGION}}"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
 # Function 1: get-s3-url
@@ -343,6 +347,47 @@ else
 fi
 echo ""
 
+# Function 12: aggregate-slow-lane-notifications
+echo -e "${YELLOW}Ensuring Pub/Sub topic ${SLOW_LANE_TOPIC} exists...${NC}"
+gcloud pubsub topics describe "${SLOW_LANE_TOPIC}" --quiet >/dev/null 2>&1 || \
+  gcloud pubsub topics create "${SLOW_LANE_TOPIC}" --quiet
+
+echo -e "${YELLOW}Deploying aggregate-slow-lane-notifications...${NC}"
+gcloud functions deploy aggregate-slow-lane-notifications \
+  --gen2 \
+  --runtime=${NODE_RUNTIME} \
+  --region=${REGION} \
+  --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+  --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+  --entry-point=aggregateSlowLaneNotifications \
+  --trigger-topic="${SLOW_LANE_TOPIC}" \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ aggregate-slow-lane-notifications deployed successfully${NC}"
+else
+  echo -e "${RED}✗ aggregate-slow-lane-notifications deployment failed${NC}"
+  exit 1
+fi
+
+echo -e "${YELLOW}Ensuring 15-minute scheduler job ${SLOW_LANE_SCHEDULER_JOB} exists...${NC}"
+if gcloud scheduler jobs describe "${SLOW_LANE_SCHEDULER_JOB}" --location="${SCHEDULER_LOCATION}" --quiet >/dev/null 2>&1; then
+  gcloud scheduler jobs update pubsub "${SLOW_LANE_SCHEDULER_JOB}" \
+    --location="${SCHEDULER_LOCATION}" \
+    --schedule="${SLOW_LANE_SCHEDULE}" \
+    --topic="${SLOW_LANE_TOPIC}" \
+    --message-body='{}' \
+    --quiet
+else
+  gcloud scheduler jobs create pubsub "${SLOW_LANE_SCHEDULER_JOB}" \
+    --location="${SCHEDULER_LOCATION}" \
+    --schedule="${SLOW_LANE_SCHEDULE}" \
+    --topic="${SLOW_LANE_TOPIC}" \
+    --message-body='{}' \
+    --quiet
+fi
+echo ""
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -363,4 +408,5 @@ fi
 echo "  • on-reflection-created"
 echo "  • on-reflection-updated"
 echo "  • send-fast-lane-notification"
+echo "  • aggregate-slow-lane-notifications"
 

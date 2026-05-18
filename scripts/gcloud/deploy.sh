@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification, aggregate-slow-lane-notifications
 
 set -e  # Exit on error
 
@@ -33,6 +33,7 @@ if [ -z "$1" ]; then
   echo "  • on-reflection-created"
   echo "  • on-reflection-updated"
   echo "  • send-fast-lane-notification"
+  echo "  • aggregate-slow-lane-notifications"
   exit 1
 fi
 
@@ -59,6 +60,10 @@ REGION="us-central1"
 FIRESTORE_TRIGGER_LOCATION="${FIRESTORE_TRIGGER_LOCATION:-nam5}"
 RUNTIME="go125"
 NODE_RUNTIME="nodejs20"
+SLOW_LANE_TOPIC="aggregate-slow-lane-notifications"
+SLOW_LANE_SCHEDULER_JOB="aggregate-slow-lane-notifications"
+SLOW_LANE_SCHEDULE="*/15 * * * *"
+SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-${REGION}}"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
 # Deploy based on function name
@@ -203,6 +208,44 @@ case "$FUNCTION_NAME" in
       --trigger-event-filters-path-pattern=document='pending_notifications/{notificationId}' \
       --quiet
     ;;
+
+  aggregate-slow-lane-notifications)
+    if [ ! -f "${NOTIFICATIONS_NODE_SOURCE_DIR}/package.json" ]; then
+      echo -e "${RED}Error: package.json not found in ${NOTIFICATIONS_NODE_SOURCE_DIR}${NC}"
+      exit 1
+    fi
+    echo -e "${YELLOW}Ensuring Pub/Sub topic ${SLOW_LANE_TOPIC} exists...${NC}"
+    gcloud pubsub topics describe "${SLOW_LANE_TOPIC}" --quiet >/dev/null 2>&1 || \
+      gcloud pubsub topics create "${SLOW_LANE_TOPIC}" --quiet
+
+    echo -e "${YELLOW}Deploying aggregate-slow-lane-notifications...${NC}"
+    gcloud functions deploy aggregate-slow-lane-notifications \
+      --gen2 \
+      --runtime=${NODE_RUNTIME} \
+      --region=${REGION} \
+      --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+      --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+      --entry-point=aggregateSlowLaneNotifications \
+      --trigger-topic="${SLOW_LANE_TOPIC}" \
+      --quiet
+
+    echo -e "${YELLOW}Ensuring 15-minute scheduler job ${SLOW_LANE_SCHEDULER_JOB} exists...${NC}"
+    if gcloud scheduler jobs describe "${SLOW_LANE_SCHEDULER_JOB}" --location="${SCHEDULER_LOCATION}" --quiet >/dev/null 2>&1; then
+      gcloud scheduler jobs update pubsub "${SLOW_LANE_SCHEDULER_JOB}" \
+        --location="${SCHEDULER_LOCATION}" \
+        --schedule="${SLOW_LANE_SCHEDULE}" \
+        --topic="${SLOW_LANE_TOPIC}" \
+        --message-body='{}' \
+        --quiet
+    else
+      gcloud scheduler jobs create pubsub "${SLOW_LANE_SCHEDULER_JOB}" \
+        --location="${SCHEDULER_LOCATION}" \
+        --schedule="${SLOW_LANE_SCHEDULE}" \
+        --topic="${SLOW_LANE_TOPIC}" \
+        --message-body='{}' \
+        --quiet
+    fi
+    ;;
   
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
@@ -217,6 +260,7 @@ case "$FUNCTION_NAME" in
     echo "  • on-reflection-created"
     echo "  • on-reflection-updated"
     echo "  • send-fast-lane-notification"
+    echo "  • aggregate-slow-lane-notifications"
     exit 1
     ;;
 esac
