@@ -77,6 +77,7 @@ NODE_RUNTIME="nodejs20"
 SLOW_LANE_TOPIC="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULER_JOB="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULE="*/15 * * * *"
+PUBSUB_TRIGGER_LOCATION="${PUBSUB_TRIGGER_LOCATION:-${REGION}}"
 SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-${REGION}}"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
 
@@ -357,7 +358,7 @@ gcloud functions deploy aggregate-slow-lane-notifications \
   --gen2 \
   --runtime=${NODE_RUNTIME} \
   --region=${REGION} \
-  --trigger-location=${FIRESTORE_TRIGGER_LOCATION} \
+  --trigger-location=${PUBSUB_TRIGGER_LOCATION} \
   --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
   --entry-point=aggregateSlowLaneNotifications \
   --trigger-topic="${SLOW_LANE_TOPIC}" \
