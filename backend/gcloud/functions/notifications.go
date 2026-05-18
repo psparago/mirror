@@ -29,6 +29,7 @@ type pendingNotification struct {
 	RecipientIDs             []string `firestore:"recipientIds"`
 	TriggerType              string   `firestore:"triggerType"`
 	ReflectionID             string   `firestore:"reflectionId"`
+	SenderID                 string   `firestore:"senderId"`
 	SenderName               string   `firestore:"senderName"`
 	Status                   string   `firestore:"status"`
 	CreatedAt                any      `firestore:"createdAt"`
@@ -159,7 +160,18 @@ func containsString(values []string, target string) bool {
 }
 
 func createPendingNotification(ctx context.Context, client *firestore.Client, docID string, notification pendingNotification) error {
-	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, notification)
+	data := map[string]any{
+		"explorerId":               notification.ExplorerID,
+		"broadcastToAllCompanions": notification.BroadcastToAllCompanions,
+		"recipientIds":             notification.RecipientIDs,
+		"triggerType":              notification.TriggerType,
+		"reflectionId":             notification.ReflectionID,
+		"senderId":                 notification.SenderID,
+		"senderName":               notification.SenderName,
+		"status":                   notification.Status,
+		"createdAt":                firestore.ServerTimestamp,
+	}
+	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, data)
 	if status.Code(err) == codes.AlreadyExists {
 		fmt.Printf("pending notification %s already exists; treating retry as success\n", docID)
 		return nil
@@ -200,6 +212,7 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 		RecipientIDs:             []string{},
 		TriggerType:              triggerCompanionUpload,
 		ReflectionID:             id,
+		SenderID:                 senderID(doc),
 		SenderName:               senderName(doc),
 		Status:                   pendingStatus,
 		CreatedAt:                firestore.ServerTimestamp,

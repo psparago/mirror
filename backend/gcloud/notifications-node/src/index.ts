@@ -2,8 +2,8 @@ import {cloudEvent} from '@google-cloud/functions-framework';
 import {getApps, initializeApp} from 'firebase-admin/app';
 import {FieldValue, Timestamp, getFirestore} from 'firebase-admin/firestore';
 import type {DocumentData, QueryDocumentSnapshot} from 'firebase-admin/firestore';
-import {getMessaging} from 'firebase-admin/messaging';
 
+const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const PENDING_NOTIFICATIONS_COLLECTION = 'pending_notifications';
 const RELATIONSHIPS_COLLECTION = 'relationships';
 const SYSTEM_CONFIG_COLLECTION = 'system_config';
@@ -37,6 +37,7 @@ type FirestoreCreateEventData = {
 
 type FastLaneCloudEvent<T> = {
   data?: T;
+  subject?: string;
 };
 
 type PendingNotification = {
@@ -44,6 +45,7 @@ type PendingNotification = {
   recipientIds: string[];
   triggerType: string;
   reflectionId: string;
+  senderId: string;
   senderName: string;
   status: string;
 };
@@ -51,6 +53,7 @@ type PendingNotification = {
 type SlowLaneNotification = {
   doc: QueryDocumentSnapshot<DocumentData>;
   explorerId: string;
+  senderId: string;
   senderName: string;
   createdAtMillis: number;
   processedRecipients: Record<string, ProcessedRecipient>;
@@ -68,10 +71,12 @@ type ActiveCompanion = {
 
 type ProcessedRecipientStatus =
   | 'sent'
+  | 'skipped_sender'
   | 'skipped_joined_late'
   | 'skipped_cooldown'
   | 'skipped_push_disabled'
-  | 'missing_token';
+  | 'missing_token'
+  | 'invalid_token';
 
 type ProcessedRecipient = {
   status: ProcessedRecipientStatus;
@@ -84,7 +89,6 @@ if (getApps().length === 0) {
 }
 
 const db = getFirestore();
-const messaging = getMessaging();
 
 function stringField(fields: Record<string, FirestoreValue>, key: string): string {
   return fields[key]?.stringValue?.trim() ?? '';
@@ -109,6 +113,31 @@ function documentPathFromName(name: string): string {
   return name.slice(documentsIndex + documentsPrefix.length);
 }
 
+function documentPathFromSubject(subject: string): string {
+  const documentsPrefix = 'documents/';
+  const documentsIndex = subject.indexOf(documentsPrefix);
+
+  if (documentsIndex === -1) {
+    return '';
+  }
+
+  return subject.slice(documentsIndex + documentsPrefix.length);
+}
+
+function pendingNotificationFromData(data: DocumentData): PendingNotification {
+  return {
+    explorerId: typeof data.explorerId === 'string' ? data.explorerId.trim() : '',
+    recipientIds: Array.isArray(data.recipientIds)
+      ? data.recipientIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [],
+    triggerType: typeof data.triggerType === 'string' ? data.triggerType.trim() : '',
+    reflectionId: typeof data.reflectionId === 'string' ? data.reflectionId.trim() : '',
+    senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
+    senderName: typeof data.senderName === 'string' && data.senderName.trim() ? data.senderName.trim() : 'Someone',
+    status: typeof data.status === 'string' ? data.status.trim() : '',
+  };
+}
+
 function pendingNotificationFromDocument(document: FirestoreDocument): PendingNotification {
   const fields = document.fields ?? {};
 
@@ -117,6 +146,7 @@ function pendingNotificationFromDocument(document: FirestoreDocument): PendingNo
     recipientIds: stringArrayField(fields, 'recipientIds'),
     triggerType: stringField(fields, 'triggerType'),
     reflectionId: stringField(fields, 'reflectionId'),
+    senderId: stringField(fields, 'senderId'),
     senderName: stringField(fields, 'senderName') || 'Someone',
     status: stringField(fields, 'status'),
   };
@@ -150,6 +180,74 @@ function processedRecipientMap(value: unknown): Record<string, ProcessedRecipien
   }
 
   return value as Record<string, ProcessedRecipient>;
+}
+
+class ExpoPushError extends Error {
+  constructor(
+    message: string,
+    readonly expoError?: string
+  ) {
+    super(message);
+    this.name = 'ExpoPushError';
+  }
+}
+
+function isExpoPushToken(token: string): boolean {
+  return /^Expo(nent)?PushToken\[[^\]]+\]$/.test(token);
+}
+
+function isInvalidExpoPushTokenError(error: unknown): boolean {
+  return error instanceof ExpoPushError && error.expoError === 'DeviceNotRegistered';
+}
+
+async function sendExpoPushNotification(
+  pushToken: string,
+  body: string,
+  data: Record<string, string>
+): Promise<string> {
+  if (!isExpoPushToken(pushToken)) {
+    throw new ExpoPushError('Stored push token is not an Expo push token', 'DeviceNotRegistered');
+  }
+
+  const response = await fetch(EXPO_PUSH_URL, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Accept-Encoding': 'gzip, deflate',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      to: pushToken,
+      sound: 'default',
+      body,
+      data,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new ExpoPushError(`Expo push request failed with HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    data?: {
+      status?: string;
+      id?: string;
+      message?: string;
+      details?: {
+        error?: string;
+      };
+    };
+  };
+  const ticket = payload.data;
+
+  if (ticket?.status === 'ok') {
+    return ticket.id ?? 'expo-ticket-ok';
+  }
+
+  throw new ExpoPushError(
+    ticket?.message ?? 'Expo push service rejected the notification',
+    ticket?.details?.error
+  );
 }
 
 function positiveNumber(value: unknown, fallback: number): number {
@@ -273,19 +371,33 @@ export async function sendFastLaneNotification(
 ): Promise<void> {
   const document = event.data?.value;
 
-  if (!document?.name) {
-    console.warn('sendFastLaneNotification: created event missing document name');
+  const notificationPath =
+    (document?.name ? documentPathFromName(document.name) : '') ||
+    (event.subject ? documentPathFromSubject(event.subject) : '');
+
+  if (!notificationPath) {
+    console.warn('sendFastLaneNotification: created event missing document path', {
+      subject: event.subject,
+      hasDocumentName: Boolean(document?.name),
+    });
     return;
   }
 
-  const notificationPath = documentPathFromName(document.name);
   if (!notificationPath.startsWith(`${PENDING_NOTIFICATIONS_COLLECTION}/`)) {
     console.warn(`sendFastLaneNotification: unexpected document path ${notificationPath}`);
     return;
   }
 
   const notificationRef = db.doc(notificationPath);
-  const notification = pendingNotificationFromDocument(document);
+  const notificationSnapshot = await notificationRef.get();
+  if (!notificationSnapshot.exists) {
+    console.warn(`sendFastLaneNotification: ${notificationPath} no longer exists`);
+    return;
+  }
+
+  const notification = document
+    ? pendingNotificationFromDocument(document)
+    : pendingNotificationFromData(notificationSnapshot.data() ?? {});
 
   if (notification.status !== PENDING_STATUS || notification.triggerType !== EXPLORER_LIKE_TRIGGER) {
     return;
@@ -311,42 +423,42 @@ export async function sendFastLaneNotification(
     return;
   }
 
-  const body = `❤️ ${notification.senderName} loved your Reflection!`;
-  const messageId = await messaging.send({
-    token: pushToken,
-    notification: {
-      body,
-    },
-    data: {
-      reflectionId: notification.reflectionId,
-    },
-    android: {
-      priority: 'high',
-      notification: {
-        body,
-      },
-    },
-    apns: {
-      headers: {
-        'apns-priority': '10',
-      },
-      payload: {
-        aps: {
-          alert: {
-            body,
-          },
-          sound: 'default',
-        },
-      },
-    },
-  });
+  try {
+    const explorerSnapshot = await db.collection(USERS_COLLECTION).doc(notification.explorerId).get();
+    const explorerData = explorerSnapshot.data() ?? {};
+    const explorerName: string =
+      (typeof explorerData.displayName === 'string' && explorerData.displayName.trim()) ||
+      (typeof explorerData.display_name === 'string' && explorerData.display_name.trim()) ||
+      (typeof explorerData.name === 'string' && explorerData.name.trim()) ||
+      'Explorer';
 
-  await notificationRef.update({
-    status: 'sent',
-    processedAt: FieldValue.serverTimestamp(),
-  });
+    const body = `❤️ ${explorerName} loved your Reflection!`;
+    const messageId = await sendExpoPushNotification(pushToken, body, {
+        reflectionId: notification.reflectionId,
+    });
 
-  console.log(`sendFastLaneNotification: sent ${notificationPath} as ${messageId}`);
+    await notificationRef.update({
+      status: 'sent',
+      processedAt: FieldValue.serverTimestamp(),
+    });
+
+    console.log(`sendFastLaneNotification: sent ${notificationPath} as ${messageId}`);
+  } catch (error) {
+    if (!isInvalidExpoPushTokenError(error)) {
+      throw error;
+    }
+
+    await Promise.all([
+      notificationRef.update({
+        status: 'invalid_token',
+        processedAt: FieldValue.serverTimestamp(),
+      }),
+      userSnapshot.ref.update({
+        pushToken: FieldValue.delete(),
+      }),
+    ]);
+    console.warn(`sendFastLaneNotification: invalid Expo push token for ${recipientId}`);
+  }
 }
 
 export async function aggregateSlowLaneNotifications(): Promise<void> {
@@ -375,6 +487,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
     const notification: SlowLaneNotification = {
       doc,
       explorerId,
+      senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
       senderName:
         typeof data.senderName === 'string' && data.senderName.trim()
           ? data.senderName.trim()
@@ -437,6 +550,11 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
           continue;
         }
 
+        if (notification.senderId && companionId === notification.senderId) {
+          markProcessed(notification, companionId, recipientState('skipped_sender'));
+          continue;
+        }
+
         if (
           companion.relationshipCreatedAtMillis !== null &&
           notification.createdAtMillis < companion.relationshipCreatedAtMillis
@@ -481,34 +599,9 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
 
       try {
         const body = slowLaneBody(uniqueSenderNames(eligibleNotifications));
-        const messageId = await messaging.send({
-          token: pushToken,
-          notification: {
-            body,
-          },
-          data: {
+        const messageId = await sendExpoPushNotification(pushToken, body, {
             notificationType: 'companion_upload_digest',
             explorerId,
-          },
-          android: {
-            priority: 'high',
-            notification: {
-              body,
-            },
-          },
-          apns: {
-            headers: {
-              'apns-priority': '10',
-            },
-            payload: {
-              aps: {
-                alert: {
-                  body,
-                },
-                sound: 'default',
-              },
-            },
-          },
         });
 
         await userRef.update({
@@ -521,6 +614,19 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
           `aggregateSlowLaneNotifications: sent digest for explorer ${explorerId} to ${companionId} as ${messageId}`
         );
       } catch (error) {
+        if (isInvalidExpoPushTokenError(error)) {
+          await userRef.update({
+            pushToken: FieldValue.delete(),
+          });
+          for (const notification of eligibleNotifications) {
+            markProcessed(notification, companionId, recipientState('invalid_token'));
+          }
+          console.warn(
+            `aggregateSlowLaneNotifications: invalid Expo push token for explorer ${explorerId} recipient ${companionId}`
+          );
+          continue;
+        }
+
         console.error(
           `aggregateSlowLaneNotifications: failed sending digest for explorer ${explorerId} to ${companionId}`,
           error
