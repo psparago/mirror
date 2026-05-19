@@ -186,12 +186,27 @@ type SentTimelineScreenProps = {
   onEditReflection?: (event: Event) => void;
   /** Open ReplayModal for a reflection tapped from a push notification. */
   deepLinkReflectionId?: string | null;
+  /** Explorer the deep link targets; timeline waits until context matches. */
+  deepLinkExplorerId?: string | null;
+  /** Bumped when a slow-lane digest deep link lands on this timeline. */
+  timelineRefreshNonce?: number;
   onDeepLinkHandled?: () => void;
 };
+
+function timestampToISO(ts: any): string {
+  if (!ts) return new Date().toISOString();
+  if (ts.toDate) return ts.toDate().toISOString();
+  if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
+  if (typeof ts === 'number') return new Date(ts).toISOString();
+  if (typeof ts === 'string') return ts;
+  return new Date(ts).toISOString();
+}
 
 export default function SentTimelineScreen({
   onEditReflection,
   deepLinkReflectionId,
+  deepLinkExplorerId,
+  timelineRefreshNonce = 0,
   onDeepLinkHandled,
 }: SentTimelineScreenProps) {
   const [reflections, setReflections] = useState<SentReflection[]>([]);
@@ -806,6 +821,92 @@ export default function SentTimelineScreen({
     }
   }, [currentExplorerId, responseEventIdMap]);
 
+  const resolveEventForReplayById = useCallback(
+    async (
+      reflectionId: string,
+      explorerIdForFetch?: string,
+      options?: { updateCache?: boolean }
+    ): Promise<Event | null> => {
+      const explorerId = explorerIdForFetch ?? currentExplorerId;
+      if (!explorerId) return null;
+      const updateCache = options?.updateCache !== false;
+
+      const item = reflections.find((reflection) => reflection.event_id === reflectionId);
+
+      // Captions and sender live on Firestore signal docs; LIST_MIRROR_EVENTS is media URLs only.
+      let rowMeta = item?.metadata as EventMetadata | undefined;
+      try {
+        const snap = await getDoc(doc(db, ExplorerConfig.collections.reflections, reflectionId));
+        if (snap.exists()) {
+          const data = snap.data();
+          const firestoreMeta = coerceEmbeddedMetadata(data?.metadata, reflectionId);
+          if (firestoreMeta) {
+            rowMeta = rowMeta ? ({ ...rowMeta, ...firestoreMeta } as EventMetadata) : firestoreMeta;
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to load Firestore metadata for replay deep link:', error);
+      }
+
+      let fullEvent = eventObjectsMap.get(reflectionId);
+      try {
+        const eventsResponse = await fetch(
+          `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${explorerId}`
+        );
+        if (eventsResponse.ok) {
+          const eventsData = await eventsResponse.json().catch(() => null);
+          const events =
+            isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+          const matchingEvent = events
+            .filter(Boolean)
+            .find((e) => (e as Event)?.event_id === reflectionId) as Event | undefined;
+          if (matchingEvent) {
+            fullEvent = matchingEvent;
+            if (updateCache && !eventObjectsMap.has(reflectionId)) {
+              setEventObjectsMap((prev) => new Map(prev).set(reflectionId, matchingEvent));
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to load mirror events for replay deep link:', error);
+      }
+
+      const listMeta = fullEvent?.metadata as EventMetadata | undefined;
+      const metadata =
+        rowMeta && listMeta
+          ? ({ ...rowMeta, ...listMeta } as EventMetadata)
+          : rowMeta ?? listMeta;
+
+      const imageUrl =
+        asOptionalString(fullEvent?.image_url) ??
+        asOptionalString(item?.reflectionImageUrl) ??
+        '';
+
+      if (!imageUrl && !fullEvent?.video_url) {
+        return null;
+      }
+
+      return {
+        event_id: reflectionId,
+        image_url: imageUrl,
+        audio_url: fullEvent?.audio_url,
+        video_url: fullEvent?.video_url,
+        deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
+        metadata: metadata || {
+          description: item?.description || 'Reflection',
+          sender: item ? reflectionSenderLabel(item) || 'Companion' : 'Companion',
+          timestamp: timestampToISO(item?.sentTimestamp || item?.timestamp),
+          event_id: reflectionId,
+          short_caption: item?.description || 'Reflection',
+        },
+      };
+    },
+    [currentExplorerId, eventObjectsMap, reflections]
+  );
+
+  const resolveEventForReplayByIdRef = useRef(resolveEventForReplayById);
+  resolveEventForReplayByIdRef.current = resolveEventForReplayById;
+
   const resolveEventForEdit = useCallback(
     async (item: SentReflection): Promise<Event | null> => {
       if (!currentExplorerId) return null;
@@ -868,95 +969,64 @@ export default function SentTimelineScreen({
   );
 
   const deepLinkHandledRef = useRef<string | null>(null);
+  const deepLinkLoopIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!deepLinkReflectionId || !currentExplorerId || loading || explorerLoading) return;
+    if (!timelineRefreshNonce) return;
+    setRefreshTrigger((value) => value + 1);
+  }, [timelineRefreshNonce]);
+
+  useEffect(() => {
+    if (!deepLinkReflectionId) return;
     if (deepLinkHandledRef.current === deepLinkReflectionId) return;
+    if (deepLinkLoopIdRef.current === deepLinkReflectionId) return;
 
     let cancelled = false;
     const reflectionId = deepLinkReflectionId;
-    deepLinkHandledRef.current = reflectionId;
-
-    const timestampToISO = (ts: any): string => {
-      if (!ts) return new Date().toISOString();
-      if (ts.toDate) return ts.toDate().toISOString();
-      if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
-      if (typeof ts === 'number') return new Date(ts).toISOString();
-      if (typeof ts === 'string') return ts;
-      return new Date(ts).toISOString();
-    };
+    deepLinkLoopIdRef.current = reflectionId;
 
     (async () => {
-      try {
-        const item = reflections.find((reflection) => reflection.event_id === reflectionId);
-        let fullEvent = eventObjectsMap.get(reflectionId);
-
-        if (!fullEvent) {
-          const eventsResponse = await fetch(
-            `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`
-          );
-          if (eventsResponse.ok) {
-            const eventsData = await eventsResponse.json().catch(() => null);
-            const events =
-              isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
-            const matchingEvent = events
-              .filter(Boolean)
-              .find((e) => (e as Event)?.event_id === reflectionId) as Event | undefined;
-            if (matchingEvent) {
-              fullEvent = matchingEvent;
-              if (!cancelled) {
-                setEventObjectsMap((prev) => new Map(prev).set(reflectionId, matchingEvent));
-              }
-            }
-          }
+      for (let attempt = 1; attempt <= 24 && !cancelled; attempt++) {
+        const explorerId = deepLinkExplorerId ?? currentExplorerId;
+        if (!explorerId || explorerLoading) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          continue;
         }
 
+        if (attempt === 1 || attempt % 5 === 0) {
+          console.log('[DeepLink] timeline attempt', attempt, reflectionId, explorerId);
+        }
+        const eventForReplay = await resolveEventForReplayByIdRef.current(
+          reflectionId,
+          explorerId,
+          { updateCache: false }
+        );
         if (cancelled) return;
-
-        const metadata =
-          (item?.metadata as EventMetadata | undefined) ??
-          (fullEvent?.metadata as EventMetadata | undefined);
-
-        const eventForReplay: Event = {
-          event_id: reflectionId,
-          image_url:
-            asOptionalString(fullEvent?.image_url) ??
-            asOptionalString(item?.reflectionImageUrl) ??
-            '',
-          audio_url: fullEvent?.audio_url,
-          video_url: fullEvent?.video_url,
-          deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
-          metadata: metadata || {
-            description: item?.description || 'Reflection',
-            sender: item ? reflectionSenderLabel(item) || 'Companion' : 'Companion',
-            timestamp: timestampToISO(item?.sentTimestamp || item?.timestamp),
-            event_id: reflectionId,
-            short_caption: item?.description || 'Reflection',
-          },
-        };
-
-        setSelectedReflection(eventForReplay);
-      } catch (error) {
-        console.warn('Failed to open reflection from notification deep link:', error);
-      } finally {
-        if (!cancelled) {
-          onDeepLinkHandled?.();
+        if (eventForReplay) {
+          console.log('[DeepLink] timeline opening ReplayModal');
+          deepLinkHandledRef.current = reflectionId;
+          deepLinkLoopIdRef.current = null;
+          setSelectedReflection(eventForReplay);
+          return;
         }
+
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+
+      if (!cancelled) {
+        console.warn('[DeepLink] timeline gave up opening reflection', reflectionId);
+        deepLinkLoopIdRef.current = null;
+        onDeepLinkHandled?.();
       }
     })();
 
     return () => {
       cancelled = true;
+      if (deepLinkLoopIdRef.current === reflectionId) {
+        deepLinkLoopIdRef.current = null;
+      }
     };
-  }, [
-    currentExplorerId,
-    deepLinkReflectionId,
-    eventObjectsMap,
-    explorerLoading,
-    loading,
-    onDeepLinkHandled,
-    reflections,
-  ]);
+  }, [currentExplorerId, deepLinkExplorerId, deepLinkReflectionId, explorerLoading]);
 
   useEffect(() => {
     if (!deepLinkReflectionId) {
@@ -1508,7 +1578,14 @@ export default function SentTimelineScreen({
         explorerName={explorerName}
         companions={companions}
         onToggleLike={handleReplayToggleLike}
-        onClose={() => setSelectedReflection(null)}
+        onClose={() => {
+          const openedViaDeepLink = deepLinkHandledRef.current !== null;
+          setSelectedReflection(null);
+          if (openedViaDeepLink) {
+            deepLinkHandledRef.current = null;
+            onDeepLinkHandled?.();
+          }
+        }}
       />
 
       <Modal

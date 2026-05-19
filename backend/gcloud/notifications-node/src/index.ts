@@ -13,7 +13,10 @@ const PENDING_STATUS = 'pending';
 const COMPANION_UPLOAD_TRIGGER = 'companion_upload';
 const EXPLORER_LIKE_TRIGGER = 'explorer_like';
 const DEFAULT_DEBOUNCE_MINUTES = 15;
-const DEFAULT_MIN_HOURS_BETWEEN_DIGESTS = 4;
+const DEFAULT_MIN_HOURS_BETWEEN_DIGESTS = 2;
+const DEFAULT_UPLOAD_DIGEST_MODE = 'batched';
+const DEFAULT_UPLOAD_DIGEST_HOURS = 2;
+const ALLOWED_UPLOAD_DIGEST_HOURS = new Set([1, 2, 4, 6, 8, 12, 24]);
 const LAST_UPLOAD_DIGEST_AT_FIELD = 'lastUploadDigestSentAt';
 
 type FirestoreValue = {
@@ -54,6 +57,7 @@ type PendingNotification = {
 type SlowLaneNotification = {
   doc: QueryDocumentSnapshot<DocumentData>;
   explorerId: string;
+  reflectionId: string;
   senderId: string;
   senderName: string;
   createdAtMillis: number;
@@ -76,6 +80,7 @@ type ProcessedRecipientStatus =
   | 'skipped_joined_late'
   | 'skipped_cooldown'
   | 'skipped_push_disabled'
+  | 'skipped_digest_disabled'
   | 'missing_token'
   | 'invalid_token';
 
@@ -280,6 +285,77 @@ function slowLaneBody(senderNames: string[]): string {
   return `${senderNames[0]}, ${senderNames[1]}, and ${senderNames.length - 2} others posted new Reflections.`;
 }
 
+function slowLanePushData(
+  explorerId: string,
+  eligibleNotifications: SlowLaneNotification[]
+): Record<string, string> {
+  const data: Record<string, string> = {
+    notificationType: 'companion_upload_digest',
+    explorerId,
+  };
+
+  const senderNames = uniqueSenderNames(eligibleNotifications);
+  if (senderNames.length !== 1) {
+    return data;
+  }
+
+  const newest = [...eligibleNotifications].sort(
+    (left, right) => right.createdAtMillis - left.createdAtMillis
+  )[0];
+  const reflectionId = newest?.reflectionId?.trim() ?? '';
+  if (reflectionId) {
+    data.reflectionId = reflectionId;
+  }
+
+  return data;
+}
+
+type UploadDigestMode = 'off' | 'soon' | 'batched';
+
+type UploadDigestPrefs = {
+  skipDigest: boolean;
+  cooldownMillis: number;
+};
+
+function normalizeUploadDigestMode(value: unknown): UploadDigestMode {
+  if (value === 'off' || value === 'soon' || value === 'batched') {
+    return value;
+  }
+  return DEFAULT_UPLOAD_DIGEST_MODE;
+}
+
+function normalizeUploadDigestHours(value: unknown, fallbackHours: number): number {
+  const numeric =
+    typeof value === 'number' && Number.isFinite(value)
+      ? Math.round(value)
+      : typeof value === 'string' && value.trim()
+        ? Number.parseInt(value.trim(), 10)
+        : NaN;
+
+  if (ALLOWED_UPLOAD_DIGEST_HOURS.has(numeric)) {
+    return numeric;
+  }
+
+  return ALLOWED_UPLOAD_DIGEST_HOURS.has(fallbackHours)
+    ? fallbackHours
+    : DEFAULT_UPLOAD_DIGEST_HOURS;
+}
+
+function uploadDigestPrefs(userData: DocumentData, systemFallbackHours: number): UploadDigestPrefs {
+  const mode = normalizeUploadDigestMode(userData.upload_digest_mode);
+
+  if (mode === 'off') {
+    return {skipDigest: true, cooldownMillis: 0};
+  }
+
+  if (mode === 'soon') {
+    return {skipDigest: false, cooldownMillis: 0};
+  }
+
+  const hours = normalizeUploadDigestHours(userData.upload_digest_hours, systemFallbackHours);
+  return {skipDigest: false, cooldownMillis: hours * 60 * 60 * 1000};
+}
+
 async function slowLaneConfig(explorerId: string): Promise<SlowLaneConfig> {
   const snapshot = await db.collection(SYSTEM_CONFIG_COLLECTION).doc(explorerId).get();
   const data = snapshot.data() ?? {};
@@ -437,6 +513,7 @@ export async function sendFastLaneNotification(
     const body = `❤️ ${explorerName} loved your Reflection!`;
     const messageId = await sendExpoPushNotification(pushToken, body, {
         reflectionId: notification.reflectionId,
+        explorerId: notification.explorerId,
     });
 
     await notificationRef.update({
@@ -489,6 +566,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
     const notification: SlowLaneNotification = {
       doc,
       explorerId,
+      reflectionId: typeof data.reflectionId === 'string' ? data.reflectionId.trim() : '',
       senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
       senderName:
         typeof data.senderName === 'string' && data.senderName.trim()
@@ -529,8 +607,6 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
       await commitSlowLaneUpdates(notifications, activeCompanionIds, recipientUpdates);
       continue;
     }
-
-    const cooldownMillis = config.minHoursBetweenDigests * 60 * 60 * 1000;
 
     const markProcessed = (
       notification: SlowLaneNotification,
@@ -583,8 +659,16 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
         continue;
       }
 
+      const digestPrefs = uploadDigestPrefs(userData, config.minHoursBetweenDigests);
+      if (digestPrefs.skipDigest) {
+        for (const notification of eligibleNotifications) {
+          markProcessed(notification, companionId, recipientState('skipped_digest_disabled'));
+        }
+        continue;
+      }
+
       const lastDigestAt = timestampMillis(userData[LAST_UPLOAD_DIGEST_AT_FIELD]);
-      if (lastDigestAt !== null && now - lastDigestAt < cooldownMillis) {
+      if (lastDigestAt !== null && now - lastDigestAt < digestPrefs.cooldownMillis) {
         for (const notification of eligibleNotifications) {
           markProcessed(notification, companionId, recipientState('skipped_cooldown'));
         }
@@ -601,10 +685,11 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
 
       try {
         const body = slowLaneBody(uniqueSenderNames(eligibleNotifications));
-        const messageId = await sendExpoPushNotification(pushToken, body, {
-            notificationType: 'companion_upload_digest',
-            explorerId,
-        });
+        const messageId = await sendExpoPushNotification(
+          pushToken,
+          body,
+          slowLanePushData(explorerId, eligibleNotifications)
+        );
 
         await userRef.update({
           [LAST_UPLOAD_DIGEST_AT_FIELD]: FieldValue.serverTimestamp(),

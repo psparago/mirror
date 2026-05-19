@@ -92,6 +92,7 @@ export type PendingNotificationStatus = 'pending';
 // Document ID: explorerId
 export interface SystemConfigDocument {
   debounce_minutes: number;
+  /** Legacy explorer default; per-companion prefs override via users.upload_digest_*. */
   min_hours_between_digests: number;
   explorer_like_delay_seconds: number;
 }
@@ -133,6 +134,10 @@ export interface UserProfile {
   created_at: string;
   developer_tools_enabled?: boolean;
   push_notifications_enabled?: boolean;
+  /** Slow-lane digest when others share Reflections. Default: batched. */
+  upload_digest_mode?: 'off' | 'soon' | 'batched';
+  /** Hours between batched digests when mode is batched. Default: 2. */
+  upload_digest_hours?: number;
 }
 
 // The Explorer (Device/Context) Document

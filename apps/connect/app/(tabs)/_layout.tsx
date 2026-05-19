@@ -4,11 +4,16 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, onSnapshot } from '@projectmirror/shared/firebase';
 import { Image } from 'expo-image';
-import { Tabs, useRouter } from 'expo-router';
+import { Tabs, useNavigation, usePathname, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { AppState, AppStateStatus, StyleSheet, Text, View } from 'react-native';
 import { OnboardingView } from '../../components/OnboardingView';
 import { useDailyReminder } from '../../hooks/useDailyReminder';
+import {
+  peekPendingNotificationRoute,
+  pendingRouteHasDeepLink,
+  subscribePendingNotificationRoute,
+} from '@/utils/pendingNotificationRoute';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -21,6 +26,21 @@ export default function TabLayout() {
   const { explorerName, activeRelationship, loading } = useExplorer();
   const { user } = useAuth();
   const router = useRouter();
+  const navigation = useNavigation();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    const focusReflectionsTab = () => {
+      if (!pendingRouteHasDeepLink(peekPendingNotificationRoute())) return;
+      if (pathname.includes('settings')) {
+        router.replace('/(tabs)');
+      }
+      navigation.navigate('index' as never);
+    };
+
+    focusReflectionsTab();
+    return subscribePendingNotificationRoute(focusReflectionsTab);
+  }, [navigation, pathname, router]);
 
   const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
   const explorerId = activeRelationship?.explorerId;

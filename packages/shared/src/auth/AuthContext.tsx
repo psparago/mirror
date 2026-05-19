@@ -110,6 +110,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!userSnap.exists() || userSnap.data()?.push_notifications_enabled === undefined) {
         userData.push_notifications_enabled = true;
       }
+      if (!userSnap.exists() || userSnap.data()?.upload_digest_mode === undefined) {
+        userData.upload_digest_mode = 'batched';
+        userData.upload_digest_hours = 2;
+      }
 
       // Safe Write
       await setDoc(userRef, userData, { merge: true });
@@ -179,6 +183,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       if (!userSnap.exists() || userSnap.data()?.push_notifications_enabled === undefined) {
         userData.push_notifications_enabled = true;
+      }
+      if (!userSnap.exists() || userSnap.data()?.upload_digest_mode === undefined) {
+        userData.upload_digest_mode = 'batched';
+        userData.upload_digest_hours = 2;
       }
 
       // Safe Write

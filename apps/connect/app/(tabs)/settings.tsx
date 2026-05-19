@@ -1,7 +1,7 @@
 import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
-import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
+import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay, type UploadDigestHourOption, type UploadDigestMode, DEFAULT_UPLOAD_DIGEST_HOURS, UPLOAD_DIGEST_HOUR_OPTIONS, normalizeUploadDigestHours, normalizeUploadDigestMode } from '@projectmirror/shared';
 import { db, doc, onSnapshot, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -115,6 +115,9 @@ export default function SettingsScreen() {
   const isCaregiver = activeRelationship?.role === 'caregiver';
   const [pushNotificationsEnabled, setPushNotificationsEnabled] = useState(true);
   const [pushNotificationsLoading, setPushNotificationsLoading] = useState(true);
+  const [uploadDigestMode, setUploadDigestMode] = useState<UploadDigestMode>('batched');
+  const [uploadDigestHours, setUploadDigestHours] = useState<UploadDigestHourOption>(DEFAULT_UPLOAD_DIGEST_HOURS);
+  const [uploadDigestLoading, setUploadDigestLoading] = useState(true);
 
   // DELETE ACCOUNT FLOW
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -211,6 +214,9 @@ export default function SettingsScreen() {
       setDeveloperToolsEnabled(snap.data()?.developer_tools_enabled === true);
       setPushNotificationsEnabled(snap.data()?.push_notifications_enabled !== false);
       setPushNotificationsLoading(false);
+      setUploadDigestMode(normalizeUploadDigestMode(snap.data()?.upload_digest_mode));
+      setUploadDigestHours(normalizeUploadDigestHours(snap.data()?.upload_digest_hours));
+      setUploadDigestLoading(false);
     });
     return () => unsub();
   }, [user?.uid]);
@@ -226,6 +232,30 @@ export default function SettingsScreen() {
       Alert.alert('Update Failed', 'Could not save your notification preference. Please try again.');
     }
   }, [user?.uid]);
+
+  const saveUploadDigestPrefs = useCallback(
+    async (mode: UploadDigestMode, hours: UploadDigestHourOption = uploadDigestHours) => {
+      if (!user?.uid) return;
+
+      const previousMode = uploadDigestMode;
+      const previousHours = uploadDigestHours;
+      setUploadDigestMode(mode);
+      setUploadDigestHours(hours);
+
+      try {
+        await updateDoc(doc(db, 'users', user.uid), {
+          upload_digest_mode: mode,
+          upload_digest_hours: hours,
+        });
+      } catch (error) {
+        console.error('Failed to update upload digest preference:', error);
+        setUploadDigestMode(previousMode);
+        setUploadDigestHours(previousHours);
+        Alert.alert('Update Failed', 'Could not save your alert preference. Please try again.');
+      }
+    },
+    [uploadDigestHours, uploadDigestMode, user?.uid]
+  );
 
   // VOICE PICKER MODAL STATE
   const [voicePickerTarget, setVoicePickerTarget] = useState<'caption' | 'deep_dive' | null>(null);
@@ -721,7 +751,7 @@ export default function SettingsScreen() {
             <View style={{ flex: 1 }}>
               <Text style={styles.rowLabel}>Push Notifications</Text>
               <Text style={styles.description}>
-                Receive alerts when an Explorer likes your Reflection or new posts arrive.
+                Receive alerts when an Explorer likes your Reflection, and when enabled below, when others share.
               </Text>
             </View>
             {pushNotificationsLoading ? (
@@ -733,6 +763,74 @@ export default function SettingsScreen() {
                 trackColor={{ false: '#333', true: '#2e78b7' }}
                 thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
               />
+            )}
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={{ marginBottom: 10 }}>
+            <Text style={styles.rowLabel}>New Reflection Alerts</Text>
+            <Text style={styles.description}>
+              When others in your Circle share Reflections.
+            </Text>
+
+            {uploadDigestLoading ? (
+              <ActivityIndicator size="small" style={{ marginTop: 12 }} />
+            ) : (
+              <>
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={[styles.actionBtn, uploadDigestMode === 'off' && styles.actionBtnActive]}
+                    onPress={() => void saveUploadDigestPrefs('off')}
+                  >
+                    <Text style={[styles.actionText, uploadDigestMode === 'off' && styles.actionTextActive]}>
+                      Off
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.actionBtn, uploadDigestMode === 'soon' && styles.actionBtnActive]}
+                    onPress={() => void saveUploadDigestPrefs('soon')}
+                  >
+                    <Text style={[styles.actionText, uploadDigestMode === 'soon' && styles.actionTextActive]}>
+                      Soon
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.actionBtn, uploadDigestMode === 'batched' && styles.actionBtnActive]}
+                    onPress={() => void saveUploadDigestPrefs('batched')}
+                  >
+                    <Text style={[styles.actionText, uploadDigestMode === 'batched' && styles.actionTextActive]}>
+                      Every
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {uploadDigestMode === 'batched' && (
+                  <View style={styles.hourChipRow}>
+                    {UPLOAD_DIGEST_HOUR_OPTIONS.map((hours) => (
+                      <TouchableOpacity
+                        key={hours}
+                        style={[styles.hourChip, uploadDigestHours === hours && styles.hourChipActive]}
+                        onPress={() => void saveUploadDigestPrefs('batched', hours)}
+                      >
+                        <Text style={[styles.hourChipText, uploadDigestHours === hours && styles.hourChipTextActive]}>
+                          {hours}h
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                <Text style={[styles.helperText, { marginTop: 8 }]}>
+                  {uploadDigestMode === 'off'
+                    ? 'No alerts when others share Reflections.'
+                    : uploadDigestMode === 'soon'
+                      ? "We'll let you know shortly after others share — without making you wait hours."
+                      : `At most one grouped alert every ${uploadDigestHours} hour${uploadDigestHours === 1 ? '' : 's'}.`}
+                </Text>
+              </>
             )}
           </View>
 
@@ -1519,6 +1617,33 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   actionTextActive: {
+    color: '#fff',
+    fontWeight: '600',
+  },
+  hourChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  hourChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#333',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  hourChipActive: {
+    backgroundColor: '#2e78b7',
+    borderColor: '#2e78b7',
+  },
+  hourChipText: {
+    color: '#aaa',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  hourChipTextActive: {
     color: '#fff',
     fontWeight: '600',
   },

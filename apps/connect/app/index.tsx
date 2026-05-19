@@ -1,7 +1,15 @@
 import { useAuth, useWaitOverlay } from '@projectmirror/shared';
 import { useRelationships } from '@projectmirror/shared/hooks/useRelationships';
+import {
+  isBootPathname,
+  parseNotificationRouteData,
+  pendingRouteHasDeepLink,
+  setPendingNotificationRoute,
+  tabsHomeHref,
+} from '@/utils/pendingNotificationRoute';
+import * as Notifications from 'expo-notifications';
 import { usePathname, useRouter } from 'expo-router';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { View } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
 
@@ -10,36 +18,50 @@ export default function BootScreen() {
   const pathname = usePathname();
   const waitOverlay = useWaitOverlay();
   const { user, loading: authLoading } = useAuth();
-  // We can safely fetch relationships here because we are inside the Provider
   const { relationships, loading: relLoading } = useRelationships(user?.uid);
+  const hasNavigatedRef = useRef(false);
 
   useEffect(() => {
-    // If another route (e.g. notification deep-link) is currently active,
-    // BootScreen must not override it.
-    if (pathname !== '/') return;
-
-    // Wait for Auth to initialize
+    if (!isBootPathname(pathname)) return;
     if (authLoading) return;
+    if (hasNavigatedRef.current) return;
 
-    // Not logged in? -> Login
     if (!user) {
+      hasNavigatedRef.current = true;
       router.replace('/(auth)/login');
       return;
     }
 
-    // Wait for Relationships to load (only if logged in)
     if (relLoading) return;
 
-    // Logged in but no family? -> Join Screen
     if (relationships.length === 0) {
+      hasNavigatedRef.current = true;
       router.replace('/join');
       return;
     }
 
-    // Everything good? -> Home
-    router.replace('/(tabs)');
-    
-  }, [user, authLoading, relationships, relLoading, pathname]);
+    hasNavigatedRef.current = true;
+
+    (async () => {
+      try {
+        const initialResponse = await Notifications.getLastNotificationResponseAsync();
+        console.log('[DeepLink] BootScreen getLastNotification:', initialResponse ? JSON.stringify(initialResponse.notification.request.content.data) : 'null');
+        if (initialResponse) {
+          const pending = parseNotificationRouteData(
+            initialResponse.notification.request.content.data as Record<string, unknown>
+          );
+          if (pendingRouteHasDeepLink(pending)) {
+            console.log('[DeepLink] BootScreen stored pending:', JSON.stringify(pending));
+            setPendingNotificationRoute(pending);
+          }
+        }
+      } catch (error) {
+        console.warn('BootScreen: failed to read cold-start notification:', error);
+      }
+
+      router.replace(tabsHomeHref());
+    })();
+  }, [user, authLoading, relationships, relLoading, pathname, router]);
 
   useEffect(() => {
     if (authLoading || relLoading) {

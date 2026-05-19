@@ -4,17 +4,29 @@ import { ThemeProvider } from '@react-navigation/native';
 import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { useFonts } from 'expo-font';
-import { Stack, useRootNavigationState, useRouter, useSegments } from 'expo-router';
+import { Stack, usePathname, useRootNavigationState, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
+import { useLastNotificationResponse } from 'expo-notifications';
 import { ReflectionsNavigationTheme } from '@/constants/NavigationTheme';
 import { ReflectionMediaProvider } from '@/context/ReflectionMediaContext';
+import {
+  bootstrapColdStartNotification,
+  isBootPathname,
+  parseNotificationRouteData,
+  pendingRouteHasDeepLink,
+  setPendingNotificationRoute,
+  tabsHomeHref,
+} from '@/utils/pendingNotificationRoute';
 import { AuthProvider, ExplorerProvider, WaitOverlayProvider, useAuth } from '@projectmirror/shared';
 import { SystemUpdateModal } from '../components/SystemUpdateModel';
+
+// Read notification response at module-load time — before any component renders.
+bootstrapColdStartNotification();
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -37,49 +49,46 @@ const REMINDER_MIGRATION_KEY = 'daily_reminder_payload_v2_migrated';
 function AuthenticatedLayout() {
   const { user, loading } = useAuth();
   const segments = useSegments() as string[];
+  const pathname = usePathname();
   const router = useRouter();
   const rootNavigationState = useRootNavigationState();
   const handledNotificationIdsRef = useRef<Set<string>>(new Set());
+  const lastNotificationResponse = useLastNotificationResponse();
 
   const routeFromNotificationData = useCallback(
     (rawData: Record<string, unknown> | undefined, notificationId?: string) => {
-      if (!user) return;
-
-      if (notificationId && handledNotificationIdsRef.current.has(notificationId)) {
+      console.log('[DeepLink] routeFromNotificationData called, user:', !!user, 'pathname:', pathname);
+      const pending = parseNotificationRouteData(rawData);
+      console.log('[DeepLink] parsed pending:', JSON.stringify(pending));
+      if (!pendingRouteHasDeepLink(pending)) {
+        console.log('[DeepLink] no deep-link fields, ignoring');
         return;
       }
 
-      const reflectionId =
-        typeof rawData?.reflectionId === 'string' ? rawData.reflectionId.trim() : '';
-      const explorerId =
-        typeof rawData?.explorerId === 'string' ? rawData.explorerId.trim() : '';
+      setPendingNotificationRoute(pending);
 
-      if (reflectionId) {
-        const query = explorerId
-          ? `?reflectionId=${encodeURIComponent(reflectionId)}&explorerId=${encodeURIComponent(explorerId)}`
-          : `?reflectionId=${encodeURIComponent(reflectionId)}`;
-        router.push(`/(tabs)${query}` as any);
-      } else if (explorerId) {
-        router.push(`/(tabs)?explorerId=${encodeURIComponent(explorerId)}` as any);
+      if (!user) {
+        console.log('[DeepLink] no user yet, pending stored for later');
+        return;
+      }
+
+      if (notificationId && handledNotificationIdsRef.current.has(notificationId)) {
+        console.log('[DeepLink] notificationId already handled, refreshing pending route');
+        return;
+      }
+
+      if (!isBootPathname(pathname)) {
+        console.log('[DeepLink] navigating to tabs home');
+        router.replace(tabsHomeHref());
       } else {
-        // Local daily reminders use targetScreen/action; server pushes use reflectionId/explorerId above.
-        const targetScreen = rawData?.targetScreen ?? rawData?.action;
-        if (typeof targetScreen !== 'string' || !targetScreen) return;
-
-        console.log('🔔 Notification Tapped! Target:', targetScreen);
-
-        if (targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search') {
-          router.push(`/(tabs)?action=${targetScreen}` as any);
-        } else {
-          router.push('/(tabs)' as any);
-        }
+        console.log('[DeepLink] on boot pathname, letting boot screen navigate');
       }
 
       if (notificationId) {
         handledNotificationIdsRef.current.add(notificationId);
       }
     },
-    [router, user]
+    [pathname, router, user]
   );
 
   useEffect(() => {
@@ -162,31 +171,17 @@ function AuthenticatedLayout() {
     };
   }, [loading, user, rootNavigationState?.key]);
 
+  // useLastNotificationResponse covers cold-start AND is reactive — handles
+  // both terminated-app taps and the case where getLastNotificationResponseAsync
+  // fires after the listener is registered.
   useEffect(() => {
-    // Handle cold-start tap: app launched from a notification when previously terminated.
-    if (loading) return;
-    if (!user) return;
-    if (!rootNavigationState?.key) return;
+    if (!lastNotificationResponse) return;
 
-    let isMounted = true;
-
-    (async () => {
-      try {
-        const initialResponse = await Notifications.getLastNotificationResponseAsync();
-        if (!isMounted || !initialResponse) return;
-
-        const data = initialResponse.notification.request.content.data;
-        const notificationId = initialResponse.notification.request.identifier;
-        routeFromNotificationData(data, notificationId);
-      } catch (error) {
-        console.warn('Failed to read last notification response:', error);
-      }
-    })();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [loading, user, rootNavigationState?.key, routeFromNotificationData]);
+    const data = lastNotificationResponse.notification.request.content.data as Record<string, unknown>;
+    const notificationId = lastNotificationResponse.notification.request.identifier;
+    console.log('[DeepLink] useLastNotificationResponse fired, data:', JSON.stringify(data));
+    routeFromNotificationData(data, notificationId);
+  }, [lastNotificationResponse, routeFromNotificationData]);
 
   useEffect(() => {
     // Wait for everything to be ready
