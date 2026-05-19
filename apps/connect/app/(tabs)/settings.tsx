@@ -2,7 +2,7 @@ import { useColorScheme } from '@/components/useColorScheme';
 import Colors from '@/constants/Colors';
 import { FontAwesome } from '@expo/vector-icons';
 import { API_ENDPOINTS, VersionDisplay, getAvatarColor, getAvatarInitial, useAuth, useExplorer, useWaitOverlay } from '@projectmirror/shared';
-import { db, doc, onSnapshot, serverTimestamp, setDoc } from '@projectmirror/shared/firebase';
+import { db, doc, onSnapshot, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -113,6 +113,8 @@ export default function SettingsScreen() {
   const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
   const [uploadingExplorerAvatar, setUploadingExplorerAvatar] = useState(false);
   const isCaregiver = activeRelationship?.role === 'caregiver';
+  const [pushNotificationsEnabled, setPushNotificationsEnabled] = useState(true);
+  const [pushNotificationsLoading, setPushNotificationsLoading] = useState(true);
 
   // DELETE ACCOUNT FLOW
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -207,8 +209,22 @@ export default function SettingsScreen() {
     if (!user?.uid) return;
     const unsub = onSnapshot(doc(db, 'users', user.uid), (snap) => {
       setDeveloperToolsEnabled(snap.data()?.developer_tools_enabled === true);
+      setPushNotificationsEnabled(snap.data()?.push_notifications_enabled !== false);
+      setPushNotificationsLoading(false);
     });
     return () => unsub();
+  }, [user?.uid]);
+
+  const togglePushNotifications = useCallback(async (enabled: boolean) => {
+    if (!user?.uid) return;
+    setPushNotificationsEnabled(enabled);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { push_notifications_enabled: enabled });
+    } catch (error) {
+      console.error('Failed to update push notification preference:', error);
+      setPushNotificationsEnabled(!enabled);
+      Alert.alert('Update Failed', 'Could not save your notification preference. Please try again.');
+    }
   }, [user?.uid]);
 
   // VOICE PICKER MODAL STATE
@@ -701,6 +717,27 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: tintColor }]}>Notifications</Text>
         <View style={styles.card}>
+          <View style={[styles.row, { marginBottom: 0 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>Push Notifications</Text>
+              <Text style={styles.description}>
+                Receive alerts when an Explorer likes your Reflection or new posts arrive.
+              </Text>
+            </View>
+            {pushNotificationsLoading ? (
+              <ActivityIndicator size="small" />
+            ) : (
+              <Switch
+                value={pushNotificationsEnabled}
+                onValueChange={togglePushNotifications}
+                trackColor={{ false: '#333', true: '#2e78b7' }}
+                thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
+              />
+            )}
+          </View>
+
+          <View style={styles.divider} />
+
           <View style={[styles.row, { marginBottom: 0 }]}>
             <View style={{ flex: 1 }}>
               <Text style={styles.rowLabel}>Daily Reminder</Text>

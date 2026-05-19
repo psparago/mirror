@@ -42,23 +42,37 @@ function AuthenticatedLayout() {
   const handledNotificationIdsRef = useRef<Set<string>>(new Set());
 
   const routeFromNotificationData = useCallback(
-    (rawData: any, notificationId?: string) => {
+    (rawData: Record<string, unknown> | undefined, notificationId?: string) => {
       if (!user) return;
 
       if (notificationId && handledNotificationIdsRef.current.has(notificationId)) {
         return;
       }
 
-      // Backward/forward compatible with payloads using either "action" or "targetScreen".
-      const targetScreen = rawData?.targetScreen ?? rawData?.action;
-      if (!targetScreen) return;
+      const reflectionId =
+        typeof rawData?.reflectionId === 'string' ? rawData.reflectionId.trim() : '';
+      const explorerId =
+        typeof rawData?.explorerId === 'string' ? rawData.explorerId.trim() : '';
 
-      console.log('🔔 Notification Tapped! Target:', targetScreen);
-
-      if (targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search') {
-        router.push(`/(tabs)?action=${targetScreen}` as any);
+      if (reflectionId) {
+        const query = explorerId
+          ? `?reflectionId=${encodeURIComponent(reflectionId)}&explorerId=${encodeURIComponent(explorerId)}`
+          : `?reflectionId=${encodeURIComponent(reflectionId)}`;
+        router.push(`/(tabs)${query}` as any);
+      } else if (explorerId) {
+        router.push(`/(tabs)?explorerId=${encodeURIComponent(explorerId)}` as any);
       } else {
-        router.push('/(tabs)' as any);
+        // Local daily reminders use targetScreen/action; server pushes use reflectionId/explorerId above.
+        const targetScreen = rawData?.targetScreen ?? rawData?.action;
+        if (typeof targetScreen !== 'string' || !targetScreen) return;
+
+        console.log('🔔 Notification Tapped! Target:', targetScreen);
+
+        if (targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search') {
+          router.push(`/(tabs)?action=${targetScreen}` as any);
+        } else {
+          router.push('/(tabs)' as any);
+        }
       }
 
       if (notificationId) {

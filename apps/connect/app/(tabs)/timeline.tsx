@@ -184,9 +184,16 @@ function timelineRowIsOwnedByCurrentCompanion(
 type SentTimelineScreenProps = {
   /** Open CreationModal in edit mode for this reflection (same Explorer). */
   onEditReflection?: (event: Event) => void;
+  /** Open ReplayModal for a reflection tapped from a push notification. */
+  deepLinkReflectionId?: string | null;
+  onDeepLinkHandled?: () => void;
 };
 
-export default function SentTimelineScreen({ onEditReflection }: SentTimelineScreenProps) {
+export default function SentTimelineScreen({
+  onEditReflection,
+  deepLinkReflectionId,
+  onDeepLinkHandled,
+}: SentTimelineScreenProps) {
   const [reflections, setReflections] = useState<SentReflection[]>([]);
   const [loading, setLoading] = useState(true);
   const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
@@ -859,6 +866,103 @@ export default function SentTimelineScreen({ onEditReflection }: SentTimelineScr
     },
     [currentExplorerId, eventObjectsMap]
   );
+
+  const deepLinkHandledRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!deepLinkReflectionId || !currentExplorerId || loading || explorerLoading) return;
+    if (deepLinkHandledRef.current === deepLinkReflectionId) return;
+
+    let cancelled = false;
+    const reflectionId = deepLinkReflectionId;
+    deepLinkHandledRef.current = reflectionId;
+
+    const timestampToISO = (ts: any): string => {
+      if (!ts) return new Date().toISOString();
+      if (ts.toDate) return ts.toDate().toISOString();
+      if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
+      if (typeof ts === 'number') return new Date(ts).toISOString();
+      if (typeof ts === 'string') return ts;
+      return new Date(ts).toISOString();
+    };
+
+    (async () => {
+      try {
+        const item = reflections.find((reflection) => reflection.event_id === reflectionId);
+        let fullEvent = eventObjectsMap.get(reflectionId);
+
+        if (!fullEvent) {
+          const eventsResponse = await fetch(
+            `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`
+          );
+          if (eventsResponse.ok) {
+            const eventsData = await eventsResponse.json().catch(() => null);
+            const events =
+              isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+            const matchingEvent = events
+              .filter(Boolean)
+              .find((e) => (e as Event)?.event_id === reflectionId) as Event | undefined;
+            if (matchingEvent) {
+              fullEvent = matchingEvent;
+              if (!cancelled) {
+                setEventObjectsMap((prev) => new Map(prev).set(reflectionId, matchingEvent));
+              }
+            }
+          }
+        }
+
+        if (cancelled) return;
+
+        const metadata =
+          (item?.metadata as EventMetadata | undefined) ??
+          (fullEvent?.metadata as EventMetadata | undefined);
+
+        const eventForReplay: Event = {
+          event_id: reflectionId,
+          image_url:
+            asOptionalString(fullEvent?.image_url) ??
+            asOptionalString(item?.reflectionImageUrl) ??
+            '',
+          audio_url: fullEvent?.audio_url,
+          video_url: fullEvent?.video_url,
+          deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
+          metadata: metadata || {
+            description: item?.description || 'Reflection',
+            sender: item ? reflectionSenderLabel(item) || 'Companion' : 'Companion',
+            timestamp: timestampToISO(item?.sentTimestamp || item?.timestamp),
+            event_id: reflectionId,
+            short_caption: item?.description || 'Reflection',
+          },
+        };
+
+        setSelectedReflection(eventForReplay);
+      } catch (error) {
+        console.warn('Failed to open reflection from notification deep link:', error);
+      } finally {
+        if (!cancelled) {
+          onDeepLinkHandled?.();
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentExplorerId,
+    deepLinkReflectionId,
+    eventObjectsMap,
+    explorerLoading,
+    loading,
+    onDeepLinkHandled,
+    reflections,
+  ]);
+
+  useEffect(() => {
+    if (!deepLinkReflectionId) {
+      deepLinkHandledRef.current = null;
+    }
+  }, [deepLinkReflectionId]);
 
   const getStatusText = (status?: string, hasEngagementTimestamp?: boolean, hasSelfie?: boolean) => {
     if (status === 'deleted') return 'Deleted';
