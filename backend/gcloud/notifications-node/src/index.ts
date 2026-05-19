@@ -8,6 +8,7 @@ const PENDING_NOTIFICATIONS_COLLECTION = 'pending_notifications';
 const RELATIONSHIPS_COLLECTION = 'relationships';
 const SYSTEM_CONFIG_COLLECTION = 'system_config';
 const USERS_COLLECTION = 'users';
+const EXPLORERS_COLLECTION = 'explorers';
 const PENDING_STATUS = 'pending';
 const COMPANION_UPLOAD_TRIGGER = 'companion_upload';
 const EXPLORER_LIKE_TRIGGER = 'explorer_like';
@@ -424,9 +425,10 @@ export async function sendFastLaneNotification(
   }
 
   try {
-    const explorerSnapshot = await db.collection(USERS_COLLECTION).doc(notification.explorerId).get();
+    const explorerSnapshot = await db.collection(EXPLORERS_COLLECTION).doc(notification.explorerId).get();
     const explorerData = explorerSnapshot.data() ?? {};
     const explorerName: string =
+      (typeof explorerData.legalName === 'string' && explorerData.legalName.trim()) ||
       (typeof explorerData.displayName === 'string' && explorerData.displayName.trim()) ||
       (typeof explorerData.display_name === 'string' && explorerData.display_name.trim()) ||
       (typeof explorerData.name === 'string' && explorerData.name.trim()) ||
@@ -515,7 +517,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
     const relationshipsSnapshot = await db
       .collection(RELATIONSHIPS_COLLECTION)
       .where('explorerId', '==', explorerId)
-      .where('role', '==', 'companion')
+      .where('role', 'in', ['companion', 'caregiver'])
       .get();
 
     const activeCompanions = activeCompanionsFromSnapshot(relationshipsSnapshot.docs);

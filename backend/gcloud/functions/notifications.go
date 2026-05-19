@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/firestore"
@@ -170,6 +171,7 @@ func createPendingNotification(ctx context.Context, client *firestore.Client, do
 		"senderName":               notification.SenderName,
 		"status":                   notification.Status,
 		"createdAt":                firestore.ServerTimestamp,
+		"expireAt":                 time.Now().UTC().Add(30 * 24 * time.Hour),
 	}
 	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, data)
 	if status.Code(err) == codes.AlreadyExists {
