@@ -38,6 +38,12 @@ import {
 
 import { ReplayModal } from '@/components/ReplayModal';
 
+// Module-level state that survives every remount of this screen. Without
+// this, a remount cycle during cold-start re-fires the deep-link resolve and
+// re-opens the ReplayModal, leading to multiple videos playing simultaneously.
+let timelineDeepLinkResolvingReflectionId: string | null = null;
+let timelineDeepLinkPresentedReflectionId: string | null = null;
+
 interface SentReflection {
   event_id: string;
   timestamp: any;
@@ -976,14 +982,31 @@ export default function SentTimelineScreen({
     setRefreshTrigger((value) => value + 1);
   }, [timelineRefreshNonce]);
 
+  // Track which reflection currently owns the modal so we never re-open for the
+  // same id even if the deep-link effect were to fire twice in quick succession.
+  const selectedReflectionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedReflectionIdRef.current = selectedReflection?.event_id ?? null;
+  }, [selectedReflection]);
+
   useEffect(() => {
     if (!deepLinkReflectionId) return;
     if (deepLinkHandledRef.current === deepLinkReflectionId) return;
-    if (deepLinkLoopIdRef.current === deepLinkReflectionId) return;
+    if (timelineDeepLinkPresentedReflectionId === deepLinkReflectionId) {
+      // Another mount of this screen already opened the modal for this id;
+      // do not open another one.
+      deepLinkHandledRef.current = deepLinkReflectionId;
+      return;
+    }
+    if (timelineDeepLinkResolvingReflectionId === deepLinkReflectionId) return;
+    if (selectedReflectionIdRef.current === deepLinkReflectionId) {
+      deepLinkHandledRef.current = deepLinkReflectionId;
+      return;
+    }
 
     let cancelled = false;
     const reflectionId = deepLinkReflectionId;
-    deepLinkLoopIdRef.current = reflectionId;
+    timelineDeepLinkResolvingReflectionId = reflectionId;
 
     (async () => {
       for (let attempt = 1; attempt <= 24 && !cancelled; attempt++) {
@@ -1003,9 +1026,25 @@ export default function SentTimelineScreen({
         );
         if (cancelled) return;
         if (eventForReplay) {
+          if (selectedReflectionIdRef.current === reflectionId) {
+            deepLinkHandledRef.current = reflectionId;
+            if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+              timelineDeepLinkResolvingReflectionId = null;
+            }
+            timelineDeepLinkPresentedReflectionId = reflectionId;
+            return;
+          }
           console.log('[DeepLink] timeline opening ReplayModal');
           deepLinkHandledRef.current = reflectionId;
-          deepLinkLoopIdRef.current = null;
+          if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+            timelineDeepLinkResolvingReflectionId = null;
+          }
+          timelineDeepLinkPresentedReflectionId = reflectionId;
+          // Update the ref synchronously — otherwise the next effect re-run (due
+          // to dep changes between now and the post-render effect that syncs
+          // this ref) would not see the new selection and could try to open
+          // the modal a second time.
+          selectedReflectionIdRef.current = reflectionId;
           setSelectedReflection(eventForReplay);
           return;
         }
@@ -1015,15 +1054,17 @@ export default function SentTimelineScreen({
 
       if (!cancelled) {
         console.warn('[DeepLink] timeline gave up opening reflection', reflectionId);
-        deepLinkLoopIdRef.current = null;
+        if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+          timelineDeepLinkResolvingReflectionId = null;
+        }
         onDeepLinkHandled?.();
       }
     })();
 
     return () => {
       cancelled = true;
-      if (deepLinkLoopIdRef.current === reflectionId) {
-        deepLinkLoopIdRef.current = null;
+      if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+        timelineDeepLinkResolvingReflectionId = null;
       }
     };
   }, [currentExplorerId, deepLinkExplorerId, deepLinkReflectionId, explorerLoading]);
@@ -1583,6 +1624,7 @@ export default function SentTimelineScreen({
           setSelectedReflection(null);
           if (openedViaDeepLink) {
             deepLinkHandledRef.current = null;
+            timelineDeepLinkPresentedReflectionId = null;
             onDeepLinkHandled?.();
           }
         }}

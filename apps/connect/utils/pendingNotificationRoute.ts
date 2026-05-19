@@ -1,54 +1,41 @@
+// Single source of truth for deep-link routing from push notifications.
+//
+// Each push tap (cold start, background tap, foreground tap) becomes a
+// PendingNotificationRoute entry keyed by the Expo notification identifier.
+// The pipeline guarantees:
+//   1. We only ever present a given notification id once.
+//   2. Listeners are only fired when the head of the queue actually changes.
+//   3. There is no callback-rebuild churn — consumers read via subscribe/getSnapshot.
+
 export type PendingNotificationRoute = {
+  /** Stable id from the Expo notification (response identifier). */
+  id: string;
   reflectionId?: string;
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
 };
 
 let pendingRoute: PendingNotificationRoute | null = null;
+const seenIds = new Set<string>();
+const presentedIds = new Set<string>();
 const listeners = new Set<() => void>();
 
-// Read the notification response at the earliest possible moment — before any component renders.
-// We import expo-notifications lazily to avoid circular init issues.
-let _coldStartChecked = false;
-export function bootstrapColdStartNotification(): void {
-  if (_coldStartChecked) return;
-  _coldStartChecked = true;
-
-  // Dynamic require so this file stays importable in server-side / test envs.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Notifications = require('expo-notifications') as typeof import('expo-notifications');
-    Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
-        if (!response) {
-          console.log('[DeepLink] cold-start: no last notification response');
-          return;
-        }
-        const data = response.notification.request.content.data as Record<string, unknown>;
-        console.log('[DeepLink] cold-start raw data:', JSON.stringify(data));
-        const pending = parseNotificationRouteData(data);
-        console.log('[DeepLink] cold-start parsed pending:', JSON.stringify(pending));
-        if (pendingRouteHasDeepLink(pending)) {
-          console.log('[DeepLink] cold-start: stored pending route');
-          setPendingNotificationRoute(pending);
-        } else {
-          console.log('[DeepLink] cold-start: payload has no deep-link fields');
-        }
-      })
-      .catch((err) => {
-        console.warn('[DeepLink] cold-start read failed:', err);
-      });
-  } catch (err) {
-    console.warn('[DeepLink] bootstrapColdStartNotification import error:', err);
-  }
+/** Has the given notification id already been handed to a consumer? */
+export function isNotificationPresented(id: string): boolean {
+  return presentedIds.has(id);
 }
 
-function notifyPendingListeners(): void {
+/** Mark a notification id as "handed off to the timeline". Persists across remounts. */
+export function markNotificationPresented(id: string): void {
+  presentedIds.add(id);
+}
+
+function notify(): void {
   listeners.forEach((listener) => {
     try {
       listener();
     } catch (error) {
-      console.warn('pendingNotificationRoute listener failed:', error);
+      console.warn('[DeepLink] listener failed:', error);
     }
   });
 }
@@ -63,9 +50,13 @@ export function isBootPathname(pathname: string): boolean {
   return pathname === '/' || pathname === '/index' || pathname === '';
 }
 
-export function parseNotificationRouteData(
+function deepLinkFieldsFromRawData(
   rawData: Record<string, unknown> | undefined
-): PendingNotificationRoute {
+): {
+  reflectionId?: string;
+  explorerId?: string;
+  action?: 'camera' | 'gallery' | 'search';
+} {
   if (!rawData || typeof rawData !== 'object') return {};
 
   const nested = rawData.data;
@@ -83,7 +74,7 @@ export function parseNotificationRouteData(
   const targetScreen = source.targetScreen ?? source.action ?? rawData.targetScreen ?? rawData.action;
   const action =
     targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search'
-      ? targetScreen
+      ? (targetScreen as 'camera' | 'gallery' | 'search')
       : undefined;
 
   return {
@@ -93,14 +84,36 @@ export function parseNotificationRouteData(
   };
 }
 
-export function setPendingNotificationRoute(route: PendingNotificationRoute | null): void {
-  pendingRoute = route;
-  notifyPendingListeners();
+export function buildPendingNotificationRoute(
+  notificationId: string,
+  rawData: Record<string, unknown> | undefined
+): PendingNotificationRoute | null {
+  const fields = deepLinkFieldsFromRawData(rawData);
+  if (!fields.reflectionId && !fields.explorerId && !fields.action) return null;
+  return { id: notificationId, ...fields };
 }
 
+/**
+ * Submit a notification to the queue. Returns `true` if it became the head
+ * (i.e. it's new and we'll present it). Already-seen ids are dropped.
+ */
+export function submitPendingNotificationRoute(
+  route: PendingNotificationRoute | null
+): boolean {
+  if (!route) return false;
+  if (seenIds.has(route.id)) return false;
+  seenIds.add(route.id);
+  pendingRoute = route;
+  notify();
+  return true;
+}
+
+/** Marks the head route consumed and clears it. */
 export function consumePendingNotificationRoute(): PendingNotificationRoute | null {
   const route = pendingRoute;
+  if (!route) return null;
   pendingRoute = null;
+  notify();
   return route;
 }
 
@@ -110,32 +123,39 @@ export function peekPendingNotificationRoute(): PendingNotificationRoute | null 
 
 export function subscribePendingNotificationRoute(listener: () => void): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
-}
-
-/** Navigate to the Reflections timeline tab; deep-link payload is applied from pending state in (tabs)/index. */
-export function tabsTimelineHref(): '/(tabs)' {
-  return '/(tabs)';
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 export function tabsHomeHref(): '/(tabs)' {
-  return tabsTimelineHref();
+  return '/(tabs)';
 }
 
-export function pendingRouteHasDeepLink(pending: PendingNotificationRoute | null | undefined): boolean {
-  if (!pending) return false;
-  return !!(pending.reflectionId || pending.explorerId || pending.action);
-}
+// Cold-start read happens once at module load — before any component renders.
+let _coldStartChecked = false;
+export function bootstrapColdStartNotification(): void {
+  if (_coldStartChecked) return;
+  _coldStartChecked = true;
 
-export function mergePendingRoute(
-  reflectionId?: string,
-  explorerId?: string
-): PendingNotificationRoute | null {
-  const pending = peekPendingNotificationRoute();
-  const merged: PendingNotificationRoute = {
-    ...(pending ?? {}),
-    ...(reflectionId ? { reflectionId } : {}),
-    ...(explorerId ? { explorerId } : {}),
-  };
-  return pendingRouteHasDeepLink(merged) ? merged : null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Notifications = require('expo-notifications') as typeof import('expo-notifications');
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (!response) return;
+        const notificationId = response.notification.request.identifier;
+        const data = response.notification.request.content.data as Record<string, unknown>;
+        const route = buildPendingNotificationRoute(notificationId, data);
+        if (route) {
+          console.log('[DeepLink] cold-start route:', JSON.stringify(route));
+          submitPendingNotificationRoute(route);
+        }
+      })
+      .catch((err) => {
+        console.warn('[DeepLink] cold-start read failed:', err);
+      });
+  } catch (err) {
+    console.warn('[DeepLink] cold-start import error:', err);
+  }
 }

@@ -4,14 +4,13 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { API_ENDPOINTS, getAvatarColor, getAvatarInitial, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, onSnapshot } from '@projectmirror/shared/firebase';
 import { Image } from 'expo-image';
-import { Tabs, useNavigation, usePathname, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { Tabs, usePathname, useRouter } from 'expo-router';
+import React, { useEffect, useRef, useState } from 'react';
 import { AppState, AppStateStatus, StyleSheet, Text, View } from 'react-native';
 import { OnboardingView } from '../../components/OnboardingView';
 import { useDailyReminder } from '../../hooks/useDailyReminder';
 import {
   peekPendingNotificationRoute,
-  pendingRouteHasDeepLink,
   subscribePendingNotificationRoute,
 } from '@/utils/pendingNotificationRoute';
 
@@ -26,21 +25,28 @@ export default function TabLayout() {
   const { explorerName, activeRelationship, loading } = useExplorer();
   const { user } = useAuth();
   const router = useRouter();
-  const navigation = useNavigation();
   const pathname = usePathname();
+
+  // Stash refs so the focus handler stays identity-stable across renders.
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const routerRef = useRef(router);
+  routerRef.current = router;
 
   useEffect(() => {
     const focusReflectionsTab = () => {
-      if (!pendingRouteHasDeepLink(peekPendingNotificationRoute())) return;
-      if (pathname.includes('settings')) {
-        router.replace('/(tabs)');
+      // If a deep link is waiting and we're parked on Settings, jump back to
+      // the Reflections tab so the deep-link consumer in (tabs)/index.tsx
+      // actually mounts and can process the route.
+      if (!peekPendingNotificationRoute()) return;
+      if (pathnameRef.current.includes('settings')) {
+        routerRef.current.replace('/(tabs)');
       }
-      navigation.navigate('index' as never);
     };
 
     focusReflectionsTab();
     return subscribePendingNotificationRoute(focusReflectionsTab);
-  }, [navigation, pathname, router]);
+  }, []);
 
   const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
   const explorerId = activeRelationship?.explorerId;

@@ -1,129 +1,143 @@
 import { ExplorerConfig, useAuth, useExplorer } from '@projectmirror/shared';
 import { db, doc, getDoc } from '@projectmirror/shared/firebase';
 import { useRelationships } from '@projectmirror/shared/src/hooks/useRelationships';
-import { useLocalSearchParams } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import {
   consumePendingNotificationRoute,
-  mergePendingRoute,
+  isNotificationPresented,
+  markNotificationPresented,
   peekPendingNotificationRoute,
   subscribePendingNotificationRoute,
 } from '@/utils/pendingNotificationRoute';
 
-function paramString(value: string | string[] | undefined): string {
-  if (typeof value === 'string') return value.trim();
-  if (Array.isArray(value) && typeof value[0] === 'string') return value[0].trim();
-  return '';
-}
+type DeepLinkTarget = {
+  notificationId: string;
+  reflectionId?: string;
+  explorerId?: string;
+};
 
+// Module-level state — survives across remounts of the consuming component so
+// that a re-mount during cold-start (which we observe in the dev build) does
+// not re-resolve the same notification and re-open the ReplayModal multiple
+// times.
+let moduleResolvingId: string | null = null;
+let moduleLastTarget: DeepLinkTarget | null = null;
+
+/**
+ * Consumes the head of the pending-notification-route queue and exposes the
+ * data needed to deep-link into the timeline. Guarantees that each notification
+ * id is presented exactly once, even if the consuming component remounts.
+ */
 export function useNotificationDeepLink() {
-  const params = useLocalSearchParams<{ reflectionId?: string; explorerId?: string }>();
+  const pendingRoute = useSyncExternalStore(
+    subscribePendingNotificationRoute,
+    peekPendingNotificationRoute,
+    peekPendingNotificationRoute
+  );
+
   const { user } = useAuth();
   const { switchExplorer, currentExplorerId, loading: explorerLoading } = useExplorer();
   const { loading: relLoading } = useRelationships(user?.uid);
 
-  const [deepLinkTarget, setDeepLinkTarget] = useState<{
-    reflectionId: string;
-    explorerId?: string;
-  } | null>(null);
+  const [target, setTarget] = useState<DeepLinkTarget | null>(() => moduleLastTarget);
   const [timelineRefreshNonce, setTimelineRefreshNonce] = useState(0);
 
-  const deepLinkInFlightRef = useRef(false);
-  const pendingExplorerIdRef = useRef<string | null>(null);
+  // Stable refs for context values used inside the async resolver.
+  const switchExplorerRef = useRef(switchExplorer);
+  switchExplorerRef.current = switchExplorer;
+  const currentExplorerIdRef = useRef(currentExplorerId);
+  currentExplorerIdRef.current = currentExplorerId;
 
-  const completeDeepLink = useCallback(() => {
-    consumePendingNotificationRoute();
-    setDeepLinkTarget(null);
-    pendingExplorerIdRef.current = null;
-    deepLinkInFlightRef.current = false;
-  }, []);
-
-  const applyPendingRoute = useCallback(async () => {
+  useEffect(() => {
+    if (!pendingRoute) return;
     if (explorerLoading || relLoading) return;
-    if (deepLinkInFlightRef.current) return;
 
-    const merged = mergePendingRoute(
-      paramString(params.reflectionId),
-      paramString(params.explorerId)
-    );
-    const pending = merged ?? peekPendingNotificationRoute();
-    const reflectionId = pending?.reflectionId ?? '';
-    const explorerId = pending?.explorerId ?? '';
+    const { id } = pendingRoute;
 
-    if (!reflectionId && !explorerId) return;
-
-    deepLinkInFlightRef.current = true;
-
-    let targetExplorerId = explorerId;
-    if (reflectionId && !targetExplorerId) {
-      try {
-        const snap = await getDoc(doc(db, ExplorerConfig.collections.reflections, reflectionId));
-        const resolved = snap.data()?.explorerId;
-        if (typeof resolved === 'string' && resolved.trim()) {
-          targetExplorerId = resolved.trim();
-        }
-      } catch (error) {
-        console.warn('[DeepLink] failed to resolve explorer for reflection:', error);
+    // Already handed off (possibly to a previous mount of this component).
+    if (isNotificationPresented(id)) {
+      if (!target && moduleLastTarget && moduleLastTarget.notificationId === id) {
+        setTarget(moduleLastTarget);
       }
-    }
-
-    if (targetExplorerId) {
-      pendingExplorerIdRef.current = targetExplorerId;
-      switchExplorer(targetExplorerId);
-    }
-
-    if (reflectionId) {
-      setDeepLinkTarget({ reflectionId, explorerId: targetExplorerId || undefined });
       return;
     }
 
-    if (!targetExplorerId) {
-      deepLinkInFlightRef.current = false;
-      return;
-    }
+    if (moduleResolvingId === id) return;
+    moduleResolvingId = id;
 
-    if (currentExplorerId === targetExplorerId) {
-      setTimelineRefreshNonce((value) => value + 1);
-      completeDeepLink();
-    }
-  }, [
-    completeDeepLink,
-    currentExplorerId,
-    explorerLoading,
-    params.explorerId,
-    params.reflectionId,
-    relLoading,
-    switchExplorer,
-  ]);
+    let cancelled = false;
 
-  useEffect(() => {
-    void applyPendingRoute();
-  }, [applyPendingRoute]);
+    (async () => {
+      let targetExplorerId = pendingRoute.explorerId ?? '';
 
-  useEffect(() => {
-    return subscribePendingNotificationRoute(() => {
-      deepLinkInFlightRef.current = false;
-      void applyPendingRoute();
-    });
-  }, [applyPendingRoute]);
+      if (pendingRoute.reflectionId && !targetExplorerId) {
+        try {
+          const snap = await getDoc(
+            doc(db, ExplorerConfig.collections.reflections, pendingRoute.reflectionId)
+          );
+          const resolved = snap.data()?.explorerId;
+          if (typeof resolved === 'string' && resolved.trim()) {
+            targetExplorerId = resolved.trim();
+          }
+        } catch (error) {
+          console.warn('[DeepLink] failed to resolve explorer for reflection:', error);
+        }
+      }
 
-  useEffect(() => {
-    const targetExplorerId = pendingExplorerIdRef.current;
-    if (!targetExplorerId || explorerLoading || relLoading) return;
-    if (currentExplorerId !== targetExplorerId) {
-      switchExplorer(targetExplorerId);
-      return;
+      if (cancelled) return;
+
+      if (targetExplorerId && currentExplorerIdRef.current !== targetExplorerId) {
+        switchExplorerRef.current(targetExplorerId);
+      }
+
+      if (pendingRoute.reflectionId) {
+        const nextTarget: DeepLinkTarget = {
+          notificationId: id,
+          reflectionId: pendingRoute.reflectionId,
+          explorerId: targetExplorerId || undefined,
+        };
+        moduleLastTarget = nextTarget;
+        markNotificationPresented(id);
+        moduleResolvingId = null;
+        setTarget(nextTarget);
+        return;
+      }
+
+      // Explorer-only deep link — refresh the timeline and mark complete.
+      if (targetExplorerId) {
+        setTimelineRefreshNonce((value) => value + 1);
+      }
+      markNotificationPresented(id);
+      moduleResolvingId = null;
+      consumePendingNotificationRoute();
+    })();
+
+    return () => {
+      cancelled = true;
+      if (moduleResolvingId === id) {
+        moduleResolvingId = null;
+      }
+    };
+    // `target` is intentionally excluded — adding it would trigger a re-run
+    // every time we set the target, defeating the dedupe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingRoute, explorerLoading, relLoading]);
+
+  // The timeline calls this once the user closes the ReplayModal.
+  const completeDeepLink = useRef(() => {
+    const current = peekPendingNotificationRoute();
+    if (current) {
+      consumePendingNotificationRoute();
     }
-    if (!deepLinkTarget && deepLinkInFlightRef.current) {
-      setTimelineRefreshNonce((value) => value + 1);
-      completeDeepLink();
-    }
-  }, [completeDeepLink, currentExplorerId, deepLinkTarget, explorerLoading, relLoading, switchExplorer]);
+    moduleLastTarget = null;
+    moduleResolvingId = null;
+    setTarget(null);
+  }).current;
 
   return {
-    deepLinkReflectionId: deepLinkTarget?.reflectionId ?? null,
-    deepLinkExplorerId: deepLinkTarget?.explorerId ?? null,
+    deepLinkReflectionId: target?.reflectionId ?? null,
+    deepLinkExplorerId: target?.explorerId ?? null,
     timelineRefreshNonce,
     completeDeepLink,
   };

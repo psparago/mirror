@@ -16,10 +16,9 @@ import { ReflectionsNavigationTheme } from '@/constants/NavigationTheme';
 import { ReflectionMediaProvider } from '@/context/ReflectionMediaContext';
 import {
   bootstrapColdStartNotification,
+  buildPendingNotificationRoute,
   isBootPathname,
-  parseNotificationRouteData,
-  pendingRouteHasDeepLink,
-  setPendingNotificationRoute,
+  submitPendingNotificationRoute,
   tabsHomeHref,
 } from '@/utils/pendingNotificationRoute';
 import { AuthProvider, ExplorerProvider, WaitOverlayProvider, useAuth } from '@projectmirror/shared';
@@ -52,54 +51,47 @@ function AuthenticatedLayout() {
   const pathname = usePathname();
   const router = useRouter();
   const rootNavigationState = useRootNavigationState();
-  const handledNotificationIdsRef = useRef<Set<string>>(new Set());
   const lastNotificationResponse = useLastNotificationResponse();
 
-  const routeFromNotificationData = useCallback(
-    (rawData: Record<string, unknown> | undefined, notificationId?: string) => {
-      console.log('[DeepLink] routeFromNotificationData called, user:', !!user, 'pathname:', pathname);
-      const pending = parseNotificationRouteData(rawData);
-      console.log('[DeepLink] parsed pending:', JSON.stringify(pending));
-      if (!pendingRouteHasDeepLink(pending)) {
-        console.log('[DeepLink] no deep-link fields, ignoring');
-        return;
-      }
+  // Use refs so the response handler identity is stable. Re-running it on
+  // every navigation was previously causing the deep-link pipeline to fire
+  // multiple times per notification.
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const routerRef = useRef(router);
+  routerRef.current = router;
 
-      setPendingNotificationRoute(pending);
+  const handleNotificationResponse = useCallback(
+    (notificationId: string, rawData: Record<string, unknown> | undefined) => {
+      const route = buildPendingNotificationRoute(notificationId, rawData);
+      if (!route) return;
 
-      if (!user) {
-        console.log('[DeepLink] no user yet, pending stored for later');
-        return;
-      }
+      // submit is idempotent per notification id; subsequent calls are ignored.
+      const submitted = submitPendingNotificationRoute(route);
+      if (!submitted) return;
 
-      if (notificationId && handledNotificationIdsRef.current.has(notificationId)) {
-        console.log('[DeepLink] notificationId already handled, refreshing pending route');
-        return;
-      }
+      console.log('[DeepLink] submitted notification', notificationId, JSON.stringify(route));
 
-      if (!isBootPathname(pathname)) {
-        console.log('[DeepLink] navigating to tabs home');
-        router.replace(tabsHomeHref());
-      } else {
-        console.log('[DeepLink] on boot pathname, letting boot screen navigate');
-      }
-
-      if (notificationId) {
-        handledNotificationIdsRef.current.add(notificationId);
-      }
+      // If we're already on a tabs path, nudge navigation back to the tabs root
+      // so the deep-link consumer (inside the tabs layout) sees the route.
+      if (!userRef.current) return; // wait for auth; consumer will pick it up on login
+      if (isBootPathname(pathnameRef.current)) return; // boot screen handles it
+      routerRef.current.replace(tabsHomeHref());
     },
-    [pathname, router, user]
+    []
   );
 
   useEffect(() => {
-    // This listener fires whenever a user taps a notification
-    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
-      const data = response.notification.request.content.data;
-      const notificationId = response.notification.request.identifier;
-      routeFromNotificationData(data, notificationId);
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      handleNotificationResponse(
+        response.notification.request.identifier,
+        response.notification.request.content.data as Record<string, unknown>
+      );
     });
     return () => subscription.remove();
-  }, [routeFromNotificationData]);
+  }, [handleNotificationResponse]);
 
   useEffect(() => {
     // One-time migration: replace old scheduled reminders with payload containing targetScreen.
@@ -171,17 +163,16 @@ function AuthenticatedLayout() {
     };
   }, [loading, user, rootNavigationState?.key]);
 
-  // useLastNotificationResponse covers cold-start AND is reactive — handles
-  // both terminated-app taps and the case where getLastNotificationResponseAsync
-  // fires after the listener is registered.
+  // useLastNotificationResponse covers cold-start AND background taps. It fires
+  // once when the response becomes available. We dedupe by notification id
+  // inside submitPendingNotificationRoute so additional firings are no-ops.
   useEffect(() => {
     if (!lastNotificationResponse) return;
-
-    const data = lastNotificationResponse.notification.request.content.data as Record<string, unknown>;
-    const notificationId = lastNotificationResponse.notification.request.identifier;
-    console.log('[DeepLink] useLastNotificationResponse fired, data:', JSON.stringify(data));
-    routeFromNotificationData(data, notificationId);
-  }, [lastNotificationResponse, routeFromNotificationData]);
+    handleNotificationResponse(
+      lastNotificationResponse.notification.request.identifier,
+      lastNotificationResponse.notification.request.content.data as Record<string, unknown>
+    );
+  }, [lastNotificationResponse, handleNotificationResponse]);
 
   useEffect(() => {
     // Wait for everything to be ready
