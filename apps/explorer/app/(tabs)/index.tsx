@@ -158,7 +158,6 @@ export default function HomeScreen() {
   };
 
   const [events, setEvents] = useState<Event[]>([]);
-  const [recentlyArrivedIds, setRecentlyArrivedIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +185,11 @@ export default function HomeScreen() {
   const [readEventIds, setReadEventIds] = useState<string[]>([]);
   const readEventIdsRef = useRef<string[]>([]);
   const [isReadStateLoaded, setIsReadStateLoaded] = useState(false);
+  /** Session-only — prevents replaying the arrival chime for the same id. */
+  const chimedArrivalIdsRef = useRef<Set<string>>(new Set());
+  /** Event ids present when the session's first fetch completed — arrivals after this are "new". */
+  const sessionBaselineIdsRef = useRef<Set<string> | null>(null);
+  const [sessionBaselineTick, setSessionBaselineTick] = useState(0);
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -254,6 +258,22 @@ export default function HomeScreen() {
       return false;
     });
   }, [events, eventMetadata, selectedCompanionId, companions]);
+
+  // Derive "new" from the live list: reflections that arrived after this session
+  // started, are still unread, and aren't currently on the main stage.
+  const newArrivalIds = useMemo(() => {
+    const baseline = sessionBaselineIdsRef.current;
+    if (!isReadStateLoaded || !baseline) return [];
+    const selectedId = selectedEvent?.event_id ?? null;
+    return filteredEvents
+      .filter(
+        (event) =>
+          !baseline.has(event.event_id) &&
+          !readEventIds.includes(event.event_id) &&
+          event.event_id !== selectedId
+      )
+      .map((event) => event.event_id);
+  }, [filteredEvents, readEventIds, selectedEvent?.event_id, isReadStateLoaded, sessionBaselineTick]);
 
   // When filter changes, ensure selectedEvent is still in the filtered list
   useEffect(() => {
@@ -695,6 +715,11 @@ export default function HomeScreen() {
       // Just update immediately, the centering logic in MainStageView will handle the focus stability
       setEvents(eventsWithTimestamp);
 
+      if (sessionBaselineIdsRef.current === null && sortedEvents.length > 0) {
+        sessionBaselineIdsRef.current = new Set(sortedEvents.map((event) => event.event_id));
+        setSessionBaselineTick((tick) => tick + 1);
+      }
+
       const embeddedById: Record<string, EventMetadata> = {};
       for (const e of sortedEvents) {
         if (eventHasEmbeddedMetadata(e)) {
@@ -848,14 +873,12 @@ export default function HomeScreen() {
             });
 
             const notifyNewArrivalForEvent = (eventId: string) => {
-              let shouldChime = false;
-              setRecentlyArrivedIds(prev => {
-                if (prev.includes(eventId) || readEventIdsRef.current.includes(eventId)) return prev;
-                shouldChime = true;
-                debugLog(`✨ New arrival: ${eventId}`);
-                return [...prev, eventId];
-              });
-              if (shouldChime) void playArrivalChime();
+              if (eventId === selectedEventIdRef.current) return;
+              if (readEventIdsRef.current.includes(eventId)) return;
+              if (chimedArrivalIdsRef.current.has(eventId)) return;
+              chimedArrivalIdsRef.current.add(eventId);
+              debugLog(`✨ New arrival chime: ${eventId}`);
+              void playArrivalChime();
             };
 
             const newIds = newItems.map((item) => item.event_id);
@@ -968,16 +991,6 @@ export default function HomeScreen() {
     // Open immediately with existing URLs for instant response
     setSelectedEvent(item);
 
-    // Remove from "Recent" arrivals once selected
-    debugLog(`Reflections: ${item.event_id} selected. Removing from recent arrivals.`);
-    setRecentlyArrivedIds(prev => {
-      const filtered = prev.filter(id => id !== item.event_id);
-      if (filtered.length !== prev.length) {
-        debugLog(`   Removed ${item.event_id} from recent arrivals. New count: ${filtered.length}`);
-      }
-      return filtered;
-    });
-
     // Copy embedded metadata into grid state if not already loaded
     if (!eventMetadata[item.event_id] && eventHasEmbeddedMetadata(item)) {
       setEventMetadata((prev) => ({
@@ -1035,7 +1048,7 @@ export default function HomeScreen() {
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
     const isRead = readEventIds.includes(item.event_id);
-    const isNewArrival = recentlyArrivedIds.includes(item.event_id);
+    const isNewArrival = newArrivalIds.includes(item.event_id);
     const likedBy = reflectionLikes[item.event_id] ?? [];
     const explorerLikeId = currentExplorerId ?? null;
     const likedByMe = !!explorerLikeId && likedBy.includes(explorerLikeId);
@@ -1568,11 +1581,10 @@ export default function HomeScreen() {
       {/* Header Bar */}
       <View style={[styles.gridHeader, { paddingTop: insets.top + 12 }]}>
         <View style={styles.gridHeaderLeft}>
-          {recentlyArrivedIds.length > 0 ? (
+          {newArrivalIds.length > 0 ? (
             <TouchableOpacity
               onPress={() => {
-                // Find and select the first new arrival
-                const newestArrival = events.find(e => recentlyArrivedIds.includes(e.event_id));
+                const newestArrival = filteredEvents.find((event) => newArrivalIds.includes(event.event_id));
                 if (newestArrival) {
                   throttledHandleEventPress(newestArrival);
                 }
@@ -1582,7 +1594,7 @@ export default function HomeScreen() {
             >
               <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.newArrivalPillBlur}>
                 <Text style={styles.newArrivalPillText}>
-                  ✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}
+                  ✨ {newArrivalIds.length} New Reflection{newArrivalIds.length > 1 ? 's' : ''}
                 </Text>
               </BlurView>
             </TouchableOpacity>
@@ -1670,7 +1682,7 @@ export default function HomeScreen() {
             isCapturingSelfie={isCapturingSelfie}
             isSelfieCameraReady={isSelfieCameraReady}
             onSelfieCameraReadyChange={setIsSelfieCameraReady}
-            recentlyArrivedIds={recentlyArrivedIds}
+            newArrivalIds={newArrivalIds}
             readEventIds={readEventIds}
             onReplay={(event) => sendReplaySignal(event.event_id)}
             config={EXPLORER_CONFIG}

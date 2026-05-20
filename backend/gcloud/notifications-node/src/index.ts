@@ -669,9 +669,13 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
 
       const lastDigestAt = timestampMillis(userData[LAST_UPLOAD_DIGEST_AT_FIELD]);
       if (lastDigestAt !== null && now - lastDigestAt < digestPrefs.cooldownMillis) {
-        for (const notification of eligibleNotifications) {
-          markProcessed(notification, companionId, recipientState('skipped_cooldown'));
-        }
+        // Do NOT mark these notifications processed — the companion has not received
+        // them yet. They were only blocked by the per-user digest interval. Leave
+        // processedRecipients unset so the next scheduler run can include this upload
+        // once the cooldown expires.
+        console.log(
+          `aggregateSlowLaneNotifications: deferring ${eligibleNotifications.length} upload(s) for explorer ${explorerId} companion ${companionId} (cooldown)`
+        );
         continue;
       }
 

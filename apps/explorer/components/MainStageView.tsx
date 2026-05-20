@@ -193,7 +193,7 @@ interface MainStageProps {
   isSelfieCameraReady: boolean;
   onSelfieCameraReadyChange: (ready: boolean) => void;
   readEventIds: string[];
-  recentlyArrivedIds: string[]; // State for items that arrived during this session
+  newArrivalIds: string[]; // Unread reflections visible in the list (derived, not session state)
   onReplay?: (event: Event) => void;
   config?: {
     autoplay?: boolean;
@@ -236,7 +236,7 @@ export default function MainStageView({
   isSelfieCameraReady,
   onSelfieCameraReadyChange,
   readEventIds,
-  recentlyArrivedIds,
+  newArrivalIds,
   onReplay,
   config,
   filterBar,
@@ -2172,10 +2172,10 @@ export default function MainStageView({
 
 
   const scrollToNewestArrival = () => {
-    if (recentlyArrivedIds.length === 0 || !flatListRef.current) return;
+    if (newArrivalIds.length === 0 || !flatListRef.current) return;
 
     const evs = eventsRef.current;
-    const newestIndex = evs.findIndex(e => recentlyArrivedIds.includes(e.event_id));
+    const newestIndex = evs.findIndex(e => newArrivalIds.includes(e.event_id));
     if (newestIndex < 0 || newestIndex >= evs.length) return;
 
     debugLog(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
@@ -2188,7 +2188,7 @@ export default function MainStageView({
     const itemMetadata = eventMetadata[item.event_id];
     const isNowPlaying = item.event_id === selectedEvent?.event_id;
     const isRead = readEventIds.includes(item.event_id);
-    const isNewArrival = recentlyArrivedIds.includes(item.event_id);
+    const isNewArrival = newArrivalIds.includes(item.event_id);
     const itemLikedBy = reflectionLikes[item.event_id] ?? [];
     const itemLikedByMe = !!currentUserId && itemLikedBy.includes(currentUserId);
     const itemLikeCount = itemLikedBy.length;
@@ -2396,14 +2396,14 @@ export default function MainStageView({
               <View style={[styles.headerBar, { top: insets.top + 10 }]}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'transparent' }}>
                   <View style={{ flex: 1 }}>
-                    {recentlyArrivedIds.length > 0 ? (
+                    {newArrivalIds.length > 0 ? (
                       <TouchableOpacity
                         onPress={scrollToNewestArrival}
                         style={styles.newArrivalNotification}
                         activeOpacity={0.7}
                       >
                         <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.notificationBlur}>
-                          <Text style={styles.newArrivalText}>✨ {recentlyArrivedIds.length} New Reflection{recentlyArrivedIds.length > 1 ? 's' : ''}</Text>
+                          <Text style={styles.newArrivalText}>✨ {newArrivalIds.length} New Reflection{newArrivalIds.length > 1 ? 's' : ''}</Text>
                         </BlurView>
                       </TouchableOpacity>
                     ) : (
