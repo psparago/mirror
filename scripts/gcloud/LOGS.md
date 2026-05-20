@@ -26,7 +26,7 @@ Read logs for Gen2 Cloud Functions deployed via `./scripts/gcloud/deploy.sh`.
 | `--project` | `gcloud config` project | `reflections-1200b` |
 | `--region` | `us-central1` | same for all functions in this repo |
 | `--limit` | `100` | `200` |
-| `--filter` | none | `cooldown`, `deferring`, `sent digest` |
+| `--filter` | none | `cooldown`, `deferring`, `sent digest` — uses Cloud Logging `SEARCH()` |
 | `--freshness` | none | `30m`, `1h`, `1d` |
 | `--logging-read` | off | use for time-window queries |
 
@@ -41,13 +41,13 @@ Same names as `deploy.sh`:
 
 ## Two log backends
 
-**Default (`gcloud functions logs read`)** — simplest, good for recent tail:
+**Default (`gcloud functions logs read`)** — simplest tail when no text filter:
 
 ```bash
 ./scripts/gcloud/logs.sh aggregate-slow-lane-notifications --limit 50
 ```
 
-**Cloud Logging (`--freshness` or `--logging-read`)** — better for time ranges:
+**With `--filter` or `--freshness`** — uses `gcloud logging read` (Gen2 logs live under Cloud Run):
 
 ```bash
 ./scripts/gcloud/logs.sh aggregate-slow-lane-notifications --freshness 2h --filter cooldown

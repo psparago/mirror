@@ -42,7 +42,7 @@ Options:
   --region REGION        Cloud Function region (default: us-central1)
   --limit N              Max log entries (default: 100)
   --freshness DURATION   Only recent logs, e.g. 30m, 1h, 1d (uses logging read)
-  --filter TEXT          Search string in log body (e.g. cooldown, deferring)
+  --filter TEXT          Search log message text (uses Cloud Logging SEARCH)
   --logging-read         Use 'gcloud logging read' instead of 'gcloud functions logs read'
   --format FMT           Output format for logging-read (default: table)
   -h, --help             Show this help
@@ -109,13 +109,13 @@ echo -e "${GREEN}Limit:${NC}     ${LIMIT}"
 [[ -n "$FRESHNESS" ]] && echo -e "${GREEN}Freshness:${NC} ${FRESHNESS}"
 echo ""
 
-if [[ "$USE_LOGGING_READ" == true ]] || [[ -n "$FRESHNESS" ]]; then
+if [[ "$USE_LOGGING_READ" == true ]] || [[ -n "$FRESHNESS" ]] || [[ -n "$TEXT_FILTER" ]]; then
   QUERY="resource.type=\"cloud_run_revision\"
 resource.labels.service_name=\"${FUNCTION_NAME}\""
 
   if [[ -n "$TEXT_FILTER" ]]; then
     QUERY="${QUERY}
-(textPayload:\"${TEXT_FILTER}\" OR jsonPayload.message:\"${TEXT_FILTER}\")"
+SEARCH(\"${TEXT_FILTER}\")"
   fi
 
   LOG_CMD=(
@@ -134,17 +134,20 @@ resource.labels.service_name=\"${FUNCTION_NAME}\""
     LOG_CMD+=(--format='table(timestamp,severity,textPayload)')
   fi
 
-  "${LOG_CMD[@]}"
-else
-  FILTER_ARGS=()
-  if [[ -n "$TEXT_FILTER" ]]; then
-    FILTER_ARGS=(--filter="textPayload:\"${TEXT_FILTER}\" OR textPayload:\"${TEXT_FILTER}\"")
+  if ! OUTPUT=$("${LOG_CMD[@]}" 2>&1); then
+    echo "$OUTPUT" >&2
+    exit 1
   fi
 
+  if [[ -z "$OUTPUT" ]]; then
+    echo "No matching log entries."
+  else
+    printf '%s\n' "$OUTPUT"
+  fi
+else
   gcloud functions logs read "$FUNCTION_NAME" \
     --gen2 \
     --region="$REGION" \
     --project="$PROJECT" \
-    --limit="$LIMIT" \
-    "${FILTER_ARGS[@]}"
+    --limit="$LIMIT"
 fi
