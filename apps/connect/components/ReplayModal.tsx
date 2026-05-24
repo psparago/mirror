@@ -1,6 +1,6 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
-import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
+import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
@@ -68,6 +68,9 @@ export function ReplayModal({
   const [showLikesModal, setShowLikesModal] = useState(false);
   const hasAutoPlayedDeepDiveRef = useRef(false);
   const deepDiveBreathTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoFinishHandledForEventRef = useRef<string | null>(null);
+  const stateRef = useRef<any>(null);
+  const [videoReady, setVideoReady] = useState(false);
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
@@ -122,6 +125,8 @@ export function ReplayModal({
     setIsDeepDivePending(false);
     setIsDirectDeepDivePlaying(false);
     setShowLikesModal(false);
+    setVideoReady(false);
+    videoFinishHandledForEventRef.current = null;
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
@@ -172,8 +177,8 @@ export function ReplayModal({
         
         try {
           videoPlayer.pause();
-          const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
-          seekVideoToSeconds(videoPlayer, trim.active ? trim.startSec : 0);
+          seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(eventRef.current?.metadata));
+          setVideoReady(false);
         } catch (e) {}
       },
 
@@ -226,10 +231,14 @@ export function ReplayModal({
 
       playVideo: () => {
         try {
+          videoFinishHandledForEventRef.current = null;
+          setVideoReady(false);
           const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
           if (trim.active) {
             seekVideoToSeconds(videoPlayer, trim.startSec);
           }
+          videoPlayer.muted = false;
+          videoPlayer.volume = 1;
           videoPlayer.play();
         } catch (e) {
           console.warn('[ReplayModal] playVideo failed:', e);
@@ -358,6 +367,70 @@ export function ReplayModal({
   }, [send]);
 
   useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const parkVideoForCaption = useCallback(() => {
+    const meta = eventRef.current?.metadata;
+    try {
+      videoPlayer.pause();
+      seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(meta));
+      videoPlayer.muted = false;
+      videoPlayer.volume = 1;
+    } catch {
+      // player may be tearing down
+    }
+    setVideoReady(false);
+  }, [videoPlayer]);
+
+  const signalVideoFinished = useCallback(() => {
+    const currentState = stateRef.current;
+    const isInPlayingState =
+      currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+      currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+    if (!isInPlayingState) return;
+
+    const eventId = eventRef.current?.event_id;
+    if (!eventId) return;
+    if (videoFinishHandledForEventRef.current === eventId) return;
+    videoFinishHandledForEventRef.current = eventId;
+
+    parkVideoForCaption();
+    sendRef.current({ type: 'VIDEO_FINISHED' });
+  }, [parkVideoForCaption]);
+
+  const signalVideoFinishedRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    signalVideoFinishedRef.current = signalVideoFinished;
+  }, [signalVideoFinished]);
+
+  useEffect(() => {
+    if (!visible || !event?.video_url) return;
+    const sub = videoPlayer.addListener('playingChange', (evt: unknown) => {
+      const isPlaying =
+        evt && typeof evt === 'object' && 'isPlaying' in evt
+          ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
+          : false;
+      if (isPlaying) {
+        setVideoReady(true);
+      }
+    });
+    return () => sub.remove();
+  }, [visible, event?.video_url, videoPlayer]);
+
+  useEffect(() => {
+    if (!visible || !event?.video_url) return;
+    if (!state.matches('finished')) return;
+    try {
+      videoPlayer.pause();
+      seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(event.metadata));
+      setVideoReady(false);
+    } catch {
+      // player may be tearing down
+    }
+  }, [visible, state, event?.event_id, event?.video_url, event?.metadata, videoPlayer]);
+
+  useEffect(() => {
     let cancelled = false;
     if (visible && event) {
       configureConnectPlaybackAudioSessionAsync()
@@ -383,10 +456,10 @@ export function ReplayModal({
 
   useEffect(() => {
     const subscription = videoPlayer.addListener('playToEnd', () => {
-       send({ type: 'VIDEO_FINISHED' });
+      signalVideoFinishedRef.current();
     });
     return () => subscription.remove();
-  }, [videoPlayer, send]);
+  }, [videoPlayer]);
 
   // Cloud master: pause at metadata end and finish the video state (full file may extend past window).
   useEffect(() => {
@@ -416,7 +489,8 @@ export function ReplayModal({
         } catch {
           /* ignore */
         }
-        sendRef.current({ type: 'VIDEO_FINISHED' });
+        debugLog('🏁 Cloud master: trim window end (timeUpdate)');
+        signalVideoFinishedRef.current();
       }
     });
     return () => {
@@ -680,12 +754,22 @@ export function ReplayModal({
           >
             <View style={styles.mediaFrame}>
               {isVideo ? (
-                 <VideoView 
-                   player={videoPlayer} 
-                   style={styles.mediaImage} 
-                   contentFit="contain"
-                   nativeControls={false}
-                 />
+                <>
+                  <VideoView
+                    player={videoPlayer}
+                    style={styles.mediaImage}
+                    contentFit="contain"
+                    nativeControls={false}
+                  />
+                  {event.image_url && !videoReady ? (
+                    <Image
+                      source={{ uri: event.image_url }}
+                      style={[styles.mediaImage, styles.posterShield]}
+                      contentFit="contain"
+                      cachePolicy="memory-disk"
+                    />
+                  ) : null}
+                </>
               ) : (
                  <Image
                    source={{ uri: event.image_url }}
@@ -1060,6 +1144,14 @@ const styles = StyleSheet.create({
   mediaImage: {
     width: '100%',
     height: '100%',
+  },
+  posterShield: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 2,
   },
   captionBar: {
     position: 'absolute',

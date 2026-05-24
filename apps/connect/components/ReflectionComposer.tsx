@@ -2449,7 +2449,7 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Trim & Playback</Text>
                           <Text style={styles.infoDesc}>
-                            Drag the gold bar handles to set the Explorer’s playback window — start and end are saved as metadata, the full source video is uploaded. Hold a handle to zoom in for fine control. Tap the video to pause or resume; it doesn’t loop, and a Replay button appears at the end.
+                            Drag the gold bar handles to set the Explorer’s playback window — start and end are saved as metadata, the full source video is uploaded. Hold a handle to zoom in for fine control. Tap the video to pause or resume; it doesn’t loop. When playback ends, the Explorer returns to your poster frame before the caption plays.
                           </Text>
                         </View>
                       </View>
@@ -2461,7 +2461,7 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Poster</Text>
                           <Text style={styles.infoDesc}>
-                            The poster is the frame the Explorer sees first. Tap Poster, then use the arrows or swipe the video to scrub to your frame — it locks automatically. Confirm saves and exits, Reset clears the custom poster.
+                            The poster is the frame the Explorer sees before video starts and again after it ends (before the caption). Tap Poster, then use the arrows or swipe the video to scrub to your frame — it locks automatically. Confirm saves and exits, Reset clears the custom poster.
                           </Text>
                         </View>
                       </View>
@@ -2487,7 +2487,7 @@ function ReflectionComposerInner({
                     Top-left chip re-opens where you picked media (Camera, Library, or Search). Top-right is Sparkle and X. X always closes to the timeline. Nothing sends until Preview & Send.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    After a Reflection is sent, Companions can like it from the timeline or playback screen. Those hearts appear for the Explorer too.
+                    After a Reflection is sent, Companions can like it from the timeline or playback screen. The Explorer can double-tap the video to like back — everyone sees the hearts, and you get a notification when they do.
                   </Text>
                   <Text style={styles.infoProTip}>
                     {mediaType === 'video'
@@ -2524,7 +2524,7 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Voice Intro</Text>
                       <Text style={styles.infoDesc}>
-                        Optional. Record a short intro in your own voice. If present, the Explorer hears it first — it always wins over the AI voice. If you skip it, Sparkle can speak your caption in an AI voice instead.
+                        Optional. Record a short intro in your own voice. For videos, the Explorer watches first, then hears your voice as the caption after playback ends. For photos, they hear it while viewing the image. Your recording always wins over AI voice.
                       </Text>
                     </View>
                   </View>
@@ -2536,7 +2536,7 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Caption</Text>
                       <Text style={styles.infoDesc}>
-                        Sparkle drafts a caption from your hints and media. You can edit or replace it. If you didn’t record a voice intro, this text becomes the AI voice intro the Explorer hears.
+                        Sparkle drafts a caption from your hints and media. You can edit or replace it. If you didn’t record a voice intro, Sparkle speaks this text as the caption after the video (or while viewing a photo).
                       </Text>
                     </View>
                   </View>
@@ -2581,7 +2581,7 @@ function ReflectionComposerInner({
                     A recorded voice intro always takes priority over AI voice.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    Likes are social warmth for the Explorer: tap a heart to like a Reflection, or long-press it later to see who liked it.
+                    Likes are social warmth: tap a heart on the timeline or preview. The Explorer double-taps the video to like back — you get a notification. Long-press a heart anytime to see who liked.
                   </Text>
                 </>
               ) : (
@@ -2599,8 +2599,8 @@ function ReflectionComposerInner({
                       <Text style={styles.infoLabel}>Preview</Text>
                       <Text style={styles.infoDesc}>
                         {mediaType === 'video'
-                          ? 'Plays in order: poster frame, then your voice or AI intro audio, then the trimmed video. You can like from the heart control, but nothing is sent until you tap Send.'
-                          : 'Shows your cropped photo, then plays your voice or AI intro audio. You can like from the heart control, but nothing is sent until you tap Send.'}
+                          ? 'Plays the same order the Explorer experiences: poster frame, trimmed video, back to the poster, then your voice or AI caption, then Rich Narration if present. Tap the heart to try likes — nothing sends until you tap Send.'
+                          : 'Shows your cropped photo, then plays your voice or AI caption. You can like from the heart control, but nothing is sent until you tap Send.'}
                       </Text>
                     </View>
                   </View>
@@ -2627,7 +2627,7 @@ function ReflectionComposerInner({
                     A recorded voice intro always takes priority over the AI voice.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    On sent Reflections, tap the heart to like and long-press it to see the faces of everyone who liked it.
+                    On sent Reflections, tap the heart to like and long-press it to see who liked. The Explorer can double-tap their screen to like back.
                   </Text>
                 </>
               )}

@@ -21,7 +21,7 @@ A Companion's workbench. A place where someone who loves the Explorer can shape 
 - **Hint** the AI so it knows who is in the photo, what their names are, where this was taken. The AI is powerful but it is not omniscient. The Companion is.
 - **Sparkle** — run the AI, review what it wrote, adjust the hints, run it again. Iterate until the caption and deep dive actually describe what is happening in a way the Explorer will understand.
 - **Write** a caption by hand if the AI cannot get it right. Or tweak what the AI suggested. The Companion always has the final word.
-- **Record** a voice introduction in their own voice — because the Explorer knows that voice, and hearing it before the video plays is context no AI can replicate.
+- **Record** a voice introduction in their own voice — because the Explorer knows that voice, and hearing it after the video (or while viewing a photo) is context no AI can replicate.
 - **Apply a Look** — a filter that changes the mood of a photo. Not a gimmick. A creative choice.
 
 These are five independent layers. None overrides another. The Companion controls all of them, in any order, as many times as they want. This is not a linear wizard. It is an editor.
@@ -48,8 +48,8 @@ But when a Companion wants to craft something special — a birthday video, a fa
 
 ## The North Star
 
-A Companion sits down with a video of the Explorer's grandmother visiting. They trim to the moment Nona walks through the door. They set the poster frame to her smiling face. They tell the AI: "That's Nona, the Explorer's grandmother." They Sparkle, read the caption, decide it is too generic, add more detail to the hints, Sparkle again. Better. They record a voice note: "Hey buddy, look who came to see you!" They preview the whole thing — audio intro, then video — and it is *perfect*. They send.
+A Companion sits down with a video of the Explorer's grandmother visiting. They trim to the moment Nona walks through the door. They set the poster frame to her smiling face. They tell the AI: "That's Nona, the Explorer's grandmother." They Sparkle, read the caption, decide it is too generic, add more detail to the hints, Sparkle again. Better. They record a voice note: "Hey buddy, look who came to see you!" They preview the whole thing — poster, video, back to Nona's smile, then the voice caption — and it is *perfect*. They send.
 
-The Explorer sees Nona's face in the timeline. They hear a familiar voice say their name. The video plays. They understand. They smile. They tap the selfie button and send a reaction back.
+The Explorer sees Nona's face in the timeline. The video plays. They hear a familiar voice say their name. They double-tap to like it back. They understand. They smile. They tap the selfie button and send a reaction back.
 
 That is what this editor is for.
