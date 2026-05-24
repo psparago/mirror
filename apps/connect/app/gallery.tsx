@@ -297,7 +297,7 @@ export default function GalleryScreen() {
           setStatusLine('Copying video into Reflections…');
           setStatusDetail('Keeping a local working copy so preparation is reliable.');
           setPrepStep(4);
-          fileUri = await materializeVideoSourceToFileAsync(expoUri);
+          fileUri = await materializeVideoSourceToFileAsync(expoUri, { forceStableCopy: true });
         } catch {
           fileUri = expoUri;
         }
@@ -327,7 +327,12 @@ export default function GalleryScreen() {
         setStatusLine('Reading video details…');
         setStatusDetail('Checking duration and making sure the clip can be opened.');
         setPrepStep(5);
-        const durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        let durationSec: number | null = null;
+        try {
+          durationSec = await probeLocalVideoDurationSeconds(fileUri);
+        } catch (probeError) {
+          console.error('[GalleryScreen] duration probe failed:', probeError);
+        }
         if (!isUsableVideoDurationSeconds(durationSec)) {
           closeWithPrompt(
             'Can\'t use this clip',

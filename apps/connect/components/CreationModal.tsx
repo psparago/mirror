@@ -820,7 +820,9 @@ export default function CreationModal({
         try {
           setConditioningStatus('Copying video into Reflections...');
           setConditioningProgress(0.14);
-          resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri);
+          resolvedVideoUri = await materializeVideoSourceToFileAsync(normalizedUri, {
+            forceStableCopy: true,
+          });
           trackThisConditioningScratch(resolvedVideoUri, normalizedUri);
         } catch (error) {
           resolvedVideoUri = normalizedUri;

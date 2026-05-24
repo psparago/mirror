@@ -793,9 +793,9 @@ function postingReminderPushData(explorerId: string): Record<string, string> {
 
 function postingReminderBody(explorerName: string, hasSentReflection: boolean): string {
   if (hasSentReflection) {
-    return `It's been so long since you shared a Reflection with ${explorerName}. Tap to share a new Reflection with ${explorerName}.`;
+    return `It's been a while since you shared with ${explorerName}. A quick selfie video is a great way to say hello — tap to send a Reflection.`;
   }
-  return `Tap to share your first Reflection with ${explorerName}.`;
+  return `How about a quick selfie video to say hello to ${explorerName}? Tap to share your first Reflection.`;
 }
 
 async function relationshipRecordsFromSnapshot(

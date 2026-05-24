@@ -157,9 +157,21 @@ export function tabsHomeHref(): '/(tabs)' {
 
 // Cold-start read happens once at module load — before any component renders.
 let _coldStartChecked = false;
+
+function notificationsAvailableOnPlatform(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Platform } = require('react-native') as typeof import('react-native');
+    return Platform.OS === 'ios' || Platform.OS === 'android';
+  } catch {
+    return false;
+  }
+}
+
 export function bootstrapColdStartNotification(): void {
   if (_coldStartChecked) return;
   _coldStartChecked = true;
+  if (!notificationsAvailableOnPlatform()) return;
 
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires

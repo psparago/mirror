@@ -2,7 +2,7 @@ import * as FileSystem from 'expo-file-system';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { createVideoPlayer } from 'expo-video';
 import { Image as RNImage, Platform } from 'react-native';
-import { Video } from 'react-native-compressor';
+import { Video, getVideoMetaData } from 'react-native-compressor';
 
 const MAX_UPLOAD_WIDTH_PX = 1080;
 /** Hard cap on source / trim window length (seconds) for Reflections Connect video. */
@@ -112,13 +112,30 @@ export async function stabilizeLocalImageFileAsync(uri: string, label: string): 
  * (and iCloud-backed picks on iOS) often supply `content://` / `ph://` that must be copied into
  * app cache first.
  */
-export async function materializeVideoSourceToFileAsync(uri: string): Promise<string> {
+export type MaterializeVideoOptions = {
+  /** Copy file:// picker URIs into app cache (avoids ImagePicker cache races on Android). */
+  forceStableCopy?: boolean;
+};
+
+export async function materializeVideoSourceToFileAsync(
+  uri: string,
+  options?: MaterializeVideoOptions
+): Promise<string> {
   const u = normalizePickerUri(uri);
   if (u.startsWith('http://') || u.startsWith('https://')) {
     return u;
   }
   if (u.startsWith('file://')) {
-    return u;
+    if (!options?.forceStableCopy) {
+      return u;
+    }
+    if (!FileSystem.cacheDirectory) {
+      return u;
+    }
+    const ext = guessVideoExtensionFromUri(u);
+    const dest = `${FileSystem.cacheDirectory}video_pick_${Date.now()}_${Math.floor(Math.random() * 1e6)}.${ext}`;
+    await FileSystem.copyAsync({ from: u, to: dest });
+    return dest;
   }
   if (u.startsWith('content://') || u.startsWith('ph://') || u.startsWith('assets-library://')) {
     if (!FileSystem.cacheDirectory) {
@@ -424,25 +441,26 @@ export async function prepareVideoForUpload(uri: string): Promise<string> {
  * workbench composer can own the only long-lived `VideoPlayer` (Android struggles with two
  * players on the same file).
  */
-export async function probeLocalVideoDurationSeconds(uri: string): Promise<number | null> {
-  const normalized = normalizePickerUri(uri.trim());
-  let workUri = normalized;
-  if (workUri.startsWith('content://') || workUri.startsWith('ph://')) {
-    try {
-      workUri = await materializeVideoSourceToFileAsync(normalized);
-    } catch {
-      return null;
+async function probeDurationViaVideoMetaDataAsync(workUri: string): Promise<number | null> {
+  try {
+    const meta = await getVideoMetaData(workUri);
+    if (isUsableVideoDurationSeconds(meta.duration)) {
+      return meta.duration;
     }
-  } else if (
-    !workUri.startsWith('file://') &&
-    !workUri.startsWith('http://') &&
-    !workUri.startsWith('https://')
-  ) {
-    workUri = ensureFileUri(workUri);
+  } catch (error) {
+    console.warn('[probeLocalVideoDurationSeconds] getVideoMetaData failed:', error);
+  }
+  return null;
+}
+
+async function probeDurationViaDisposablePlayerAsync(workUri: string): Promise<number | null> {
+  if (!workUri?.trim()) {
+    return null;
   }
 
-  const player = createVideoPlayer(workUri);
+  let player: ReturnType<typeof createVideoPlayer> | null = null;
   try {
+    player = createVideoPlayer(workUri);
     player.loop = false;
     try {
       player.pause();
@@ -456,12 +474,50 @@ export async function probeLocalVideoDurationSeconds(uri: string): Promise<numbe
       await new Promise((r) => setTimeout(r, 50));
     }
     return null;
+  } catch (error) {
+    console.warn('[probeLocalVideoDurationSeconds] createVideoPlayer failed:', error);
+    return null;
   } finally {
+    if (!player) return;
     try {
-      player.replace('');
+      player.replace(null);
     } catch {
       /* ignore */
     }
+  }
+}
+
+export async function probeLocalVideoDurationSeconds(uri: string): Promise<number | null> {
+  try {
+    const normalized = normalizePickerUri((uri ?? '').trim());
+    if (!normalized) {
+      return null;
+    }
+
+    let workUri = normalized;
+    if (workUri.startsWith('content://') || workUri.startsWith('ph://')) {
+      try {
+        workUri = await materializeVideoSourceToFileAsync(normalized, { forceStableCopy: true });
+      } catch {
+        return null;
+      }
+    } else if (
+      !workUri.startsWith('file://') &&
+      !workUri.startsWith('http://') &&
+      !workUri.startsWith('https://')
+    ) {
+      workUri = ensureFileUri(workUri);
+    }
+
+    const metaDuration = await probeDurationViaVideoMetaDataAsync(workUri);
+    if (isUsableVideoDurationSeconds(metaDuration)) {
+      return metaDuration;
+    }
+
+    return await probeDurationViaDisposablePlayerAsync(workUri);
+  } catch (error) {
+    console.warn('[probeLocalVideoDurationSeconds] failed:', error);
+    return null;
   }
 }
 

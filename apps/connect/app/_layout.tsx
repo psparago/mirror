@@ -8,6 +8,7 @@ import { Stack, usePathname, useRootNavigationState, useRouter, useSegments } fr
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef } from 'react';
+import { Platform } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 import * as Notifications from 'expo-notifications';
@@ -43,6 +44,8 @@ Sentry.init({
 
 const REMINDER_SETTINGS_KEY = 'daily_reminder_settings';
 const REMINDER_MIGRATION_KEY = 'daily_reminder_payload_v2_migrated';
+
+const notificationsSupported = Platform.OS === 'ios' || Platform.OS === 'android';
 
 // --- THE SESSION GUARD ---
 function AuthenticatedLayout() {
@@ -84,6 +87,7 @@ function AuthenticatedLayout() {
   );
 
   useEffect(() => {
+    if (!notificationsSupported) return;
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       handleNotificationResponse(
         response.notification.request.identifier,
@@ -103,6 +107,7 @@ function AuthenticatedLayout() {
 
     (async () => {
       try {
+        if (!notificationsSupported) return;
         const alreadyMigrated = await AsyncStorage.getItem(REMINDER_MIGRATION_KEY);
         if (alreadyMigrated === '1') return;
 
@@ -167,6 +172,7 @@ function AuthenticatedLayout() {
   // once when the response becomes available. We dedupe by notification id
   // inside submitPendingNotificationRoute so additional firings are no-ops.
   useEffect(() => {
+    if (!notificationsSupported) return;
     if (!lastNotificationResponse) return;
     handleNotificationResponse(
       lastNotificationResponse.notification.request.identifier,

@@ -75,7 +75,7 @@ export default function CameraScreen() {
         const video = result.assets[0];
         let fileUri = video.uri;
         try {
-          fileUri = await materializeVideoSourceToFileAsync(video.uri);
+          fileUri = await materializeVideoSourceToFileAsync(video.uri, { forceStableCopy: true });
         } catch {
           fileUri = video.uri;
         }
