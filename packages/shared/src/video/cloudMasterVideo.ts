@@ -98,6 +98,31 @@ export function getCloudMasterTrimWindow(meta: EventMetadata | null | undefined)
 }
 
 /**
+ * Seek target when parking video before post-playback caption: poster frame when set,
+ * otherwise trim start, otherwise 0. Poster is clamped to the trim window when trim is active.
+ */
+export function getVideoParkSeekSec(meta: EventMetadata | null | undefined): number {
+  const trim = getCloudMasterTrimWindow(meta);
+  const posterMs = coerceThumbnailTimeMs(meta?.thumbnail_time_ms);
+
+  if (posterMs !== undefined) {
+    const posterSec = posterMs / 1000;
+    if (!trim.active) {
+      return posterSec;
+    }
+    if (posterSec >= trim.startSec && posterSec < trim.endSec) {
+      return posterSec;
+    }
+    return trim.startSec;
+  }
+
+  if (trim.active) {
+    return trim.startSec;
+  }
+  return 0;
+}
+
+/**
  * Seek an expo-video `VideoPlayer` to a time in seconds.
  * expo-video does not expose `seekTo`; assigning `currentTime` performs the seek.
  */

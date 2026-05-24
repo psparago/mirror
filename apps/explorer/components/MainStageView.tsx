@@ -7,6 +7,7 @@ import {
   EventMetadata,
   getCloudMasterTrimWindow,
   getLikeFeedbackMediaKind,
+  getVideoParkSeekSec,
   isLikeFeedbackInCooldown,
   getValidVideoTrimMs,
   playerMachine,
@@ -578,6 +579,7 @@ export default function MainStageView({
   // Track previous event to prevent restart loops
   const prevEventIdRef = useRef<string | null>(null);
   const lastVideoFinishedEventIdRef = useRef<string | null>(null);
+  const videoFinishHandledForEventRef = useRef<string | null>(null);
   const hasConsumedInitialIdleSelectionRef = useRef(false);
 
   // Co-Host: track whether deep dive has already auto-played for the current reflection
@@ -811,6 +813,8 @@ export default function MainStageView({
       playVideo: async () => {
         // Preparation logic for video
         if (!playerRef.current) return;
+
+        videoFinishHandledForEventRef.current = null;
 
         debugLog(`🎬 playVideo called: status=${playerRef.current.status}`);
 
@@ -1250,6 +1254,50 @@ export default function MainStageView({
   useEffect(() => {
     ensureStageVideoAudibleRef.current = ensureStageVideoAudible;
   }, [ensureStageVideoAudible]);
+
+  const parkVideoForCaption = useCallback(() => {
+    const player = playerRef.current;
+    const meta = selectedMetadataRef.current;
+    if (!player) return;
+    try {
+      player.pause();
+      seekVideoToSeconds(player, getVideoParkSeekSec(meta));
+    } catch {
+      // player may be tearing down
+    }
+    setVideoReady(false);
+  }, []);
+
+  const signalVideoFinished = useCallback(() => {
+    const currentState = stateRef.current;
+    const isInPlayingState =
+      currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
+      currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+    if (!isInPlayingState) return;
+
+    const eventId = selectedEventRef.current?.event_id;
+    if (!eventId) return;
+    if (videoFinishHandledForEventRef.current === eventId) return;
+    videoFinishHandledForEventRef.current = eventId;
+
+    debugLog('🏁 Video finished — parking on poster before caption');
+    parkVideoForCaption();
+    sendRef.current({ type: 'VIDEO_FINISHED' });
+
+    if (lastVideoFinishedEventIdRef.current !== eventId) {
+      lastVideoFinishedEventIdRef.current = eventId;
+      onPlaybackIdleRef.current?.();
+    }
+  }, [parkVideoForCaption]);
+
+  const signalVideoFinishedRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    signalVideoFinishedRef.current = signalVideoFinished;
+  }, [signalVideoFinished]);
+
+  useEffect(() => {
+    videoFinishHandledForEventRef.current = null;
+  }, [selectedEvent?.event_id]);
 
   const lastTapRef = useRef<number>(0);
 
@@ -1757,13 +1805,7 @@ export default function MainStageView({
           }
           if (player.currentTime >= player.duration - 0.5) {
             debugLog('🏁 Video finished (detected via playingChange near end)');
-            sendRef.current({ type: 'VIDEO_FINISHED' });
-
-            const currentEventId = selectedEventRef.current?.event_id || null;
-            if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
-              lastVideoFinishedEventIdRef.current = currentEventId;
-              onPlaybackIdleRef.current?.();
-            }
+            signalVideoFinishedRef.current();
           }
         }
       }
@@ -2144,29 +2186,7 @@ export default function MainStageView({
 
     // Listen for the specific "End of Stream" event from the native player
     const subscription = player.addListener('playToEnd', () => {
-      // Guard: Only process if the machine is actually in a video-playing state.
-      // This prevents spurious VIDEO_FINISHED signals during source replacement
-      // or when the player emits stale events from a previous video.
-      const currentState = stateRef.current;
-      const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
-        currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
-
-      if (!isInPlayingState) {
-        debugLog('🏁 playToEnd received but not in playing state - ignoring');
-        return;
-      }
-
-      debugLog('🏁 Video playToEnd event received');
-
-      // Tell the machine we are done
-      send({ type: 'VIDEO_FINISHED' });
-
-      // Notify parent if needed (legacy logic)
-      const currentEventId = selectedEventRef.current?.event_id || null;
-      if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
-        lastVideoFinishedEventIdRef.current = currentEventId;
-        onPlaybackIdleRef.current?.();
-      }
+      signalVideoFinishedRef.current();
     });
 
     return () => {
@@ -2196,12 +2216,7 @@ export default function MainStageView({
           /* ignore */
         }
         debugLog('🏁 Cloud master: trim window end (timeUpdate)');
-        sendRef.current({ type: 'VIDEO_FINISHED' });
-        const currentEventId = selectedEventRef.current?.event_id || null;
-        if (currentEventId && lastVideoFinishedEventIdRef.current !== currentEventId) {
-          lastVideoFinishedEventIdRef.current = currentEventId;
-          onPlaybackIdleRef.current?.();
-        }
+        signalVideoFinishedRef.current();
       }
     });
     return () => {
@@ -2220,13 +2235,13 @@ export default function MainStageView({
     selectedMetadata?.video_end_ms,
   ]);
 
-  // 3. Rewind video on completion for deep dive context
+  // 3. Keep video parked on poster/trim start when fully finished (replay / deep dive context)
   useEffect(() => {
     if (state?.matches('finished') && player && (selectedMetadata?.content_type === 'video' || !!selectedEvent?.video_url)) {
-      debugLog('🏁 Rewinding video to start for deep dive context');
+      debugLog('🏁 Keeping video parked on poster at finished');
       player.pause();
-      const trim = getCloudMasterTrimWindow(selectedMetadata);
-      seekVideoToSeconds(player, trim.active ? trim.startSec : 0);
+      seekVideoToSeconds(player, getVideoParkSeekSec(selectedMetadata));
+      setVideoReady(false);
     }
   }, [state?.matches('finished'), player, selectedMetadata, selectedEvent]);
 
