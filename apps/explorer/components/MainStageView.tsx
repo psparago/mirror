@@ -1,18 +1,23 @@
 import { FontAwesome } from '@expo/vector-icons';
 import {
+  buildLikeFeedbackPhrase,
   coerceThumbnailTimeMs,
   CompanionAvatar,
   Event,
   EventMetadata,
   getCloudMasterTrimWindow,
+  getLikeFeedbackMediaKind,
+  isLikeFeedbackInCooldown,
   getValidVideoTrimMs,
   playerMachine,
   seekVideoToSeconds,
   useThrottledCallback,
 } from '@projectmirror/shared';
+import { LikeHeartBurstOverlay, useLikeHeartBursts } from '@/components/LikeHeartBurst';
+import { playLikeFeedbackAudio, stopLikeFeedbackAudio } from '@/utils/playLikeFeedbackAudio';
 
 import { useMachine } from '@xstate/react';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import { CameraView, PermissionResponse } from 'expo-camera';
@@ -66,6 +71,8 @@ export function ensureExplorerAudioSessionOnce(): void {
     shouldDuckAndroid: true,
     staysActiveInBackground: true,
     playThroughEarpieceAndroid: false,
+    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+    interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
   }).catch((err) => {
     isAudioModeSet = false;
     console.warn('Reflections: Audio.setAudioModeAsync failed:', err);
@@ -122,6 +129,19 @@ const UP_NEXT_FALLBACK_ITEM_HEIGHT = 200;
  */
 const EXPO_AV_PROGRESS_INTERVAL_MS = 60_000;
 const STATIC_BLUR_INTENSITY = 20;
+
+/** Video keeps playing during like feedback; volume ducks so like TTS stays intelligible. */
+const LIKE_FEEDBACK_VIDEO_DUCK_VOLUME = 0.2;
+
+type LikePauseSnapshot = {
+  /** Prior player.volume when video was ducked for like TTS; null if video was not playing. */
+  videoVolumeBeforeDuck: number | null;
+  captionSoundPaused: boolean;
+  deepDiveSoundPaused: boolean;
+  speechWasActive: boolean;
+  speechResumeText: string | null;
+  speechResumeKind: 'caption' | 'deep_dive' | null;
+};
 
 type StageVideoViewProps = {
   player: React.ComponentProps<typeof VideoView>['player'];
@@ -424,6 +444,53 @@ export default function MainStageView({
     });
   }, [companions, currentUserId, displayedLikeFaces, explorerDisplayName]);
 
+  const { bursts: likeHeartBursts, spawnBurst, clearBursts, removeBurst } = useLikeHeartBursts();
+  const likeCooldownByEventRef = useRef<Record<string, number>>({});
+  const mediaFrameLayoutRef = useRef({ width: 0, height: 0 });
+  const likePauseSnapshotRef = useRef<LikePauseSnapshot | null>(null);
+  const pauseForLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
+  const resumeAfterLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
+
+  const triggerLikeCelebration = useCallback((x: number, y: number) => {
+    spawnBurst(x, y);
+    ensureExplorerAudioSessionOnce();
+    const mediaKind = getLikeFeedbackMediaKind(!!selectedEvent?.video_url);
+    const phrase = buildLikeFeedbackPhrase(selectedMetadata?.sender, mediaKind);
+    void playLikeFeedbackAudio(phrase, {
+      onBeforePlay: () => pauseForLikeFeedbackRef.current(),
+      onAfterPlay: () => resumeAfterLikeFeedbackRef.current(),
+    });
+  }, [selectedEvent?.video_url, selectedMetadata?.sender, spawnBurst]);
+
+  const commitLikeIfAllowed = useCallback(() => {
+    if (!selectedEvent?.event_id || !currentUserId || !onToggleLike) {
+      return false;
+    }
+    const eventId = selectedEvent.event_id;
+    const lastTriggeredAt = likeCooldownByEventRef.current[eventId];
+    if (isLikeFeedbackInCooldown(lastTriggeredAt)) {
+      return false;
+    }
+    likeCooldownByEventRef.current[eventId] = Date.now();
+    if (!likedByCurrentUser) {
+      onToggleLike(eventId, currentUserId, true);
+    }
+    return true;
+  }, [currentUserId, likedByCurrentUser, onToggleLike, selectedEvent?.event_id]);
+
+  const triggerLikeFeedbackAtPoint = useCallback((x: number, y: number) => {
+    commitLikeIfAllowed();
+    triggerLikeCelebration(x, y);
+  }, [commitLikeIfAllowed, triggerLikeCelebration]);
+
+  const triggerLikeFeedbackCentered = useCallback(() => {
+    const { width, height } = mediaFrameLayoutRef.current;
+    const x = width > 0 ? width / 2 : 0;
+    const y = height > 0 ? height / 2 : 0;
+    commitLikeIfAllowed();
+    triggerLikeCelebration(x, y);
+  }, [commitLikeIfAllowed, triggerLikeCelebration]);
+
   const handleLikePress = useCallback(() => {
     if (!selectedEvent?.event_id || !currentUserId || !onToggleLike) {
       return;
@@ -431,13 +498,26 @@ export default function MainStageView({
     heartScale.value = withSpring(1.28, { damping: 8, stiffness: 260 }, () => {
       heartScale.value = withSpring(1, { damping: 10, stiffness: 240 });
     });
-    onToggleLike(selectedEvent.event_id, currentUserId, !likedByCurrentUser);
-  }, [currentUserId, heartScale, likedByCurrentUser, onToggleLike, selectedEvent?.event_id]);
+    if (likedByCurrentUser) {
+      onToggleLike(selectedEvent.event_id, currentUserId, false);
+      return;
+    }
+    triggerLikeFeedbackCentered();
+  }, [
+    currentUserId,
+    heartScale,
+    likedByCurrentUser,
+    onToggleLike,
+    selectedEvent?.event_id,
+    triggerLikeFeedbackCentered,
+  ]);
 
   useEffect(() => {
     setShowLikeFaces(false);
     setLikeFacesLikedBy(null);
-  }, [selectedEvent?.event_id]);
+    clearBursts();
+    void stopLikeFeedbackAudio();
+  }, [clearBursts, selectedEvent?.event_id]);
 
   const positionText = useMemo(() => {
     if (!selectedEvent || events.length === 0) return '';
@@ -899,6 +979,140 @@ export default function MainStageView({
     captionSoundRefForActions.current = captionSound;
   }, [send, state, sound, captionSound]);
 
+  /** Narration-only pause for likes: duck video audio, pause companion TTS/MP3s; video keeps playing. */
+  const pauseAllMediaForLikeFeedback = useCallback(async () => {
+    if (likePauseSnapshotRef.current) return;
+
+    const snapshot: LikePauseSnapshot = {
+      videoVolumeBeforeDuck: null,
+      captionSoundPaused: false,
+      deepDiveSoundPaused: false,
+      speechWasActive: false,
+      speechResumeText: null,
+      speechResumeKind: null,
+    };
+
+    try {
+      const player = playerRef.current;
+      if (player?.playing) {
+        const currentVolume = typeof player.volume === 'number' ? player.volume : 1;
+        snapshot.videoVolumeBeforeDuck = currentVolume;
+        player.volume = LIKE_FEEDBACK_VIDEO_DUCK_VOLUME;
+      }
+    } catch {
+      // player may already be stopped
+    }
+
+    const tryPauseSound = async (activeSound: Audio.Sound | null): Promise<boolean> => {
+      if (!activeSound) return false;
+      try {
+        const status = await activeSound.getStatusAsync();
+        if (status.isLoaded && status.isPlaying) {
+          await activeSound.pauseAsync();
+          return true;
+        }
+      } catch {
+        // sound may already be stopped
+      }
+      return false;
+    };
+
+    snapshot.captionSoundPaused = await tryPauseSound(captionSoundRefForActions.current);
+    snapshot.deepDiveSoundPaused = await tryPauseSound(soundRef.current);
+
+    let speaking = false;
+    try {
+      speaking = await Speech.isSpeakingAsync();
+    } catch {
+      speaking = false;
+    }
+
+    if (speaking) {
+      snapshot.speechWasActive = true;
+      const meta = selectedMetadataRef.current;
+      const currentState = stateRef.current;
+      const captionText = trimMeta(meta?.short_caption) || trimMeta(meta?.description) || '';
+      const deepDiveText = trimMeta(meta?.deep_dive) || '';
+      const isCaptionSpeech =
+        !!currentState?.hasTag?.('speaking') &&
+        !snapshot.captionSoundPaused &&
+        !snapshot.deepDiveSoundPaused;
+
+      if (isCaptionSpeech && captionText) {
+        snapshot.speechResumeKind = 'caption';
+        snapshot.speechResumeText = captionText;
+      } else if (deepDiveText) {
+        snapshot.speechResumeKind = 'deep_dive';
+        snapshot.speechResumeText = deepDiveText;
+      } else if (captionText) {
+        snapshot.speechResumeKind = 'caption';
+        snapshot.speechResumeText = captionText;
+      }
+      Speech.stop();
+    }
+
+    likePauseSnapshotRef.current = snapshot;
+  }, []);
+
+  const resumeAllMediaAfterLikeFeedback = useCallback(async () => {
+    const snapshot = likePauseSnapshotRef.current;
+    if (!snapshot) return;
+    likePauseSnapshotRef.current = null;
+
+    if (snapshot.videoVolumeBeforeDuck !== null && playerRef.current) {
+      try {
+        playerRef.current.volume = snapshot.videoVolumeBeforeDuck;
+      } catch {
+        // player may have been torn down
+      }
+    }
+
+    if (snapshot.captionSoundPaused && captionSoundRefForActions.current) {
+      try {
+        await captionSoundRefForActions.current.playAsync();
+      } catch {
+        // caption may have been torn down
+      }
+    }
+
+    if (snapshot.deepDiveSoundPaused && soundRef.current) {
+      try {
+        await soundRef.current.playAsync();
+      } catch {
+        // deep dive audio may have been torn down
+      }
+    }
+
+    if (snapshot.speechWasActive && snapshot.speechResumeText) {
+      if (snapshot.speechResumeKind === 'caption') {
+        const thisSession = captionSessionRef.current;
+        Speech.speak(snapshot.speechResumeText, {
+          onDone: () => {
+            if (captionSessionRef.current === thisSession) {
+              sendRef.current({ type: 'NARRATION_FINISHED' });
+            }
+          },
+          onError: () => {
+            if (captionSessionRef.current === thisSession) {
+              sendRef.current({ type: 'NARRATION_FINISHED' });
+            }
+          },
+        });
+      } else {
+        setIsCaptionOrSparklePlayingRef.current(true);
+        Speech.speak(snapshot.speechResumeText, {
+          onDone: () => setIsCaptionOrSparklePlayingRef.current(false),
+          onError: () => setIsCaptionOrSparklePlayingRef.current(false),
+        });
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    pauseForLikeFeedbackRef.current = pauseAllMediaForLikeFeedback;
+    resumeAfterLikeFeedbackRef.current = resumeAllMediaAfterLikeFeedback;
+  }, [pauseAllMediaForLikeFeedback, resumeAllMediaAfterLikeFeedback]);
+
   const lastTapRef = useRef<number>(0);
 
   /** Duplicate guard: suppress repeated autoscroll for the same (eventId, list length) within 800ms. */
@@ -1113,6 +1327,14 @@ export default function MainStageView({
 
   const throttledSingleTap = useThrottledCallback(handleSingleTap);
 
+  const handleMediaDoubleTapLike = useCallback((x: number, y: number) => {
+    triggerLikeFeedbackAtPoint(x, y);
+  }, [triggerLikeFeedbackAtPoint]);
+
+  const handleMediaSingleTap = useCallback(() => {
+    throttledSingleTap();
+  }, [throttledSingleTap]);
+
   // Horizontal swipe gesture for next/prev (applied to root container)
   const horizontalSwipeGesture = Gesture.Pan()
     .activeOffsetX([-20, 20]) // Activate after 20px horizontal movement
@@ -1132,13 +1354,6 @@ export default function MainStageView({
       // Increased threshold to 30px to avoid accidental triggers during video playback
       if (Math.abs(event.translationX) > 30 && Math.abs(event.translationX) > Math.abs(event.translationY)) {
         runOnJS(handleHorizontalSwipe)(event.translationX);
-        return; // Don't process tap if swipe was detected
-      }
-
-      // Handle single tap (only if no significant movement)
-      // Stricter threshold to avoid accidental taps during video
-      if (Math.abs(event.translationX) < 5 && Math.abs(event.translationY) < 5 && event.velocityX === 0 && event.velocityY === 0) {
-        runOnJS(throttledSingleTap)();
       }
     });
 
@@ -1172,6 +1387,33 @@ export default function MainStageView({
         opacity.value = withSpring(1, { damping: 20, stiffness: 300 });
       }
     });
+
+  const mediaTapGestures = useMemo(
+    () =>
+      Gesture.Simultaneous(
+        verticalSwipeGesture,
+        Gesture.Exclusive(
+          Gesture.Tap()
+            .numberOfTaps(2)
+            .maxDelay(350)
+            .onEnd((event, success) => {
+              'worklet';
+              if (success) {
+                runOnJS(handleMediaDoubleTapLike)(event.x, event.y);
+              }
+            }),
+          Gesture.Tap()
+            .numberOfTaps(1)
+            .onEnd((_event, success) => {
+              'worklet';
+              if (success) {
+                runOnJS(handleMediaSingleTap)();
+              }
+            })
+        )
+      ),
+    [verticalSwipeGesture, handleMediaDoubleTapLike, handleMediaSingleTap]
+  );
 
   // Toast opacity shared value
   const toastOpacityShared = useSharedValue(0);
@@ -1584,7 +1826,8 @@ export default function MainStageView({
     // Ensure we aren't finished
     const isFinished = state.matches('finished');
 
-    // Videos don't pause - only play or stop. Avoid redundant player.play() — limits bridge/native churn (Now Playing).
+    // Videos don't pause - only play or stop (including during like feedback; narration-only duck/pause).
+    // Avoid redundant player.play() — limits bridge/native churn (Now Playing).
     if (isMachinePlayingVideo && !isFinished) {
       if (!isVideoPlaying) {
         debugLog('⚡ Hardware Sync: Playing Video');
@@ -2437,8 +2680,15 @@ export default function MainStageView({
 
               {/* Media Container */}
               <View style={styles.mediaContainer}>
-                <GestureDetector gesture={verticalSwipeGesture}>
-                  <Animated.View style={styles.mediaFrame}>
+                <Animated.View
+                  style={styles.mediaFrame}
+                  onLayout={(event) => {
+                    mediaFrameLayoutRef.current = {
+                      width: event.nativeEvent.layout.width,
+                      height: event.nativeEvent.layout.height,
+                    };
+                  }}
+                >
                     {/* Layer 1: stage video player, rendered only after a Reflection has a valid source. */}
                     {videoSource && player ? (
                       <StableStageVideoView
@@ -2459,7 +2709,17 @@ export default function MainStageView({
                         priority="high"
                       />
                     )}
-                    {/* Play/Replay overlay */}
+                    {/*
+                      VideoView must not be a child of RNGH GestureDetector on Android — the native
+                      surface often never paints. Keep VideoView under a plain View; gestures on overlay.
+                    */}
+                    <GestureDetector gesture={mediaTapGestures}>
+                      <View style={styles.mediaGestureOverlay} pointerEvents="box-only" />
+                    </GestureDetector>
+
+                    <LikeHeartBurstOverlay bursts={likeHeartBursts} onBurstComplete={removeBurst} />
+
+                    {/* Play/Replay overlay — above gesture layer so the play button stays tappable */}
                     <Animated.View
                       style={[styles.playOverlay, controlsAnimatedStyle]}
                       pointerEvents={showPlayOverlay || showReplayOverlay ? 'auto' : 'none'}
@@ -2479,8 +2739,7 @@ export default function MainStageView({
                         </TouchableOpacity>
                       ) : null}
                     </Animated.View>
-                  </Animated.View>
-                </GestureDetector>
+                </Animated.View>
 
                 {/* Loading Indicator removed - was blocking video */}
               </View>
@@ -2531,7 +2790,7 @@ export default function MainStageView({
                             accessibilityLabel={likedByCurrentUser ? 'Unlike this Reflection' : 'Like this Reflection'}
                           >
                             <FontAwesome
-                              name={likeCount > 0 ? 'heart' : 'heart-o'}
+                              name={likedByCurrentUser ? 'heart' : 'heart-o'}
                               size={16}
                               color={likedByCurrentUser ? '#4FC3F7' : likeCount > 0 ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.82)'}
                             />
@@ -2953,6 +3212,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.15)',
   },
+  mediaGestureOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 30,
+  },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   playOverlay: {
     position: 'absolute',
@@ -2962,8 +3225,8 @@ const styles = StyleSheet.create({
     right: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 20,
-    elevation: 20,
+    zIndex: 40,
+    elevation: 40,
   },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },

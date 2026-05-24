@@ -35,6 +35,7 @@ export type { WaitOverlayProps } from './components/WaitOverlay';
 // Utilities
 export * from './utils/avatarDefaults';
 export * from './reflections/likes';
+export * from './reflections/likeFeedback';
 export * from './notifications/uploadDigest';
 export * from './notifications/postingReminder';
 

@@ -11,6 +11,7 @@ import {
   ExplorerConfig,
   getValidVideoTrimFromFields,
   ListEventsResponse,
+  mergeReflectionLikesWithPending,
   toggleReflectionLike,
   useCompanionAvatars,
   useThrottledCallback,
@@ -788,7 +789,7 @@ export default function HomeScreen() {
         if (Object.keys(metadataFromFirestore).length > 0) {
           setEventMetadata((prev) => ({ ...prev, ...metadataFromFirestore }));
         }
-        setReflectionLikes((prev) => ({ ...prev, ...likesFromFirestore }));
+        setReflectionLikes((prev) => mergeReflectionLikesWithPending(prev, likesFromFirestore));
 
         if (isInitialLoad) {
           isInitialLoad = false;

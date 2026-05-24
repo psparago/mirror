@@ -48,16 +48,21 @@ Options:
   -h, --help             Show this help
 
 Common function names:
-  aggregate-slow-lane-notifications
-  send-fast-lane-notification
-  on-reflection-created
-  on-reflection-updated
   get-s3-url
   list-mirror-events
   delete-mirror-event
+  get-batch-s3-upload-urls
+  get-event-bundle
+  get-voice-sample
+  synthesize-speech
+  delete-companion-account
   unsplash-search
   generate-ai-description
-  get-event-bundle
+  on-reflection-created
+  on-reflection-updated
+  send-fast-lane-notification
+  aggregate-slow-lane-notifications
+  send-posting-reminders
 
 Examples:
   $(basename "$0") aggregate-slow-lane-notifications

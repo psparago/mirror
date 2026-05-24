@@ -23,6 +23,7 @@ const (
 
 	triggerCompanionUpload = "companion_upload"
 	triggerExplorerLike    = "explorer_like"
+	triggerCompanionLike   = "companion_like"
 	pendingStatus          = "pending"
 )
 
@@ -34,6 +35,8 @@ type pendingNotification struct {
 	ReflectionID             string   `firestore:"reflectionId"`
 	SenderID                 string   `firestore:"senderId"`
 	SenderName               string   `firestore:"senderName"`
+	LikerID                  string   `firestore:"likerId,omitempty"`
+	LikerName                string   `firestore:"likerName,omitempty"`
 	Status                   string   `firestore:"status"`
 	CreatedAt                any      `firestore:"createdAt"`
 }
@@ -162,6 +165,47 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
+func newlyAddedLikedBy(before, after []string) []string {
+	beforeSet := make(map[string]struct{}, len(before))
+	for _, value := range before {
+		beforeSet[value] = struct{}{}
+	}
+	added := make([]string, 0)
+	for _, value := range after {
+		if value == "" {
+			continue
+		}
+		if _, seen := beforeSet[value]; !seen {
+			added = append(added, value)
+		}
+	}
+	return added
+}
+
+func companionNameForUser(ctx context.Context, client *firestore.Client, explorerID, userID string) string {
+	if userID == "" {
+		return "A Companion"
+	}
+	iter := client.Collection(relationshipsCollection).
+		Where("userId", "==", userID).
+		Where("explorerId", "==", explorerID).
+		Limit(1).
+		Documents(ctx)
+	doc, err := iter.Next()
+	if err == iterator.Done {
+		return "A Companion"
+	}
+	if err != nil {
+		fmt.Printf("companionNameForUser: query failed for userId=%s explorerId=%s: %v\n", userID, explorerID, err)
+		return "A Companion"
+	}
+	data := doc.Data()
+	if name, ok := data["companionName"].(string); ok && strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name)
+	}
+	return "A Companion"
+}
+
 func createPendingNotification(ctx context.Context, client *firestore.Client, docID string, notification pendingNotification) error {
 	data := map[string]any{
 		"explorerId":               notification.ExplorerID,
@@ -174,6 +218,12 @@ func createPendingNotification(ctx context.Context, client *firestore.Client, do
 		"status":                   notification.Status,
 		"createdAt":                firestore.ServerTimestamp,
 		"expireAt":                 time.Now().UTC().Add(30 * 24 * time.Hour),
+	}
+	if notification.LikerID != "" {
+		data["likerId"] = notification.LikerID
+	}
+	if notification.LikerName != "" {
+		data["likerName"] = notification.LikerName
 	}
 	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, data)
 	if status.Code(err) == codes.AlreadyExists {
@@ -257,7 +307,7 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 	return updateRelationshipLastReflectionSent(ctx, client, explorerID, senderID(doc))
 }
 
-// OnReflectionUpdated stages a notification when the Explorer newly likes a Reflection.
+// OnReflectionUpdated stages fast-lane notifications when the Explorer or a Companion newly likes a Reflection.
 func OnReflectionUpdated(ctx context.Context, e event.Event) error {
 	data, err := decodeDocumentEvent(e)
 	if err != nil {
@@ -276,33 +326,88 @@ func OnReflectionUpdated(ctx context.Context, e event.Event) error {
 		return nil
 	}
 
-	beforeLikedBy := stringArrayField(before, "likedBy")
-	afterLikedBy := stringArrayField(after, "likedBy")
-	if !containsString(afterLikedBy, explorerID) || containsString(beforeLikedBy, explorerID) {
-		return nil
-	}
-
-	recipientID := senderID(after)
-	if recipientID == "" {
-		fmt.Printf("OnReflectionUpdated: skipping explorer_like for %s; missing sender_id\n", id)
-		return nil
-	}
-
 	client, err := firestoreClient(ctx)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
+	beforeLikedBy := stringArrayField(before, "likedBy")
+	afterLikedBy := stringArrayField(after, "likedBy")
+
+	if err := stageExplorerLikeNotification(ctx, client, beforeLikedBy, afterLikedBy, explorerID, id, after); err != nil {
+		return err
+	}
+	return stageCompanionLikeNotifications(ctx, client, beforeLikedBy, afterLikedBy, explorerID, id, after)
+}
+
+func stageExplorerLikeNotification(
+	ctx context.Context,
+	client *firestore.Client,
+	beforeLikedBy, afterLikedBy []string,
+	explorerID, reflectionID string,
+	after *firestoredata.Document,
+) error {
+	if !containsString(afterLikedBy, explorerID) || containsString(beforeLikedBy, explorerID) {
+		return nil
+	}
+
+	recipientID := senderID(after)
+	if recipientID == "" {
+		fmt.Printf("OnReflectionUpdated: skipping explorer_like for %s; missing sender_id\n", reflectionID)
+		return nil
+	}
+
 	notification := pendingNotification{
 		ExplorerID:               explorerID,
 		BroadcastToAllCompanions: false,
 		RecipientIDs:             []string{recipientID},
 		TriggerType:              triggerExplorerLike,
-		ReflectionID:             id,
+		ReflectionID:             reflectionID,
 		SenderName:               senderName(after),
 		Status:                   pendingStatus,
 		CreatedAt:                firestore.ServerTimestamp,
 	}
-	return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s_%s", triggerExplorerLike, id, explorerID), notification)
+	return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s_%s", triggerExplorerLike, reflectionID, explorerID), notification)
+}
+
+func stageCompanionLikeNotifications(
+	ctx context.Context,
+	client *firestore.Client,
+	beforeLikedBy, afterLikedBy []string,
+	explorerID, reflectionID string,
+	after *firestoredata.Document,
+) error {
+	recipientID := senderID(after)
+	if recipientID == "" {
+		return nil
+	}
+
+	for _, likerID := range newlyAddedLikedBy(beforeLikedBy, afterLikedBy) {
+		if likerID == explorerID {
+			continue
+		}
+		if likerID == recipientID {
+			continue
+		}
+
+		notification := pendingNotification{
+			ExplorerID:               explorerID,
+			BroadcastToAllCompanions: false,
+			RecipientIDs:             []string{recipientID},
+			TriggerType:              triggerCompanionLike,
+			ReflectionID:             reflectionID,
+			SenderID:                 senderID(after),
+			SenderName:               senderName(after),
+			LikerID:                  likerID,
+			LikerName:                companionNameForUser(ctx, client, explorerID, likerID),
+			Status:                   pendingStatus,
+			CreatedAt:                firestore.ServerTimestamp,
+		}
+		docID := fmt.Sprintf("%s_%s_%s", triggerCompanionLike, reflectionID, likerID)
+		if err := createPendingNotification(ctx, client, docID, notification); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -16,6 +16,38 @@ function likeKey(reflectionId: string, userId: string): string {
   return `${reflectionId}:${userId}`;
 }
 
+function applyPendingLikeToArray(likedBy: string[], reflectionId: string): string[] {
+  let merged = [...likedBy];
+  for (const pending of pendingLikes.values()) {
+    if (pending.reflectionId !== reflectionId) continue;
+    if (pending.isAdd) {
+      if (!merged.includes(pending.userId)) {
+        merged = [...merged, pending.userId];
+      }
+    } else {
+      merged = merged.filter((uid) => uid !== pending.userId);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Merge Firestore likedBy arrays with in-flight debounced writes so optimistic
+ * UI is not wiped by snapshots that arrive before updateDoc completes.
+ */
+export function mergeReflectionLikesWithPending(
+  prev: Record<string, string[]>,
+  fromFirestore: Record<string, string[]>
+): Record<string, string[]> {
+  const next = { ...prev };
+
+  for (const [reflectionId, serverLikedBy] of Object.entries(fromFirestore)) {
+    next[reflectionId] = applyPendingLikeToArray(serverLikedBy, reflectionId);
+  }
+
+  return next;
+}
+
 /**
  * Debounced Reflections like toggle. Rapid taps are collapsed so Firestore only
  * receives the final state for this Reflection/user pair.
@@ -36,13 +68,16 @@ export function toggleReflectionLike(reflectionId: string, userId: string, isAdd
   }
 
   const timer = setTimeout(() => {
-    pendingLikes.delete(key);
     const reflectionRef = doc(db, ExplorerConfig.collections.reflections, trimmedReflectionId);
     updateDoc(reflectionRef, {
       likedBy: isAdd ? arrayUnion(trimmedUserId) : arrayRemove(trimmedUserId),
-    }).catch((error) => {
-      console.error('Reflections like update failed:', error);
-    });
+    })
+      .catch((error) => {
+        console.error('Reflections like update failed:', error);
+      })
+      .finally(() => {
+        pendingLikes.delete(key);
+      });
   }, LIKE_DEBOUNCE_MS);
 
   pendingLikes.set(key, {

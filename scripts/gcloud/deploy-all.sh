@@ -210,6 +210,27 @@ else
 fi
 echo ""
 
+# Function 6b: synthesize-speech
+echo -e "${YELLOW}Deploying synthesize-speech...${NC}"
+gcloud functions deploy synthesize-speech \
+  --gen2 \
+  --runtime=${RUNTIME} \
+  --region=${REGION} \
+  --source="${SOURCE_DIR}" \
+  --entry-point=SynthesizeSpeech \
+  --trigger-http \
+  --allow-unauthenticated \
+  --set-env-vars ${ENV_VARS} \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ synthesize-speech deployed successfully${NC}"
+else
+  echo -e "${RED}✗ synthesize-speech deployment failed${NC}"
+  exit 1
+fi
+echo ""
+
 # Function 7: unsplash-search
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo -e "${YELLOW}Deploying unsplash-search...${NC}"
@@ -443,6 +464,7 @@ echo "  • delete-mirror-event"
 echo "  • get-batch-s3-upload-urls"
 echo "  • get-event-bundle"
 echo "  • get-voice-sample"
+echo "  • synthesize-speech"
 echo "  • delete-companion-account"
 if [ "$SKIP_UNSPLASH" = false ]; then
   echo "  • unsplash-search"

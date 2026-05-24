@@ -85,7 +85,7 @@ export interface ReflectionDocument {
   likedBy?: string[]; // UIDs that liked this Reflection.
 }
 
-export type PendingNotificationTriggerType = 'companion_upload' | 'explorer_like';
+export type PendingNotificationTriggerType = 'companion_upload' | 'explorer_like' | 'companion_like';
 export type PendingNotificationStatus = 'pending';
 
 // Collection: system_config
@@ -105,6 +105,8 @@ export interface PendingNotificationDocument {
   triggerType: PendingNotificationTriggerType;
   reflectionId: string;
   senderName: string;
+  likerId?: string;
+  likerName?: string;
   status: PendingNotificationStatus;
   createdAt: unknown;
 }

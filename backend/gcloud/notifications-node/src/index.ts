@@ -12,6 +12,8 @@ const EXPLORERS_COLLECTION = 'explorers';
 const PENDING_STATUS = 'pending';
 const COMPANION_UPLOAD_TRIGGER = 'companion_upload';
 const EXPLORER_LIKE_TRIGGER = 'explorer_like';
+const COMPANION_LIKE_TRIGGER = 'companion_like';
+const FAST_LANE_LIKE_TRIGGERS = new Set([EXPLORER_LIKE_TRIGGER, COMPANION_LIKE_TRIGGER]);
 const DEFAULT_DEBOUNCE_MINUTES = 15;
 const DEFAULT_MIN_HOURS_BETWEEN_DIGESTS = 2;
 const DEFAULT_UPLOAD_DIGEST_MODE = 'batched';
@@ -54,6 +56,8 @@ type PendingNotification = {
   reflectionId: string;
   senderId: string;
   senderName: string;
+  likerId: string;
+  likerName: string;
   status: string;
 };
 
@@ -143,6 +147,8 @@ function pendingNotificationFromData(data: DocumentData): PendingNotification {
     reflectionId: typeof data.reflectionId === 'string' ? data.reflectionId.trim() : '',
     senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
     senderName: typeof data.senderName === 'string' && data.senderName.trim() ? data.senderName.trim() : 'Someone',
+    likerId: typeof data.likerId === 'string' ? data.likerId.trim() : '',
+    likerName: typeof data.likerName === 'string' && data.likerName.trim() ? data.likerName.trim() : '',
     status: typeof data.status === 'string' ? data.status.trim() : '',
   };
 }
@@ -157,6 +163,8 @@ function pendingNotificationFromDocument(document: FirestoreDocument): PendingNo
     reflectionId: stringField(fields, 'reflectionId'),
     senderId: stringField(fields, 'senderId'),
     senderName: stringField(fields, 'senderName') || 'Someone',
+    likerId: stringField(fields, 'likerId'),
+    likerName: stringField(fields, 'likerName'),
     status: stringField(fields, 'status'),
   };
 }
@@ -481,7 +489,7 @@ export async function sendFastLaneNotification(
     ? pendingNotificationFromDocument(document)
     : pendingNotificationFromData(notificationSnapshot.data() ?? {});
 
-  if (notification.status !== PENDING_STATUS || notification.triggerType !== EXPLORER_LIKE_TRIGGER) {
+  if (notification.status !== PENDING_STATUS || !FAST_LANE_LIKE_TRIGGERS.has(notification.triggerType)) {
     return;
   }
 
@@ -506,16 +514,22 @@ export async function sendFastLaneNotification(
   }
 
   try {
-    const explorerSnapshot = await db.collection(EXPLORERS_COLLECTION).doc(notification.explorerId).get();
-    const explorerData = explorerSnapshot.data() ?? {};
-    const explorerName: string =
-      (typeof explorerData.legalName === 'string' && explorerData.legalName.trim()) ||
-      (typeof explorerData.displayName === 'string' && explorerData.displayName.trim()) ||
-      (typeof explorerData.display_name === 'string' && explorerData.display_name.trim()) ||
-      (typeof explorerData.name === 'string' && explorerData.name.trim()) ||
-      'Explorer';
+    let body: string;
+    if (notification.triggerType === EXPLORER_LIKE_TRIGGER) {
+      const explorerSnapshot = await db.collection(EXPLORERS_COLLECTION).doc(notification.explorerId).get();
+      const explorerData = explorerSnapshot.data() ?? {};
+      const explorerName: string =
+        (typeof explorerData.legalName === 'string' && explorerData.legalName.trim()) ||
+        (typeof explorerData.displayName === 'string' && explorerData.displayName.trim()) ||
+        (typeof explorerData.display_name === 'string' && explorerData.display_name.trim()) ||
+        (typeof explorerData.name === 'string' && explorerData.name.trim()) ||
+        'Explorer';
+      body = `❤️ ${explorerName} loved your Reflection!`;
+    } else {
+      const likerName = notification.likerName || 'A Companion';
+      body = `❤️ ${likerName} loved your Reflection!`;
+    }
 
-    const body = `❤️ ${explorerName} loved your Reflection!`;
     const messageId = await sendExpoPushNotification(pushToken, body, {
         reflectionId: notification.reflectionId,
         explorerId: notification.explorerId,

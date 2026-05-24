@@ -32,12 +32,27 @@ Read logs for Gen2 Cloud Functions deployed via `./scripts/gcloud/deploy.sh`.
 
 ## Function names
 
-Same names as `deploy.sh`:
+Same names as `deploy.sh` / `deploy-all.sh`:
 
-- `aggregate-slow-lane-notifications` — slow lane digest batching
-- `send-fast-lane-notification` — Explorer like pushes
+**HTTP (Go)**
+- `get-s3-url` — presigned S3 GET/PUT URLs
+- `list-mirror-events` — reflection list API
+- `delete-mirror-event` — delete reflection assets
+- `get-batch-s3-upload-urls` — batch staging upload URLs
+- `get-event-bundle` — full event metadata bundle
+- `get-voice-sample` — presigned voice preview MP3 URLs
+- `synthesize-speech` — ephemeral Google TTS (base64 MP3)
+- `delete-companion-account` — companion account deletion
+- `unsplash-search` — stock photo search (optional)
+- `generate-ai-description` — AI caption/deep dive (optional)
+
+**Firestore triggers (Go)**
 - `on-reflection-created` / `on-reflection-updated` — reflection lifecycle
-- `get-s3-url`, `list-mirror-events`, `delete-mirror-event`, etc.
+
+**Notifications (Node)**
+- `send-fast-lane-notification` — Explorer like pushes
+- `aggregate-slow-lane-notifications` — slow lane digest batching
+- `send-posting-reminders` — weekly posting reminders
 
 ## Two log backends
 

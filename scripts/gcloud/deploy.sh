@@ -1,7 +1,8 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification, aggregate-slow-lane-notifications, send-posting-reminders
+#
+# See also: ./deploy-all.sh (deploy everything), ./deploy-<name>.sh (shortcuts)
 
 set -e  # Exit on error
 
@@ -17,6 +18,30 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+ALL_FUNCTIONS=(
+  get-s3-url
+  list-mirror-events
+  delete-mirror-event
+  get-batch-s3-upload-urls
+  get-event-bundle
+  get-voice-sample
+  synthesize-speech
+  delete-companion-account
+  unsplash-search
+  generate-ai-description
+  on-reflection-created
+  on-reflection-updated
+  send-fast-lane-notification
+  aggregate-slow-lane-notifications
+  send-posting-reminders
+)
+
+print_available_functions() {
+  for fn in "${ALL_FUNCTIONS[@]}"; do
+    echo "  • ${fn}"
+  done
+}
+
 # Check if function name was provided
 if [ -z "$1" ]; then
   echo -e "${RED}Error: Function name required${NC}"
@@ -24,17 +49,7 @@ if [ -z "$1" ]; then
   echo "Usage: $0 <function-name>"
   echo ""
   echo "Available functions:"
-  echo "  • get-s3-url"
-  echo "  • list-mirror-events"
-  echo "  • delete-mirror-event"
-  echo "  • unsplash-search"
-  echo "  • generate-ai-description"
-  echo "  • get-event-bundle"
-  echo "  • on-reflection-created"
-  echo "  • on-reflection-updated"
-  echo "  • send-fast-lane-notification"
-  echo "  • aggregate-slow-lane-notifications"
-  echo "  • send-posting-reminders"
+  print_available_functions
   exit 1
 fi
 
@@ -114,6 +129,20 @@ case "$FUNCTION_NAME" in
       --set-env-vars ${ENV_VARS} \
       --quiet
     ;;
+
+  get-batch-s3-upload-urls)
+    echo -e "${YELLOW}Deploying get-batch-s3-upload-urls...${NC}"
+    gcloud functions deploy get-batch-s3-upload-urls \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=GetBatchS3UploadURLs \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
   
   unsplash-search)
     if [ -z "$UNSPLASH_KEY" ]; then
@@ -159,6 +188,48 @@ case "$FUNCTION_NAME" in
       --region=${REGION} \
       --source="${SOURCE_DIR}" \
       --entry-point=GetEventBundle \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
+
+  get-voice-sample)
+    echo -e "${YELLOW}Deploying get-voice-sample...${NC}"
+    gcloud functions deploy get-voice-sample \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=GetVoiceSample \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
+
+  synthesize-speech)
+    echo -e "${YELLOW}Deploying synthesize-speech...${NC}"
+    gcloud functions deploy synthesize-speech \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=SynthesizeSpeech \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
+
+  delete-companion-account)
+    echo -e "${YELLOW}Deploying delete-companion-account...${NC}"
+    gcloud functions deploy delete-companion-account \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=DeleteCompanionAccount \
       --trigger-http \
       --allow-unauthenticated \
       --set-env-vars ${ENV_VARS} \
@@ -294,17 +365,7 @@ case "$FUNCTION_NAME" in
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
     echo ""
     echo "Available functions:"
-    echo "  • get-s3-url"
-    echo "  • list-mirror-events"
-    echo "  • delete-mirror-event"
-    echo "  • unsplash-search"
-    echo "  • generate-ai-description"
-    echo "  • get-event-bundle"
-    echo "  • on-reflection-created"
-    echo "  • on-reflection-updated"
-    echo "  • send-fast-lane-notification"
-    echo "  • aggregate-slow-lane-notifications"
-    echo "  • send-posting-reminders"
+    print_available_functions
     exit 1
     ;;
 esac
