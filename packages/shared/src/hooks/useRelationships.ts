@@ -20,6 +20,9 @@ export interface Relationship {
   onboarding_complete?: boolean;
   tutorial_viewed?: boolean;
   tutorial_asked?: boolean;
+  lastReflectionSentAt?: unknown;
+  lastPostingReminderSentAt?: unknown;
+  createdAt?: unknown;
 }
 
 export function useRelationships(userId: string | undefined) {
@@ -54,6 +57,9 @@ export function useRelationships(userId: string | undefined) {
           onboarding_complete: data.onboarding_complete,
           tutorial_viewed: data.tutorial_viewed,
           tutorial_asked: data.tutorial_asked,
+          lastReflectionSentAt: data.lastReflectionSentAt,
+          lastPostingReminderSentAt: data.lastPostingReminderSentAt,
+          createdAt: data.createdAt,
         } as Relationship);
       });
       

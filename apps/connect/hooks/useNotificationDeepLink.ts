@@ -15,6 +15,8 @@ type DeepLinkTarget = {
   notificationId: string;
   reflectionId?: string;
   explorerId?: string;
+  action?: 'camera' | 'gallery' | 'search';
+  openCreationModal?: boolean;
 };
 
 // Module-level state — survives across remounts of the consuming component so
@@ -23,6 +25,8 @@ type DeepLinkTarget = {
 // times.
 let moduleResolvingId: string | null = null;
 let moduleLastTarget: DeepLinkTarget | null = null;
+let moduleOpenCreationModal = false;
+let moduleCreationAction: 'camera' | 'gallery' | 'search' | null = null;
 
 /**
  * Consumes the head of the pending-notification-route queue and exposes the
@@ -42,6 +46,12 @@ export function useNotificationDeepLink() {
 
   const [target, setTarget] = useState<DeepLinkTarget | null>(() => moduleLastTarget);
   const [timelineRefreshNonce, setTimelineRefreshNonce] = useState(0);
+  const [deepLinkOpenCreationModal, setDeepLinkOpenCreationModal] = useState(
+    () => moduleOpenCreationModal
+  );
+  const [deepLinkAction, setDeepLinkAction] = useState<'camera' | 'gallery' | 'search' | null>(
+    () => moduleCreationAction
+  );
 
   // Stable refs for context values used inside the async resolver.
   const switchExplorerRef = useRef(switchExplorer);
@@ -104,6 +114,22 @@ export function useNotificationDeepLink() {
         return;
       }
 
+      if (pendingRoute.openCreationModal || pendingRoute.action) {
+        moduleLastTarget = null;
+        moduleOpenCreationModal = Boolean(pendingRoute.openCreationModal || pendingRoute.action);
+        moduleCreationAction = pendingRoute.action ?? null;
+        markNotificationPresented(id);
+        moduleResolvingId = null;
+        setTarget(null);
+        setDeepLinkOpenCreationModal(moduleOpenCreationModal);
+        setDeepLinkAction(moduleCreationAction);
+        if (targetExplorerId) {
+          setTimelineRefreshNonce((value) => value + 1);
+        }
+        consumePendingNotificationRoute();
+        return;
+      }
+
       // Explorer-only deep link — refresh the timeline and mark complete.
       if (targetExplorerId) {
         setTimelineRefreshNonce((value) => value + 1);
@@ -132,13 +158,19 @@ export function useNotificationDeepLink() {
     }
     moduleLastTarget = null;
     moduleResolvingId = null;
+    moduleOpenCreationModal = false;
+    moduleCreationAction = null;
     setTarget(null);
+    setDeepLinkOpenCreationModal(false);
+    setDeepLinkAction(null);
   }).current;
 
   return {
     deepLinkReflectionId: target?.reflectionId ?? null,
     deepLinkExplorerId: target?.explorerId ?? null,
     timelineRefreshNonce,
+    deepLinkOpenCreationModal,
+    deepLinkAction,
     completeDeepLink,
   };
 }

@@ -1,7 +1,7 @@
 import {cloudEvent} from '@google-cloud/functions-framework';
 import {getApps, initializeApp} from 'firebase-admin/app';
 import {FieldValue, Timestamp, getFirestore} from 'firebase-admin/firestore';
-import type {DocumentData, QueryDocumentSnapshot} from 'firebase-admin/firestore';
+import type {DocumentData, DocumentReference, QueryDocumentSnapshot} from 'firebase-admin/firestore';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const PENDING_NOTIFICATIONS_COLLECTION = 'pending_notifications';
@@ -18,6 +18,9 @@ const DEFAULT_UPLOAD_DIGEST_MODE = 'batched';
 const DEFAULT_UPLOAD_DIGEST_HOURS = 2;
 const ALLOWED_UPLOAD_DIGEST_HOURS = new Set([1, 2, 4, 6, 8, 12, 24]);
 const LAST_UPLOAD_DIGEST_AT_FIELD = 'lastUploadDigestSentAt';
+const POSTING_REMINDER_INACTIVE_MS = 7 * 24 * 60 * 60 * 1000;
+const POSTING_REMINDER_NOTIFICATION_TYPE = 'posting_reminder';
+const RELATIONSHIP_PAGE_SIZE = 200;
 
 type FirestoreValue = {
   stringValue?: string;
@@ -209,7 +212,8 @@ function isInvalidExpoPushTokenError(error: unknown): boolean {
 async function sendExpoPushNotification(
   pushToken: string,
   body: string,
-  data: Record<string, string>
+  data: Record<string, string>,
+  title?: string
 ): Promise<string> {
   if (!isExpoPushToken(pushToken)) {
     throw new ExpoPushError('Stored push token is not an Expo push token', 'DeviceNotRegistered');
@@ -225,6 +229,7 @@ async function sendExpoPushNotification(
     body: JSON.stringify({
       to: pushToken,
       sound: 'default',
+      ...(title ? {title} : {}),
       body,
       data,
     }),
@@ -729,10 +734,223 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
   }
 }
 
+type RelationshipRecord = {
+  ref: DocumentReference;
+  userId: string;
+  explorerId: string;
+  explorerName: string;
+  baselineMillis: number | null;
+  lastReminderSentAtMillis: number | null;
+  hasSentReflection: boolean;
+};
+
+function booleanField(value: unknown): boolean {
+  return value === true;
+}
+
+function explorerDisplayName(
+  relationshipData: DocumentData,
+  explorerData: DocumentData | undefined
+): string {
+  const fromRelationship =
+    typeof relationshipData.explorerName === 'string' ? relationshipData.explorerName.trim() : '';
+  if (fromRelationship) {
+    return fromRelationship;
+  }
+  const fromExplorer =
+    typeof explorerData?.displayName === 'string'
+      ? explorerData.displayName.trim()
+      : typeof explorerData?.name === 'string'
+        ? explorerData.name.trim()
+        : '';
+  return fromExplorer || 'your Explorer';
+}
+
+function isPostingReminderEligible(
+  relationship: RelationshipRecord,
+  nowMillis: number
+): boolean {
+  if (relationship.baselineMillis === null) {
+    return false;
+  }
+  const inactiveMs = nowMillis - relationship.baselineMillis;
+  if (inactiveMs < POSTING_REMINDER_INACTIVE_MS) {
+    return false;
+  }
+  if (relationship.lastReminderSentAtMillis === null) {
+    return true;
+  }
+  return nowMillis - relationship.lastReminderSentAtMillis >= POSTING_REMINDER_INACTIVE_MS;
+}
+
+function postingReminderPushData(explorerId: string): Record<string, string> {
+  return {
+    notificationType: POSTING_REMINDER_NOTIFICATION_TYPE,
+    explorerId,
+    openCreationModal: 'true',
+  };
+}
+
+function postingReminderBody(explorerName: string, hasSentReflection: boolean): string {
+  if (hasSentReflection) {
+    return `It's been so long since you shared a Reflection with ${explorerName}. Tap to share a new Reflection with ${explorerName}.`;
+  }
+  return `Tap to share your first Reflection with ${explorerName}.`;
+}
+
+async function relationshipRecordsFromSnapshot(
+  docs: QueryDocumentSnapshot<DocumentData>[]
+): Promise<RelationshipRecord[]> {
+  const records: RelationshipRecord[] = [];
+
+  for (const doc of docs) {
+    const data = doc.data();
+    if (!booleanField(data.onboarding_complete)) {
+      continue;
+    }
+
+    const userId = typeof data.userId === 'string' ? data.userId.trim() : '';
+    const explorerId = typeof data.explorerId === 'string' ? data.explorerId.trim() : '';
+    if (!userId || !explorerId) {
+      continue;
+    }
+
+    const lastReflectionSentAtMillis = timestampMillis(data.lastReflectionSentAt);
+    const baselineMillis =
+      lastReflectionSentAtMillis ??
+      timestampMillis(data.createdAt) ??
+      timestampMillis(data.joined_at);
+
+    records.push({
+      ref: doc.ref,
+      userId,
+      explorerId,
+      explorerName: explorerDisplayName(data, undefined),
+      baselineMillis,
+      lastReminderSentAtMillis: timestampMillis(data.lastPostingReminderSentAt),
+      hasSentReflection: lastReflectionSentAtMillis !== null,
+    });
+  }
+
+  return records;
+}
+
+export async function sendPostingReminders(): Promise<void> {
+  const now = Date.now();
+  let lastDoc: QueryDocumentSnapshot<DocumentData> | undefined;
+  let scanned = 0;
+  let eligible = 0;
+  let sent = 0;
+  let skipped = 0;
+
+  while (true) {
+    let query = db.collection(RELATIONSHIPS_COLLECTION).limit(RELATIONSHIP_PAGE_SIZE);
+
+    if (lastDoc) {
+      query = query.startAfter(lastDoc);
+    }
+
+    const snapshot = await query.get();
+    if (snapshot.empty) {
+      break;
+    }
+
+    const relationships = await relationshipRecordsFromSnapshot(snapshot.docs);
+    scanned += relationships.length;
+
+    const explorerNameCache = new Map<string, string>();
+
+    for (const relationship of relationships) {
+      if (!isPostingReminderEligible(relationship, now)) {
+        skipped++;
+        continue;
+      }
+
+      eligible++;
+
+      const userRef = db.collection(USERS_COLLECTION).doc(relationship.userId);
+      const userSnapshot = await userRef.get();
+      const userData = userSnapshot.data() ?? {};
+
+      if (userData.push_notifications_enabled === false) {
+        skipped++;
+        continue;
+      }
+
+      const pushToken = typeof userData.pushToken === 'string' ? userData.pushToken.trim() : '';
+      if (!pushToken) {
+        skipped++;
+        continue;
+      }
+
+      let explorerName = relationship.explorerName;
+      if (!explorerName || explorerName === 'your Explorer') {
+        const cached = explorerNameCache.get(relationship.explorerId);
+        if (cached) {
+          explorerName = cached;
+        } else {
+          const explorerSnapshot = await db
+            .collection(EXPLORERS_COLLECTION)
+            .doc(relationship.explorerId)
+            .get();
+          explorerName = explorerDisplayName({}, explorerSnapshot.data());
+          explorerNameCache.set(relationship.explorerId, explorerName);
+        }
+      }
+
+      try {
+        const messageId = await sendExpoPushNotification(
+          pushToken,
+          postingReminderBody(explorerName, relationship.hasSentReflection),
+          postingReminderPushData(relationship.explorerId),
+          'Send a Reflection'
+        );
+
+        await relationship.ref.update({
+          lastPostingReminderSentAt: FieldValue.serverTimestamp(),
+        });
+        sent++;
+        console.log(
+          `sendPostingReminders: sent reminder for relationship ${relationship.ref.id} to ${relationship.userId} as ${messageId}`
+        );
+      } catch (error) {
+        if (isInvalidExpoPushTokenError(error)) {
+          await userRef.update({
+            pushToken: FieldValue.delete(),
+          });
+          skipped++;
+          console.warn(
+            `sendPostingReminders: invalid Expo push token for user ${relationship.userId}`
+          );
+          continue;
+        }
+
+        console.error(
+          `sendPostingReminders: failed sending reminder for relationship ${relationship.ref.id}`,
+          error
+        );
+      }
+    }
+
+    lastDoc = snapshot.docs[snapshot.docs.length - 1];
+    if (snapshot.size < RELATIONSHIP_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  console.log(
+    `sendPostingReminders: scanned=${scanned} eligible=${eligible} sent=${sent} skipped=${skipped}`
+  );
+}
+
 cloudEvent('sendFastLaneNotification', async (event: unknown) => {
   await sendFastLaneNotification(event as FastLaneCloudEvent<FirestoreCreateEventData>);
 });
 
 cloudEvent('aggregateSlowLaneNotifications', async () => {
   await aggregateSlowLaneNotifications();
+});
+
+cloudEvent('sendPostingReminders', async () => {
+  await sendPostingReminders();
 });

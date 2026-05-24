@@ -36,6 +36,7 @@ export type { WaitOverlayProps } from './components/WaitOverlay';
 export * from './utils/avatarDefaults';
 export * from './reflections/likes';
 export * from './notifications/uploadDigest';
+export * from './notifications/postingReminder';
 
 // State machines
 export * from './machines/playerMachine';

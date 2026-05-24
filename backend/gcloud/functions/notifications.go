@@ -11,6 +11,7 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/cloudevents/sdk-go/v2/event"
 	firestoredata "github.com/googleapis/google-cloudevents-go/cloud/firestoredata"
+	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -18,6 +19,7 @@ import (
 
 const (
 	pendingNotificationsCollection = "pending_notifications"
+	relationshipsCollection        = "relationships"
 
 	triggerCompanionUpload = "companion_upload"
 	triggerExplorerLike    = "explorer_like"
@@ -184,6 +186,36 @@ func createPendingNotification(ctx context.Context, client *firestore.Client, do
 	return nil
 }
 
+func updateRelationshipLastReflectionSent(ctx context.Context, client *firestore.Client, explorerID, senderID string) error {
+	if senderID == "" {
+		fmt.Printf("OnReflectionCreated: skipping relationship update; missing sender_id for explorer %s\n", explorerID)
+		return nil
+	}
+
+	iter := client.Collection(relationshipsCollection).
+		Where("userId", "==", senderID).
+		Where("explorerId", "==", explorerID).
+		Limit(1).
+		Documents(ctx)
+	doc, err := iter.Next()
+	if err == iterator.Done {
+		fmt.Printf("OnReflectionCreated: no relationship for userId=%s explorerId=%s\n", senderID, explorerID)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("query relationship for lastReflectionSentAt: %w", err)
+	}
+
+	_, err = doc.Ref.Update(ctx, []firestore.Update{
+		{Path: "lastReflectionSentAt", Value: firestore.ServerTimestamp},
+		{Path: "lastPostingReminderSentAt", Value: firestore.Delete},
+	})
+	if err != nil {
+		return fmt.Errorf("update relationship %s lastReflectionSentAt: %w", doc.Ref.ID, err)
+	}
+	return nil
+}
+
 // OnReflectionCreated stages a notification whenever a Companion creates a new Reflection.
 func OnReflectionCreated(ctx context.Context, e event.Event) error {
 	data, err := decodeDocumentEvent(e)
@@ -219,7 +251,10 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 		Status:                   pendingStatus,
 		CreatedAt:                firestore.ServerTimestamp,
 	}
-	return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s", triggerCompanionUpload, id), notification)
+	if err := createPendingNotification(ctx, client, fmt.Sprintf("%s_%s", triggerCompanionUpload, id), notification); err != nil {
+		return err
+	}
+	return updateRelationshipLastReflectionSent(ctx, client, explorerID, senderID(doc))
 }
 
 // OnReflectionUpdated stages a notification when the Explorer newly likes a Reflection.

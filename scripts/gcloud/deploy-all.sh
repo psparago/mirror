@@ -77,6 +77,9 @@ NODE_RUNTIME="nodejs20"
 SLOW_LANE_TOPIC="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULER_JOB="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULE="*/15 * * * *"
+POSTING_REMINDERS_TOPIC="send-posting-reminders"
+POSTING_REMINDERS_SCHEDULER_JOB="send-posting-reminders"
+POSTING_REMINDERS_SCHEDULE="0 14 * * *"
 PUBSUB_TRIGGER_LOCATION="${PUBSUB_TRIGGER_LOCATION:-${REGION}}"
 SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-${REGION}}"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
@@ -389,6 +392,47 @@ else
 fi
 echo ""
 
+# Function 13: send-posting-reminders
+echo -e "${YELLOW}Ensuring Pub/Sub topic ${POSTING_REMINDERS_TOPIC} exists...${NC}"
+gcloud pubsub topics describe "${POSTING_REMINDERS_TOPIC}" --quiet >/dev/null 2>&1 || \
+  gcloud pubsub topics create "${POSTING_REMINDERS_TOPIC}" --quiet
+
+echo -e "${YELLOW}Deploying send-posting-reminders...${NC}"
+gcloud functions deploy send-posting-reminders \
+  --gen2 \
+  --runtime=${NODE_RUNTIME} \
+  --region=${REGION} \
+  --trigger-location=${PUBSUB_TRIGGER_LOCATION} \
+  --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+  --entry-point=sendPostingReminders \
+  --trigger-topic="${POSTING_REMINDERS_TOPIC}" \
+  --quiet
+
+if [ $? -eq 0 ]; then
+  echo -e "${GREEN}✓ send-posting-reminders deployed successfully${NC}"
+else
+  echo -e "${RED}✗ send-posting-reminders deployment failed${NC}"
+  exit 1
+fi
+
+echo -e "${YELLOW}Ensuring daily scheduler job ${POSTING_REMINDERS_SCHEDULER_JOB} exists...${NC}"
+if gcloud scheduler jobs describe "${POSTING_REMINDERS_SCHEDULER_JOB}" --location="${SCHEDULER_LOCATION}" --quiet >/dev/null 2>&1; then
+  gcloud scheduler jobs update pubsub "${POSTING_REMINDERS_SCHEDULER_JOB}" \
+    --location="${SCHEDULER_LOCATION}" \
+    --schedule="${POSTING_REMINDERS_SCHEDULE}" \
+    --topic="${POSTING_REMINDERS_TOPIC}" \
+    --message-body='{}' \
+    --quiet
+else
+  gcloud scheduler jobs create pubsub "${POSTING_REMINDERS_SCHEDULER_JOB}" \
+    --location="${SCHEDULER_LOCATION}" \
+    --schedule="${POSTING_REMINDERS_SCHEDULE}" \
+    --topic="${POSTING_REMINDERS_TOPIC}" \
+    --message-body='{}' \
+    --quiet
+fi
+echo ""
+
 echo "=========================================="
 echo -e "${GREEN}All functions deployed successfully!${NC}"
 echo ""
@@ -410,4 +454,5 @@ echo "  • on-reflection-created"
 echo "  • on-reflection-updated"
 echo "  • send-fast-lane-notification"
 echo "  • aggregate-slow-lane-notifications"
+echo "  • send-posting-reminders"
 

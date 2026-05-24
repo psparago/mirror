@@ -24,6 +24,8 @@ export default function TimelineHomeScreen() {
     deepLinkReflectionId,
     deepLinkExplorerId,
     timelineRefreshNonce,
+    deepLinkOpenCreationModal,
+    deepLinkAction,
     completeDeepLink,
   } = useNotificationDeepLink();
 
@@ -56,6 +58,14 @@ export default function TimelineHomeScreen() {
     setInitialAction(action);
     router.setParams({ action: undefined });
   }, [params.action, router]);
+
+  useEffect(() => {
+    if (!deepLinkOpenCreationModal) return;
+    setEditingReflection(null);
+    setInitialAction(deepLinkAction);
+    setCreationModalVisible(true);
+    completeDeepLink();
+  }, [deepLinkOpenCreationModal, deepLinkAction, completeDeepLink]);
 
   return (
     <View style={styles.container}>

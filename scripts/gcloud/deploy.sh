@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy a single Cloud Function for Project Mirror
 # Usage: ./deploy.sh <function-name>
-# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification, aggregate-slow-lane-notifications
+# Available functions: get-s3-url, list-mirror-events, delete-mirror-event, unsplash-search, generate-ai-description, get-event-bundle, on-reflection-created, on-reflection-updated, send-fast-lane-notification, aggregate-slow-lane-notifications, send-posting-reminders
 
 set -e  # Exit on error
 
@@ -34,6 +34,7 @@ if [ -z "$1" ]; then
   echo "  • on-reflection-updated"
   echo "  • send-fast-lane-notification"
   echo "  • aggregate-slow-lane-notifications"
+  echo "  • send-posting-reminders"
   exit 1
 fi
 
@@ -63,6 +64,9 @@ NODE_RUNTIME="nodejs20"
 SLOW_LANE_TOPIC="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULER_JOB="aggregate-slow-lane-notifications"
 SLOW_LANE_SCHEDULE="*/15 * * * *"
+POSTING_REMINDERS_TOPIC="send-posting-reminders"
+POSTING_REMINDERS_SCHEDULER_JOB="send-posting-reminders"
+POSTING_REMINDERS_SCHEDULE="0 14 * * *"
 PUBSUB_TRIGGER_LOCATION="${PUBSUB_TRIGGER_LOCATION:-${REGION}}"
 SCHEDULER_LOCATION="${SCHEDULER_LOCATION:-${REGION}}"
 ENV_VARS="AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID},AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY},AWS_REGION=${AWS_REGION}"
@@ -247,6 +251,44 @@ case "$FUNCTION_NAME" in
         --quiet
     fi
     ;;
+
+  send-posting-reminders)
+    if [ ! -f "${NOTIFICATIONS_NODE_SOURCE_DIR}/package.json" ]; then
+      echo -e "${RED}Error: package.json not found in ${NOTIFICATIONS_NODE_SOURCE_DIR}${NC}"
+      exit 1
+    fi
+    echo -e "${YELLOW}Ensuring Pub/Sub topic ${POSTING_REMINDERS_TOPIC} exists...${NC}"
+    gcloud pubsub topics describe "${POSTING_REMINDERS_TOPIC}" --quiet >/dev/null 2>&1 || \
+      gcloud pubsub topics create "${POSTING_REMINDERS_TOPIC}" --quiet
+
+    echo -e "${YELLOW}Deploying send-posting-reminders...${NC}"
+    gcloud functions deploy send-posting-reminders \
+      --gen2 \
+      --runtime=${NODE_RUNTIME} \
+      --region=${REGION} \
+      --trigger-location=${PUBSUB_TRIGGER_LOCATION} \
+      --source="${NOTIFICATIONS_NODE_SOURCE_DIR}" \
+      --entry-point=sendPostingReminders \
+      --trigger-topic="${POSTING_REMINDERS_TOPIC}" \
+      --quiet
+
+    echo -e "${YELLOW}Ensuring daily scheduler job ${POSTING_REMINDERS_SCHEDULER_JOB} exists...${NC}"
+    if gcloud scheduler jobs describe "${POSTING_REMINDERS_SCHEDULER_JOB}" --location="${SCHEDULER_LOCATION}" --quiet >/dev/null 2>&1; then
+      gcloud scheduler jobs update pubsub "${POSTING_REMINDERS_SCHEDULER_JOB}" \
+        --location="${SCHEDULER_LOCATION}" \
+        --schedule="${POSTING_REMINDERS_SCHEDULE}" \
+        --topic="${POSTING_REMINDERS_TOPIC}" \
+        --message-body='{}' \
+        --quiet
+    else
+      gcloud scheduler jobs create pubsub "${POSTING_REMINDERS_SCHEDULER_JOB}" \
+        --location="${SCHEDULER_LOCATION}" \
+        --schedule="${POSTING_REMINDERS_SCHEDULE}" \
+        --topic="${POSTING_REMINDERS_TOPIC}" \
+        --message-body='{}' \
+        --quiet
+    fi
+    ;;
   
   *)
     echo -e "${RED}Error: Unknown function name: ${FUNCTION_NAME}${NC}"
@@ -262,6 +304,7 @@ case "$FUNCTION_NAME" in
     echo "  • on-reflection-updated"
     echo "  • send-fast-lane-notification"
     echo "  • aggregate-slow-lane-notifications"
+    echo "  • send-posting-reminders"
     exit 1
     ;;
 esac

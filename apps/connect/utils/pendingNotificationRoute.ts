@@ -13,6 +13,8 @@ export type PendingNotificationRoute = {
   reflectionId?: string;
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
+  openCreationModal?: boolean;
+  notificationType?: string;
 };
 
 let pendingRoute: PendingNotificationRoute | null = null;
@@ -50,12 +52,23 @@ export function isBootPathname(pathname: string): boolean {
   return pathname === '/' || pathname === '/index' || pathname === '';
 }
 
+function booleanField(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes';
+  }
+  return false;
+}
+
 function deepLinkFieldsFromRawData(
   rawData: Record<string, unknown> | undefined
 ): {
   reflectionId?: string;
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
+  openCreationModal?: boolean;
+  notificationType?: string;
 } {
   if (!rawData || typeof rawData !== 'object') return {};
 
@@ -76,11 +89,19 @@ function deepLinkFieldsFromRawData(
     targetScreen === 'camera' || targetScreen === 'gallery' || targetScreen === 'search'
       ? (targetScreen as 'camera' | 'gallery' | 'search')
       : undefined;
+  const notificationType = stringField(
+    source.notificationType ?? source.notification_type ?? rawData.notificationType ?? rawData.notification_type
+  );
+  const openCreationModal =
+    booleanField(source.openCreationModal ?? source.open_creation_modal ?? rawData.openCreationModal ?? rawData.open_creation_modal) ||
+    notificationType === 'posting_reminder';
 
   return {
     ...(reflectionId ? { reflectionId } : {}),
     ...(explorerId ? { explorerId } : {}),
     ...(action ? { action } : {}),
+    ...(openCreationModal ? { openCreationModal: true } : {}),
+    ...(notificationType ? { notificationType } : {}),
   };
 }
 
@@ -89,7 +110,9 @@ export function buildPendingNotificationRoute(
   rawData: Record<string, unknown> | undefined
 ): PendingNotificationRoute | null {
   const fields = deepLinkFieldsFromRawData(rawData);
-  if (!fields.reflectionId && !fields.explorerId && !fields.action) return null;
+  if (!fields.reflectionId && !fields.explorerId && !fields.action && !fields.openCreationModal) {
+    return null;
+  }
   return { id: notificationId, ...fields };
 }
 
