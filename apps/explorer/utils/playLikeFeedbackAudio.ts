@@ -31,14 +31,26 @@ async function runLikeAfterPlay(
   }
 }
 
+export type StopLikeFeedbackAudioOptions = {
+  /** Navigation kill switch — stop playback without running onAfterPlay resume. */
+  skipResume?: boolean;
+};
+
 async function clearPendingLikeAfterPlay(): Promise<void> {
   const resume = pendingLikeAfterPlay;
   pendingLikeAfterPlay = undefined;
   await runLikeAfterPlay(resume);
 }
 
-export async function stopLikeFeedbackAudio(): Promise<void> {
+export async function stopLikeFeedbackAudio(
+  options: StopLikeFeedbackAudioOptions = {}
+): Promise<void> {
   likeAudioRequestId += 1;
+  if (options.skipResume) {
+    pendingLikeAfterPlay = undefined;
+  } else {
+    await clearPendingLikeAfterPlay();
+  }
   if (activeLikeSound) {
     try {
       await activeLikeSound.stopAsync();

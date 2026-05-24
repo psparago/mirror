@@ -6,11 +6,15 @@ import Animated, {
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withSpring,
   withTiming,
 } from 'react-native-reanimated';
 
-const BURST_DURATION_MS = 420;
+const HEART_SIZE = 84;
+const BURST_DURATION_MS = 820;
 const MAX_CONCURRENT_BURSTS = 3;
+/** Instagram-style like burst red */
+const LIKE_HEART_COLOR = '#FF3040';
 
 export type LikeHeartBurstPoint = {
   id: string;
@@ -24,7 +28,7 @@ type BurstItemProps = {
 };
 
 function BurstItem({ burst, onComplete }: BurstItemProps) {
-  const scale = useSharedValue(0.3);
+  const scale = useSharedValue(0.15);
   const opacity = useSharedValue(1);
   const translateY = useSharedValue(0);
   const onCompleteRef = useRef(onComplete);
@@ -35,15 +39,16 @@ function BurstItem({ burst, onComplete }: BurstItemProps) {
   }, []);
 
   useEffect(() => {
-    scale.value = withTiming(1.45, {
-      duration: BURST_DURATION_MS,
-      easing: Easing.out(Easing.cubic),
+    scale.value = withSpring(1.75, {
+      damping: 8,
+      stiffness: 260,
+      mass: 0.55,
     });
     opacity.value = withTiming(0, {
       duration: BURST_DURATION_MS,
       easing: Easing.out(Easing.quad),
     });
-    translateY.value = withTiming(-28, {
+    translateY.value = withTiming(-64, {
       duration: BURST_DURATION_MS,
       easing: Easing.out(Easing.cubic),
     }, (finished) => {
@@ -53,18 +58,19 @@ function BurstItem({ burst, onComplete }: BurstItemProps) {
     });
   }, [burst.id, finishBurst, opacity, scale, translateY]);
 
+  const half = HEART_SIZE / 2;
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
     transform: [
-      { translateX: burst.x - 28 },
-      { translateY: burst.y - 28 + translateY.value },
+      { translateX: burst.x - half },
+      { translateY: burst.y - half + translateY.value },
       { scale: scale.value },
     ],
   }));
 
   return (
     <Animated.View pointerEvents="none" style={[styles.burst, animatedStyle]}>
-      <FontAwesome name="heart" size={56} color="#4FC3F7" />
+      <FontAwesome name="heart" size={HEART_SIZE} color={LIKE_HEART_COLOR} />
     </Animated.View>
   );
 }
@@ -78,7 +84,7 @@ export function LikeHeartBurstOverlay({ bursts, onBurstComplete }: LikeHeartBurs
   if (bursts.length === 0) return null;
 
   return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+    <View pointerEvents="none" style={styles.overlay}>
       {bursts.map((burst) => (
         <BurstItem key={burst.id} burst={burst} onComplete={onBurstComplete} />
       ))}
@@ -109,13 +115,23 @@ export function useLikeHeartBursts() {
 }
 
 const styles = StyleSheet.create({
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    elevation: 50,
+  },
   burst: {
     position: 'absolute',
     left: 0,
     top: 0,
-    width: 56,
-    height: 56,
+    width: HEART_SIZE,
+    height: HEART_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.55,
+    shadowRadius: 8,
+    elevation: 12,
   },
 });

@@ -165,6 +165,8 @@ export default function HomeScreen() {
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventMetadata, setEventMetadata] = useState<{ [key: string]: EventMetadata }>({});
   const [reflectionLikes, setReflectionLikes] = useState<Record<string, string[]>>({});
+  const reflectionLikesRef = useRef(reflectionLikes);
+  reflectionLikesRef.current = reflectionLikes;
   const [gridLikeFacesLikedBy, setGridLikeFacesLikedBy] = useState<string[] | null>(null);
   const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
   const [isSelfieCameraReady, setIsSelfieCameraReady] = useState(false);
@@ -636,14 +638,17 @@ export default function HomeScreen() {
   const selectedMetadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
 
   const handleToggleReflectionLike = useCallback((eventId: string, userId: string, isAdd: boolean) => {
+    const current = reflectionLikesRef.current[eventId] ?? [];
+    const scheduled = toggleReflectionLike(eventId, userId, isAdd, current);
+    if (!scheduled) return;
+
     setReflectionLikes((prev) => {
-      const current = prev[eventId] ?? [];
+      const likedBy = prev[eventId] ?? [];
       const next = isAdd
-        ? (current.includes(userId) ? current : [...current, userId])
-        : current.filter((uid) => uid !== userId);
+        ? (likedBy.includes(userId) ? likedBy : [...likedBy, userId])
+        : likedBy.filter((uid) => uid !== userId);
       return { ...prev, [eventId]: next };
     });
-    toggleReflectionLike(eventId, userId, isAdd);
   }, []);
 
   // Track engagement: send signal if Explorer views Reflection for > 5 seconds

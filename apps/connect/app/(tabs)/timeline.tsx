@@ -325,7 +325,7 @@ export default function SentTimelineScreen({
     const isLiked = likedBy.includes(userId);
     const nextLikedBy = isLiked ? likedBy.filter((uid) => uid !== userId) : [...likedBy, userId];
     updateReflectionLikedBy(item.event_id, nextLikedBy);
-    toggleReflectionLike(item.event_id, userId, !isLiked);
+    toggleReflectionLike(item.event_id, userId, !isLiked, likedBy);
   }, [authUser?.uid, showToast, updateReflectionLikedBy]);
 
   const handleReplayToggleLike = useCallback((eventId: string, isAdd: boolean) => {
@@ -339,7 +339,7 @@ export default function SentTimelineScreen({
       ? (currentLikedBy.includes(userId) ? currentLikedBy : [...currentLikedBy, userId])
       : currentLikedBy.filter((uid) => uid !== userId);
     updateReflectionLikedBy(eventId, nextLikedBy);
-    toggleReflectionLike(eventId, userId, isAdd);
+    toggleReflectionLike(eventId, userId, isAdd, currentLikedBy);
   }, [authUser?.uid, reflections, showToast, updateReflectionLikedBy]);
 
   const selectedReflectionLikedBy = useMemo(() => (

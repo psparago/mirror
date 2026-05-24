@@ -51,11 +51,28 @@ export function mergeReflectionLikesWithPending(
 /**
  * Debounced Reflections like toggle. Rapid taps are collapsed so Firestore only
  * receives the final state for this Reflection/user pair.
+ *
+ * Pass `currentLikedBy` when known so no-op adds/removes skip Firestore (and backend
+ * notifications) when the Reflection is already liked/unliked by this user.
+ *
+ * @returns true when a debounced write was scheduled; false when skipped as a no-op.
  */
-export function toggleReflectionLike(reflectionId: string, userId: string, isAdd: boolean): void {
+export function toggleReflectionLike(
+  reflectionId: string,
+  userId: string,
+  isAdd: boolean,
+  currentLikedBy?: string[]
+): boolean {
   const trimmedReflectionId = reflectionId.trim();
   const trimmedUserId = userId.trim();
-  if (!trimmedReflectionId || !trimmedUserId) return;
+  if (!trimmedReflectionId || !trimmedUserId) return false;
+
+  if (currentLikedBy) {
+    const effectiveLikedBy = applyPendingLikeToArray(currentLikedBy, trimmedReflectionId);
+    const alreadyLiked = effectiveLikedBy.includes(trimmedUserId);
+    if (isAdd && alreadyLiked) return false;
+    if (!isAdd && !alreadyLiked) return false;
+  }
 
   const key = likeKey(trimmedReflectionId, trimmedUserId);
   const pending = pendingLikes.get(key);
@@ -63,7 +80,7 @@ export function toggleReflectionLike(reflectionId: string, userId: string, isAdd
     clearTimeout(pending.timer);
     if (pending.isAdd !== isAdd) {
       pendingLikes.delete(key);
-      return;
+      return false;
     }
   }
 
@@ -86,4 +103,5 @@ export function toggleReflectionLike(reflectionId: string, userId: string, isAdd
     userId: trimmedUserId,
     isAdd,
   });
+  return true;
 }

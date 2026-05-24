@@ -132,6 +132,8 @@ const STATIC_BLUR_INTENSITY = 20;
 
 /** Video keeps playing during like feedback; volume ducks so like TTS stays intelligible. */
 const LIKE_FEEDBACK_VIDEO_DUCK_VOLUME = 0.2;
+/** Short pause before resuming caption/deep-dive narration interrupted by like TTS. */
+const LIKE_FEEDBACK_NARRATION_RESUME_BREATH_MS = 350;
 
 type LikePauseSnapshot = {
   /** Prior player.volume when video was ducked for like TTS; null if video was not playing. */
@@ -448,11 +450,30 @@ export default function MainStageView({
   const likeCooldownByEventRef = useRef<Record<string, number>>({});
   const mediaFrameLayoutRef = useRef({ width: 0, height: 0 });
   const likePauseSnapshotRef = useRef<LikePauseSnapshot | null>(null);
+  const likeFeedbackResumeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pauseForLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
   const resumeAfterLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
+  const abortLikeFeedbackForNavigationRef = useRef<() => void>(() => {});
 
-  const triggerLikeCelebration = useCallback((x: number, y: number) => {
+  /** Heart + like TTS; Firestore write only when not already liked. Runs on every double-tap. */
+  const runLikeFeedbackAtPoint = useCallback((x: number, y: number) => {
+    if (!selectedEvent?.event_id) return;
+
+    // Always celebrate a recognized double-tap (Instagram-style), even during TTS cooldown.
     spawnBurst(x, y);
+
+    const eventId = selectedEvent.event_id;
+    const lastTriggeredAt = likeCooldownByEventRef.current[eventId];
+    if (isLikeFeedbackInCooldown(lastTriggeredAt)) {
+      return;
+    }
+    likeCooldownByEventRef.current[eventId] = Date.now();
+
+    // Commit like before audio so navigation can kill TTS without losing the write.
+    if (!likedByCurrentUser && currentUserId && onToggleLike) {
+      onToggleLike(eventId, currentUserId, true);
+    }
+
     ensureExplorerAudioSessionOnce();
     const mediaKind = getLikeFeedbackMediaKind(!!selectedEvent?.video_url);
     const phrase = buildLikeFeedbackPhrase(selectedMetadata?.sender, mediaKind);
@@ -460,36 +481,22 @@ export default function MainStageView({
       onBeforePlay: () => pauseForLikeFeedbackRef.current(),
       onAfterPlay: () => resumeAfterLikeFeedbackRef.current(),
     });
-  }, [selectedEvent?.video_url, selectedMetadata?.sender, spawnBurst]);
+  }, [
+    currentUserId,
+    likedByCurrentUser,
+    onToggleLike,
+    selectedEvent?.event_id,
+    selectedEvent?.video_url,
+    selectedMetadata?.sender,
+    spawnBurst,
+  ]);
 
-  const commitLikeIfAllowed = useCallback(() => {
-    if (!selectedEvent?.event_id || !currentUserId || !onToggleLike) {
-      return false;
-    }
-    const eventId = selectedEvent.event_id;
-    const lastTriggeredAt = likeCooldownByEventRef.current[eventId];
-    if (isLikeFeedbackInCooldown(lastTriggeredAt)) {
-      return false;
-    }
-    likeCooldownByEventRef.current[eventId] = Date.now();
-    if (!likedByCurrentUser) {
-      onToggleLike(eventId, currentUserId, true);
-    }
-    return true;
-  }, [currentUserId, likedByCurrentUser, onToggleLike, selectedEvent?.event_id]);
-
-  const triggerLikeFeedbackAtPoint = useCallback((x: number, y: number) => {
-    commitLikeIfAllowed();
-    triggerLikeCelebration(x, y);
-  }, [commitLikeIfAllowed, triggerLikeCelebration]);
-
-  const triggerLikeFeedbackCentered = useCallback(() => {
+  const runLikeFeedbackCentered = useCallback(() => {
     const { width, height } = mediaFrameLayoutRef.current;
     const x = width > 0 ? width / 2 : 0;
     const y = height > 0 ? height / 2 : 0;
-    commitLikeIfAllowed();
-    triggerLikeCelebration(x, y);
-  }, [commitLikeIfAllowed, triggerLikeCelebration]);
+    runLikeFeedbackAtPoint(x, y);
+  }, [runLikeFeedbackAtPoint]);
 
   const handleLikePress = useCallback(() => {
     if (!selectedEvent?.event_id || !currentUserId || !onToggleLike) {
@@ -502,22 +509,15 @@ export default function MainStageView({
       onToggleLike(selectedEvent.event_id, currentUserId, false);
       return;
     }
-    triggerLikeFeedbackCentered();
+    runLikeFeedbackCentered();
   }, [
     currentUserId,
     heartScale,
     likedByCurrentUser,
     onToggleLike,
     selectedEvent?.event_id,
-    triggerLikeFeedbackCentered,
+    runLikeFeedbackCentered,
   ]);
-
-  useEffect(() => {
-    setShowLikeFaces(false);
-    setLikeFacesLikedBy(null);
-    clearBursts();
-    void stopLikeFeedbackAudio();
-  }, [clearBursts, selectedEvent?.event_id]);
 
   const positionText = useMemo(() => {
     if (!selectedEvent || events.length === 0) return '';
@@ -569,6 +569,8 @@ export default function MainStageView({
   const machine = useMemo(() => playerMachine.provide({
     actions: {
       stopAllMedia: async () => {
+        abortLikeFeedbackForNavigationRef.current();
+
         // Increment session IMMEDIATELY and SYNCHRONOUSLY to invalidate any pending Narration/TTS
         captionSessionRef.current += 1;
         const thisStopSession = captionSessionRef.current;
@@ -1067,45 +1069,100 @@ export default function MainStageView({
       }
     }
 
-    if (snapshot.captionSoundPaused && captionSoundRefForActions.current) {
-      try {
-        await captionSoundRefForActions.current.playAsync();
-      } catch {
-        // caption may have been torn down
+    const resumeEventId = selectedEventRef.current?.event_id;
+    const needsNarrationResume =
+      snapshot.captionSoundPaused ||
+      snapshot.deepDiveSoundPaused ||
+      snapshot.speechWasActive;
+
+    const resumeNarration = async () => {
+      if (selectedEventRef.current?.event_id !== resumeEventId) return;
+
+      if (snapshot.captionSoundPaused && captionSoundRefForActions.current) {
+        try {
+          await captionSoundRefForActions.current.playAsync();
+        } catch {
+          // caption may have been torn down
+        }
       }
+
+      if (snapshot.deepDiveSoundPaused && soundRef.current) {
+        try {
+          await soundRef.current.playAsync();
+        } catch {
+          // deep dive audio may have been torn down
+        }
+      }
+
+      if (snapshot.speechWasActive && snapshot.speechResumeText) {
+        if (snapshot.speechResumeKind === 'caption') {
+          const thisSession = captionSessionRef.current;
+          Speech.speak(snapshot.speechResumeText, {
+            onDone: () => {
+              if (captionSessionRef.current === thisSession) {
+                sendRef.current({ type: 'NARRATION_FINISHED' });
+              }
+            },
+            onError: () => {
+              if (captionSessionRef.current === thisSession) {
+                sendRef.current({ type: 'NARRATION_FINISHED' });
+              }
+            },
+          });
+        } else {
+          setIsCaptionOrSparklePlayingRef.current(true);
+          Speech.speak(snapshot.speechResumeText, {
+            onDone: () => setIsCaptionOrSparklePlayingRef.current(false),
+            onError: () => setIsCaptionOrSparklePlayingRef.current(false),
+          });
+        }
+      }
+    };
+
+    if (!needsNarrationResume) return;
+
+    if (likeFeedbackResumeTimeoutRef.current) {
+      clearTimeout(likeFeedbackResumeTimeoutRef.current);
+    }
+    likeFeedbackResumeTimeoutRef.current = setTimeout(() => {
+      likeFeedbackResumeTimeoutRef.current = null;
+      void resumeNarration();
+    }, LIKE_FEEDBACK_NARRATION_RESUME_BREATH_MS);
+  }, []);
+
+  /** Kill like TTS/hearts on navigation; does not undo Firestore likes already committed. */
+  const abortLikeFeedbackForNavigation = useCallback(() => {
+    if (likeFeedbackResumeTimeoutRef.current) {
+      clearTimeout(likeFeedbackResumeTimeoutRef.current);
+      likeFeedbackResumeTimeoutRef.current = null;
     }
 
-    if (snapshot.deepDiveSoundPaused && soundRef.current) {
+    const snapshot = likePauseSnapshotRef.current;
+    if (snapshot?.videoVolumeBeforeDuck !== null && playerRef.current) {
       try {
-        await soundRef.current.playAsync();
+        playerRef.current.volume = snapshot.videoVolumeBeforeDuck;
       } catch {
-        // deep dive audio may have been torn down
+        // player may have been torn down
       }
     }
+    likePauseSnapshotRef.current = null;
 
-    if (snapshot.speechWasActive && snapshot.speechResumeText) {
-      if (snapshot.speechResumeKind === 'caption') {
-        const thisSession = captionSessionRef.current;
-        Speech.speak(snapshot.speechResumeText, {
-          onDone: () => {
-            if (captionSessionRef.current === thisSession) {
-              sendRef.current({ type: 'NARRATION_FINISHED' });
-            }
-          },
-          onError: () => {
-            if (captionSessionRef.current === thisSession) {
-              sendRef.current({ type: 'NARRATION_FINISHED' });
-            }
-          },
-        });
-      } else {
-        setIsCaptionOrSparklePlayingRef.current(true);
-        Speech.speak(snapshot.speechResumeText, {
-          onDone: () => setIsCaptionOrSparklePlayingRef.current(false),
-          onError: () => setIsCaptionOrSparklePlayingRef.current(false),
-        });
-      }
-    }
+    void stopLikeFeedbackAudio({ skipResume: true });
+    clearBursts();
+  }, [clearBursts]);
+
+  useEffect(() => {
+    abortLikeFeedbackForNavigationRef.current = abortLikeFeedbackForNavigation;
+  }, [abortLikeFeedbackForNavigation]);
+
+  useEffect(() => {
+    setShowLikeFaces(false);
+    setLikeFacesLikedBy(null);
+    abortLikeFeedbackForNavigation();
+  }, [abortLikeFeedbackForNavigation, selectedEvent?.event_id]);
+
+  useEffect(() => () => {
+    abortLikeFeedbackForNavigationRef.current();
   }, []);
 
   useEffect(() => {
@@ -1204,6 +1261,8 @@ export default function MainStageView({
   // Handle swipe-down dismiss - stops all media before closing
   const handleSwipeDismiss = useCallback(() => {
     debugLog('👇 Swipe Dismiss - stopping all media');
+
+    abortLikeFeedbackForNavigationRef.current();
 
     // 1. Increment session to invalidate any pending callbacks
     captionSessionRef.current += 1;
@@ -1328,8 +1387,8 @@ export default function MainStageView({
   const throttledSingleTap = useThrottledCallback(handleSingleTap);
 
   const handleMediaDoubleTapLike = useCallback((x: number, y: number) => {
-    triggerLikeFeedbackAtPoint(x, y);
-  }, [triggerLikeFeedbackAtPoint]);
+    runLikeFeedbackAtPoint(x, y);
+  }, [runLikeFeedbackAtPoint]);
 
   const handleMediaSingleTap = useCallback(() => {
     throttledSingleTap();
@@ -1337,8 +1396,8 @@ export default function MainStageView({
 
   // Horizontal swipe gesture for next/prev (applied to root container)
   const horizontalSwipeGesture = Gesture.Pan()
-    .activeOffsetX([-20, 20]) // Activate after 20px horizontal movement
-    .failOffsetY([-30, 30]) // Fail if vertical movement exceeds 30px first
+    .activeOffsetX([-48, 48]) // High threshold — don't steal gross-motor double-taps on media
+    .failOffsetY([-40, 40])
     .onEnd((event) => {
       'worklet';
       // Only process swipes in the stage area (exclude bottom grid in portrait)
@@ -1359,11 +1418,10 @@ export default function MainStageView({
 
   // Vertical swipe gesture for dismiss-to-grid (ONLY on mediaFrame).
   // Swipe DOWN to dismiss (iOS modal-sheet convention: Apple Photos, YouTube minimize, Stories).
-  // Activation threshold is aggressive (12px) so the gesture claims the touch before
-  // iOS can hand it to the home indicator. A velocity-based commit rescues quick flicks.
+  // Only activates on deliberate downward drags so double-taps aren't stolen.
   const verticalSwipeGesture = Gesture.Pan()
-    .activeOffsetY([-12, 12])
-    .failOffsetX([-30, 30])
+    .activeOffsetY(32)
+    .failOffsetX([-50, 50])
     .onUpdate((event) => {
       if (event.translationY > 0) {
         translateY.value = event.translationY;
@@ -1390,27 +1448,26 @@ export default function MainStageView({
 
   const mediaTapGestures = useMemo(
     () =>
-      Gesture.Simultaneous(
-        verticalSwipeGesture,
-        Gesture.Exclusive(
-          Gesture.Tap()
-            .numberOfTaps(2)
-            .maxDelay(350)
-            .onEnd((event, success) => {
-              'worklet';
-              if (success) {
-                runOnJS(handleMediaDoubleTapLike)(event.x, event.y);
-              }
-            }),
-          Gesture.Tap()
-            .numberOfTaps(1)
-            .onEnd((_event, success) => {
-              'worklet';
-              if (success) {
-                runOnJS(handleMediaSingleTap)();
-              }
-            })
-        )
+      Gesture.Exclusive(
+        Gesture.Tap()
+          .numberOfTaps(2)
+          .maxDelay(500)
+          .maxDistance(48)
+          .onEnd((event, success) => {
+            'worklet';
+            if (success) {
+              runOnJS(handleMediaDoubleTapLike)(event.x, event.y);
+            }
+          }),
+        Gesture.Tap()
+          .maxDistance(48)
+          .onEnd((_event, success) => {
+            'worklet';
+            if (success) {
+              runOnJS(handleMediaSingleTap)();
+            }
+          }),
+        verticalSwipeGesture
       ),
     [verticalSwipeGesture, handleMediaDoubleTapLike, handleMediaSingleTap]
   );
@@ -1438,6 +1495,10 @@ export default function MainStageView({
       if (deepDiveBreathTimeoutRef.current) {
         clearTimeout(deepDiveBreathTimeoutRef.current);
         deepDiveBreathTimeoutRef.current = null;
+      }
+      if (likeFeedbackResumeTimeoutRef.current) {
+        clearTimeout(likeFeedbackResumeTimeoutRef.current);
+        likeFeedbackResumeTimeoutRef.current = null;
       }
     };
   }, []);
@@ -2714,31 +2775,32 @@ export default function MainStageView({
                       surface often never paints. Keep VideoView under a plain View; gestures on overlay.
                     */}
                     <GestureDetector gesture={mediaTapGestures}>
-                      <View style={styles.mediaGestureOverlay} pointerEvents="box-only" />
+                      <View style={styles.mediaGestureOverlay} pointerEvents="box-only" collapsable={false} />
                     </GestureDetector>
 
                     <LikeHeartBurstOverlay bursts={likeHeartBursts} onBurstComplete={removeBurst} />
 
-                    {/* Play/Replay overlay — above gesture layer so the play button stays tappable */}
-                    <Animated.View
-                      style={[styles.playOverlay, controlsAnimatedStyle]}
-                      pointerEvents={showPlayOverlay || showReplayOverlay ? 'auto' : 'none'}
-                    >
-                      {showPlayOverlay ? (
-                        <TouchableOpacity onPress={throttledSingleTap} style={styles.playButton}>
-                          <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
-                            <FontAwesome name="play" size={64} color="rgba(255, 255, 255, 0.95)" />
-                          </BlurView>
-                        </TouchableOpacity>
-                      ) : null}
-                      {showReplayOverlay ? (
-                        <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
-                          <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
-                            <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
-                          </BlurView>
-                        </TouchableOpacity>
-                      ) : null}
-                    </Animated.View>
+                    {(showPlayOverlay || showReplayOverlay) ? (
+                      <Animated.View
+                        style={[styles.playOverlay, controlsAnimatedStyle]}
+                        pointerEvents="box-none"
+                      >
+                        {showPlayOverlay ? (
+                          <TouchableOpacity onPress={throttledSingleTap} style={styles.playButton}>
+                            <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
+                              <FontAwesome name="play" size={64} color="rgba(255, 255, 255, 0.95)" />
+                            </BlurView>
+                          </TouchableOpacity>
+                        ) : null}
+                        {showReplayOverlay ? (
+                          <TouchableOpacity onPress={handleReplay} style={styles.playButton}>
+                            <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.playOverlayBlur}>
+                              <FontAwesome name="repeat" size={64} color="rgba(255, 255, 255, 0.95)" />
+                            </BlurView>
+                          </TouchableOpacity>
+                        ) : null}
+                      </Animated.View>
+                    ) : null}
                 </Animated.View>
 
                 {/* Loading Indicator removed - was blocking video */}
@@ -2792,7 +2854,7 @@ export default function MainStageView({
                             <FontAwesome
                               name={likedByCurrentUser ? 'heart' : 'heart-o'}
                               size={16}
-                              color={likedByCurrentUser ? '#4FC3F7' : likeCount > 0 ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.82)'}
+                              color={likedByCurrentUser ? '#FF3040' : likeCount > 0 ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.82)'}
                             />
                           </TouchableOpacity>
                         </Animated.View>
@@ -2814,6 +2876,7 @@ export default function MainStageView({
                             <Text style={styles.stageLikeCount}>{likeCount}</Text>
                           </Pressable>
                         ) : null}
+                        <Text style={styles.stageLikeHint}>Double tap to like</Text>
                       </View>
                     ) : null}
 
@@ -3214,7 +3277,8 @@ const styles = StyleSheet.create({
   },
   mediaGestureOverlay: {
     ...StyleSheet.absoluteFillObject,
-    zIndex: 30,
+    zIndex: 45,
+    elevation: 45,
   },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   playOverlay: {
@@ -3225,8 +3289,8 @@ const styles = StyleSheet.create({
     right: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 40,
-    elevation: 40,
+    zIndex: 55,
+    elevation: 55,
   },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
@@ -3290,8 +3354,15 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.18)',
   },
   stageLikeButtonActive: {
-    backgroundColor: 'rgba(79, 195, 247, 0.2)',
-    borderColor: 'rgba(79, 195, 247, 0.55)',
+    backgroundColor: 'rgba(255, 48, 64, 0.18)',
+    borderColor: 'rgba(255, 48, 64, 0.45)',
+  },
+  stageLikeHint: {
+    flex: 1,
+    color: 'rgba(255, 255, 255, 0.72)',
+    fontSize: 14,
+    fontWeight: '500',
+    marginLeft: 2,
   },
   stageLikeCountButton: {
     minWidth: 30,
