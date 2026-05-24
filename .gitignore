@@ -38,6 +38,7 @@ scripts/gcloud/.env.deploy
 scripts/utilities/serviceAccountKey.json
 scripts/utilities/serviceAccountKeyV2.json
 firebase-debug.log*
+.firebase/
 
 # typescript
 *.tsbuildinfo

@@ -17,6 +17,10 @@ export interface VideoTrimSliderProps {
   onChange: (start: number, end: number) => void;
   /** Called continuously while dragging so the parent can seek the video. */
   onSeek?: (ms: number) => void;
+  /** Called when the user begins dragging a trim handle. */
+  onScrubStart?: () => void;
+  /** Called when the user releases a trim handle. */
+  onScrubEnd?: () => void;
   /** When set, (end − start) cannot exceed this many milliseconds. */
   maxRangeMs?: number;
 }
@@ -40,6 +44,8 @@ export default function VideoTrimSlider({
   currentTimeMs,
   onChange,
   onSeek,
+  onScrubStart,
+  onScrubEnd,
   maxRangeMs,
 }: VideoTrimSliderProps) {
   const trackWidth = useSharedValue(0);
@@ -92,6 +98,14 @@ export default function VideoTrimSlider({
     [onSeek],
   );
 
+  const emitScrubStart = useCallback(() => {
+    onScrubStart?.();
+  }, [onScrubStart]);
+
+  const emitScrubEnd = useCallback(() => {
+    onScrubEnd?.();
+  }, [onScrubEnd]);
+
   const hapticLight = useCallback(() => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   }, []);
@@ -100,6 +114,7 @@ export default function VideoTrimSlider({
     .hitSlop({ top: 20, bottom: 20, left: 16, right: 16 })
     .onBegin(() => {
       'worklet';
+      runOnJS(emitScrubStart)();
       originMs.value = startVal.value;
       prevStartClamped.value = startVal.value;
     })
@@ -127,6 +142,10 @@ export default function VideoTrimSlider({
       startVal.value = clamped;
       runOnJS(emitChange)(clamped, endVal.value);
       runOnJS(emitSeek)(clamped);
+    })
+    .onFinalize(() => {
+      'worklet';
+      runOnJS(emitScrubEnd)();
     });
 
   const startLongPress = Gesture.LongPress()
@@ -155,6 +174,7 @@ export default function VideoTrimSlider({
     .hitSlop({ top: 20, bottom: 20, left: 16, right: 16 })
     .onBegin(() => {
       'worklet';
+      runOnJS(emitScrubStart)();
       originMs.value = endVal.value;
       prevEndClamped.value = endVal.value;
     })
@@ -184,6 +204,10 @@ export default function VideoTrimSlider({
       endVal.value = clamped;
       runOnJS(emitChange)(startVal.value, clamped);
       runOnJS(emitSeek)(clamped);
+    })
+    .onFinalize(() => {
+      'worklet';
+      runOnJS(emitScrubEnd)();
     });
 
   const endLongPress = Gesture.LongPress()

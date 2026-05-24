@@ -178,6 +178,8 @@ function ReflectionComposerVideoPlayerProvider({
 }) {
   const player = useVideoPlayer(mediaUri, (p) => {
     p.loop = false;
+    p.volume = 1;
+    p.muted = false;
     // Android: starting in the hook setup races SurfaceView attach; play after readyToPlay below.
     if (Platform.OS !== 'android') {
       p.play();
@@ -681,6 +683,63 @@ function ReflectionComposerInner({
 
   const player = useContext(ReflectionComposerVideoPlayerContext);
   const trimAppliedRef = useRef(false);
+  const trimScrubDepthRef = useRef(0);
+  const wasPlayingBeforeTrimScrubRef = useRef(false);
+
+  useEffect(() => {
+    if (mediaType !== 'video') return;
+    void configureConnectPlaybackAudioSessionAsync();
+  }, [mediaType, mediaUri]);
+
+  useEffect(() => {
+    if (mediaType !== 'video' || !player) return;
+    player.volume = 1;
+    player.muted = false;
+  }, [mediaType, mediaUri, player]);
+
+  const handleTrimScrubStart = useCallback(() => {
+    if (!player) return;
+    if (trimScrubDepthRef.current === 0) {
+      wasPlayingBeforeTrimScrubRef.current = player.playing;
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+      void configureConnectPlaybackAudioSessionAsync();
+    }
+    trimScrubDepthRef.current += 1;
+  }, [player]);
+
+  const handleTrimScrubEnd = useCallback(() => {
+    if (!player) return;
+    trimScrubDepthRef.current = Math.max(0, trimScrubDepthRef.current - 1);
+    if (trimScrubDepthRef.current !== 0) return;
+
+    player.volume = 1;
+    player.muted = false;
+    if (wasPlayingBeforeTrimScrubRef.current && !videoEnded) {
+      try {
+        player.play();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [player, videoEnded]);
+
+  const seekTrimPreview = useCallback(
+    (ms: number) => {
+      if (!player) return;
+      try {
+        player.currentTime = ms / 1000;
+        player.volume = 1;
+        player.muted = false;
+      } catch {
+        /* ignore */
+      }
+    },
+    [player],
+  );
 
   useEffect(() => {
     if (mediaType !== 'video' || !player) return;
@@ -2099,7 +2158,9 @@ function ReflectionComposerInner({
             currentTimeMs={playheadMs}
             maxRangeMs={REFLECTION_MAX_VIDEO_MS}
             onChange={(s, e) => setVideoRangeMs({ start: s, end: e })}
-            onSeek={(ms) => { try { player.currentTime = ms / 1000; } catch { /* ignore */ } }}
+            onSeek={seekTrimPreview}
+            onScrubStart={handleTrimScrubStart}
+            onScrubEnd={handleTrimScrubEnd}
           />
         </View>
       )}
