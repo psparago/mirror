@@ -132,8 +132,56 @@ const STATIC_BLUR_INTENSITY = 20;
 
 /** Video keeps playing during like feedback; volume ducks so like TTS stays intelligible. */
 const LIKE_FEEDBACK_VIDEO_DUCK_VOLUME = 0.2;
+const STAGE_VIDEO_FULL_VOLUME = 1;
 /** Short pause before resuming caption/deep-dive narration interrupted by like TTS. */
 const LIKE_FEEDBACK_NARRATION_RESUME_BREATH_MS = 350;
+
+let lastVideoAudioSessionRefreshAt = 0;
+
+type StageVideoPlayer = {
+  volume?: number;
+  muted?: boolean;
+};
+
+function normalizeRestoredVideoVolume(previousVolume: number | null | undefined): number {
+  if (typeof previousVolume !== 'number' || Number.isNaN(previousVolume)) {
+    return STAGE_VIDEO_FULL_VOLUME;
+  }
+  if (previousVolume <= LIKE_FEEDBACK_VIDEO_DUCK_VOLUME + 0.05) {
+    return STAGE_VIDEO_FULL_VOLUME;
+  }
+  return previousVolume;
+}
+
+function applyStageVideoAudible(player: StageVideoPlayer | null | undefined): void {
+  if (!player) return;
+  try {
+    player.muted = false;
+    player.volume = STAGE_VIDEO_FULL_VOLUME;
+  } catch {
+    // player may be tearing down
+  }
+}
+
+/** Re-apply audio session after expo-av (chime, like TTS) so expo-video regains output. */
+export async function refreshExplorerAudioSessionForVideo(): Promise<void> {
+  const now = Date.now();
+  if (now - lastVideoAudioSessionRefreshAt < 350) return;
+  lastVideoAudioSessionRefreshAt = now;
+  try {
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      shouldDuckAndroid: true,
+      staysActiveInBackground: true,
+      playThroughEarpieceAndroid: false,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+    });
+  } catch (err) {
+    console.warn('Reflections: refreshExplorerAudioSessionForVideo failed:', err);
+  }
+}
 
 type LikePauseSnapshot = {
   /** Prior player.volume when video was ducked for like TTS; null if video was not playing. */
@@ -450,6 +498,7 @@ export default function MainStageView({
   const likeCooldownByEventRef = useRef<Record<string, number>>({});
   const mediaFrameLayoutRef = useRef({ width: 0, height: 0 });
   const likePauseSnapshotRef = useRef<LikePauseSnapshot | null>(null);
+  const likeVideoDuckActiveRef = useRef(false);
   const likeFeedbackResumeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pauseForLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
   const resumeAfterLikeFeedbackRef = useRef<() => Promise<void>>(async () => {});
@@ -561,6 +610,9 @@ export default function MainStageView({
   const sendRef = useRef<any>(() => { });
   const soundRef = useRef<Audio.Sound | null>(null);
   const playerRef = useRef<any>(null);
+  const ensureStageVideoAudibleRef = useRef<(player?: StageVideoPlayer | null) => Promise<void>>(
+    async () => {}
+  );
   const captionSoundRefForActions = useRef<Audio.Sound | null>(null);
   const performSelfieCaptureRef = useRef<((delay?: number) => Promise<void>) | null>(null);
   const clearHeavyMediaRefsRef = useRef<() => void>(() => { });
@@ -997,8 +1049,9 @@ export default function MainStageView({
     try {
       const player = playerRef.current;
       if (player?.playing) {
-        const currentVolume = typeof player.volume === 'number' ? player.volume : 1;
+        const currentVolume = typeof player.volume === 'number' ? player.volume : STAGE_VIDEO_FULL_VOLUME;
         snapshot.videoVolumeBeforeDuck = currentVolume;
+        likeVideoDuckActiveRef.current = true;
         player.volume = LIKE_FEEDBACK_VIDEO_DUCK_VOLUME;
       }
     } catch {
@@ -1061,13 +1114,22 @@ export default function MainStageView({
     if (!snapshot) return;
     likePauseSnapshotRef.current = null;
 
+    likeVideoDuckActiveRef.current = false;
+
     if (snapshot.videoVolumeBeforeDuck !== null && playerRef.current) {
       try {
-        playerRef.current.volume = snapshot.videoVolumeBeforeDuck;
+        playerRef.current.volume = normalizeRestoredVideoVolume(snapshot.videoVolumeBeforeDuck);
+        playerRef.current.muted = false;
       } catch {
         // player may have been torn down
       }
     }
+
+    void refreshExplorerAudioSessionForVideo().then(() => {
+      if (!likeVideoDuckActiveRef.current) {
+        applyStageVideoAudible(playerRef.current);
+      }
+    });
 
     const resumeEventId = selectedEventRef.current?.event_id;
     const needsNarrationResume =
@@ -1138,14 +1200,20 @@ export default function MainStageView({
     }
 
     const snapshot = likePauseSnapshotRef.current;
+    likeVideoDuckActiveRef.current = false;
     if (snapshot?.videoVolumeBeforeDuck !== null && playerRef.current) {
       try {
-        playerRef.current.volume = snapshot.videoVolumeBeforeDuck;
+        playerRef.current.volume = normalizeRestoredVideoVolume(snapshot.videoVolumeBeforeDuck);
+        playerRef.current.muted = false;
       } catch {
         // player may have been torn down
       }
     }
     likePauseSnapshotRef.current = null;
+
+    void refreshExplorerAudioSessionForVideo().then(() => {
+      applyStageVideoAudible(playerRef.current);
+    });
 
     void stopLikeFeedbackAudio({ skipResume: true });
     clearBursts();
@@ -1169,6 +1237,19 @@ export default function MainStageView({
     pauseForLikeFeedbackRef.current = pauseAllMediaForLikeFeedback;
     resumeAfterLikeFeedbackRef.current = resumeAllMediaAfterLikeFeedback;
   }, [pauseAllMediaForLikeFeedback, resumeAllMediaAfterLikeFeedback]);
+
+  const ensureStageVideoAudible = useCallback(async (target?: StageVideoPlayer | null) => {
+    if (likeVideoDuckActiveRef.current) return;
+    const player = target ?? playerRef.current;
+    if (!player) return;
+    ensureExplorerAudioSessionOnce();
+    await refreshExplorerAudioSessionForVideo();
+    applyStageVideoAudible(player);
+  }, []);
+
+  useEffect(() => {
+    ensureStageVideoAudibleRef.current = ensureStageVideoAudible;
+  }, [ensureStageVideoAudible]);
 
   const lastTapRef = useRef<number>(0);
 
@@ -1571,8 +1652,10 @@ export default function MainStageView({
     if (!player) return;
     if (videoSource) {
       try {
+        likeVideoDuckActiveRef.current = false;
         player.replace(videoSource);
         player.timeUpdateEventInterval = 0.25;
+        void ensureStageVideoAudibleRef.current(player);
       } catch {
         /* teardown / invalid URI */
       }
@@ -1642,6 +1725,7 @@ export default function MainStageView({
           : false;
       setIsVideoPlaying(isPlaying);
       if (isPlaying) {
+        void ensureStageVideoAudibleRef.current(player);
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         if (!trim.active) {
           clearShieldLiftFallback();
@@ -1710,6 +1794,7 @@ export default function MainStageView({
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
         if (shouldBePlaying && player && !player.playing) {
           debugLog('⚡ Player became ready while machine expects playback - starting play');
+          void ensureStageVideoAudibleRef.current(player);
           player.play();
         }
       }
@@ -1900,6 +1985,7 @@ export default function MainStageView({
           }
         }
         if (player && !player.playing) {
+          void ensureStageVideoAudibleRef.current(player);
           player.play();
         }
       }

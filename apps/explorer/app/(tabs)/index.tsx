@@ -1,4 +1,4 @@
-import MainStageView, { ensureExplorerAudioSessionOnce } from '@/components/MainStageView';
+import MainStageView, { ensureExplorerAudioSessionOnce, refreshExplorerAudioSessionForVideo } from '@/components/MainStageView';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
@@ -577,6 +577,7 @@ export default function HomeScreen() {
     debugLog('📸 Triggering permission check and audio setup on startup...');
 
     ensureExplorerAudioSessionOnce();
+    void refreshExplorerAudioSessionForVideo();
 
     // Camera Permission
     requestCameraPermission().then(result => {
