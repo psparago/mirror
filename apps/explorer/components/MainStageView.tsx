@@ -2852,9 +2852,15 @@ export default function MainStageView({
                             accessibilityLabel={likedByCurrentUser ? 'Unlike this Reflection' : 'Like this Reflection'}
                           >
                             <FontAwesome
-                              name={likedByCurrentUser ? 'heart' : 'heart-o'}
+                              name={likeCount > 0 || likedByCurrentUser ? 'heart' : 'heart-o'}
                               size={16}
-                              color={likedByCurrentUser ? '#FF3040' : likeCount > 0 ? 'rgba(255,255,255,0.62)' : 'rgba(255,255,255,0.82)'}
+                              color={
+                                likedByCurrentUser
+                                  ? '#FF3040'
+                                  : likeCount > 0
+                                    ? 'rgba(255, 255, 255, 0.78)'
+                                    : 'rgba(255, 255, 255, 0.82)'
+                              }
                             />
                           </TouchableOpacity>
                         </Animated.View>
