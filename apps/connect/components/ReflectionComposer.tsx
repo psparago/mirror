@@ -46,11 +46,20 @@ import {
   REFLECTION_MAX_VIDEO_SECONDS,
 } from '@/utils/mediaProcessor';
 import { ReplayModal } from './ReplayModal';
+import { VoicePickerModal } from './VoicePickerModal';
 import {
   VideoTrimSlider,
   coerceThumbnailTimeMs,
   getValidVideoTrimFromFields,
 } from '@projectmirror/shared';
+import {
+  CAPTION_VOICE_STORAGE_KEY,
+  DEEP_DIVE_VOICE_STORAGE_KEY,
+  getVoiceLabel,
+  saveVoicePreference,
+  type VoiceOption,
+  type VoicePickerTarget,
+} from '@/utils/ttsVoices';
 
 export type ComposerVideoMeta = {
   video_start_ms: number;
@@ -58,6 +67,15 @@ export type ComposerVideoMeta = {
   thumbnail_time_ms: number | null;
   /** Local JPEG from view-shot when native thumbnails fail (e.g. Space Saver / codec quirks). */
   poster_custom_uri?: string | null;
+};
+
+export type TriggerMagicOptions = {
+  targetCaption?: string;
+  targetDeepDive?: string;
+  /** Keep staging media when only regenerating TTS (e.g. voice change). */
+  preserveStaging?: boolean;
+  captionVoice?: string;
+  deepDiveVoice?: string;
 };
 
 export type ComposerSendPayload = {
@@ -93,8 +111,12 @@ interface ReflectionComposerProps {
   initialVideoMeta?: Partial<ComposerVideoMeta> | null;
   /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
   onVideoMetaChange?: (meta: ComposerVideoMeta) => void;
-  onTriggerMagic: (targetCaption?: string) => Promise<void>;
+  onTriggerMagic: (options?: TriggerMagicOptions) => Promise<void>;
   isSending: boolean;
+  captionVoice?: string;
+  deepDiveVoice?: string;
+  onCaptionVoiceChange?: (voice: string) => void;
+  onDeepDiveVoiceChange?: (voice: string) => void;
   /** Shown on Replay preview header when editing an existing reflection (CreationModal). */
   onReplaceMediaFromPreview?: () => void;
   
@@ -204,6 +226,10 @@ function ReflectionComposerInner({
   onSend,
   onTriggerMagic,
   isSending,
+  captionVoice = '',
+  deepDiveVoice = '',
+  onCaptionVoiceChange,
+  onDeepDiveVoiceChange,
   onReplaceMediaFromPreview,
   audioRecorder,
   onStartRecording,
@@ -228,6 +254,7 @@ function ReflectionComposerInner({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isCaptionFocused, setIsCaptionFocused] = useState(false);
   const [isContextFocused, setIsContextFocused] = useState(false);
+  const [voicePickerTarget, setVoicePickerTarget] = useState<VoicePickerTarget | null>(null);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
@@ -325,10 +352,15 @@ function ReflectionComposerInner({
     companionInReflection: boolean;
     explorerInReflection: boolean;
     peopleContextNorm: string;
+    captionVoice: string;
+    deepDiveVoice: string;
   } | null>(null);
   const prevAiThinkingRef = useRef(isAiThinking);
-  /** `playAiPreview` is declared later; the AI-completion effect calls through this ref to satisfy TS ordering. */
+  /** `playAiPreview` / `stopAiPreview` are declared later; callers use these refs for TS ordering. */
   const playAiPreviewRef = useRef<(() => Promise<void>) | null>(null);
+  const stopAiPreviewRef = useRef<(() => Promise<void>) | null>(null);
+  const wantsAutoPlayRef = useRef(false);
+  const autoAdvanceRef = useRef(false);
 
   useEffect(() => {
     const wasThinking = prevAiThinkingRef.current;
@@ -343,6 +375,8 @@ function ReflectionComposerInner({
         companionInReflection: !!companionInReflection,
         explorerInReflection: !!explorerInReflection,
         peopleContextNorm: (peopleContext ?? '').trim(),
+        captionVoice,
+        deepDiveVoice,
       };
       if (autoAdvanceRef.current) {
         autoAdvanceRef.current = false;
@@ -363,6 +397,8 @@ function ReflectionComposerInner({
     companionInReflection,
     explorerInReflection,
     peopleContext,
+    captionVoice,
+    deepDiveVoice,
     onStageChange,
   ]);
 
@@ -377,6 +413,8 @@ function ReflectionComposerInner({
     if (!!companionInReflection !== snap.companionInReflection) return true;
     if (!!explorerInReflection !== snap.explorerInReflection) return true;
     if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return true;
+    if (captionVoice !== snap.captionVoice) return true;
+    if (deepDiveVoice !== snap.deepDiveVoice) return true;
     return false;
   }, [
     caption,
@@ -386,6 +424,8 @@ function ReflectionComposerInner({
     companionInReflection,
     explorerInReflection,
     peopleContext,
+    captionVoice,
+    deepDiveVoice,
   ]);
 
   const hasAnyAiArtifacts = useMemo(
@@ -411,6 +451,8 @@ function ReflectionComposerInner({
       companionInReflection: !!companionInReflection,
       explorerInReflection: !!explorerInReflection,
       peopleContextNorm: (peopleContext ?? '').trim(),
+      captionVoice,
+      deepDiveVoice,
     };
   }, [
     hasAnyAiArtifacts,
@@ -421,7 +463,72 @@ function ReflectionComposerInner({
     companionInReflection,
     explorerInReflection,
     peopleContext,
+    captionVoice,
+    deepDiveVoice,
   ]);
+
+  const buildSparkleOptions = useCallback(
+    (mode: 'full' | 'ttsOnly' = 'full'): TriggerMagicOptions => {
+      const options: TriggerMagicOptions = {
+        targetCaption: caption.trim() || undefined,
+        captionVoice,
+        deepDiveVoice,
+      };
+      if (mode === 'ttsOnly') {
+        options.targetDeepDive = aiArtifacts?.deepDive?.trim() || undefined;
+        options.preserveStaging = true;
+      }
+      return options;
+    },
+    [caption, aiArtifacts?.deepDive, captionVoice, deepDiveVoice],
+  );
+
+  const handleVoicePick = useCallback(
+    async (voice: VoiceOption) => {
+      if (!voicePickerTarget || isAiThinking) return;
+      void stopAiPreviewRef.current?.();
+      const nextCaptionVoice =
+        voicePickerTarget === 'caption' ? voice.value : captionVoice;
+      const nextDeepDiveVoice =
+        voicePickerTarget === 'deep_dive' ? voice.value : deepDiveVoice;
+      if (voicePickerTarget === 'caption') {
+        onCaptionVoiceChange?.(voice.value);
+        await saveVoicePreference(CAPTION_VOICE_STORAGE_KEY, voice.value);
+      } else {
+        onDeepDiveVoiceChange?.(voice.value);
+        await saveVoicePreference(DEEP_DIVE_VOICE_STORAGE_KEY, voice.value);
+      }
+      setVoicePickerTarget(null);
+      if (hasAnyAiArtifacts) {
+        const deepDiveText = aiArtifacts?.deepDive?.trim();
+        if (!deepDiveText) return;
+        setIsAiCancelled(false);
+        wantsAutoPlayRef.current = true;
+        autoAdvanceRef.current = false;
+        onTriggerMagic({
+          targetCaption: caption.trim() || undefined,
+          targetDeepDive: deepDiveText,
+          preserveStaging: true,
+          captionVoice: nextCaptionVoice,
+          deepDiveVoice: nextDeepDiveVoice,
+        }).catch(() => {
+          wantsAutoPlayRef.current = false;
+        });
+      }
+    },
+    [
+      voicePickerTarget,
+      isAiThinking,
+      captionVoice,
+      deepDiveVoice,
+      onCaptionVoiceChange,
+      onDeepDiveVoiceChange,
+      hasAnyAiArtifacts,
+      aiArtifacts?.deepDive,
+      caption,
+      onTriggerMagic,
+    ],
+  );
 
   const ensureAiCurrent = useCallback(
     (): boolean => {
@@ -430,10 +537,10 @@ function ReflectionComposerInner({
       autoAdvanceRef.current = false;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(caption || undefined).catch(() => {});
+      onTriggerMagic(buildSparkleOptions()).catch(() => {});
       return false;
     },
-    [hasAnyAiArtifacts, isAiStale, onTriggerMagic, caption],
+    [hasAnyAiArtifacts, isAiStale, onTriggerMagic, buildSparkleOptions],
   );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
@@ -1096,6 +1203,7 @@ function ReflectionComposerInner({
   }, [ensureAiCurrent, doPreviewNow]);
 
   const goToWorkbench = () => {
+    void stopAiPreviewRef.current?.();
     onStageChange('workbench');
     Keyboard.dismiss();
   };
@@ -1107,19 +1215,20 @@ function ReflectionComposerInner({
   }, [mediaType, player, onStageChange]);
 
   const goToSend = useCallback(() => {
+    void stopAiPreviewRef.current?.();
     Keyboard.dismiss();
     const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
     if (needsRun) {
       autoAdvanceRef.current = true;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(caption || undefined).catch(() => {
+      onTriggerMagic(buildSparkleOptions()).catch(() => {
         autoAdvanceRef.current = false;
       });
       return;
     }
     onStageChange('send');
-  }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, caption]);
+  }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, buildSparkleOptions]);
 
   // Confirm before discarding whenever the user has Sparkle results, regardless of stage.
   const handleRequestClose = useCallback(() => {
@@ -1149,6 +1258,8 @@ function ReflectionComposerInner({
   const [previewSound, setPreviewSound] = useState<Audio.Sound | null>(null);
   const [previewPhase, setPreviewPhase] = useState<PreviewPhase>('idle');
   const previewAbortRef = useRef(false);
+  const previewPhaseRef = useRef<PreviewPhase>('idle');
+  previewPhaseRef.current = previewPhase;
 
   const isPlayingPreview = previewPhase !== 'idle';
 
@@ -1220,17 +1331,62 @@ function ReflectionComposerInner({
     setPreviewPhase('idle');
   }, [previewSound]);
 
-  const wantsAutoPlayRef = useRef(false);
-  const autoAdvanceRef = useRef(false);
+  stopAiPreviewRef.current = stopAiPreview;
+
+  const sparkleCompositionKey = useMemo(
+    () =>
+      [
+        caption.trim(),
+        companionInReflection ? '1' : '0',
+        explorerInReflection ? '1' : '0',
+        (peopleContext ?? '').trim(),
+        captionVoice,
+        deepDiveVoice,
+      ].join('\u0001'),
+    [
+      caption,
+      companionInReflection,
+      explorerInReflection,
+      peopleContext,
+      captionVoice,
+      deepDiveVoice,
+    ],
+  );
+  const sparkleCompositionKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (sparkleCompositionKeyRef.current === null) {
+      sparkleCompositionKeyRef.current = sparkleCompositionKey;
+      return;
+    }
+    if (sparkleCompositionKeyRef.current === sparkleCompositionKey) return;
+    sparkleCompositionKeyRef.current = sparkleCompositionKey;
+    if (previewPhaseRef.current !== 'idle') {
+      void stopAiPreviewRef.current?.();
+    }
+  }, [sparkleCompositionKey]);
+
+  useEffect(() => {
+    if (stage !== 'ai') {
+      void stopAiPreviewRef.current?.();
+    }
+  }, [stage]);
+
+  useEffect(() => {
+    if (audioRecorder?.isRecording) {
+      void stopAiPreviewRef.current?.();
+    }
+  }, [audioRecorder?.isRecording]);
 
   const handleRunSparkleAndPlay = useCallback(() => {
+    void stopAiPreviewRef.current?.();
     wantsAutoPlayRef.current = true;
     autoAdvanceRef.current = false;
     setIsAiCancelled(false);
-    onTriggerMagic(caption || undefined).catch(() => {
+    onTriggerMagic(buildSparkleOptions()).catch(() => {
       wantsAutoPlayRef.current = false;
     });
-  }, [onTriggerMagic, caption]);
+  }, [onTriggerMagic, buildSparkleOptions]);
 
   // --- RENDERERS ---
 
@@ -1726,8 +1882,6 @@ function ReflectionComposerInner({
   );
 
   const hasAiAudio = !!(audioUri || aiArtifacts?.audioUrl);
-  const sparkleNeeded =
-    (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
 
   const renderAiTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
@@ -1864,6 +2018,12 @@ function ReflectionComposerInner({
               <Text style={styles.aiCaptionDoneText}>Done editing</Text>
             </TouchableOpacity>
           ) : null}
+          <View style={styles.aiHintsFootnoteRow}>
+            <FontAwesome name="volume-up" size={12} color="rgba(255,255,255,0.35)" />
+            <Text style={styles.aiHintsFootnote}>
+              After Sparkle runs, you can scroll down to AI Voice to change how the caption and Rich Narration sound.
+            </Text>
+          </View>
         </View>
 
         {/* SECTION: Caption */}
@@ -1932,6 +2092,41 @@ function ReflectionComposerInner({
             )}
       </View>
       </View>
+
+        {/* SECTION: AI Voice */}
+        <View style={styles.aiCard}>
+          <View style={styles.aiCardHeader}>
+            <FontAwesome name="volume-up" size={14} color="#5aadde" />
+            <Text style={styles.aiCardTitle}>AI Voice</Text>
+          </View>
+          <Text style={styles.aiCardDesc}>
+            Choose how Sparkle speaks your caption and Rich Narration. Changes apply right away after Sparkle has run once.
+          </Text>
+          <View style={styles.aiVoiceRow}>
+            <Text style={styles.aiVoiceRowLabel}>Caption Voice</Text>
+            <TouchableOpacity
+              style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
+              onPress={() => setVoicePickerTarget('caption')}
+              disabled={isAiThinking}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(captionVoice)}</Text>
+              <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.aiVoiceRow}>
+            <Text style={styles.aiVoiceRowLabel}>Rich Narration Voice</Text>
+            <TouchableOpacity
+              style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
+              onPress={() => setVoicePickerTarget('deep_dive')}
+              disabled={isAiThinking}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(deepDiveVoice)}</Text>
+              <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
+            </TouchableOpacity>
+          </View>
+        </View>
       </ScrollView>
 
       {/* FOOTER: Run Sparkle + Play + How this works */}
@@ -1948,14 +2143,14 @@ function ReflectionComposerInner({
         ) : null}
         <View style={styles.aiFooterBtnRow}>
           <TouchableOpacity
-            style={[styles.aiSparkleBtn, (!sparkleNeeded && !isAiThinking) && { opacity: 0.35 }]}
+            style={[styles.aiSparkleBtn, isAiThinking && { opacity: 0.35 }]}
             onPress={handleRunSparkleAndPlay}
-            disabled={isAiThinking || !sparkleNeeded}
+            disabled={isAiThinking}
             activeOpacity={0.8}
           >
             <FontAwesome name="magic" size={14} color="#fff" />
             <Text style={styles.aiSparkleBtnText}>
-              {isAiThinking ? 'Running...' : sparkleNeeded ? 'Run Sparkle' : 'Up to Date'}
+              {isAiThinking ? 'Running...' : 'Run Sparkle'}
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -2307,8 +2502,20 @@ function ReflectionComposerInner({
                 <>
                   <Text style={styles.infoTitle}>The Sparkle Stage</Text>
                   <Text style={styles.infoSubtitle}>
-                    Tell AI who and what is in your reflection, optionally record your voice, and let Sparkle draft a caption and an AI voice intro you can preview before sending.
+                    Tell AI who and what is in your reflection, optionally record your voice, pick AI voices, and let Sparkle draft a caption and intro you can preview before sending.
                   </Text>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
+                      <FontAwesome name="magic" size={14} color="#f5c842" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>Reflection Hints</Text>
+                      <Text style={styles.infoDesc}>
+                        Tell Sparkle who is in the photo or video and what is happening. Better hints mean a better caption and Rich Narration. The hints section also points you to AI Voice when you want a different sound.
+                      </Text>
+                    </View>
+                  </View>
 
                   <View style={styles.infoRow}>
                     <View style={styles.infoIconWrap}>
@@ -2336,12 +2543,24 @@ function ReflectionComposerInner({
 
                   <View style={styles.infoRow}>
                     <View style={styles.infoIconWrap}>
+                      <FontAwesome name="volume-up" size={14} color="#5aadde" />
+                    </View>
+                    <View style={styles.infoTextWrap}>
+                      <Text style={styles.infoLabel}>AI Voice</Text>
+                      <Text style={styles.infoDesc}>
+                        Pick separate voices for the caption intro and Rich Narration. After Sparkle has run once, changing a voice regenerates the audio and plays the updated caption and Rich Narration automatically.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoIconWrap}>
                       <FontAwesome name="magic" size={14} color="#f5c842" />
                     </View>
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
                       <Text style={styles.infoDesc}>
-                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. Run Sparkle shows “Up to Date” until you change {mediaType === 'video' ? 'trim, poster, caption, or hints' : 'caption, hints, or framing'}.
+                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.
                       </Text>
                     </View>
                   </View>
@@ -2354,6 +2573,9 @@ function ReflectionComposerInner({
                   </Text>
                   <Text style={styles.infoProTip}>
                     While editing the caption, drag the page to dismiss the keyboard or tap the Done editing button under the caption field.
+                  </Text>
+                  <Text style={styles.infoProTip}>
+                    Changing hints, caption, or AI voice stops any narration that is playing. Voice changes refresh the audio and play the new version when ready.
                   </Text>
                   <Text style={styles.infoProTip}>
                     A recorded voice intro always takes priority over AI voice.
@@ -2431,6 +2653,15 @@ function ReflectionComposerInner({
         }}
         isSending={isSending}
         isSendDisabled={isBlockedByAi || photoExportBusy || (!caption && !hasRecordedAudio)}
+      />
+
+      <VoicePickerModal
+        visible={voicePickerTarget !== null}
+        target={voicePickerTarget}
+        captionVoice={captionVoice}
+        deepDiveVoice={deepDiveVoice}
+        onSelect={handleVoicePick}
+        onClose={() => setVoicePickerTarget(null)}
       />
 
     </GestureHandlerRootView>
@@ -3069,6 +3300,21 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginBottom: 2,
   },
+  aiHintsFootnoteRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  aiHintsFootnote: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
+    color: 'rgba(255,255,255,0.45)',
+  },
   aiInputRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -3145,6 +3391,33 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.55)',
     fontSize: 14,
     fontWeight: '500',
+  },
+  aiVoiceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.08)',
+  },
+  aiVoiceRowLabel: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1,
+  },
+  aiVoiceRowBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  aiVoiceRowValue: {
+    color: '#5aadde',
+    fontSize: 13,
+    fontWeight: '600',
   },
   aiCaptionInput: {
     flex: 1,

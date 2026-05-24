@@ -18,6 +18,10 @@ import {
   type VideoProcessProgress,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
+import {
+  DEFAULT_TTS_VOICE,
+  loadVoicePreferences,
+} from '@/utils/ttsVoices';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FontAwesome } from '@expo/vector-icons';
 import {
@@ -64,9 +68,6 @@ const debugLog = (...args: any[]) => {
   if (DEBUG_LOGS) console.log(...args);
 };
 
-const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
-const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
-const DEFAULT_TTS_VOICE = 'en-US-Journey-O';
 // Remote JPEG fallback when local thumbnail extraction fails (codec edge cases on Android).
 const FALLBACK_POSTER_REMOTE_URL =
   'https://dummyimage.com/640x640/1f2937/e5e7eb.jpg&text=Video+Reflection';
@@ -566,27 +567,24 @@ export default function CreationModal({
 
   useEffect(() => {
     if (!visible) return;
-    const loadVoicePrefs = async () => {
-      try {
-        const [savedCaption, savedDeepDive] = await Promise.all([
-          AsyncStorage.getItem(CAPTION_VOICE_STORAGE_KEY),
-          AsyncStorage.getItem(DEEP_DIVE_VOICE_STORAGE_KEY),
-        ]);
-        if (savedCaption) {
-          setCaptionVoice(savedCaption);
-        } else {
-          await AsyncStorage.setItem(CAPTION_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
-        }
-        if (savedDeepDive) {
-          setDeepDiveVoice(savedDeepDive);
-        } else {
-          await AsyncStorage.setItem(DEEP_DIVE_VOICE_STORAGE_KEY, DEFAULT_TTS_VOICE);
-        }
-      } catch {
-        // keep defaults
-      }
+    void loadVoicePreferences().then(({ captionVoice: cv, deepDiveVoice: dv }) => {
+      setCaptionVoice(cv);
+      setDeepDiveVoice(dv);
+    });
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const syncVoicePrefs = () => {
+      void loadVoicePreferences().then(({ captionVoice: cv, deepDiveVoice: dv }) => {
+        setCaptionVoice(cv);
+        setDeepDiveVoice(dv);
+      });
     };
-    loadVoicePrefs();
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      if (state === 'active') syncVoicePrefs();
+    });
+    return () => sub.remove();
   }, [visible]);
 
   const lastProcessedUriRef = useRef<string | null>(null);
@@ -979,7 +977,14 @@ export default function CreationModal({
 
   const getAIDescription = async (
     imageUrl: string,
-    options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = {}
+    options: {
+      silent?: boolean;
+      targetCaption?: string;
+      targetDeepDive?: string;
+      skipTts?: boolean;
+      captionVoice?: string;
+      deepDiveVoice?: string;
+    } = {}
   ): Promise<AiDescriptionResponse | null> => {
     if (!currentExplorerId || !imageUrl) {
       console.warn('[CreationModal] AI description skipped: missing explorer or image URL');
@@ -1004,8 +1009,10 @@ export default function CreationModal({
       if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
-      if (captionVoice) fetchUrl += `&caption_voice=${encodeURIComponent(captionVoice)}`;
-      if (deepDiveVoice) fetchUrl += `&deep_dive_voice=${encodeURIComponent(deepDiveVoice)}`;
+      const resolvedCaptionVoice = options.captionVoice ?? captionVoice;
+      const resolvedDeepDiveVoice = options.deepDiveVoice ?? deepDiveVoice;
+      if (resolvedCaptionVoice) fetchUrl += `&caption_voice=${encodeURIComponent(resolvedCaptionVoice)}`;
+      if (resolvedDeepDiveVoice) fetchUrl += `&deep_dive_voice=${encodeURIComponent(resolvedDeepDiveVoice)}`;
 
       // Add timeout to prevent 504 errors (60 seconds for AI generation)
       const controller = new AbortController();
@@ -1949,7 +1956,14 @@ export default function CreationModal({
   };
 
   const generateDeepDiveBackground = async (
-    options: { silent?: boolean, targetCaption?: string, targetDeepDive?: string, skipTts?: boolean } = { silent: true }
+    options: {
+      silent?: boolean;
+      targetCaption?: string;
+      targetDeepDive?: string;
+      skipTts?: boolean;
+      captionVoice?: string;
+      deepDiveVoice?: string;
+    } = { silent: true }
   ): Promise<AiDescriptionResponse | null> => {
     const currentPhotoUri = asOptionalString(photo?.uri);
     if (!currentExplorerId || !currentPhotoUri) return null;
@@ -2506,12 +2520,17 @@ export default function CreationModal({
                 onReplaceMediaFromPreview={
                   isEditingExistingReflection ? handleReplaceMediaInEdit : undefined
                 }
-                onTriggerMagic={async (targetCaption?: string) => {
-                  setStagingEventId(null);
-                  stagingEventIdRef.current = null;
+                onTriggerMagic={async (options = {}) => {
+                  if (!options.preserveStaging) {
+                    setStagingEventId(null);
+                    stagingEventIdRef.current = null;
+                  }
                   await generateDeepDiveBackground({
                     silent: false,
-                    targetCaption: targetCaption ?? description ?? undefined,
+                    targetCaption: options.targetCaption ?? description ?? undefined,
+                    targetDeepDive: options.targetDeepDive ?? deepDive ?? undefined,
+                    captionVoice: options.captionVoice,
+                    deepDiveVoice: options.deepDiveVoice,
                   });
                 }}
                 onSend={(data) => {
@@ -2536,6 +2555,10 @@ export default function CreationModal({
                 stage={composerStage}
                 onStageChange={setComposerStage}
                 replaceMediaBackLabel={composerReplaceBackLabel}
+                captionVoice={captionVoice}
+                deepDiveVoice={deepDiveVoice}
+                onCaptionVoiceChange={setCaptionVoice}
+                onDeepDiveVoiceChange={setDeepDiveVoice}
               />
             </View>
           ) : (
