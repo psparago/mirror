@@ -366,11 +366,12 @@ function ReflectionComposerInner({
     const wasThinking = prevAiThinkingRef.current;
     prevAiThinkingRef.current = isAiThinking;
     if (wasThinking && !isAiThinking && !isAiCancelled) {
+      const resolvedCaption = aiArtifacts?.caption?.trim() || caption;
       aiSnapshotRef.current = {
         trimStart: videoRangeMs?.start ?? null,
         trimEnd: videoRangeMs?.end ?? null,
         thumbMs: thumbnailTimeMs,
-        caption,
+        caption: resolvedCaption,
         photoEditRevision,
         companionInReflection: !!companionInReflection,
         explorerInReflection: !!explorerInReflection,
@@ -400,6 +401,7 @@ function ReflectionComposerInner({
     captionVoice,
     deepDiveVoice,
     onStageChange,
+    aiArtifacts?.caption,
   ]);
 
   const isAiStale = useCallback((): boolean => {
@@ -470,11 +472,11 @@ function ReflectionComposerInner({
   const buildSparkleOptions = useCallback(
     (mode: 'full' | 'ttsOnly' = 'full'): TriggerMagicOptions => {
       const options: TriggerMagicOptions = {
-        targetCaption: caption.trim() || undefined,
         captionVoice,
         deepDiveVoice,
       };
       if (mode === 'ttsOnly') {
+        options.targetCaption = caption.trim() || undefined;
         options.targetDeepDive = aiArtifacts?.deepDive?.trim() || undefined;
         options.preserveStaging = true;
       }
@@ -737,14 +739,18 @@ function ReflectionComposerInner({
     markPhotoEdited();
   }, [photoScale, photoTranslateX, photoTranslateY, photoRotation, markPhotoEdited]);
 
-  // Sync AI Caption if user hasn't typed yet
+  // Sync AI caption when Sparkle returns fresh text; preserve hand-edits that diverged from last AI output.
   useEffect(() => {
-    if (aiArtifacts?.caption && !caption) {
-      setCaption(aiArtifacts.caption);
+    const next = aiArtifacts?.caption?.trim();
+    if (!next) return;
+
+    const lastAi = lastAiCaptionRef.current?.trim() ?? '';
+    const current = caption.trim();
+
+    if (current === '' || current === lastAi) {
+      setCaption(next);
     }
-    if (aiArtifacts?.caption) {
-      lastAiCaptionRef.current = aiArtifacts.caption;
-    }
+    lastAiCaptionRef.current = next;
   }, [aiArtifacts?.caption, caption]);
 
   // Track keyboard height

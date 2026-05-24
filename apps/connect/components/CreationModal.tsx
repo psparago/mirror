@@ -2529,8 +2529,8 @@ export default function CreationModal({
                   }
                   await generateDeepDiveBackground({
                     silent: false,
-                    targetCaption: options.targetCaption ?? description ?? undefined,
-                    targetDeepDive: options.targetDeepDive ?? deepDive ?? undefined,
+                    targetCaption: options.targetCaption,
+                    targetDeepDive: options.targetDeepDive,
                     captionVoice: options.captionVoice,
                     deepDiveVoice: options.deepDiveVoice,
                   });
