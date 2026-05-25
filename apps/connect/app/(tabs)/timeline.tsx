@@ -40,6 +40,7 @@ import {
 } from 'react-native';
 
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
+import { ReactionSheet } from '@/components/ReactionSheet';
 import { ReplayModal } from '@/components/ReplayModal';
 import {
   buildEventForReplay,
@@ -287,6 +288,7 @@ export default function SentTimelineScreen({
   }, []);
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [selectedReactionSession, setSelectedReactionSession] = useState<ReactionPlaybackSession | null>(null);
+  const [reactionTarget, setReactionTarget] = useState<{ id: string; videoUrl: string } | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
@@ -1693,10 +1695,12 @@ export default function SentTimelineScreen({
                         ) : (
                           <Pressable
                             onPress={() => {
-                              router.setParams({
-                                isReaction: 'true',
-                                parentId: item.event_id,
-                              });
+                              const videoUrl = eventObjectsMap.get(item.event_id)?.video_url;
+                              if (!videoUrl) {
+                                showToast('This Reflection has no video to react to');
+                                return;
+                              }
+                              setReactionTarget({ id: item.event_id, videoUrl });
                             }}
                             style={({ pressed }) => [
                               styles.reactControl,
@@ -1812,6 +1816,27 @@ export default function SentTimelineScreen({
             timelineDeepLinkPresentedReflectionId = null;
             onDeepLinkHandled?.();
           }
+        }}
+      />
+
+      <ReactionSheet
+        visible={!!reactionTarget}
+        parentReflectionId={reactionTarget?.id ?? ''}
+        parentVideoUrl={reactionTarget?.videoUrl ?? ''}
+        onClose={() => setReactionTarget(null)}
+        onUploadSuccess={(parentReflectionId, relationshipId) => {
+          setReflections((prev) =>
+            prev.map((reflection) =>
+              reflection.event_id === parentReflectionId
+                ? {
+                    ...reflection,
+                    respondedRelationshipIds: [
+                      ...new Set([...(reflection.respondedRelationshipIds ?? []), relationshipId]),
+                    ],
+                  }
+                : reflection,
+            ),
+          );
         }}
       />
 

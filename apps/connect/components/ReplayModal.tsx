@@ -13,7 +13,7 @@ import {
 } from '@/utils/reactionPlayback';
 import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
-import { Audio } from 'expo-av';
+import { Audio, ResizeMode, Video as AvVideo } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
@@ -103,8 +103,12 @@ export function ReplayModal({
   const suppressInstantPlayEventIdRef = useRef<string | null>(null);
   const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
   const [isDeletingReaction, setIsDeletingReaction] = useState(false);
+  const [resolvedParentVideoUrl, setResolvedParentVideoUrl] = useState<string | null>(null);
+  const pipVideoRef = useRef<AvVideo>(null);
+  const pipAlignedForEventRef = useRef<string | null>(null);
 
   const displayEvent = playbackEvent ?? event;
+  const isReactionPlayback = displayEvent?.isReaction === true;
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
@@ -164,6 +168,107 @@ export function ReplayModal({
       console.warn('[ReplayModal] video replace failed:', error);
     }
   }, [visible, displayEvent?.event_id, displayEvent?.video_url, videoPlayer]);
+
+  const alignPipToSyncStart = useCallback(async () => {
+    if (!isReactionPlayback) return;
+    const syncMs = displayEvent?.syncStartTimeMillis ?? 0;
+    try {
+      await pipVideoRef.current?.setPositionAsync(syncMs);
+    } catch (error) {
+      console.warn('[ReplayModal] PiP align failed:', error);
+    }
+  }, [displayEvent?.syncStartTimeMillis, isReactionPlayback]);
+
+  useEffect(() => {
+    if (!visible || !isReactionPlayback) {
+      setResolvedParentVideoUrl(null);
+      pipAlignedForEventRef.current = null;
+      void pipVideoRef.current?.pauseAsync().catch(() => {});
+      return;
+    }
+
+    const sessionParentUrl = reactionSessionRef.current?.parentEvent?.video_url
+      ?? reactionSession?.parentEvent?.video_url;
+    if (sessionParentUrl) {
+      setResolvedParentVideoUrl(sessionParentUrl);
+      return;
+    }
+
+    const parentId = displayEvent?.parentReflectionId;
+    if (!parentId || !explorerId) {
+      setResolvedParentVideoUrl(null);
+      return;
+    }
+
+    let cancelled = false;
+    void fetchMirrorEventById(parentId, explorerId).then((parentEvent) => {
+      if (cancelled) return;
+      setResolvedParentVideoUrl(parentEvent?.video_url ?? null);
+    }).catch((error) => {
+      console.warn('[ReplayModal] failed to resolve parent video for PiP', error);
+      if (!cancelled) setResolvedParentVideoUrl(null);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    visible,
+    isReactionPlayback,
+    displayEvent?.parentReflectionId,
+    displayEvent?.event_id,
+    explorerId,
+    reactionSession?.parentEvent?.video_url,
+  ]);
+
+  useEffect(() => {
+    if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
+    if (pipAlignedForEventRef.current === displayEvent?.event_id) return;
+    pipAlignedForEventRef.current = displayEvent?.event_id ?? null;
+    void alignPipToSyncStart();
+  }, [
+    alignPipToSyncStart,
+    displayEvent?.event_id,
+    isReactionPlayback,
+    resolvedParentVideoUrl,
+    visible,
+  ]);
+
+  useEffect(() => {
+    if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
+
+    const syncPipPlayback = (shouldPlay: boolean) => {
+      if (shouldPlay) {
+        void pipVideoRef.current?.playAsync().catch(() => {});
+      } else {
+        void pipVideoRef.current?.pauseAsync().catch(() => {});
+      }
+    };
+
+    const playingSub = videoPlayer.addListener('playingChange', (evt: unknown) => {
+      const isPlaying =
+        evt && typeof evt === 'object' && 'isPlaying' in evt
+          ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
+          : false;
+      syncPipPlayback(isPlaying);
+    });
+
+    const endSub = videoPlayer.addListener('playToEnd', () => {
+      void pipVideoRef.current?.pauseAsync().catch(() => {});
+    });
+
+    return () => {
+      playingSub.remove();
+      endSub.remove();
+      void pipVideoRef.current?.pauseAsync().catch(() => {});
+    };
+  }, [
+    displayEvent?.event_id,
+    isReactionPlayback,
+    resolvedParentVideoUrl,
+    videoPlayer,
+    visible,
+  ]);
 
   const companionByRelationshipId = useMemo(() => {
     const map = new Map<string, CompanionAvatar>();
@@ -1029,6 +1134,8 @@ export function ReplayModal({
       event: displayEvent,
       metadata: displayEvent.metadata || ({} as EventMetadata)
     });
+    pipAlignedForEventRef.current = null;
+    void alignPipToSyncStart();
   };
 
   const handleToggleLike = () => {
@@ -1157,6 +1264,16 @@ export function ReplayModal({
                     contentFit="contain"
                     nativeControls={false}
                   />
+                  {isReactionPlayback && resolvedParentVideoUrl ? (
+                    <AvVideo
+                      ref={pipVideoRef}
+                      source={{ uri: resolvedParentVideoUrl }}
+                      style={styles.reactionPipVideo}
+                      resizeMode={ResizeMode.CONTAIN}
+                      isMuted
+                      shouldPlay={false}
+                    />
+                  ) : null}
                   {displayEvent.image_url && !videoReady ? (
                     <Image
                       source={{ uri: displayEvent.image_url }}
@@ -1596,6 +1713,19 @@ const styles = StyleSheet.create({
   mediaImage: {
     width: '100%',
     height: '100%',
+  },
+  reactionPipVideo: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 148,
+    height: 104,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.35)',
+    backgroundColor: '#000',
+    zIndex: 4,
   },
   posterShield: {
     position: 'absolute',

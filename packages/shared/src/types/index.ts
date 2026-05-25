@@ -69,6 +69,12 @@ export interface Event {
   /** Inline bundle (e.g. from Firestore); when set, Explorer can skip S3 metadata.json fetch. */
   metadata?: EventMetadata;
   refreshedAt?: number; // Local timestamp when URLs were last refreshed
+  /** True when this event is a Companion reaction recording. */
+  isReaction?: boolean;
+  /** Parent Reflection id for reaction playback alignment. */
+  parentReflectionId?: string | null;
+  /** Parent playhead (ms) when the reaction recording started. */
+  syncStartTimeMillis?: number;
 }
 
 /** Merged Firestore signal doc (`mirror_event` + engagement overlays); rich content lives in `metadata`. */
@@ -90,6 +96,10 @@ export interface ReflectionDocument {
   parentReflectionId?: string | null;
   /** `relationships/{id}` for the Companion who recorded this reaction. */
   responderRelationshipId?: string;
+  /** Companion reaction capture mode (e.g. live-sync selfie). */
+  reactionType?: 'selfie' | string;
+  /** Parent Reflection playhead (ms) when the reaction recording started. */
+  syncStartTimeMillis?: number;
   /**
    * `relationships/{id}` doc ids for Companions who reacted to this parent (per Explorer link).
    * Prefer this over `respondedCompanionIds` — one Firebase user can have multiple Explorer relationships.

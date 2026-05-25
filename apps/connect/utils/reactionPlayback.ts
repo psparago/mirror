@@ -152,6 +152,9 @@ export function buildEventForReplay(
     timestamp?: unknown;
     description?: string;
     fullEvent?: Event | null;
+    isReaction?: boolean;
+    parentReflectionId?: string | null;
+    syncStartTimeMillis?: number;
   },
 ): Event {
   const metadata = options.metadata ?? (options.fullEvent?.metadata as EventMetadata | undefined);
@@ -166,6 +169,11 @@ export function buildEventForReplay(
     audio_url: options.fullEvent?.audio_url,
     video_url: options.fullEvent?.video_url,
     deep_dive_audio_url: options.fullEvent?.deep_dive_audio_url,
+    ...(options.isReaction ? { isReaction: true } : {}),
+    ...(options.parentReflectionId ? { parentReflectionId: options.parentReflectionId } : {}),
+    ...(typeof options.syncStartTimeMillis === 'number'
+      ? { syncStartTimeMillis: options.syncStartTimeMillis }
+      : {}),
     metadata: metadata
       ? {
           ...metadata,
@@ -213,6 +221,12 @@ export async function fetchReactionEventForPlayback(
     metadata?.sender || asOptionalString(data?.sender) || face.companionName;
   const senderId = asOptionalString(data?.sender_id) ?? face.userId;
   const fullEvent = await fetchMirrorEventById(reactionEventId, explorerId, eventObjectsMap);
+  const syncStartTimeMillis =
+    typeof data?.syncStartTimeMillis === 'number'
+      ? data.syncStartTimeMillis
+      : typeof fullEvent?.syncStartTimeMillis === 'number'
+        ? fullEvent.syncStartTimeMillis
+        : undefined;
 
   return buildEventForReplay(reactionEventId, {
     metadata: metadata
@@ -227,6 +241,9 @@ export async function fetchReactionEventForPlayback(
     timestamp: data?.timestamp,
     description: metadata?.short_caption || metadata?.description,
     fullEvent,
+    isReaction: data?.isReaction === true || fullEvent?.isReaction === true,
+    parentReflectionId: asOptionalString(data?.parentReflectionId) ?? parentEventId,
+    syncStartTimeMillis,
   });
 }
 

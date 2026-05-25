@@ -15,9 +15,7 @@ export default function TimelineHomeScreen() {
   const [creationModalVisible, setCreationModalVisible] = useState(false);
   const [initialAction, setInitialAction] = useState<CreationModalInitialAction | null>(null);
   const [editingReflection, setEditingReflection] = useState<Event | null>(null);
-  const params = useLocalSearchParams<{ action?: string; isReaction?: string; parentId?: string }>();
-  const [isReactionSession, setIsReactionSession] = useState(false);
-  const [reactionParentId, setReactionParentId] = useState<string | null>(null);
+  const params = useLocalSearchParams<{ action?: string }>();
   const router = useRouter();
   const navigation = useNavigation();
   const hasHandledActionParamRef = useRef(false);
@@ -56,23 +54,10 @@ export default function TimelineHomeScreen() {
     }
     if (hasHandledActionParamRef.current) return;
     hasHandledActionParamRef.current = true;
-    setIsReactionSession(false);
-    setReactionParentId(null);
     setCreationModalVisible(true);
     setInitialAction(action);
     router.setParams({ action: undefined });
   }, [params.action, router]);
-
-  useEffect(() => {
-    const parentId = typeof params.parentId === 'string' ? params.parentId : undefined;
-    if (params.isReaction !== 'true' || !parentId) return;
-    setEditingReflection(null);
-    setInitialAction(null);
-    setIsReactionSession(true);
-    setReactionParentId(parentId);
-    setCreationModalVisible(true);
-    router.setParams({ isReaction: undefined, parentId: undefined });
-  }, [params.isReaction, params.parentId, router]);
 
   useEffect(() => {
     if (!deepLinkOpenCreationModal) return;
@@ -98,8 +83,6 @@ export default function TimelineHomeScreen() {
         style={styles.fab}
         onPress={() => {
           setEditingReflection(null);
-          setIsReactionSession(false);
-          setReactionParentId(null);
           setCreationModalVisible(true);
         }}
         activeOpacity={0.7}
@@ -112,13 +95,9 @@ export default function TimelineHomeScreen() {
         onClose={() => {
           setCreationModalVisible(false);
           setEditingReflection(null);
-          setIsReactionSession(false);
-          setReactionParentId(null);
         }}
         initialAction={initialAction}
         onActionTriggered={() => setInitialAction(null)}
-        isReaction={isReactionSession}
-        parentReflectionId={reactionParentId}
       />
     </View>
   );
