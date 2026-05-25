@@ -35,7 +35,7 @@ import {
   useAuth,
   useExplorer,
 } from '@projectmirror/shared';
-import { collection, db, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
+import { arrayUnion, collection, db, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -184,6 +184,9 @@ export interface CreationModalProps {
   onActionTriggered?: () => void;
   /** Open in edit mode: pre-filled narrative + existing media preview (timeline). */
   editEvent?: Event | null;
+  /** Recording a Companion reaction to an existing Reflection (timeline React). */
+  isReaction?: boolean;
+  parentReflectionId?: string | null;
 }
 
 export default function CreationModal({
@@ -192,6 +195,8 @@ export default function CreationModal({
   initialAction,
   onActionTriggered,
   editEvent = null,
+  isReaction = false,
+  parentReflectionId = null,
 }: CreationModalProps) {
   const [photo, setPhoto] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
@@ -215,6 +220,9 @@ export default function CreationModal({
   /** Pinned copy of the edit event ID that survives state resets during media replacement.
    *  Only cleared on modal close or upload success — never by intermediate resets. */
   const pinnedEditEventIdRef = useRef<string | null>(null);
+  const parentReflectionIdRef = useRef<string | null>(null);
+  /** Survives modal close during upload so reaction Firestore writes still have parent id. */
+  const reactionUploadParentIdRef = useRef<string | null>(null);
   const mediaReplacedDuringEditRef = useRef(false);
   const [isEditingExistingReflection, setIsEditingExistingReflection] = useState(false);
   const [captionVoice, setCaptionVoice] = useState<string>(DEFAULT_TTS_VOICE);
@@ -319,6 +327,8 @@ export default function CreationModal({
       lastSourceForRecoveryRef.current = null;
       editSourceEventIdRef.current = null;
       pinnedEditEventIdRef.current = null;
+      parentReflectionIdRef.current = null;
+      reactionUploadParentIdRef.current = null;
       mediaReplacedDuringEditRef.current = false;
       composerVideoMetaRef.current = null;
       setIsEditingExistingReflection(false);
@@ -328,7 +338,7 @@ export default function CreationModal({
       return;
     }
 
-    if (editEvent?.event_id) {
+    if (editEvent?.event_id && !isReaction) {
       const imageUrl = asOptionalString(editEvent?.image_url);
       const videoUrl = asOptionalString(editEvent?.video_url);
       if (!imageUrl) {
@@ -459,7 +469,7 @@ export default function CreationModal({
     suppressPickerRecoveryRef.current = false;
     lastSourceForRecoveryRef.current = null;
     setTransitionUnlockTick((v) => v + 1);
-  }, [visible, editEvent]);
+  }, [visible, editEvent, isReaction]);
 
   useEffect(() => {
     if (phase !== 'creating') return;
@@ -541,7 +551,7 @@ export default function CreationModal({
       initialActionTriggeredRef.current = false;
       return;
     }
-    if (editEvent?.event_id) {
+    if (editEvent?.event_id || isReaction) {
       initialActionTriggeredRef.current = false;
       return;
     }
@@ -720,6 +730,17 @@ export default function CreationModal({
 
   // Get the user from the Auth Hook
   const { user } = useAuth();
+
+  useEffect(() => {
+    const pinnedParent =
+      isReaction && typeof parentReflectionId === 'string' && parentReflectionId.length > 0
+        ? parentReflectionId
+        : null;
+    parentReflectionIdRef.current = pinnedParent;
+    if (pinnedParent) {
+      reactionUploadParentIdRef.current = pinnedParent;
+    }
+  }, [isReaction, parentReflectionId]);
   
   // Request audio permissions on mount
   useEffect(() => {
@@ -1387,6 +1408,9 @@ export default function CreationModal({
       const stagingTtsKeysToDelete: string[] = [];
       let stagingIdToDelete: string | null = null;
 
+    const reactionParentIdForUpload = reactionUploadParentIdRef.current ?? parentReflectionIdRef.current;
+    const isReactionForUpload = isReaction && !!reactionParentIdForUpload;
+
     try {
       setUploading(true);
 
@@ -1671,7 +1695,7 @@ export default function CreationModal({
         explorer_in_reflection: isExplorerInReflection,
         is_companion_present: isCompanionInReflection,
         is_explorer_present: isExplorerInReflection,
-        is_selfie: isSelfie,
+        is_selfie: isReactionForUpload ? false : isSelfie,
         library_source: resolvedLib,
         ...(libIdStored ? { library_id: libIdStored } : {}),
         ...(libSearchStored ? { library_search_term: libSearchStored } : {}),
@@ -1771,7 +1795,47 @@ export default function CreationModal({
       }
       await cleanupConditionedScratchFiles();
 
-      // 10. Reset State & close creation overlay.
+      if (audioRecorder.isRecording) {
+        await stopRecording();
+      }
+
+      // 10. Write signal to Firestore before closing the modal (onClose clears reaction parent refs).
+      const firestorePayload: Record<string, unknown> = {
+        explorerId: currentExplorerId,
+        event_id: eventID,
+        sender: companionName || 'Companion',
+        sender_id: user?.uid || undefined,
+        status: 'ready',
+        timestamp: serverTimestamp(),
+        type: 'mirror_event',
+        metadata: eventMetadata,
+      };
+      if (!startedAsEditBundle) {
+        firestorePayload.engagement_count = 0;
+        firestorePayload.likedBy = [];
+        firestorePayload.respondedRelationshipIds = [];
+      }
+      if (isReactionForUpload && reactionParentIdForUpload) {
+        firestorePayload.isReaction = true;
+        firestorePayload.parentReflectionId = reactionParentIdForUpload;
+        if (activeRelationship?.id) {
+          firestorePayload.responderRelationshipId = activeRelationship.id;
+        }
+      }
+      const eventDocRef = doc(collection(db, ExplorerConfig.collections.reflections), eventID);
+      await setDoc(eventDocRef, firestorePayload, {
+        merge: true,
+      });
+      const activeRelationshipId = activeRelationship?.id ?? null;
+      if (isReactionForUpload && reactionParentIdForUpload && activeRelationshipId) {
+        const parentRef = doc(db, ExplorerConfig.collections.reflections, reactionParentIdForUpload);
+        await updateDoc(parentRef, {
+          respondedRelationshipIds: arrayUnion(activeRelationshipId),
+        });
+      }
+      reactionUploadParentIdRef.current = null;
+
+      // 11. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
       // On successful send, we want to fully close, not resurface picker.
       suppressPickerRecoveryRef.current = true;
@@ -1805,29 +1869,6 @@ export default function CreationModal({
       composerVideoMetaRef.current = null;
       sheetRef.current?.close();
       onClose();
-      if (audioRecorder.isRecording) {
-        await stopRecording();
-      }
-
-      // 11. Write signal to Firestore (metadata is the source of truth for clients)
-      const firestorePayload: Record<string, unknown> = {
-        explorerId: currentExplorerId,
-        event_id: eventID,
-        sender: companionName || 'Companion',
-        sender_id: user?.uid || undefined,
-        status: 'ready',
-        timestamp: serverTimestamp(),
-        type: 'mirror_event',
-        metadata: eventMetadata,
-      };
-      if (!startedAsEditBundle) {
-        firestorePayload.engagement_count = 0;
-        firestorePayload.likedBy = [];
-      }
-      const eventDocRef = doc(collection(db, ExplorerConfig.collections.reflections), eventID);
-      setDoc(eventDocRef, firestorePayload, {
-        merge: true,
-      }).catch((err) => console.error('Firestore signal error:', err));
 
       // When editing and media changed from video to photo, purge stale video metadata.
       // merge:true preserves old fields so we must explicitly delete them.
@@ -2347,7 +2388,7 @@ export default function CreationModal({
           <LinearGradient colors={[...CREATION_SURFACE_GRADIENT]} style={styles.dashboardContainer}>
             <View style={styles.dashboardContent}>
               <Text style={styles.dashboardTitle}>
-                Create a Reflection
+                {isReaction ? 'Recording Reaction' : 'Create a Reflection'}
               </Text>
 
               {companionName && (
@@ -2557,6 +2598,7 @@ export default function CreationModal({
                 stage={composerStage}
                 onStageChange={setComposerStage}
                 replaceMediaBackLabel={composerReplaceBackLabel}
+                composerHeaderTitle={isReaction ? 'Recording Reaction' : undefined}
                 captionVoice={captionVoice}
                 deepDiveVoice={deepDiveVoice}
                 onCaptionVoiceChange={setCaptionVoice}

@@ -12,6 +12,8 @@ import { db } from '../firebase';
 import { getAvatarColor, getAvatarInitial } from '../utils/avatarDefaults';
 
 export interface CompanionAvatar {
+  /** `relationships/{id}` document id for this Explorer link. */
+  relationshipId: string;
   userId: string;
   companionName: string;
   role: string | null;
@@ -50,6 +52,7 @@ export function useCompanionAvatars(explorerId: string | null): {
       const rawCompanions = snapshot.docs.map((d) => {
         const data = d.data();
         return {
+          relationshipId: d.id,
           userId: data.userId as string,
           companionName: (data.companionName as string) || 'Companion',
           role: typeof data.role === 'string' ? data.role : null,
@@ -72,6 +75,7 @@ export function useCompanionAvatars(explorerId: string | null): {
             } catch { /* use fallback */ }
           }
           return {
+            relationshipId: c.relationshipId,
             userId: c.userId,
             companionName: c.companionName,
             role: c.role,

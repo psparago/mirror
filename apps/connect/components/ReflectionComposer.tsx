@@ -136,6 +136,8 @@ interface ReflectionComposerProps {
   onStageChange: (next: ComposerStage) => void;
   /** Workbench back: where re-pick media opens (Library, Camera, Search). */
   replaceMediaBackLabel?: string;
+  /** Overrides send-stage center title (e.g. Companion reaction flow). */
+  composerHeaderTitle?: string;
 }
 
 const MIN_PHOTO_SCALE = 0.35;
@@ -246,6 +248,7 @@ function ReflectionComposerInner({
   stage,
   onStageChange,
   replaceMediaBackLabel = 'Library',
+  composerHeaderTitle,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
@@ -1715,7 +1718,7 @@ function ReflectionComposerInner({
               <Text style={styles.workbenchNavPillLabel}>Sparkle</Text>
             </TouchableOpacity>
             <Text style={[styles.sendStageTitle, styles.sendStageTitleCenter]} numberOfLines={1}>
-              Preview & Send
+              {composerHeaderTitle ?? 'Preview & Send'}
             </Text>
             <TouchableOpacity
               style={[styles.toolbarCloseBtn, isBlockedByAi && { opacity: 0.35 }]}

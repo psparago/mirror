@@ -13,13 +13,15 @@ import {
   useExplorer,
   useWaitOverlay,
 } from '@projectmirror/shared';
-import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
+import type { CompanionAvatar } from '@projectmirror/shared';
+import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as MediaLibrary from 'expo-media-library';
 import type { QuerySnapshot } from 'firebase/firestore';
+import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -32,11 +34,21 @@ import {
   SafeAreaView,
   StyleSheet,
   Text,
+  ScrollView,
   TouchableOpacity,
   View,
 } from 'react-native';
 
+import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
 import { ReplayModal } from '@/components/ReplayModal';
+import {
+  buildEventForReplay,
+  fetchMirrorEventById,
+  fetchReactionEventForPlayback,
+  resolveReactionResponderFaces,
+  type ReactionPlaybackSession,
+  type ReactionResponderFace,
+} from '@/utils/reactionPlayback';
 
 // Module-level state that survives every remount of this screen. Without
 // this, a remount cycle during cold-start re-fires the deep-link resolve and
@@ -63,6 +75,8 @@ interface SentReflection {
   metadata?: EventMetadata;
   isReaction?: boolean;
   parentReflectionId?: string | null;
+  respondedRelationshipIds?: string[];
+  /** @deprecated Legacy UID list; prefer `respondedRelationshipIds`. */
   respondedCompanionIds?: string[];
 }
 
@@ -75,10 +89,13 @@ const asOptionalString = (value: unknown): string | null =>
 const coerceLikedBy = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
 
-const coerceRespondedCompanionIds = (value: unknown): string[] =>
+const coerceStringIdArray = (value: unknown): string[] =>
   Array.isArray(value)
-    ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
+    ? value.filter((id): id is string => typeof id === 'string' && id.length > 0)
     : [];
+
+const coerceRespondedRelationshipIds = coerceStringIdArray;
+const coerceRespondedCompanionIds = coerceStringIdArray;
 
 const coerceIsReaction = (value: unknown): boolean | undefined =>
   typeof value === 'boolean' ? value : undefined;
@@ -231,6 +248,7 @@ export default function SentTimelineScreen({
   timelineRefreshNonce = 0,
   onDeepLinkHandled,
 }: SentTimelineScreenProps) {
+  const router = useRouter();
   const [reflections, setReflections] = useState<SentReflection[]>([]);
   const [loading, setLoading] = useState(true);
   const [responseEventIds, setResponseEventIds] = useState<Set<string>>(new Set());
@@ -268,6 +286,7 @@ export default function SentTimelineScreen({
     AsyncStorage.setItem(FILTER_STORAGE_KEY, val).catch(() => {});
   }, []);
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
+  const [selectedReactionSession, setSelectedReactionSession] = useState<ReactionPlaybackSession | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
@@ -287,6 +306,10 @@ export default function SentTimelineScreen({
   const { companions, loading: companionsLoading } = useCompanionAvatars(currentExplorerId);
   const [selectedCompanionId, setSelectedCompanionId] = useState<string | null>(null);
   const companionById = useMemo(() => new Map(companions.map((companion) => [companion.userId, companion])), [companions]);
+  const companionByRelationshipId = useMemo(
+    () => new Map(companions.map((companion) => [companion.relationshipId, companion])),
+    [companions]
+  );
 
   useEffect(() => {
     if (loading || explorerLoading || !currentExplorerId) {
@@ -364,6 +387,86 @@ export default function SentTimelineScreen({
       : []
   ), [reflections, selectedReflection]);
 
+  const [fetchingReactionFaceKey, setFetchingReactionFaceKey] = useState<string | null>(null);
+
+  const openReplayForEventId = useCallback(async (
+    eventId: string,
+    options?: {
+      metadata?: EventMetadata;
+      reflectionImageUrl?: string;
+      senderLabel?: string;
+      sentTimestamp?: unknown;
+      timestamp?: unknown;
+      description?: string;
+    },
+  ) => {
+    if (!currentExplorerId) return;
+
+    const fullEvent = await fetchMirrorEventById(eventId, currentExplorerId, eventObjectsMap);
+    if (fullEvent && !eventObjectsMap.has(eventId)) {
+      setEventObjectsMap((prev) => new Map(prev).set(eventId, fullEvent));
+    }
+
+    const eventForReplay = buildEventForReplay(eventId, { ...options, fullEvent });
+    setSelectedReflection(eventForReplay);
+  }, [currentExplorerId, eventObjectsMap]);
+
+  const handleReactionAvatarPress = useCallback(async (
+    parentEventId: string,
+    face: ReactionResponderFace,
+  ) => {
+    if (!currentExplorerId || fetchingReactionFaceKey) return;
+
+    setFetchingReactionFaceKey(face.key);
+    try {
+      const parentReflection = reflections.find((reflection) => reflection.event_id === parentEventId);
+      const parentAuthorName =
+        (parentReflection ? reflectionSenderLabel(parentReflection) : null) ||
+        parentReflection?.metadata?.sender ||
+        parentReflection?.sender ||
+        'Companion';
+      const parentEvent = buildEventForReplay(parentEventId, {
+        metadata: parentReflection?.metadata as EventMetadata | undefined,
+        reflectionImageUrl: parentReflection?.reflectionImageUrl,
+        senderLabel: parentAuthorName,
+        sentTimestamp: parentReflection?.sentTimestamp || parentReflection?.timestamp,
+        description: parentReflection?.description,
+        fullEvent: eventObjectsMap.get(parentEventId),
+      });
+
+      setSelectedReactionSession({
+        parentEventId,
+        parentAuthorName,
+        parentEvent,
+        respondedRelationshipIds: parentReflection?.respondedRelationshipIds ?? [],
+      });
+
+      const reactionEvent = await fetchReactionEventForPlayback(
+        parentEventId,
+        face,
+        currentExplorerId,
+        eventObjectsMap,
+      );
+
+      if (!reactionEvent) {
+        console.warn('[Reaction] no child doc for playback', {
+          parentEventId,
+          relationshipId: face.key,
+          userId: face.userId,
+        });
+        showToast('Could not load reaction');
+        return;
+      }
+
+      setSelectedReflection(reactionEvent);
+    } catch (err) {
+      console.error('[Reaction] failed to load reaction for playback', err);
+      showToast('Could not load reaction');
+    } finally {
+      setFetchingReactionFaceKey(null);
+    }
+  }, [currentExplorerId, eventObjectsMap, fetchingReactionFaceKey, reflections, showToast]);
+
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
   // SORTED BY: Response timestamp (viewed) first, so most recently viewed are at top
@@ -375,6 +478,9 @@ export default function SentTimelineScreen({
 
     // Do not include soft-deleted items in the timeline list
     result = result.filter(r => !r.deletedAt && r.status !== 'deleted');
+
+    // Companion reactions are not primary timeline posts (avatar stack / parent card later).
+    result = result.filter((r) => r.isReaction !== true);
 
     // Filter by selected companion avatar (null = show all)
     if (selectedCompanionId) {
@@ -610,6 +716,7 @@ export default function SentTimelineScreen({
               sender_id: asOptionalString(data?.sender_id) ?? undefined,
               isReaction: coerceIsReaction(data?.isReaction),
               parentReflectionId: coerceParentReflectionId(data?.parentReflectionId),
+              respondedRelationshipIds: coerceRespondedRelationshipIds(data?.respondedRelationshipIds),
               respondedCompanionIds: coerceRespondedCompanionIds(data?.respondedCompanionIds),
             });
           } else {
@@ -693,7 +800,16 @@ export default function SentTimelineScreen({
             row.likedBy = coerceLikedBy(data.likedBy);
             row.isReaction = coerceIsReaction(data?.isReaction) ?? row.isReaction;
             row.parentReflectionId = coerceParentReflectionId(data?.parentReflectionId) ?? row.parentReflectionId;
-            row.respondedCompanionIds = coerceRespondedCompanionIds(data?.respondedCompanionIds);
+            const respondedRelFromDoc = coerceRespondedRelationshipIds(data?.respondedRelationshipIds);
+            if (respondedRelFromDoc.length > 0) {
+              const merged = new Set([...(row.respondedRelationshipIds ?? []), ...respondedRelFromDoc]);
+              row.respondedRelationshipIds = [...merged];
+            }
+            const respondedUidFromDoc = coerceRespondedCompanionIds(data?.respondedCompanionIds);
+            if (respondedUidFromDoc.length > 0) {
+              const merged = new Set([...(row.respondedCompanionIds ?? []), ...respondedUidFromDoc]);
+              row.respondedCompanionIds = [...merged];
+            }
             const m = coerceEmbeddedMetadata(data.metadata, actualEventId);
             if (m) {
               row.metadata = m;
@@ -1372,71 +1488,58 @@ export default function SentTimelineScreen({
             const likeCount = likedBy.length;
             const likedByMe = !!authUser?.uid && likedBy.includes(authUser.uid);
             const likedByOthers = likeCount > 0 && !likedByMe;
+            const activeRelationshipId = activeRelationship?.id;
             const currentUid = authUser?.uid;
-            const hasReacted = !!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false);
+            const hasReacted =
+              (!!activeRelationshipId && (item.respondedRelationshipIds?.includes(activeRelationshipId) ?? false)) ||
+              (!!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false));
             const showReactAffordance = item.status !== 'deleted' && item.isReaction !== true;
+            const reactionResponderFaces = resolveReactionResponderFaces(
+              item,
+              companionByRelationshipId,
+              companionById
+            );
 
             return (
+              <View style={styles.reflectionItem}>
               <TouchableOpacity
-                style={styles.reflectionItem}
+                style={styles.reflectionMainTap}
                 activeOpacity={0.7}
-                onPress={async () => {
-                  // Get the full Event object if available
-                  let fullEvent = eventObjectsMap.get(item.event_id);
-
-                  // If we don't have the Event object, fetch it from the API
-                  if (!fullEvent) {
-                    try {
-                      const eventsResponse = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
-                      if (eventsResponse.ok) {
-                        const eventsData = await eventsResponse.json().catch(() => null);
-                        const events = isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
-                        const matchingEvent = events.filter(Boolean).find((e) => (e as Event)?.event_id === item.event_id) as Event | undefined;
-                        if (matchingEvent) {
-                          fullEvent = matchingEvent;
-                          // Update the map for future use
-                          setEventObjectsMap(prev => new Map(prev).set(item.event_id, matchingEvent));
-                        }
-                      }
-                    } catch (err) {
-                      console.error('Error fetching event for replay:', err);
-                    }
-                  }
-
-                  const metadata =
-                    (item.metadata as EventMetadata | undefined) ??
-                    (fullEvent?.metadata as EventMetadata | undefined);
-
-                  // Helper to convert timestamp to ISO string
-                  const timestampToISO = (ts: any): string => {
-                    if (!ts) return new Date().toISOString();
-                    if (ts.toDate) return ts.toDate().toISOString();
-                    if (ts.seconds) return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1000000).toISOString();
-                    if (typeof ts === 'number') return new Date(ts).toISOString();
-                    if (typeof ts === 'string') return ts;
-                    return new Date(ts).toISOString();
-                  };
-
-                  // Construct Event object with all required fields
-                  const eventForReplay: Event = {
-                    event_id: item.event_id,
-                    image_url: asOptionalString(fullEvent?.image_url) ?? asOptionalString(item.reflectionImageUrl) ?? '',
-                    audio_url: fullEvent?.audio_url,
-                    video_url: fullEvent?.video_url,
-                    deep_dive_audio_url: fullEvent?.deep_dive_audio_url,
-                    metadata: metadata || {
-                      description: item.description || 'Reflection',
-                      sender: reflectionSenderLabel(item) || 'Companion',
-                      timestamp: timestampToISO(item.sentTimestamp || item.timestamp),
-                      event_id: item.event_id,
-                      short_caption: item.description || 'Reflection',
-                    },
-                  };
-
-                  setSelectedReflection(eventForReplay);
+                onPress={() => {
+                  const parentAuthorName =
+                    reflectionSenderLabel(item) ||
+                    item.metadata?.sender ||
+                    item.sender ||
+                    'Companion';
+                  const parentEvent = buildEventForReplay(item.event_id, {
+                    metadata: item.metadata as EventMetadata | undefined,
+                    reflectionImageUrl: item.reflectionImageUrl,
+                    senderLabel: parentAuthorName,
+                    sentTimestamp: item.sentTimestamp || item.timestamp,
+                    description: item.description,
+                    fullEvent: eventObjectsMap.get(item.event_id),
+                  });
+                  setSelectedReactionSession({
+                    parentEventId: item.event_id,
+                    parentAuthorName,
+                    parentEvent,
+                    respondedRelationshipIds: item.respondedRelationshipIds ?? [],
+                  });
+                  void openReplayForEventId(item.event_id, {
+                    metadata: item.metadata as EventMetadata | undefined,
+                    reflectionImageUrl: item.reflectionImageUrl,
+                    senderLabel: parentAuthorName,
+                    sentTimestamp: item.sentTimestamp || item.timestamp,
+                    description: item.description,
+                  });
                 }}
               >
-                <View style={styles.reflectionRow}>
+                <View
+                  style={[
+                    styles.reflectionRow,
+                    reactionResponderFaces.length === 0 && styles.reflectionRowBottomPad,
+                  ]}
+                >
                   {item.reflectionImageUrl ? (
                     <View style={styles.reflectionImageContainer}>
                       <Image
@@ -1590,7 +1693,10 @@ export default function SentTimelineScreen({
                         ) : (
                           <Pressable
                             onPress={() => {
-                              console.log('Launch composer for parent:', item.event_id);
+                              router.setParams({
+                                isReaction: 'true',
+                                parentId: item.event_id,
+                              });
                             }}
                             style={({ pressed }) => [
                               styles.reactControl,
@@ -1654,6 +1760,14 @@ export default function SentTimelineScreen({
                   </View>
                 </View>
               </TouchableOpacity>
+              <ReactionRespondentsBar
+                faces={reactionResponderFaces}
+                fetchingFaceKey={fetchingReactionFaceKey}
+                onPressFace={(face) => {
+                  void handleReactionAvatarPress(item.event_id, face);
+                }}
+              />
+              </View>
             );
           }}
           contentContainerStyle={styles.listContainer}
@@ -1666,6 +1780,8 @@ export default function SentTimelineScreen({
       <ReplayModal
         visible={!!selectedReflection}
         event={selectedReflection}
+        reactionSession={selectedReactionSession}
+        explorerId={currentExplorerId ?? undefined}
         likedBy={selectedReflectionLikedBy}
         currentUserId={authUser?.uid ?? null}
         currentIdentity={currentIdentity}
@@ -1675,6 +1791,7 @@ export default function SentTimelineScreen({
         onClose={() => {
           const openedViaDeepLink = deepLinkHandledRef.current !== null;
           setSelectedReflection(null);
+          setSelectedReactionSession(null);
           if (openedViaDeepLink) {
             deepLinkHandledRef.current = null;
             timelineDeepLinkPresentedReflectionId = null;
@@ -1821,16 +1938,25 @@ const styles = StyleSheet.create({
   // Explorer up-next style: soft cards on gradient (dark but inviting)
   reflectionItem: {
     backgroundColor: 'rgba(255,255,255,0.1)',
-    padding: 12,
+    paddingTop: 12,
+    paddingHorizontal: 12,
+    paddingBottom: 0,
     marginVertical: 4,
     marginHorizontal: 8,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.25)',
+    overflow: 'hidden',
+  },
+  reflectionMainTap: {
+    width: '100%',
   },
   reflectionRow: {
     flexDirection: 'row',
     gap: 12,
+  },
+  reflectionRowBottomPad: {
+    paddingBottom: 12,
   },
   reflectionImageContainer: {
     width: 80,

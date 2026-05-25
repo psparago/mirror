@@ -1,5 +1,12 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
+import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
 import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
+import {
+  fetchReactionEventForPlayback,
+  resolveReactionResponderFaces,
+  type ReactionPlaybackSession,
+  type ReactionResponderFace,
+} from '@/utils/reactionPlayback';
 import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio } from 'expo-av';
@@ -8,7 +15,7 @@ import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Alert, Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -32,6 +39,9 @@ interface ReplayModalProps {
   onReplaceMedia?: () => void;
   /** Preview mode: never synthesize TTS fallback; use recorded files only. */
   preferRecordedAudioOnly?: boolean;
+  /** Parent reflection context for in-player reaction navigation. */
+  reactionSession?: ReactionPlaybackSession | null;
+  explorerId?: string;
 }
 
 export function ReplayModal({
@@ -49,6 +59,8 @@ export function ReplayModal({
   isSendDisabled = false,
   onReplaceMedia,
   preferRecordedAudioOnly = false,
+  reactionSession = null,
+  explorerId,
 }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -71,26 +83,174 @@ export function ReplayModal({
   const videoFinishHandledForEventRef = useRef<string | null>(null);
   const stateRef = useRef<any>(null);
   const [videoReady, setVideoReady] = useState(false);
+  const [playbackEvent, setPlaybackEvent] = useState<Event | null>(null);
+  const [fetchingReactionFaceKey, setFetchingReactionFaceKey] = useState<string | null>(null);
+  const reactionSessionRef = useRef<ReactionPlaybackSession | null>(null);
+  const activeReactionResponderKeyRef = useRef<string | null>(null);
+  const suppressInstantPlayEventIdRef = useRef<string | null>(null);
+  const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
+
+  const displayEvent = playbackEvent ?? event;
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
     player.loop = false;
   });
 
-  // 3. Animation for sparkle button
-  const tellMeMorePulse = useSharedValue(1);
-  
+  // 3. Pulse animations for top sparkle + caption speaker while audio plays
+  const tellMeMoreGlow = useSharedValue(1);
+  const captionSpeakerGlow = useSharedValue(1);
+
   useEffect(() => {
-    if (event?.metadata?.deep_dive) {
-      tellMeMorePulse.value = withRepeat(
-        withTiming(1.15, { duration: 600 }),
-        -1,
-        true
-      );
-    } else {
-      tellMeMorePulse.value = 1;
+    if (visible && reactionSession) {
+      reactionSessionRef.current = reactionSession;
     }
-  }, [event?.metadata?.deep_dive]);
+    if (!visible) {
+      reactionSessionRef.current = null;
+    }
+  }, [visible, reactionSession]);
+
+  useEffect(() => {
+    if (!visible) {
+      setPlaybackEvent(null);
+      setFetchingReactionFaceKey(null);
+      setShowManualReplayOverlay(false);
+      suppressInstantPlayEventIdRef.current = null;
+      return;
+    }
+    if (event) {
+      setPlaybackEvent(event);
+    }
+  }, [visible, event?.event_id]);
+
+  useEffect(() => {
+    if (!visible || !displayEvent?.video_url) return;
+    try {
+      videoPlayer.replace(displayEvent.video_url);
+      setVideoReady(false);
+      videoFinishHandledForEventRef.current = null;
+    } catch (error) {
+      console.warn('[ReplayModal] video replace failed:', error);
+    }
+  }, [visible, displayEvent?.event_id, displayEvent?.video_url, videoPlayer]);
+
+  const companionByRelationshipId = useMemo(() => {
+    const map = new Map<string, CompanionAvatar>();
+    for (const companion of companions) {
+      if (companion.relationshipId) {
+        map.set(companion.relationshipId, companion);
+      }
+    }
+    return map;
+  }, [companions]);
+
+  const companionByUserId = useMemo(() => {
+    const map = new Map<string, CompanionAvatar>();
+    for (const companion of companions) {
+      map.set(companion.userId, companion);
+    }
+    return map;
+  }, [companions]);
+
+  const reactionSessionForUi = reactionSession ?? reactionSessionRef.current;
+
+  const reactionResponderFaces = useMemo(() => {
+    if (!reactionSessionForUi?.respondedRelationshipIds?.length) return [];
+    return resolveReactionResponderFaces(
+      { respondedRelationshipIds: reactionSessionForUi.respondedRelationshipIds },
+      companionByRelationshipId,
+      companionByUserId,
+    );
+  }, [reactionSessionForUi, companionByRelationshipId, companionByUserId]);
+
+  const isViewingChildReaction = !!(
+    reactionSessionForUi &&
+    displayEvent &&
+    displayEvent.event_id !== reactionSessionForUi.parentEventId
+  );
+
+  const activeReactionFaceKey = useMemo(() => {
+    if (!isViewingChildReaction || !displayEvent) return null;
+    const senderId = displayEvent.metadata?.sender_id;
+    if (senderId) {
+      const matchedFace = reactionResponderFaces.find((face) => face.userId === senderId);
+      if (matchedFace) {
+        activeReactionResponderKeyRef.current = matchedFace.key;
+        return matchedFace.key;
+      }
+    }
+    return activeReactionResponderKeyRef.current;
+  }, [isViewingChildReaction, displayEvent, reactionResponderFaces]);
+
+  useEffect(() => {
+    if (!isViewingChildReaction) {
+      activeReactionResponderKeyRef.current = null;
+    }
+  }, [isViewingChildReaction, displayEvent?.event_id]);
+
+  const handleInPlayerReactionPress = useCallback(async (face: ReactionResponderFace) => {
+    const session = reactionSessionRef.current ?? reactionSession;
+    if (!session || fetchingReactionFaceKey) return;
+    if (!explorerId) {
+      Alert.alert('Unable to load reaction', 'Explorer context is missing.');
+      return;
+    }
+
+    const isSwitchingReaction =
+      !!displayEvent && displayEvent.event_id !== session.parentEventId;
+    if (isSwitchingReaction && activeReactionFaceKey === face.key) {
+      return;
+    }
+
+    setFetchingReactionFaceKey(face.key);
+    try {
+      if (isSwitchingReaction) {
+        sendRef.current({ type: 'CLOSE' });
+        videoFinishHandledForEventRef.current = null;
+        setVideoReady(false);
+      }
+
+      const reactionEvent = await fetchReactionEventForPlayback(
+        session.parentEventId,
+        face,
+        explorerId,
+      );
+      if (!reactionEvent) {
+        console.warn('[ReplayModal] reaction not found', {
+          parentEventId: session.parentEventId,
+          relationshipId: face.key,
+        });
+        Alert.alert('Unable to load reaction', 'That response could not be found.');
+        return;
+      }
+      activeReactionResponderKeyRef.current = face.key;
+      setPlaybackEvent(reactionEvent);
+    } catch (error) {
+      console.error('[ReplayModal] failed to load reaction', error);
+      Alert.alert('Unable to load reaction', 'Something went wrong. Please try again.');
+    } finally {
+      setFetchingReactionFaceKey(null);
+    }
+  }, [
+    activeReactionFaceKey,
+    displayEvent,
+    explorerId,
+    fetchingReactionFaceKey,
+    reactionSession,
+  ]);
+
+  const showReactionResponses = reactionResponderFaces.length > 0;
+
+  const handleBackToParentReflection = useCallback(() => {
+    const session = reactionSessionRef.current ?? reactionSession;
+    if (!session?.parentEvent) return;
+
+    suppressInstantPlayEventIdRef.current = session.parentEvent.event_id;
+    activeReactionResponderKeyRef.current = null;
+    sendRef.current({ type: 'CLOSE' });
+    setShowManualReplayOverlay(true);
+    setPlaybackEvent(session.parentEvent);
+  }, [reactionSession]);
 
   // FORCE AUDIO TO SPEAKER
   useEffect(() => {
@@ -109,16 +269,22 @@ export function ReplayModal({
   }, [visible]);
 
   const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: tellMeMorePulse.value }],
+    opacity: tellMeMoreGlow.value,
+    transform: [{ scale: 0.94 + tellMeMoreGlow.value * 0.06 }],
+  }));
+
+  const captionSpeakerAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: captionSpeakerGlow.value,
+    transform: [{ scale: 0.94 + captionSpeakerGlow.value * 0.06 }],
   }));
 
   // 4. The State Machine & Refs
   const sendRef = useRef<any>(() => {});
-  const eventRef = useRef<Event | null>(event);
+  const eventRef = useRef<Event | null>(displayEvent);
   
   useEffect(() => {
-    eventRef.current = event;
-  }, [event]);
+    eventRef.current = displayEvent;
+  }, [displayEvent]);
 
   useEffect(() => {
     hasAutoPlayedDeepDiveRef.current = false;
@@ -131,7 +297,7 @@ export function ReplayModal({
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
     }
-  }, [event?.event_id, visible]);
+  }, [displayEvent?.event_id, visible]);
 
   const likedByPeople = useMemo(() => {
     return likedBy.map((uid) => {
@@ -358,9 +524,36 @@ export function ReplayModal({
         }
       },
     }
-  }), [event, videoPlayer, preferRecordedAudioOnly]);
+  }), [videoPlayer, preferRecordedAudioOnly]);
 
   const [state, send] = useMachine(machine);
+
+  const isDeepDivePlaying = isDirectDeepDivePlaying || state.matches('playingDeepDive');
+  const isCaptionPlaying = state.hasTag('speaking') || captionSound !== null;
+
+  useEffect(() => {
+    if (isDeepDivePlaying) {
+      tellMeMoreGlow.value = withRepeat(
+        withTiming(0.55, { duration: 520 }),
+        -1,
+        true,
+      );
+    } else {
+      tellMeMoreGlow.value = withTiming(1, { duration: 180 });
+    }
+  }, [isDeepDivePlaying]);
+
+  useEffect(() => {
+    if (isCaptionPlaying) {
+      captionSpeakerGlow.value = withRepeat(
+        withTiming(0.55, { duration: 520 }),
+        -1,
+        true,
+      );
+    } else {
+      captionSpeakerGlow.value = withTiming(1, { duration: 180 });
+    }
+  }, [isCaptionPlaying]);
 
   useEffect(() => {
     sendRef.current = send;
@@ -405,7 +598,7 @@ export function ReplayModal({
   }, [signalVideoFinished]);
 
   useEffect(() => {
-    if (!visible || !event?.video_url) return;
+    if (!visible || !displayEvent?.video_url) return;
     const sub = videoPlayer.addListener('playingChange', (evt: unknown) => {
       const isPlaying =
         evt && typeof evt === 'object' && 'isPlaying' in evt
@@ -416,33 +609,40 @@ export function ReplayModal({
       }
     });
     return () => sub.remove();
-  }, [visible, event?.video_url, videoPlayer]);
+  }, [visible, displayEvent?.video_url, videoPlayer]);
 
   useEffect(() => {
-    if (!visible || !event?.video_url) return;
+    if (!visible || !displayEvent?.video_url) return;
     if (!state.matches('finished')) return;
     try {
       videoPlayer.pause();
-      seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(event.metadata));
+      seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(displayEvent.metadata));
       setVideoReady(false);
     } catch {
       // player may be tearing down
     }
-  }, [visible, state, event?.event_id, event?.video_url, event?.metadata, videoPlayer]);
+  }, [visible, state, displayEvent?.event_id, displayEvent?.video_url, displayEvent?.metadata, videoPlayer]);
 
   useEffect(() => {
     let cancelled = false;
-    if (visible && event) {
+    if (visible && displayEvent) {
       configureConnectPlaybackAudioSessionAsync()
         .catch((error) => {
           console.error('Failed to prepare playback audio session:', error);
         })
         .finally(() => {
           if (cancelled) return;
+          if (suppressInstantPlayEventIdRef.current === displayEvent.event_id) {
+            suppressInstantPlayEventIdRef.current = null;
+            sendRef.current({ type: 'CLOSE' });
+            setShowManualReplayOverlay(true);
+            return;
+          }
+          setShowManualReplayOverlay(false);
           sendRef.current({
             type: 'SELECT_EVENT_INSTANT',
-            event: event,
-            metadata: event.metadata || ({} as EventMetadata)
+            event: displayEvent,
+            metadata: displayEvent.metadata || ({} as EventMetadata),
           });
         });
     } else {
@@ -452,7 +652,18 @@ export function ReplayModal({
       cancelled = true;
       sendRef.current({ type: 'CLOSE' });
     };
-  }, [visible, event, send]);
+  }, [visible, displayEvent?.event_id, send]);
+
+  useEffect(() => {
+    if (!showManualReplayOverlay || !displayEvent?.video_url) return;
+    try {
+      videoPlayer.pause();
+      seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(displayEvent.metadata));
+      setVideoReady(false);
+    } catch {
+      // player may be tearing down
+    }
+  }, [showManualReplayOverlay, displayEvent?.event_id, displayEvent?.video_url, displayEvent?.metadata, videoPlayer]);
 
   useEffect(() => {
     const subscription = videoPlayer.addListener('playToEnd', () => {
@@ -471,8 +682,8 @@ export function ReplayModal({
       }
       return;
     }
-    const trim = getCloudMasterTrimWindow(event?.metadata);
-    if (!trim.active || !event?.video_url) {
+    const trim = getCloudMasterTrimWindow(displayEvent?.metadata);
+    if (!trim.active || !displayEvent?.video_url) {
       try {
         videoPlayer.timeUpdateEventInterval = 0;
       } catch {
@@ -503,10 +714,10 @@ export function ReplayModal({
     };
   }, [
     visible,
-    event?.event_id,
-    event?.video_url,
-    event?.metadata?.video_start_ms,
-    event?.metadata?.video_end_ms,
+    displayEvent?.event_id,
+    displayEvent?.video_url,
+    displayEvent?.metadata?.video_start_ms,
+    displayEvent?.metadata?.video_end_ms,
     videoPlayer,
   ]);
 
@@ -597,15 +808,16 @@ export function ReplayModal({
   const isViewingPhotoViewing = state.matches({ viewingPhoto: 'viewing' });
   const isViewingPhotoNarrating = state.matches({ viewingPhoto: 'narrating' });
   const isFinished = state.matches('finished');
-  const hasDeepDive = !!event?.metadata?.deep_dive || !!event?.deep_dive_audio_url;
+  const hasDeepDive = !!displayEvent?.metadata?.deep_dive || !!displayEvent?.deep_dive_audio_url;
   const canShowSparkle = hasDeepDive && (
     isFinished ||
     isAudioDoneButStuck ||
-    (isViewingPhoto && !isViewingPhotoNarrating)
+    (isViewingPhoto && !isViewingPhotoNarrating) ||
+    isDeepDivePlaying
   );
 
   useEffect(() => {
-    if (!visible || !event || !hasDeepDive) return;
+    if (!visible || !displayEvent || !hasDeepDive) return;
     if (hasAutoPlayedDeepDiveRef.current) return;
     if (!(isViewingPhotoViewing || isAudioDoneButStuck || isFinished)) return;
 
@@ -631,7 +843,7 @@ export function ReplayModal({
     };
   }, [
     visible,
-    event?.event_id,
+    displayEvent?.event_id,
     hasDeepDive,
     isViewingPhotoViewing,
     isAudioDoneButStuck,
@@ -640,10 +852,10 @@ export function ReplayModal({
     send
   ]);
 
-  if (!visible || !event) return null;
+  if (!visible || !displayEvent) return null;
 
   // --- RENDER ---
-  const hasVideo = !!event?.video_url;
+  const hasVideo = !!displayEvent?.video_url;
   const isVideo = hasVideo || state.hasTag('video_mode');
   const isSpeaking = state.hasTag('speaking');
   const isPlaying = state.hasTag('playing');
@@ -660,6 +872,7 @@ export function ReplayModal({
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
     setIsDirectDeepDivePlaying(false);
+    setShowManualReplayOverlay(false);
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
@@ -667,14 +880,14 @@ export function ReplayModal({
 
     send({
       type: 'SELECT_EVENT_INSTANT',
-      event: event,
-      metadata: event.metadata || ({} as EventMetadata)
+      event: displayEvent,
+      metadata: displayEvent.metadata || ({} as EventMetadata)
     });
   };
 
   const handleToggleLike = () => {
-    if (!event?.event_id || !currentUserId || !onToggleLike) return;
-    onToggleLike(event.event_id, !likedByMe);
+    if (!displayEvent?.event_id || !currentUserId || !onToggleLike) return;
+    onToggleLike(displayEvent.event_id, !likedByMe);
   };
 
   const handleShowLikes = () => {
@@ -684,7 +897,7 @@ export function ReplayModal({
   const showReplayOverlay =
     !isDeepDivePending &&
     !isDirectDeepDivePlaying &&
-    (isFinished || isAudioDoneButStuck || isViewingPhotoViewing);
+    (showManualReplayOverlay || isFinished || isAudioDoneButStuck || isViewingPhotoViewing);
 
   const swipeDownGesture = Gesture.Pan()
     .activeOffsetY([10, 200])
@@ -700,7 +913,7 @@ export function ReplayModal({
     Speech.stop();
     if (captionSoundRef.current) await captionSoundRef.current.unloadAsync().catch(()=>{});
 
-    const audioUrl = normalizeAudioUrl(event?.audio_url);
+    const audioUrl = normalizeAudioUrl(displayEvent?.audio_url);
     // expo-av accepts http/https URLs and file:// URLs
     const isValidUrl = audioUrl && 
       (audioUrl.startsWith('http://') || 
@@ -727,17 +940,54 @@ export function ReplayModal({
       } catch (e) {
         console.error('❌ [handlePlayCaption] Audio load error:', e);
         // Fall back to TTS only when enabled.
-        if (!preferRecordedAudioOnly && event?.metadata?.description) {
-          Speech.speak(event.metadata.description, { volume: 1.0 });
+        if (!preferRecordedAudioOnly && displayEvent?.metadata?.description) {
+          Speech.speak(displayEvent.metadata.description, { volume: 1.0 });
         }
       }
-    } else if (event?.audio_url) {
-      console.warn('⚠️ [handlePlayCaption] Invalid audio URL, using TTS. Raw:', event.audio_url, 'Normalized:', audioUrl);
-      if (!preferRecordedAudioOnly && event?.metadata?.description) {
-        Speech.speak(event.metadata.description, { volume: 1.0 });
+    } else if (displayEvent?.audio_url) {
+      console.warn('⚠️ [handlePlayCaption] Invalid audio URL, using TTS. Raw:', displayEvent.audio_url, 'Normalized:', audioUrl);
+      if (!preferRecordedAudioOnly && displayEvent?.metadata?.description) {
+        Speech.speak(displayEvent.metadata.description, { volume: 1.0 });
       }
-    } else if (!preferRecordedAudioOnly && event?.metadata?.description) {
-      Speech.speak(event.metadata.description, { volume: 1.0 });
+    } else if (!preferRecordedAudioOnly && displayEvent?.metadata?.description) {
+      Speech.speak(displayEvent.metadata.description, { volume: 1.0 });
+    }
+  };
+
+  const handleTellMeMorePress = async () => {
+    hasAutoPlayedDeepDiveRef.current = true;
+    setIsDeepDivePending(false);
+    if (isAudioDoneButStuck || state.matches('playingAudio')) {
+      await playDeepDiveDirectly();
+    } else if (isViewingPhoto) {
+      send({ type: 'TELL_ME_MORE' });
+      setTimeout(() => {
+        if (state.matches('viewingPhoto') && !state.matches('playingDeepDive')) {
+          Speech.stop();
+          if (displayEvent?.deep_dive_audio_url) {
+            Audio.Sound.createAsync(
+              { uri: displayEvent.deep_dive_audio_url },
+              { shouldPlay: true, volume: 1.0 }
+            ).then(({ sound }) => {
+              soundRef.current = sound;
+              sound.setOnPlaybackStatusUpdate((status) => {
+                if (status.isLoaded && status.didJustFinish) {
+                  sound.unloadAsync();
+                  soundRef.current = null;
+                }
+              });
+            }).catch(() => {
+              if (!preferRecordedAudioOnly && displayEvent?.metadata?.deep_dive) {
+                Speech.speak(displayEvent.metadata.deep_dive, { volume: 1.0 });
+              }
+            });
+          } else if (!preferRecordedAudioOnly && displayEvent?.metadata?.deep_dive) {
+            Speech.speak(displayEvent.metadata.deep_dive, { volume: 1.0 });
+          }
+        }
+      }, 300);
+    } else {
+      send({ type: 'TELL_ME_MORE' });
     }
   };
 
@@ -761,9 +1011,9 @@ export function ReplayModal({
                     contentFit="contain"
                     nativeControls={false}
                   />
-                  {event.image_url && !videoReady ? (
+                  {displayEvent.image_url && !videoReady ? (
                     <Image
-                      source={{ uri: event.image_url }}
+                      source={{ uri: displayEvent.image_url }}
                       style={[styles.mediaImage, styles.posterShield]}
                       contentFit="contain"
                       cachePolicy="memory-disk"
@@ -772,7 +1022,7 @@ export function ReplayModal({
                 </>
               ) : (
                  <Image
-                   source={{ uri: event.image_url }}
+                   source={{ uri: displayEvent.image_url }}
                    style={styles.mediaImage}
                    contentFit="contain"
                    cachePolicy="memory-disk"
@@ -792,27 +1042,57 @@ export function ReplayModal({
                   </TouchableOpacity>
                 </View>
               )}
+
             </View>
           </View>
 
           {/* CAPTION BAR */}
           <View style={[styles.captionBar, { paddingBottom: insets.bottom + 16 }]}>
-            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-              {isAnyAudioPlaying && (
-                <View style={{ marginRight: 12, marginTop: 2 }}>
-                  <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
-                </View>
-              )}
+            {showReactionResponses ? (
+              <ReactionRespondentsBar
+                variant="caption"
+                faces={reactionResponderFaces}
+                fetchingFaceKey={fetchingReactionFaceKey}
+                activeFaceKey={activeReactionFaceKey}
+                onPressFace={(face) => {
+                  void handleInPlayerReactionPress(face);
+                }}
+              />
+            ) : null}
+            <View style={styles.captionMainRow}>
+              {(displayEvent?.audio_url || displayEvent?.metadata?.description) ? (
+                <Animated.View style={[styles.playCaptionButtonLeading, captionSpeakerAnimatedStyle]}>
+                  <TouchableOpacity
+                    style={[
+                      styles.playCaptionButton,
+                      isAnyAudioPlaying && !isCaptionPlaying && styles.playCaptionButtonDisabled,
+                    ]}
+                    onPress={handlePlayCaption}
+                    disabled={!!isAnyAudioPlaying}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel={isCaptionPlaying ? 'Caption audio playing' : 'Play caption audio'}
+                    accessibilityState={{ disabled: !!isAnyAudioPlaying }}
+                  >
+                    <FontAwesome
+                      name="volume-up"
+                      size={16}
+                      color={
+                        isCaptionPlaying
+                          ? 'rgba(255, 255, 255, 0.9)'
+                          : isAnyAudioPlaying
+                            ? 'rgba(255, 255, 255, 0.35)'
+                            : 'rgba(255, 255, 255, 0.9)'
+                      }
+                    />
+                  </TouchableOpacity>
+                </Animated.View>
+              ) : null}
 
-              <View style={{ flex: 1 }}>
+              <View style={styles.captionTextBlock}>
                 <Text style={styles.captionText} numberOfLines={2}>
-                  {event.metadata?.short_caption || event.metadata?.description || 'No caption'}
+                  {displayEvent.metadata?.short_caption || displayEvent.metadata?.description || 'No caption'}
                 </Text>
-                {event.metadata?.sender && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-                    <Text style={styles.senderText}>From {event.metadata.sender}</Text>
-                  </View>
-                )}
               </View>
 
               <TouchableOpacity
@@ -833,82 +1113,55 @@ export function ReplayModal({
                   <Text style={[styles.likeButtonCount, likedByMe && styles.likeButtonCountActive]}>{likeCount}</Text>
                 ) : null}
               </TouchableOpacity>
-
-              {(event?.audio_url || event?.metadata?.description) && (
-                <TouchableOpacity
-                  style={[styles.playCaptionButton, isAnyAudioPlaying && styles.playCaptionButtonDisabled]}
-                  onPress={handlePlayCaption}
-                  disabled={!!isAnyAudioPlaying}
-                >
-                  <FontAwesome
-                    name="volume-up"
-                    size={18}
-                    color={isAnyAudioPlaying ? "rgba(255, 255, 255, 0.3)" : "rgba(255, 255, 255, 0.8)"}
-                  />
-                </TouchableOpacity>
-              )}
             </View>
+            {displayEvent.metadata?.sender ? (
+              <Text style={styles.senderText}>From {displayEvent.metadata.sender}</Text>
+            ) : null}
           </View>
-
-          {/* TELL ME MORE SPARKLE */}
-          {canShowSparkle && !isDeepDivePending && !isDirectDeepDivePlaying && (
-            <Animated.View style={[styles.tellMeMoreFAB, tellMeMoreAnimatedStyle]}>
-              <TouchableOpacity
-                onPress={async () => {
-                  hasAutoPlayedDeepDiveRef.current = true;
-                  setIsDeepDivePending(false);
-                  // If we're stuck in playingAudio state, directly play deep dive (bypass state machine)
-                  if (isAudioDoneButStuck || state.matches('playingAudio')) {
-                    await playDeepDiveDirectly();
-                  } else if (isViewingPhoto) {
-                    // For viewingPhoto state, try state machine first, but have fallback
-                    send({ type: 'TELL_ME_MORE' });
-                    
-                    // Fallback: if state doesn't change after a short delay, play directly
-                    setTimeout(() => {
-                      if (state.matches('viewingPhoto') && !state.matches('playingDeepDive')) {
-                        // Play deep dive directly
-                        Speech.stop();
-                        if (event?.deep_dive_audio_url) {
-                          Audio.Sound.createAsync(
-                            { uri: event.deep_dive_audio_url },
-                            { shouldPlay: true, volume: 1.0 }
-                          ).then(({ sound }) => {
-                            soundRef.current = sound;
-                            sound.setOnPlaybackStatusUpdate((status) => {
-                              if (status.isLoaded && status.didJustFinish) {
-                                sound.unloadAsync();
-                                soundRef.current = null;
-                              }
-                            });
-                          }).catch(() => {
-                            if (!preferRecordedAudioOnly && event?.metadata?.deep_dive) {
-                              Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
-                            }
-                          });
-                        } else if (!preferRecordedAudioOnly && event?.metadata?.deep_dive) {
-                          Speech.speak(event.metadata.deep_dive, { volume: 1.0 });
-                        }
-                      }
-                    }, 300);
-                  } else {
-                    // For finished state or any other state, use state machine
-                    send({ type: 'TELL_ME_MORE' });
-                  }
-                }}
-                disabled={isAnyAudioPlaying}
-                style={{ flex: 1, justifyContent: 'center', alignItems: 'center', opacity: isAnyAudioPlaying ? 0.4 : 1 }}
-              >
-                <BlurView intensity={50} style={styles.tellMeMoreBlur}>
-                  <Text style={{ fontSize: 32 }}>✨</Text>
-                </BlurView>
-              </TouchableOpacity>
-            </Animated.View>
-          )}
 
           {/* TOP CONTROLS - Rendered last to appear on top */}
           <View style={[styles.topControls, { top: insets.top + 8 }]}>
-            <View style={{ flex: 1 }} />
+            {canShowSparkle && !isDeepDivePending ? (
+              <Animated.View style={tellMeMoreAnimatedStyle}>
+                <TouchableOpacity
+                  style={[
+                    styles.tellMeMoreTopButton,
+                    isAnyAudioPlaying && !isDeepDivePlaying && styles.tellMeMoreTopButtonDisabled,
+                  ]}
+                  onPress={() => {
+                    void handleTellMeMorePress();
+                  }}
+                  disabled={isAnyAudioPlaying || isDeepDivePlaying}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel={isDeepDivePlaying ? 'Deep dive playing' : 'Tell me more'}
+                  accessibilityState={{ disabled: isAnyAudioPlaying || isDeepDivePlaying }}
+                >
+                  <BlurView intensity={45} style={styles.tellMeMoreTopBlur}>
+                    <Text style={styles.tellMeMoreTopEmoji}>✨</Text>
+                  </BlurView>
+                </TouchableOpacity>
+              </Animated.View>
+            ) : null}
+            {canShowSparkle && !isDeepDivePending ? (
+              <View style={styles.topControlGap} />
+            ) : null}
+            {isViewingChildReaction && reactionSessionForUi ? (
+              <TouchableOpacity
+                style={styles.reactionBackButton}
+                onPress={handleBackToParentReflection}
+                activeOpacity={0.85}
+                accessibilityRole="button"
+                accessibilityLabel={`Back to ${reactionSessionForUi.parentAuthorName}'s Reflection`}
+              >
+                <FontAwesome name="chevron-left" size={12} color="#fff" />
+                <Text style={styles.reactionBackButtonText} numberOfLines={1}>
+                  {`Back to ${reactionSessionForUi.parentAuthorName}'s Reflection`}
+                </Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={{ flex: 1 }} />
+            )}
             {onReplaceMedia ? (
               <TouchableOpacity
                 style={[styles.replacePreviewButton, isSending && styles.replacePreviewButtonDisabled]}
@@ -990,6 +1243,26 @@ const styles = StyleSheet.create({
     zIndex: 1000,
     elevation: 1000,
   },
+  reactionBackButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
+    marginRight: 8,
+    minWidth: 0,
+  },
+  reactionBackButtonText: {
+    flexShrink: 1,
+    color: 'rgba(255, 255, 255, 0.92)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
   closeButton: {
     width: 40,
     height: 40,
@@ -1048,7 +1321,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   likeButton: {
-    minWidth: 42,
+    minWidth: 44,
     height: 40,
     borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.15)',
@@ -1056,7 +1329,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: 6,
-    paddingHorizontal: 11,
+    paddingHorizontal: 12,
     marginLeft: 12,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.14)',
@@ -1158,10 +1431,45 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    paddingTop: 20,
+    paddingTop: 16,
     paddingHorizontal: 20,
     backgroundColor: 'rgba(0,0,0,0.6)',
     borderRadius: 20,
+  },
+  captionMainRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  captionTextBlock: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 8,
+  },
+  tellMeMoreTopButton: {
+    width: 40,
+    height: 40,
+    marginLeft: 5,
+    marginTop: 5,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+    zIndex: 1001,
+    elevation: 1001,
+  },
+  tellMeMoreTopButtonDisabled: {
+    opacity: 0.4,
+  },
+  tellMeMoreTopBlur: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  tellMeMoreTopEmoji: {
+    fontSize: 18,
   },
   captionText: {
     color: '#fff',
@@ -1169,38 +1477,29 @@ const styles = StyleSheet.create({
     lineHeight: 24,
   },
   senderText: {
+    alignSelf: 'stretch',
+    marginTop: 8,
     color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 14,
     fontWeight: '600',
+    textAlign: 'left',
   },
   playCaptionButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: 'rgba(255, 255, 255, 0.15)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  playCaptionButtonLeading: {
+    marginRight: 12,
+    marginTop: 2,
   },
   playCaptionButtonDisabled: {
     opacity: 0.4,
-  },
-  tellMeMoreFAB: {
-    position: 'absolute',
-    bottom: 120,
-    right: 30,
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  tellMeMoreBlur: {
-    flex: 1,
-    width: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
   },
   replayOverlay: {
     ...StyleSheet.absoluteFillObject,

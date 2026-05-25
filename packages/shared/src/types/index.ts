@@ -88,7 +88,14 @@ export interface ReflectionDocument {
   isReaction?: boolean;
   /** Firestore ID of the parent Reflection being replied to. */
   parentReflectionId?: string | null;
-  /** Companion UIDs who have already posted a reaction to this parent. */
+  /** `relationships/{id}` for the Companion who recorded this reaction. */
+  responderRelationshipId?: string;
+  /**
+   * `relationships/{id}` doc ids for Companions who reacted to this parent (per Explorer link).
+   * Prefer this over `respondedCompanionIds` — one Firebase user can have multiple Explorer relationships.
+   */
+  respondedRelationshipIds?: string[];
+  /** @deprecated Legacy writes used Firebase Auth UIDs; read for backward compatibility only. */
   respondedCompanionIds?: string[];
 }
 
