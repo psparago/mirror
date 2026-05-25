@@ -2,7 +2,11 @@ import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
 import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
 import {
+  buildEventForReplay,
+  deleteReflectionDocument,
+  fetchMirrorEventById,
   fetchReactionEventForPlayback,
+  removeResponderFromParentReflection,
   resolveReactionResponderFaces,
   type ReactionPlaybackSession,
   type ReactionResponderFace,
@@ -41,6 +45,13 @@ interface ReplayModalProps {
   preferRecordedAudioOnly?: boolean;
   /** Parent reflection context for in-player reaction navigation. */
   reactionSession?: ReactionPlaybackSession | null;
+  /** Called when in-player session changes (e.g. parent healed after delete). */
+  onReactionSessionUpdate?: (
+    session: ReactionPlaybackSession,
+    parentPlaybackEvent: Event,
+  ) => void;
+  /** Active Companion `relationships/{id}` for arrayRemove on parent when deleting own reaction. */
+  activeRelationshipId?: string | null;
   explorerId?: string;
 }
 
@@ -60,6 +71,8 @@ export function ReplayModal({
   onReplaceMedia,
   preferRecordedAudioOnly = false,
   reactionSession = null,
+  onReactionSessionUpdate,
+  activeRelationshipId = null,
   explorerId,
 }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
@@ -89,6 +102,7 @@ export function ReplayModal({
   const activeReactionResponderKeyRef = useRef<string | null>(null);
   const suppressInstantPlayEventIdRef = useRef<string | null>(null);
   const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
+  const [isDeletingReaction, setIsDeletingReaction] = useState(false);
 
   const displayEvent = playbackEvent ?? event;
 
@@ -110,6 +124,11 @@ export function ReplayModal({
     }
   }, [visible, reactionSession]);
 
+  const playbackEventRef = useRef<Event | null>(null);
+  useEffect(() => {
+    playbackEventRef.current = displayEvent;
+  }, [displayEvent]);
+
   useEffect(() => {
     if (!visible) {
       setPlaybackEvent(null);
@@ -118,9 +137,21 @@ export function ReplayModal({
       suppressInstantPlayEventIdRef.current = null;
       return;
     }
-    if (event) {
-      setPlaybackEvent(event);
+    if (!event) return;
+
+    const session = reactionSessionRef.current;
+    const playback = playbackEventRef.current;
+    // Timeline `event` may still be the deleted reaction while in-player parent is active.
+    if (
+      session &&
+      playback &&
+      playback.event_id === session.parentEventId &&
+      event.event_id !== session.parentEventId
+    ) {
+      return;
     }
+
+    setPlaybackEvent(event);
   }, [visible, event?.event_id]);
 
   useEffect(() => {
@@ -152,7 +183,7 @@ export function ReplayModal({
     return map;
   }, [companions]);
 
-  const reactionSessionForUi = reactionSession ?? reactionSessionRef.current;
+  const reactionSessionForUi = reactionSessionRef.current ?? reactionSession;
 
   const reactionResponderFaces = useMemo(() => {
     if (!reactionSessionForUi?.respondedRelationshipIds?.length) return [];
@@ -241,16 +272,131 @@ export function ReplayModal({
 
   const showReactionResponses = reactionResponderFaces.length > 0;
 
-  const handleBackToParentReflection = useCallback(() => {
-    const session = reactionSessionRef.current ?? reactionSession;
-    if (!session?.parentEvent) return;
+  const returnToParentReflection = useCallback((session: ReactionPlaybackSession) => {
+    if (!session.parentEvent) return;
 
     suppressInstantPlayEventIdRef.current = session.parentEvent.event_id;
     activeReactionResponderKeyRef.current = null;
+    try {
+      Speech.stop();
+    } catch {
+      /* ignore */
+    }
     sendRef.current({ type: 'CLOSE' });
     setShowManualReplayOverlay(true);
     setPlaybackEvent(session.parentEvent);
-  }, [reactionSession]);
+  }, []);
+
+  const handleBackToParentReflection = useCallback(() => {
+    const session = reactionSessionRef.current ?? reactionSession;
+    returnToParentReflection(session);
+  }, [reactionSession, returnToParentReflection]);
+
+  const canDeleteReaction = !!(
+    isViewingChildReaction &&
+    currentUserId &&
+    displayEvent?.metadata?.sender_id === currentUserId &&
+    activeRelationshipId &&
+    explorerId
+  );
+
+  const confirmDeleteReaction = useCallback(async () => {
+    const session = reactionSessionRef.current ?? reactionSession;
+    if (!session || !displayEvent || !explorerId || !activeRelationshipId) return;
+
+    const deletedReactionId = displayEvent.event_id;
+
+    setIsDeletingReaction(true);
+    try {
+      // Stop reaction playback before URLs are deleted (prevents speakCaption -1100).
+      sendRef.current({ type: 'CLOSE' });
+      try {
+        Speech.stop();
+      } catch {
+        /* ignore */
+      }
+      if (captionSoundRef.current) {
+        await captionSoundRef.current.stopAsync().catch(() => {});
+        await captionSoundRef.current.unloadAsync().catch(() => {});
+        captionSoundRef.current = null;
+        setCaptionSound(null);
+      }
+      if (soundRef.current) {
+        await soundRef.current.stopAsync().catch(() => {});
+        await soundRef.current.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
+      try {
+        videoPlayer.pause();
+      } catch {
+        /* ignore */
+      }
+      videoFinishHandledForEventRef.current = null;
+      setVideoReady(false);
+
+      // Heal parent first so avatar stack updates even if media delete fails.
+      await removeResponderFromParentReflection(
+        session.parentEventId,
+        activeRelationshipId,
+      );
+      await deleteReflectionDocument(deletedReactionId, explorerId);
+
+      const fullParent = await fetchMirrorEventById(session.parentEventId, explorerId);
+      const parentPlaybackEvent = buildEventForReplay(session.parentEventId, {
+        metadata: session.parentEvent.metadata,
+        reflectionImageUrl: session.parentEvent.image_url,
+        senderLabel: session.parentAuthorName,
+        description:
+          session.parentEvent.metadata?.short_caption ||
+          session.parentEvent.metadata?.description,
+        fullEvent: fullParent,
+      });
+
+      const updatedSession: ReactionPlaybackSession = {
+        ...session,
+        parentEvent: parentPlaybackEvent,
+        respondedRelationshipIds: session.respondedRelationshipIds.filter(
+          (id) => id !== activeRelationshipId,
+        ),
+      };
+      reactionSessionRef.current = updatedSession;
+      onReactionSessionUpdate?.(updatedSession, parentPlaybackEvent);
+      returnToParentReflection(updatedSession);
+    } catch (error) {
+      console.error('[ReplayModal] failed to delete reaction', error);
+      Alert.alert(
+        'Delete Failed',
+        error instanceof Error ? error.message : 'Failed to delete reaction',
+      );
+    } finally {
+      setIsDeletingReaction(false);
+    }
+  }, [
+    activeRelationshipId,
+    displayEvent,
+    explorerId,
+    onReactionSessionUpdate,
+    reactionSession,
+    returnToParentReflection,
+    videoPlayer,
+  ]);
+
+  const handleDeleteReactionPress = useCallback(() => {
+    Alert.alert(
+      'Delete reaction?',
+      'Are you sure you want to delete this reaction?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void confirmDeleteReaction();
+          },
+        },
+      ],
+    );
+  }, [confirmDeleteReaction]);
 
   // FORCE AUDIO TO SPEAKER
   useEffect(() => {
@@ -1189,6 +1335,24 @@ export function ReplayModal({
               </TouchableOpacity>
             ) : null}
             {onSend ? <View style={styles.topControlGap} /> : null}
+            {canDeleteReaction ? (
+              <>
+                <TouchableOpacity
+                  style={[
+                    styles.deleteReactionButton,
+                    isDeletingReaction && styles.deleteReactionButtonDisabled,
+                  ]}
+                  onPress={handleDeleteReactionPress}
+                  disabled={isDeletingReaction}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete this reaction"
+                >
+                  <FontAwesome name="trash-o" size={17} color="#fff" />
+                </TouchableOpacity>
+                <View style={styles.topControlGap} />
+              </>
+            ) : null}
             <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
               <FontAwesome name="times" size={18} color="#fff" />
             </TouchableOpacity>
@@ -1262,6 +1426,21 @@ const styles = StyleSheet.create({
     color: 'rgba(255, 255, 255, 0.92)',
     fontSize: 12,
     fontWeight: '600',
+  },
+  deleteReactionButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(120, 20, 20, 0.75)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 120, 120, 0.45)',
+    zIndex: 1001,
+    elevation: 1001,
+  },
+  deleteReactionButtonDisabled: {
+    opacity: 0.45,
   },
   closeButton: {
     width: 40,

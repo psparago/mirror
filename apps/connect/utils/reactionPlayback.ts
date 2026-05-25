@@ -1,6 +1,17 @@
 import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, getAvatarColor, getAvatarInitial } from '@projectmirror/shared';
 import type { CompanionAvatar } from '@projectmirror/shared';
-import { collection, db, getDocs, limit, query, where } from '@projectmirror/shared/firebase';
+import {
+  arrayRemove,
+  collection,
+  db,
+  deleteDoc,
+  doc,
+  getDocs,
+  limit,
+  query,
+  updateDoc,
+  where,
+} from '@projectmirror/shared/firebase';
 
 export type ReactionResponderFace = {
   key: string;
@@ -225,3 +236,32 @@ export type ReactionPlaybackSession = {
   parentEvent: Event;
   respondedRelationshipIds: string[];
 };
+
+export async function deleteReflectionDocument(
+  eventId: string,
+  explorerId: string,
+): Promise<void> {
+  const deleteRes = await fetch(
+    `${API_ENDPOINTS.DELETE_MIRROR_EVENT}?event_id=${eventId}&explorer_id=${explorerId}&path=to`,
+    { method: 'DELETE' },
+  );
+  if (!deleteRes.ok) {
+    const errData = await deleteRes.json().catch(() => null);
+    const errors =
+      isRecord(errData) && Array.isArray(errData?.errors)
+        ? errData.errors.filter((e): e is string => typeof e === 'string')
+        : [];
+    throw new Error(errors.join(', ') || 'Failed to delete reflection');
+  }
+
+  await deleteDoc(doc(db, ExplorerConfig.collections.reflections, eventId));
+}
+
+export async function removeResponderFromParentReflection(
+  parentReflectionId: string,
+  relationshipId: string,
+): Promise<void> {
+  await updateDoc(doc(db, ExplorerConfig.collections.reflections, parentReflectionId), {
+    respondedRelationshipIds: arrayRemove(relationshipId),
+  });
+}

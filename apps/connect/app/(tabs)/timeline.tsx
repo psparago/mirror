@@ -1781,6 +1781,21 @@ export default function SentTimelineScreen({
         visible={!!selectedReflection}
         event={selectedReflection}
         reactionSession={selectedReactionSession}
+        onReactionSessionUpdate={(session, parentPlaybackEvent) => {
+          setSelectedReactionSession(session);
+          setSelectedReflection(parentPlaybackEvent);
+          setReflections((prev) =>
+            prev.map((reflection) =>
+              reflection.event_id === session.parentEventId
+                ? {
+                    ...reflection,
+                    respondedRelationshipIds: session.respondedRelationshipIds,
+                  }
+                : reflection,
+            ),
+          );
+        }}
+        activeRelationshipId={activeRelationship?.id ?? null}
         explorerId={currentExplorerId ?? undefined}
         likedBy={selectedReflectionLikedBy}
         currentUserId={authUser?.uid ?? null}
