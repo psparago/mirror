@@ -61,6 +61,9 @@ interface SentReflection {
   sender?: string;
   sender_id?: string;
   metadata?: EventMetadata;
+  isReaction?: boolean;
+  parentReflectionId?: string | null;
+  respondedCompanionIds?: string[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -71,6 +74,19 @@ const asOptionalString = (value: unknown): string | null =>
 
 const coerceLikedBy = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
+
+const coerceRespondedCompanionIds = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0)
+    : [];
+
+const coerceIsReaction = (value: unknown): boolean | undefined =>
+  typeof value === 'boolean' ? value : undefined;
+
+const coerceParentReflectionId = (value: unknown): string | null | undefined => {
+  if (value === null) return null;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+};
 
 function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMetadata | undefined {
   if (!isRecord(raw)) return undefined;
@@ -592,6 +608,9 @@ export default function SentTimelineScreen({
               deletedAt: currentStatus === 'deleted' ? data.deleted_at : undefined,
               sender: asOptionalString(data?.sender) ?? undefined,
               sender_id: asOptionalString(data?.sender_id) ?? undefined,
+              isReaction: coerceIsReaction(data?.isReaction),
+              parentReflectionId: coerceParentReflectionId(data?.parentReflectionId),
+              respondedCompanionIds: coerceRespondedCompanionIds(data?.respondedCompanionIds),
             });
           } else {
             // We already have this event_id - always update to higher priority status
@@ -672,6 +691,9 @@ export default function SentTimelineScreen({
           const row = reflectionMap.get(actualEventId);
           if (row) {
             row.likedBy = coerceLikedBy(data.likedBy);
+            row.isReaction = coerceIsReaction(data?.isReaction) ?? row.isReaction;
+            row.parentReflectionId = coerceParentReflectionId(data?.parentReflectionId) ?? row.parentReflectionId;
+            row.respondedCompanionIds = coerceRespondedCompanionIds(data?.respondedCompanionIds);
             const m = coerceEmbeddedMetadata(data.metadata, actualEventId);
             if (m) {
               row.metadata = m;
@@ -1350,6 +1372,9 @@ export default function SentTimelineScreen({
             const likeCount = likedBy.length;
             const likedByMe = !!authUser?.uid && likedBy.includes(authUser.uid);
             const likedByOthers = likeCount > 0 && !likedByMe;
+            const currentUid = authUser?.uid;
+            const hasReacted = !!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false);
+            const showReactAffordance = item.status !== 'deleted' && item.isReaction !== true;
 
             return (
               <TouchableOpacity
@@ -1552,6 +1577,34 @@ export default function SentTimelineScreen({
                           <Text style={[styles.likeCountText, likedByMe && styles.likeCountTextActive]}>{likeCount}</Text>
                         ) : null}
                       </Pressable>
+                      {showReactAffordance ? (
+                        hasReacted ? (
+                          <View
+                            style={[styles.reactControl, styles.reactControlDisabled]}
+                            accessibilityRole="text"
+                            accessibilityLabel="You reacted to this Reflection"
+                          >
+                            <FontAwesome name="check" size={14} color="rgba(255,255,255,0.45)" />
+                            <Text style={[styles.reactControlText, styles.reactControlTextDisabled]}>Reacted</Text>
+                          </View>
+                        ) : (
+                          <Pressable
+                            onPress={() => {
+                              console.log('Launch composer for parent:', item.event_id);
+                            }}
+                            style={({ pressed }) => [
+                              styles.reactControl,
+                              styles.reactControlActive,
+                              pressed && styles.reactControlPressed,
+                            ]}
+                            accessibilityRole="button"
+                            accessibilityLabel="React to this Reflection"
+                          >
+                            <FontAwesome name="camera" size={14} color="#4ade80" />
+                            <Text style={styles.reactControlText}>React</Text>
+                          </Pressable>
+                        )
+                      ) : null}
                       {engagementCount > 0 ? (
                         <Text style={styles.engagementMetaText}>
                           Engagements: {engagementCount}
@@ -2095,6 +2148,37 @@ const styles = StyleSheet.create({
   },
   likeControlPressed: {
     opacity: 0.75,
+  },
+  reactControl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  reactControlActive: {
+    backgroundColor: 'rgba(74, 222, 128, 0.12)',
+    borderColor: 'rgba(74, 222, 128, 0.35)',
+  },
+  reactControlDisabled: {
+    opacity: 0.65,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  reactControlPressed: {
+    opacity: 0.75,
+  },
+  reactControlText: {
+    color: '#4ade80',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  reactControlTextDisabled: {
+    color: 'rgba(255,255,255,0.45)',
   },
   likeCountText: {
     color: 'rgba(255,255,255,0.72)',

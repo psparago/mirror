@@ -71,6 +71,7 @@ export interface Event {
   refreshedAt?: number; // Local timestamp when URLs were last refreshed
 }
 
+/** Merged Firestore signal doc (`mirror_event` + engagement overlays); rich content lives in `metadata`. */
 export interface ReflectionDocument {
   explorerId: string;
   event_id: string;
@@ -83,6 +84,12 @@ export interface ReflectionDocument {
   engagement_count?: number;
   deleted_at?: unknown;
   likedBy?: string[]; // UIDs that liked this Reflection.
+  /** True when this document is a Companion reaction to another Reflection. */
+  isReaction?: boolean;
+  /** Firestore ID of the parent Reflection being replied to. */
+  parentReflectionId?: string | null;
+  /** Companion UIDs who have already posted a reaction to this parent. */
+  respondedCompanionIds?: string[];
 }
 
 export type PendingNotificationTriggerType = 'companion_upload' | 'explorer_like' | 'companion_like';
