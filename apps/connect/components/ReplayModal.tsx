@@ -7,7 +7,9 @@ import {
   fetchMirrorEventById,
   fetchReactionEventForPlayback,
   removeResponderFromParentReflection,
+  resolveReactionParentPipMedia,
   resolveReactionResponderFaces,
+  type ReactionParentPipMedia,
   type ReactionPlaybackSession,
   type ReactionResponderFace,
 } from '@/utils/reactionPlayback';
@@ -103,7 +105,7 @@ export function ReplayModal({
   const suppressInstantPlayEventIdRef = useRef<string | null>(null);
   const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
   const [isDeletingReaction, setIsDeletingReaction] = useState(false);
-  const [resolvedParentVideoUrl, setResolvedParentVideoUrl] = useState<string | null>(null);
+  const [resolvedParentPip, setResolvedParentPip] = useState<ReactionParentPipMedia | null>(null);
   const pipVideoRef = useRef<AvVideo>(null);
   const pipAlignedForEventRef = useRef<string | null>(null);
 
@@ -181,33 +183,36 @@ export function ReplayModal({
 
   useEffect(() => {
     if (!visible || !isReactionPlayback) {
-      setResolvedParentVideoUrl(null);
+      setResolvedParentPip(null);
       pipAlignedForEventRef.current = null;
       void pipVideoRef.current?.pauseAsync().catch(() => {});
       return;
     }
 
-    const sessionParentUrl = reactionSessionRef.current?.parentEvent?.video_url
-      ?? reactionSession?.parentEvent?.video_url;
-    if (sessionParentUrl) {
-      setResolvedParentVideoUrl(sessionParentUrl);
+    const sessionParent =
+      reactionSessionRef.current?.parentEvent ?? reactionSession?.parentEvent;
+    const sessionPip = resolveReactionParentPipMedia(sessionParent);
+    if (sessionPip) {
+      setResolvedParentPip(sessionPip);
       return;
     }
 
     const parentId = displayEvent?.parentReflectionId;
     if (!parentId || !explorerId) {
-      setResolvedParentVideoUrl(null);
+      setResolvedParentPip(null);
       return;
     }
 
     let cancelled = false;
-    void fetchMirrorEventById(parentId, explorerId).then((parentEvent) => {
-      if (cancelled) return;
-      setResolvedParentVideoUrl(parentEvent?.video_url ?? null);
-    }).catch((error) => {
-      console.warn('[ReplayModal] failed to resolve parent video for PiP', error);
-      if (!cancelled) setResolvedParentVideoUrl(null);
-    });
+    void fetchMirrorEventById(parentId, explorerId)
+      .then((parentEvent) => {
+        if (cancelled) return;
+        setResolvedParentPip(resolveReactionParentPipMedia(parentEvent));
+      })
+      .catch((error) => {
+        console.warn('[ReplayModal] failed to resolve parent media for PiP', error);
+        if (!cancelled) setResolvedParentPip(null);
+      });
 
     return () => {
       cancelled = true;
@@ -218,8 +223,11 @@ export function ReplayModal({
     displayEvent?.parentReflectionId,
     displayEvent?.event_id,
     explorerId,
-    reactionSession?.parentEvent?.video_url,
+    reactionSession?.parentEvent,
   ]);
+
+  const resolvedParentVideoUrl =
+    resolvedParentPip?.mediaType === 'video' ? resolvedParentPip.url : null;
 
   useEffect(() => {
     if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
@@ -1119,6 +1127,30 @@ export function ReplayModal({
     setTimeout(() => { onClose(); }, 100);
   };
 
+  const renderReactionParentPip = () => {
+    if (!isReactionPlayback || !resolvedParentPip) return null;
+    if (resolvedParentPip.mediaType === 'video') {
+      return (
+        <AvVideo
+          ref={pipVideoRef}
+          source={{ uri: resolvedParentPip.url }}
+          style={styles.reactionPipVideo}
+          resizeMode={ResizeMode.CONTAIN}
+          isMuted
+          shouldPlay={false}
+        />
+      );
+    }
+    return (
+      <Image
+        source={{ uri: resolvedParentPip.url }}
+        style={styles.reactionPipVideo}
+        contentFit="cover"
+        cachePolicy="memory-disk"
+      />
+    );
+  };
+
   const handleReplay = () => {
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
@@ -1264,16 +1296,7 @@ export function ReplayModal({
                     contentFit="contain"
                     nativeControls={false}
                   />
-                  {isReactionPlayback && resolvedParentVideoUrl ? (
-                    <AvVideo
-                      ref={pipVideoRef}
-                      source={{ uri: resolvedParentVideoUrl }}
-                      style={styles.reactionPipVideo}
-                      resizeMode={ResizeMode.CONTAIN}
-                      isMuted
-                      shouldPlay={false}
-                    />
-                  ) : null}
+                  {renderReactionParentPip()}
                   {displayEvent.image_url && !videoReady ? (
                     <Image
                       source={{ uri: displayEvent.image_url }}
@@ -1284,12 +1307,15 @@ export function ReplayModal({
                   ) : null}
                 </>
               ) : (
-                 <Image
-                   source={{ uri: displayEvent.image_url }}
-                   style={styles.mediaImage}
-                   contentFit="contain"
-                   cachePolicy="memory-disk"
-                 />
+                <>
+                  <Image
+                    source={{ uri: displayEvent.image_url }}
+                    style={styles.mediaImage}
+                    contentFit="contain"
+                    cachePolicy="memory-disk"
+                  />
+                  {renderReactionParentPip()}
+                </>
               )}
 
               {/* Replay overlay — appears after caption + deep dive completes */}

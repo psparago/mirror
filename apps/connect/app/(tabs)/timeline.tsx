@@ -289,6 +289,7 @@ export default function SentTimelineScreen({
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [selectedReactionSession, setSelectedReactionSession] = useState<ReactionPlaybackSession | null>(null);
   const [reactionTarget, setReactionTarget] = useState<{ id: string; media: ReactionParentMedia } | null>(null);
+  const [openingReactionId, setOpeningReactionId] = useState<string | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
@@ -382,6 +383,72 @@ export default function SentTimelineScreen({
     updateReflectionLikedBy(eventId, nextLikedBy);
     toggleReflectionLike(eventId, userId, isAdd, currentLikedBy);
   }, [authUser?.uid, reflections, showToast, updateReflectionLikedBy]);
+
+  const openReactionComposer = useCallback(
+    async (item: SentReflection) => {
+      if (!currentExplorerId) {
+        showToast('Explorer not ready yet');
+        return;
+      }
+      if (openingReactionId === item.event_id) return;
+
+      setOpeningReactionId(item.event_id);
+      try {
+        let fullEvent = eventObjectsMap.get(item.event_id);
+        let videoUrl = asOptionalString(fullEvent?.video_url);
+        let imageUrl =
+          asOptionalString(fullEvent?.image_url) ?? asOptionalString(item.reflectionImageUrl);
+
+        if (!videoUrl && !imageUrl) {
+          const eventsResponse = await fetch(
+            `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`,
+          );
+          if (eventsResponse.ok) {
+            const eventsData = await eventsResponse.json().catch(() => null);
+            const events =
+              isRecord(eventsData) && Array.isArray(eventsData?.events) ? eventsData.events : [];
+            const matchingEvent = events
+              .filter(Boolean)
+              .find((event) => (event as Event)?.event_id === item.event_id) as Event | undefined;
+            if (matchingEvent) {
+              fullEvent = matchingEvent;
+              setEventObjectsMap((prev) => new Map(prev).set(item.event_id, matchingEvent));
+              videoUrl = asOptionalString(matchingEvent.video_url);
+              imageUrl =
+                asOptionalString(matchingEvent.image_url) ??
+                asOptionalString(item.reflectionImageUrl);
+            }
+          }
+        }
+
+        if (videoUrl) {
+          setSelectedReflection(null);
+          setSelectedReactionSession(null);
+          setReactionTarget({
+            id: item.event_id,
+            media: { mediaType: 'video', videoUrl },
+          });
+          return;
+        }
+        if (imageUrl) {
+          setSelectedReflection(null);
+          setSelectedReactionSession(null);
+          setReactionTarget({
+            id: item.event_id,
+            media: { mediaType: 'image', imageUrl },
+          });
+          return;
+        }
+        showToast('This Reflection has no media to react to');
+      } catch (error) {
+        console.warn('[Reaction] failed to open composer:', error);
+        showToast('Could not open reaction composer');
+      } finally {
+        setOpeningReactionId(null);
+      }
+    },
+    [currentExplorerId, eventObjectsMap, openingReactionId, showToast],
+  );
 
   const selectedReflectionLikedBy = useMemo(() => (
     selectedReflection
@@ -1694,30 +1761,16 @@ export default function SentTimelineScreen({
                           </View>
                         ) : (
                           <Pressable
-                            onPress={() => {
-                              const event = eventObjectsMap.get(item.event_id);
-                              const videoUrl = event?.video_url;
-                              const imageUrl = event?.image_url;
-                              if (videoUrl) {
-                                setReactionTarget({
-                                  id: item.event_id,
-                                  media: { mediaType: 'video', videoUrl },
-                                });
-                                return;
-                              }
-                              if (imageUrl) {
-                                setReactionTarget({
-                                  id: item.event_id,
-                                  media: { mediaType: 'image', imageUrl },
-                                });
-                                return;
-                              }
-                              showToast('This Reflection has no media to react to');
+                            onPress={(event) => {
+                              event.stopPropagation?.();
+                              void openReactionComposer(item);
                             }}
+                            disabled={openingReactionId === item.event_id}
                             style={({ pressed }) => [
                               styles.reactControl,
                               styles.reactControlActive,
                               pressed && styles.reactControlPressed,
+                              openingReactionId === item.event_id && styles.reactControlDisabled,
                             ]}
                             accessibilityRole="button"
                             accessibilityLabel="React to this Reflection"

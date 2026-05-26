@@ -254,6 +254,24 @@ export type ReactionPlaybackSession = {
   respondedRelationshipIds: string[];
 };
 
+export type ReactionParentPipMedia =
+  | { mediaType: 'video'; url: string }
+  | { mediaType: 'image'; url: string };
+
+export function resolveReactionParentPipMedia(
+  event: Event | null | undefined,
+): ReactionParentPipMedia | null {
+  const videoUrl = asOptionalString(event?.video_url);
+  if (videoUrl) {
+    return { mediaType: 'video', url: videoUrl };
+  }
+  const imageUrl = asOptionalString(event?.image_url);
+  if (imageUrl) {
+    return { mediaType: 'image', url: imageUrl };
+  }
+  return null;
+}
+
 export async function deleteReflectionDocument(
   eventId: string,
   explorerId: string,

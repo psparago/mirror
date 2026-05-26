@@ -63,10 +63,14 @@ export function ReactionSheet({
   const [trimStartMs, setTrimStartMs] = useState(0);
   const [trimEndMs, setTrimEndMs] = useState(0);
   const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
+  const [isParentReflectionMuted, setIsParentReflectionMuted] = useState(false);
 
   const isVideoParent = parentMedia?.mediaType === 'video';
+  const isImageParent = parentMedia?.mediaType === 'image';
   const parentVideoUrl = parentMedia?.mediaType === 'video' ? parentMedia.videoUrl : '';
   const parentImageUrl = parentMedia?.mediaType === 'image' ? parentMedia.imageUrl : '';
+  const hasValidParentMedia =
+    (isVideoParent && !!parentVideoUrl) || (isImageParent && !!parentImageUrl);
 
   const videoRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
@@ -83,6 +87,12 @@ export function ReactionSheet({
   const previewStopPendingRef = useRef(false);
   const seekChainRef = useRef(Promise.resolve());
   const pendingSeekTargetRef = useRef<number | null>(null);
+  const isParentReflectionMutedRef = useRef(false);
+
+  const getReactionParentVolume = useCallback(
+    () => (isParentReflectionMutedRef.current ? 0 : REACTION_PARENT_VOLUME),
+    [],
+  );
 
   const SEEK_TOLERANCE = useMemo(
     () => ({ toleranceMillisBefore: 0, toleranceMillisAfter: 0 }),
@@ -104,6 +114,10 @@ export function ReactionSheet({
   useEffect(() => {
     trimEndMsRef.current = trimEndMs;
   }, [trimEndMs]);
+
+  useEffect(() => {
+    isParentReflectionMutedRef.current = isParentReflectionMuted;
+  }, [isParentReflectionMuted]);
 
   useEffect(() => {
     if (durationMillis <= 0) return;
@@ -149,6 +163,8 @@ export function ReactionSheet({
     setTrimEndMs(0);
     trimStartMsRef.current = 0;
     trimEndMsRef.current = 0;
+    setIsParentReflectionMuted(false);
+    isParentReflectionMutedRef.current = false;
     setCameraInstanceKey(0);
     isVideoDragActiveRef.current = false;
     previewStopPendingRef.current = false;
@@ -169,7 +185,7 @@ export function ReactionSheet({
         await videoRef.current?.setStatusAsync({
           positionMillis: syncStartTimeMillis,
           shouldPlay: true,
-          volume: REACTION_PARENT_VOLUME,
+          volume: getReactionParentVolume(),
         });
         positionMillisRef.current = syncStartTimeMillis;
         setPositionMillis(syncStartTimeMillis);
@@ -177,7 +193,16 @@ export function ReactionSheet({
         console.warn('[ReactionSheet] failed to start preview loop:', error);
       }
     })();
-  }, [isVideoParent, recordedUri, syncStartTimeMillis]);
+  }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
+
+  useEffect(() => {
+    if (!isVideoParent || isRecording) return;
+    void videoRef.current
+      ?.setVolumeAsync(getReactionParentVolume())
+      .catch((error) => {
+        console.warn('[ReactionSheet] failed to update parent volume:', error);
+      });
+  }, [getReactionParentVolume, isParentReflectionMuted, isRecording, isVideoParent]);
 
   const clampTrimStart = useCallback((startMs: number) => {
     const end = trimEndMsRef.current || durationMillisRef.current;
@@ -245,7 +270,7 @@ export function ReactionSheet({
         await videoRef.current?.setStatusAsync({
           positionMillis: target,
           shouldPlay: options.shouldPlay,
-          volume: options.volume ?? 1,
+          volume: options.volume ?? getReactionParentVolume(),
         });
       } catch (error) {
         if (!isSeekInterrupted(error)) {
@@ -253,7 +278,7 @@ export function ReactionSheet({
         }
       }
     },
-    [queueVideoSeek],
+    [getReactionParentVolume, queueVideoSeek],
   );
 
   const stopPreviewAtTrimEnd = useCallback(async () => {
@@ -267,7 +292,7 @@ export function ReactionSheet({
       await videoRef.current?.setStatusAsync({
         positionMillis: start,
         shouldPlay: false,
-        volume: 1,
+        volume: getReactionParentVolume(),
       });
     } catch (error) {
       if (!isSeekInterrupted(error)) {
@@ -276,7 +301,7 @@ export function ReactionSheet({
     } finally {
       previewStopPendingRef.current = false;
     }
-  }, [isVideoParent]);
+  }, [getReactionParentVolume, isVideoParent]);
 
   const handlePlaybackStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
@@ -302,7 +327,7 @@ export function ReactionSheet({
           void videoRef.current?.setStatusAsync({
             positionMillis: syncStartTimeMillis,
             shouldPlay: true,
-            volume: REACTION_PARENT_VOLUME,
+            volume: getReactionParentVolume(),
           });
         }
         return;
@@ -334,7 +359,15 @@ export function ReactionSheet({
         setIsPreviewPlaying(false);
       }
     },
-    [isVideoParent, stopPreviewAtTrimEnd, recordedUri, syncEndTimeMillis, syncStartTimeMillis, isRecording],
+    [
+      getReactionParentVolume,
+      isVideoParent,
+      stopPreviewAtTrimEnd,
+      recordedUri,
+      syncEndTimeMillis,
+      syncStartTimeMillis,
+      isRecording,
+    ],
   );
 
   const pauseParentPreview = useCallback(async () => {
@@ -357,7 +390,10 @@ export function ReactionSheet({
         const start = trimStartMsRef.current;
         positionMillisRef.current = start;
         setPositionMillis(start);
-        await commitVideoPosition(start, { shouldPlay: false, volume: 1 });
+        await commitVideoPosition(start, {
+          shouldPlay: false,
+          volume: getReactionParentVolume(),
+        });
         return;
       }
 
@@ -367,13 +403,24 @@ export function ReactionSheet({
       await videoRef.current?.setStatusAsync({
         positionMillis: start,
         shouldPlay: true,
-        volume: 1,
+        volume: getReactionParentVolume(),
       });
       setIsPreviewPlaying(true);
     } catch (error) {
       console.warn('[ReactionSheet] toggle playback failed:', error);
     }
-  }, [commitVideoPosition, isRecording, isVideoParent, pauseParentPreview, recordedUri]);
+  }, [
+    commitVideoPosition,
+    getReactionParentVolume,
+    isRecording,
+    isVideoParent,
+    pauseParentPreview,
+    recordedUri,
+  ]);
+
+  const toggleParentReflectionMute = useCallback(() => {
+    setIsParentReflectionMuted((prev) => !prev);
+  }, []);
 
   const handleTrimChange = useCallback(
     (start: number, end: number) => {
@@ -405,10 +452,13 @@ export function ReactionSheet({
 
   const handleScrubEnd = useCallback(() => {
     void (async () => {
-      await commitVideoPosition(trimStartMsRef.current, { shouldPlay: false, volume: 1 });
+      await commitVideoPosition(trimStartMsRef.current, {
+        shouldPlay: false,
+        volume: getReactionParentVolume(),
+      });
       isScrubbingRef.current = false;
     })();
-  }, [commitVideoPosition]);
+  }, [commitVideoPosition, getReactionParentVolume]);
 
   const beginVideoDragScrub = useCallback(() => {
     if (isVideoDragActiveRef.current) return;
@@ -502,7 +552,7 @@ export function ReactionSheet({
           await videoRef.current?.setStatusAsync({
             positionMillis: syncStart,
             shouldPlay: true,
-            volume: REACTION_PARENT_VOLUME,
+            volume: getReactionParentVolume(),
           });
         } catch (error) {
           console.warn('[ReactionSheet] reaction playback failed:', error);
@@ -512,6 +562,7 @@ export function ReactionSheet({
   }, [
     cameraPermission?.granted,
     cameraReady,
+    getReactionParentVolume,
     isVideoParent,
     micReady,
     parentReflectionId,
@@ -528,14 +579,14 @@ export function ReactionSheet({
           setSyncEndTimeMillis(status.positionMillis);
         }
         await videoRef.current?.pauseAsync().catch(() => {});
-        await videoRef.current?.setVolumeAsync(1).catch(() => {});
+        await videoRef.current?.setVolumeAsync(getReactionParentVolume()).catch(() => {});
       } else {
         setSyncEndTimeMillis(0);
       }
       setIsRecording(false);
       cameraRef.current?.stopRecording();
     })();
-  }, [isRecording, isVideoParent]);
+  }, [getReactionParentVolume, isRecording, isVideoParent]);
 
   const handleRetake = useCallback(() => {
     const restartAt = syncStartTimeMillis;
@@ -547,11 +598,14 @@ export function ReactionSheet({
     setCameraInstanceKey((key) => key + 1);
     void (async () => {
       if (isVideoParent && restartAt != null) {
-        await commitVideoPosition(restartAt, { shouldPlay: false, volume: 1 });
+        await commitVideoPosition(restartAt, {
+          shouldPlay: false,
+          volume: getReactionParentVolume(),
+        });
       }
       await videoRef.current?.pauseAsync().catch(() => {});
     })();
-  }, [commitVideoPosition, isVideoParent, syncStartTimeMillis]);
+  }, [commitVideoPosition, getReactionParentVolume, isVideoParent, syncStartTimeMillis]);
 
   const handleSend = useCallback(() => {
     if (!recordedUri || isUploading) return;
@@ -615,7 +669,7 @@ export function ReactionSheet({
 
   return (
     <Modal
-      visible={visible}
+      visible={visible && hasValidParentMedia}
       animationType="slide"
       presentationStyle="fullScreen"
       onRequestClose={onClose}
@@ -678,26 +732,64 @@ export function ReactionSheet({
                           onScrubEnd={handleScrubEnd}
                         />
                       </View>
-                      <Pressable
-                        style={styles.playbackControl}
-                        onPress={toggleParentPlayback}
-                        accessibilityRole="button"
-                        accessibilityLabel={
-                          isPreviewPlaying
-                            ? 'Pause parent Reflection preview'
-                            : 'Play parent Reflection preview'
-                        }
-                      >
-                        <FontAwesome
-                          name={isPreviewPlaying ? 'pause' : 'play'}
-                          size={14}
-                          color="#fff"
-                        />
-                        <Text style={styles.playbackControlText}>
-                          {isPreviewPlaying ? 'Pause preview' : 'Play preview'}
-                        </Text>
-                      </Pressable>
+                      <View style={styles.playbackControlsRow}>
+                        <Pressable
+                          style={styles.parentAudioToggle}
+                          onPress={toggleParentReflectionMute}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            isParentReflectionMuted
+                              ? 'Unmute Reflection audio'
+                              : 'Mute Reflection audio'
+                          }
+                        >
+                          <FontAwesome
+                            name={isParentReflectionMuted ? 'volume-off' : 'volume-down'}
+                            size={14}
+                            color="#fff"
+                          />
+                        </Pressable>
+                        <Pressable
+                          style={[styles.playbackControl, styles.playbackControlFlex]}
+                          onPress={toggleParentPlayback}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            isPreviewPlaying
+                              ? 'Pause parent Reflection preview'
+                              : 'Play parent Reflection preview'
+                          }
+                        >
+                          <FontAwesome
+                            name={isPreviewPlaying ? 'pause' : 'play'}
+                            size={14}
+                            color="#fff"
+                          />
+                          <Text style={styles.playbackControlText}>
+                            {isPreviewPlaying ? 'Pause preview' : 'Play preview'}
+                          </Text>
+                        </Pressable>
+                      </View>
                     </>
+                  ) : isPreviewMode ? (
+                    <Pressable
+                      style={styles.playbackControl}
+                      onPress={toggleParentReflectionMute}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        isParentReflectionMuted
+                          ? 'Unmute Reflection audio'
+                          : 'Mute Reflection audio'
+                      }
+                    >
+                      <FontAwesome
+                        name={isParentReflectionMuted ? 'volume-off' : 'volume-down'}
+                        size={14}
+                        color="#fff"
+                      />
+                      <Text style={styles.playbackControlText}>
+                        {isParentReflectionMuted ? 'Reflection muted' : 'Reflection audio (15%)'}
+                      </Text>
+                    </Pressable>
                   ) : null}
                 </>
               ) : (
@@ -797,7 +889,11 @@ export function ReactionSheet({
               ]}
               accessibilityRole="button"
               accessibilityLabel={isRecording ? 'Recording reaction' : 'Hold to react'}
-              accessibilityHint="Press and hold to record your reaction while the Reflection plays"
+              accessibilityHint={
+                isImageParent
+                  ? 'Press and hold to record your reaction to this photo'
+                  : 'Press and hold to record your reaction while the Reflection plays'
+              }
             >
               <FontAwesome name="circle" size={14} color="#fff" />
               <Text style={styles.recordButtonText}>
@@ -898,6 +994,20 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
     backgroundColor: 'rgba(0,0,0,0.35)',
   },
+  playbackControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  parentAudioToggle: {
+    width: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.12)',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: 'rgba(255,255,255,0.12)',
+  },
   playbackControl: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -907,6 +1017,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.35)',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.12)',
+  },
+  playbackControlFlex: {
+    flex: 1,
   },
   playbackControlText: {
     color: 'rgba(255,255,255,0.88)',
