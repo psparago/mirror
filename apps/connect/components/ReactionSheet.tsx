@@ -4,6 +4,7 @@ import { useAuth, useExplorer, VideoTrimSlider } from '@projectmirror/shared';
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { requestRecordingPermissionsAsync } from 'expo-audio';
+import { Image } from 'expo-image';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,11 +19,23 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-g
 import { runOnJS } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+const REACTION_PARENT_VOLUME = 0.15;
+const PREVIEW_END_EPSILON_MS = 80;
+const MIN_TRIM_GAP_MS = 500;
+
+function isSeekInterrupted(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('Seeking interrupted');
+}
+
+export type ReactionParentMedia =
+  | { mediaType: 'video'; videoUrl: string }
+  | { mediaType: 'image'; imageUrl: string };
+
 export interface ReactionSheetProps {
   visible: boolean;
   onClose: () => void;
   parentReflectionId: string;
-  parentVideoUrl: string;
+  parentMedia: ReactionParentMedia | null;
   onUploadSuccess?: (parentReflectionId: string, relationshipId: string) => void;
 }
 
@@ -30,7 +43,7 @@ export function ReactionSheet({
   visible,
   onClose,
   parentReflectionId,
-  parentVideoUrl,
+  parentMedia,
   onUploadSuccess,
 }: ReactionSheetProps) {
   const insets = useSafeAreaInsets();
@@ -47,6 +60,13 @@ export function ReactionSheet({
   const [syncStartTimeMillis, setSyncStartTimeMillis] = useState<number | null>(null);
   const [syncEndTimeMillis, setSyncEndTimeMillis] = useState<number | null>(null);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [trimStartMs, setTrimStartMs] = useState(0);
+  const [trimEndMs, setTrimEndMs] = useState(0);
+  const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
+
+  const isVideoParent = parentMedia?.mediaType === 'video';
+  const parentVideoUrl = parentMedia?.mediaType === 'video' ? parentMedia.videoUrl : '';
+  const parentImageUrl = parentMedia?.mediaType === 'image' ? parentMedia.imageUrl : '';
 
   const videoRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
@@ -54,23 +74,49 @@ export function ReactionSheet({
   const parentVideoWidthRef = useRef(0);
   const seekOriginMsRef = useRef(0);
   const durationMillisRef = useRef(0);
+  const trimStartMsRef = useRef(0);
+  const trimEndMsRef = useRef(0);
+  const positionMillisRef = useRef(0);
   const canScrubRef = useRef(true);
   const isScrubbingRef = useRef(false);
-  const lastSeekAtRef = useRef(0);
+  const isVideoDragActiveRef = useRef(false);
+  const previewStopPendingRef = useRef(false);
+  const seekChainRef = useRef(Promise.resolve());
+  const pendingSeekTargetRef = useRef<number | null>(null);
 
   const SEEK_TOLERANCE = useMemo(
     () => ({ toleranceMillisBefore: 0, toleranceMillisAfter: 0 }),
     [],
   );
-  const SEEK_THROTTLE_MS = 50;
 
   useEffect(() => {
     durationMillisRef.current = durationMillis;
   }, [durationMillis]);
 
   useEffect(() => {
-    canScrubRef.current = !isRecording && recordedUri == null;
-  }, [isRecording, recordedUri]);
+    positionMillisRef.current = positionMillis;
+  }, [positionMillis]);
+
+  useEffect(() => {
+    trimStartMsRef.current = trimStartMs;
+  }, [trimStartMs]);
+
+  useEffect(() => {
+    trimEndMsRef.current = trimEndMs;
+  }, [trimEndMs]);
+
+  useEffect(() => {
+    if (durationMillis <= 0) return;
+    setTrimEndMs((prev) => {
+      const next = prev <= 0 ? durationMillis : Math.min(prev, durationMillis);
+      trimEndMsRef.current = next;
+      return next;
+    });
+  }, [durationMillis]);
+
+  useEffect(() => {
+    canScrubRef.current = isVideoParent && !isRecording && recordedUri == null;
+  }, [isRecording, isVideoParent, recordedUri]);
 
   useEffect(() => {
     if (!visible) return;
@@ -99,124 +145,309 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
+    setTrimStartMs(0);
+    setTrimEndMs(0);
+    trimStartMsRef.current = 0;
+    trimEndMsRef.current = 0;
+    setCameraInstanceKey(0);
+    isVideoDragActiveRef.current = false;
+    previewStopPendingRef.current = false;
+    pendingSeekTargetRef.current = null;
+    seekChainRef.current = Promise.resolve();
     setCameraReady(false);
     setIsUploading(false);
     recordingPromiseRef.current = null;
     void videoRef.current?.pauseAsync().catch(() => {});
+    void videoRef.current?.setVolumeAsync(1).catch(() => {});
     cameraRef.current?.stopRecording();
   }, [visible]);
 
   useEffect(() => {
-    if (!recordedUri || syncStartTimeMillis == null) return;
+    if (!recordedUri || syncStartTimeMillis == null || !isVideoParent) return;
     void (async () => {
       try {
-        await videoRef.current?.setPositionAsync(syncStartTimeMillis, SEEK_TOLERANCE);
+        await videoRef.current?.setStatusAsync({
+          positionMillis: syncStartTimeMillis,
+          shouldPlay: true,
+          volume: REACTION_PARENT_VOLUME,
+        });
+        positionMillisRef.current = syncStartTimeMillis;
         setPositionMillis(syncStartTimeMillis);
-        await videoRef.current?.playAsync();
       } catch (error) {
         console.warn('[ReactionSheet] failed to start preview loop:', error);
       }
     })();
-  }, [recordedUri, syncStartTimeMillis, SEEK_TOLERANCE]);
+  }, [isVideoParent, recordedUri, syncStartTimeMillis]);
 
-  const handlePlaybackStatusUpdate = useCallback((status: AVPlaybackStatus) => {
-    if (!status.isLoaded) return;
-    if (!isScrubbingRef.current) {
-      setPositionMillis(status.positionMillis);
+  const clampTrimStart = useCallback((startMs: number) => {
+    const end = trimEndMsRef.current || durationMillisRef.current;
+    if (end <= MIN_TRIM_GAP_MS) return 0;
+    return Math.max(0, Math.min(startMs, end - MIN_TRIM_GAP_MS));
+  }, []);
+
+  const setReactionStartMs = useCallback(
+    (startMs: number) => {
+      const clamped = clampTrimStart(startMs);
+      setTrimStartMs(clamped);
+      trimStartMsRef.current = clamped;
+      positionMillisRef.current = clamped;
+      setPositionMillis(clamped);
+      return clamped;
+    },
+    [clampTrimStart],
+  );
+
+  const queueVideoSeek = useCallback(
+    (targetMs: number, options?: { updateUi?: boolean }) => {
+      if (!isVideoParent || isRecording) return seekChainRef.current;
+
+      const end = trimEndMsRef.current || durationMillisRef.current;
+      const target = Math.max(0, Math.min(targetMs, end));
+
+      if (options?.updateUi !== false) {
+        positionMillisRef.current = target;
+        setPositionMillis(target);
+      }
+
+      pendingSeekTargetRef.current = target;
+
+      seekChainRef.current = seekChainRef.current
+        .then(async () => {
+          while (pendingSeekTargetRef.current != null) {
+            const nextTarget = pendingSeekTargetRef.current;
+            pendingSeekTargetRef.current = null;
+            try {
+              await videoRef.current?.setPositionAsync(nextTarget, SEEK_TOLERANCE);
+            } catch (error) {
+              if (!isSeekInterrupted(error)) {
+                console.warn('[ReactionSheet] seek failed:', error);
+              }
+            }
+          }
+        })
+        .catch(() => {});
+
+      return seekChainRef.current;
+    },
+    [SEEK_TOLERANCE, isRecording, isVideoParent],
+  );
+
+  const commitVideoPosition = useCallback(
+    async (
+      targetMs: number,
+      options?: { shouldPlay?: boolean; volume?: number },
+    ) => {
+      await queueVideoSeek(targetMs, { updateUi: true });
+      if (options?.shouldPlay == null) return;
+      const end = trimEndMsRef.current || durationMillisRef.current;
+      const target = Math.max(0, Math.min(targetMs, end));
+      try {
+        await videoRef.current?.setStatusAsync({
+          positionMillis: target,
+          shouldPlay: options.shouldPlay,
+          volume: options.volume ?? 1,
+        });
+      } catch (error) {
+        if (!isSeekInterrupted(error)) {
+          console.warn('[ReactionSheet] commit seek failed:', error);
+        }
+      }
+    },
+    [queueVideoSeek],
+  );
+
+  const stopPreviewAtTrimEnd = useCallback(async () => {
+    if (!isVideoParent || previewStopPendingRef.current) return;
+    previewStopPendingRef.current = true;
+    const start = trimStartMsRef.current;
+    positionMillisRef.current = start;
+    setPositionMillis(start);
+    setIsPreviewPlaying(false);
+    try {
+      await videoRef.current?.setStatusAsync({
+        positionMillis: start,
+        shouldPlay: false,
+        volume: 1,
+      });
+    } catch (error) {
+      if (!isSeekInterrupted(error)) {
+        console.warn('[ReactionSheet] preview stop failed:', error);
+      }
+    } finally {
+      previewStopPendingRef.current = false;
     }
-    setDurationMillis(status.durationMillis ?? 0);
+  }, [isVideoParent]);
 
-    if (!recordedUri && !isRecording && !isScrubbingRef.current && status.isLoaded) {
-      setIsPreviewPlaying(status.isPlaying);
-      if (status.didJustFinish) {
+  const handlePlaybackStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!status.isLoaded) return;
+
+      const duration = status.durationMillis ?? 0;
+      if (duration > 0) {
+        setDurationMillis(duration);
+        durationMillisRef.current = duration;
+      }
+
+      if (recordedUri && isVideoParent) {
+        if (!isScrubbingRef.current) {
+          positionMillisRef.current = status.positionMillis;
+          setPositionMillis(status.positionMillis);
+        }
+
+        if (
+          syncStartTimeMillis != null &&
+          syncEndTimeMillis != null &&
+          status.positionMillis >= syncEndTimeMillis - PREVIEW_END_EPSILON_MS
+        ) {
+          void videoRef.current?.setStatusAsync({
+            positionMillis: syncStartTimeMillis,
+            shouldPlay: true,
+            volume: REACTION_PARENT_VOLUME,
+          });
+        }
+        return;
+      }
+
+      if (isRecording && isVideoParent) {
+        if (!isScrubbingRef.current) {
+          positionMillisRef.current = status.positionMillis;
+          setPositionMillis(status.positionMillis);
+        }
+        return;
+      }
+
+      if (!isVideoParent) return;
+
+      if (status.isPlaying && !isScrubbingRef.current) {
+        positionMillisRef.current = status.positionMillis;
+        setPositionMillis(status.positionMillis);
+        setIsPreviewPlaying(true);
+
+        const end = trimEndMsRef.current || duration;
+        if (end > trimStartMsRef.current && status.positionMillis >= end - PREVIEW_END_EPSILON_MS) {
+          void stopPreviewAtTrimEnd();
+        }
+        return;
+      }
+
+      if (!isScrubbingRef.current) {
         setIsPreviewPlaying(false);
       }
-    }
+    },
+    [isVideoParent, stopPreviewAtTrimEnd, recordedUri, syncEndTimeMillis, syncStartTimeMillis, isRecording],
+  );
 
-    if (
-      recordedUri &&
-      syncStartTimeMillis != null &&
-      syncEndTimeMillis != null &&
-      status.positionMillis >= syncEndTimeMillis
-    ) {
-      void videoRef.current?.setPositionAsync(syncStartTimeMillis, SEEK_TOLERANCE);
+  const pauseParentPreview = useCallback(async () => {
+    if (!isVideoParent) return;
+    try {
+      await videoRef.current?.pauseAsync();
+      setIsPreviewPlaying(false);
+    } catch (error) {
+      console.warn('[ReactionSheet] pause preview failed:', error);
     }
-  }, [recordedUri, syncEndTimeMillis, syncStartTimeMillis, SEEK_TOLERANCE, isRecording]);
+  }, [isVideoParent]);
 
   const toggleParentPlayback = useCallback(async () => {
-    if (isRecording || recordedUri) return;
+    if (!isVideoParent || isRecording || recordedUri) return;
     try {
       const status = await videoRef.current?.getStatusAsync();
       if (!status?.isLoaded) return;
       if (status.isPlaying) {
-        await videoRef.current?.pauseAsync();
-        setIsPreviewPlaying(false);
-      } else {
-        await videoRef.current?.playAsync();
-        setIsPreviewPlaying(true);
+        await pauseParentPreview();
+        const start = trimStartMsRef.current;
+        positionMillisRef.current = start;
+        setPositionMillis(start);
+        await commitVideoPosition(start, { shouldPlay: false, volume: 1 });
+        return;
       }
+
+      const start = trimStartMsRef.current;
+      positionMillisRef.current = start;
+      setPositionMillis(start);
+      await videoRef.current?.setStatusAsync({
+        positionMillis: start,
+        shouldPlay: true,
+        volume: 1,
+      });
+      setIsPreviewPlaying(true);
     } catch (error) {
       console.warn('[ReactionSheet] toggle playback failed:', error);
     }
-  }, [isRecording, recordedUri]);
+  }, [commitVideoPosition, isRecording, isVideoParent, pauseParentPreview, recordedUri]);
 
-  const seekParentVideo = useCallback(
-    async (nextPositionMillis: number, options?: { throttle?: boolean }) => {
-      if (isRecording || recordedUri) return;
-      const target = Math.max(0, nextPositionMillis);
-      setPositionMillis(target);
-      if (options?.throttle) {
-        const now = Date.now();
-        if (now - lastSeekAtRef.current < SEEK_THROTTLE_MS) return;
-        lastSeekAtRef.current = now;
-      }
-      try {
-        await videoRef.current?.setPositionAsync(target, SEEK_TOLERANCE);
-      } catch (error) {
-        console.warn('[ReactionSheet] seek failed:', error);
+  const handleTrimChange = useCallback(
+    (start: number, end: number) => {
+      setTrimStartMs(start);
+      setTrimEndMs(end);
+      trimStartMsRef.current = start;
+      trimEndMsRef.current = end;
+      if (!isPreviewPlaying) {
+        positionMillisRef.current = start;
+        setPositionMillis(start);
       }
     },
-    [SEEK_TOLERANCE, isRecording, recordedUri],
+    [isPreviewPlaying],
   );
 
   const handleSeek = useCallback(
     (nextPositionMillis: number) => {
-      void seekParentVideo(nextPositionMillis, { throttle: true });
+      positionMillisRef.current = nextPositionMillis;
+      setPositionMillis(nextPositionMillis);
+      void queueVideoSeek(nextPositionMillis, { updateUi: false });
     },
-    [seekParentVideo],
+    [queueVideoSeek],
   );
 
   const handleScrubStart = useCallback(() => {
     isScrubbingRef.current = true;
-  }, []);
+    void pauseParentPreview();
+  }, [pauseParentPreview]);
 
   const handleScrubEnd = useCallback(() => {
-    isScrubbingRef.current = false;
-  }, []);
+    void (async () => {
+      await commitVideoPosition(trimStartMsRef.current, { shouldPlay: false, volume: 1 });
+      isScrubbingRef.current = false;
+    })();
+  }, [commitVideoPosition]);
+
+  const beginVideoDragScrub = useCallback(() => {
+    if (isVideoDragActiveRef.current) return;
+    isVideoDragActiveRef.current = true;
+    isScrubbingRef.current = true;
+    seekOriginMsRef.current = trimStartMsRef.current;
+    void pauseParentPreview();
+  }, [pauseParentPreview]);
 
   const handleSeekDragStart = useCallback(() => {
-    isScrubbingRef.current = true;
-    seekOriginMsRef.current = positionMillis;
-  }, [positionMillis]);
+    beginVideoDragScrub();
+  }, [beginVideoDragScrub]);
 
   const handleSeekDrag = useCallback(
     (translationX: number) => {
       if (!canScrubRef.current) return;
+      beginVideoDragScrub();
+
       const width = parentVideoWidthRef.current;
       const duration = durationMillisRef.current;
       if (width <= 0 || duration <= 0) return;
+
       const deltaMs = (translationX / width) * duration;
-      const target = Math.max(0, Math.min(duration, seekOriginMsRef.current + deltaMs));
-      void seekParentVideo(target, { throttle: true });
+      const start = setReactionStartMs(seekOriginMsRef.current + deltaMs);
+      void queueVideoSeek(start, { updateUi: false });
     },
-    [seekParentVideo],
+    [beginVideoDragScrub, queueVideoSeek, setReactionStartMs],
   );
 
   const handleSeekDragEnd = useCallback(() => {
-    isScrubbingRef.current = false;
-  }, []);
+    void (async () => {
+      const start = trimStartMsRef.current;
+      await queueVideoSeek(start, { updateUi: false });
+      isVideoDragActiveRef.current = false;
+      isScrubbingRef.current = false;
+    })();
+  }, [queueVideoSeek]);
 
-  const showScrubUi = !isRecording && recordedUri == null;
+  const showScrubUi = isVideoParent && !isRecording && recordedUri == null;
 
   const videoPanGesture = useMemo(() => {
     return Gesture.Pan()
@@ -246,47 +477,65 @@ export function ReactionSheet({
       return;
     }
 
-    void (async () => {
-      const status = await videoRef.current?.getStatusAsync();
-      if (status?.isLoaded) {
-        setSyncStartTimeMillis(status.positionMillis);
-      }
-    })();
-
+    const syncStart = isVideoParent ? trimStartMsRef.current : 0;
+    setSyncStartTimeMillis(syncStart);
     setIsRecording(true);
     setIsPreviewPlaying(false);
 
     const recordingPromise = cameraRef.current?.recordAsync();
     if (recordingPromise) {
       recordingPromiseRef.current = recordingPromise;
-      void recordingPromise.then((result) => {
-        if (result?.uri) {
-          console.log('Recorded local URI:', result.uri);
-          setRecordedUri(result.uri);
-        }
-      }).catch((error) => {
-        console.warn('[ReactionSheet] recordAsync failed:', error);
-      });
+      void recordingPromise
+        .then((result) => {
+          if (result?.uri) {
+            setRecordedUri(result.uri);
+          }
+        })
+        .catch((error) => {
+          console.warn('[ReactionSheet] recordAsync failed:', error);
+        });
     }
 
-    void videoRef.current?.playAsync().catch((error) => {
-      console.warn('[ReactionSheet] playAsync failed:', error);
-    });
-  }, [cameraPermission?.granted, cameraReady, micReady, parentReflectionId, recordedUri]);
+    if (isVideoParent) {
+      void (async () => {
+        try {
+          await videoRef.current?.setStatusAsync({
+            positionMillis: syncStart,
+            shouldPlay: true,
+            volume: REACTION_PARENT_VOLUME,
+          });
+        } catch (error) {
+          console.warn('[ReactionSheet] reaction playback failed:', error);
+        }
+      })();
+    }
+  }, [
+    cameraPermission?.granted,
+    cameraReady,
+    isVideoParent,
+    micReady,
+    parentReflectionId,
+    recordedUri,
+  ]);
 
   const handlePressOut = useCallback(() => {
     if (!isRecording) return;
 
     void (async () => {
-      const status = await videoRef.current?.getStatusAsync();
-      if (status?.isLoaded) {
-        setSyncEndTimeMillis(status.positionMillis);
+      if (isVideoParent) {
+        const status = await videoRef.current?.getStatusAsync();
+        if (status?.isLoaded) {
+          setSyncEndTimeMillis(status.positionMillis);
+        }
+        await videoRef.current?.pauseAsync().catch(() => {});
+        await videoRef.current?.setVolumeAsync(1).catch(() => {});
+      } else {
+        setSyncEndTimeMillis(0);
       }
       setIsRecording(false);
-      await videoRef.current?.pauseAsync().catch(() => {});
       cameraRef.current?.stopRecording();
     })();
-  }, [isRecording]);
+  }, [isRecording, isVideoParent]);
 
   const handleRetake = useCallback(() => {
     const restartAt = syncStartTimeMillis;
@@ -295,14 +544,14 @@ export function ReactionSheet({
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
     setCameraReady(false);
+    setCameraInstanceKey((key) => key + 1);
     void (async () => {
-      if (restartAt != null) {
-        await videoRef.current?.setPositionAsync(restartAt, SEEK_TOLERANCE);
-        setPositionMillis(restartAt);
+      if (isVideoParent && restartAt != null) {
+        await commitVideoPosition(restartAt, { shouldPlay: false, volume: 1 });
       }
       await videoRef.current?.pauseAsync().catch(() => {});
     })();
-  }, [syncStartTimeMillis, SEEK_TOLERANCE]);
+  }, [commitVideoPosition, isVideoParent, syncStartTimeMillis]);
 
   const handleSend = useCallback(() => {
     if (!recordedUri || isUploading) return;
@@ -362,6 +611,7 @@ export function ReactionSheet({
   const canRecord = !recordedUri && cameraReady && !!cameraPermission?.granted && micReady;
   const isPreviewMode = recordedUri != null;
   const scrubDurationMs = Math.max(durationMillis, 1);
+  const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
 
   return (
     <Modal
@@ -387,109 +637,127 @@ export function ReactionSheet({
         <View style={styles.splitPane}>
           <View style={styles.parentVideoPane}>
             <View style={styles.mediaCard}>
-              <Pressable
-                style={styles.parentVideoPressable}
-                onPress={toggleParentPlayback}
-                disabled={!showScrubUi}
-                accessibilityRole="button"
-                accessibilityLabel={isPreviewPlaying ? 'Pause parent Reflection preview' : 'Play parent Reflection preview'}
-              >
-                <GestureDetector gesture={showScrubUi ? videoPanGesture : Gesture.Pan().enabled(false)}>
-                  <View
-                    style={styles.parentVideoSurface}
-                    onLayout={(event) => {
-                      parentVideoWidthRef.current = event.nativeEvent.layout.width;
-                    }}
-                  >
-                    <Video
-                      ref={videoRef}
-                      source={{ uri: parentVideoUrl }}
-                      style={styles.parentVideo}
-                      resizeMode={ResizeMode.CONTAIN}
-                      shouldPlay={false}
-                      isLooping={false}
-                      progressUpdateIntervalMillis={250}
-                      onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-                    />
-                    {showScrubUi ? (
-                      <>
+              {isVideoParent ? (
+                <>
+                  <GestureDetector gesture={showScrubUi ? videoPanGesture : Gesture.Pan().enabled(false)}>
+                    <View
+                      style={styles.parentVideoSurface}
+                      onLayout={(event) => {
+                        parentVideoWidthRef.current = event.nativeEvent.layout.width;
+                      }}
+                    >
+                      <Video
+                        ref={videoRef}
+                        source={{ uri: parentVideoUrl }}
+                        style={styles.parentVideo}
+                        resizeMode={ResizeMode.CONTAIN}
+                        shouldPlay={false}
+                        isLooping={false}
+                        progressUpdateIntervalMillis={100}
+                        onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+                      />
+                      {showScrubUi ? (
                         <View style={styles.dragHintOverlay} pointerEvents="none">
-                          <Text style={styles.dragHintText}>Drag to seek</Text>
+                          <Text style={styles.dragHintText}>Drag to set start</Text>
                         </View>
-                        {!isPreviewPlaying ? (
-                          <View style={styles.playHintOverlay} pointerEvents="none">
-                            <View style={styles.playHintBadge}>
-                              <FontAwesome name="play" size={22} color="#fff" />
-                            </View>
-                          </View>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </View>
-                </GestureDetector>
-              </Pressable>
+                      ) : null}
+                    </View>
+                  </GestureDetector>
 
-              {showScrubUi && durationMillis > 0 ? (
-                <View style={styles.trimSliderWrap}>
-                  <VideoTrimSlider
-                    durationMs={scrubDurationMs}
-                    startMs={0}
-                    endMs={scrubDurationMs}
-                    currentTimeMs={positionMillis}
-                    onChange={() => {}}
-                    onSeek={handleSeek}
-                    onScrubStart={handleScrubStart}
-                    onScrubEnd={handleScrubEnd}
+                  {showScrubUi && durationMillis > 0 ? (
+                    <>
+                      <View style={styles.trimSliderWrap}>
+                        <VideoTrimSlider
+                          durationMs={scrubDurationMs}
+                          startMs={trimStartMs}
+                          endMs={scrubEndMs}
+                          currentTimeMs={positionMillis}
+                          onChange={handleTrimChange}
+                          onSeek={handleSeek}
+                          onScrubStart={handleScrubStart}
+                          onScrubEnd={handleScrubEnd}
+                        />
+                      </View>
+                      <Pressable
+                        style={styles.playbackControl}
+                        onPress={toggleParentPlayback}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          isPreviewPlaying
+                            ? 'Pause parent Reflection preview'
+                            : 'Play parent Reflection preview'
+                        }
+                      >
+                        <FontAwesome
+                          name={isPreviewPlaying ? 'pause' : 'play'}
+                          size={14}
+                          color="#fff"
+                        />
+                        <Text style={styles.playbackControlText}>
+                          {isPreviewPlaying ? 'Pause preview' : 'Play preview'}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <View style={styles.parentImageSurface}>
+                  <Image
+                    source={{ uri: parentImageUrl }}
+                    style={styles.parentImage}
+                    contentFit="contain"
                   />
                 </View>
-              ) : null}
+              )}
             </View>
           </View>
 
           <View style={styles.cameraPane}>
             <View style={styles.mediaCard}>
-            {isPreviewMode ? (
-              <View style={styles.cameraStageHost}>
-                <View style={styles.cameraStage}>
-                  <Video
-                    source={{ uri: recordedUri }}
-                    style={styles.selfiePreviewVideo}
-                    resizeMode={ResizeMode.COVER}
-                    shouldPlay
-                    isLooping
-                  />
+              {isPreviewMode ? (
+                <View style={styles.cameraStageHost}>
+                  <View style={styles.cameraStage}>
+                    <Video
+                      source={{ uri: recordedUri }}
+                      style={styles.selfiePreviewVideo}
+                      resizeMode={ResizeMode.COVER}
+                      shouldPlay
+                      isLooping
+                    />
+                  </View>
                 </View>
-              </View>
-            ) : cameraPermission?.granted ? (
-              <View style={styles.cameraStageHost}>
-                <View style={styles.cameraStage}>
-                  <CameraView
-                    ref={cameraRef}
-                    style={styles.cameraPreview}
-                    facing="front"
-                    mode="video"
-                    mirror
-                    onCameraReady={() => setCameraReady(true)}
-                    onMountError={(event) => {
-                      console.warn('[ReactionSheet] camera mount error:', event.message);
-                      setCameraReady(false);
-                    }}
-                  />
+              ) : cameraPermission?.granted ? (
+                <View style={styles.cameraStageHost}>
+                  <View style={styles.cameraStage}>
+                    <CameraView
+                      key={cameraInstanceKey}
+                      ref={cameraRef}
+                      style={styles.cameraPreview}
+                      facing="front"
+                      mode="video"
+                      mirror
+                      videoQuality="720p"
+                      onCameraReady={() => setCameraReady(true)}
+                      onMountError={(event) => {
+                        console.warn('[ReactionSheet] camera mount error:', event.message);
+                        setCameraReady(false);
+                      }}
+                    />
+                  </View>
                 </View>
-              </View>
-            ) : (
-              <View style={styles.permissionFallback}>
-                <Text style={styles.permissionText}>Camera access is required to record a reaction.</Text>
-                <Pressable style={styles.permissionButton} onPress={() => void requestCameraPermission()}>
-                  <Text style={styles.permissionButtonText}>Grant Camera Access</Text>
-                </Pressable>
-              </View>
-            )}
+              ) : (
+                <View style={styles.permissionFallback}>
+                  <Text style={styles.permissionText}>Camera access is required to record a reaction.</Text>
+                  <Pressable style={styles.permissionButton} onPress={() => void requestCameraPermission()}>
+                    <Text style={styles.permissionButtonText}>Grant Camera Access</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>
           </View>
         </View>
 
-        <View style={[styles.interactionFooter, { height: 110 + insets.bottom, paddingBottom: insets.bottom }]}>
+        <View style={[styles.interactionFooter, { height: 84 + insets.bottom, paddingBottom: insets.bottom }]}>
           {isPreviewMode ? (
             <View style={styles.previewActions}>
               {isUploading ? (
@@ -517,36 +785,25 @@ export function ReactionSheet({
               </Pressable>
             </View>
           ) : (
-            <View style={styles.recordSection}>
-              {!isRecording ? (
-                <Text style={styles.recordHintText}>Hold to React</Text>
-              ) : null}
-              <Pressable
-                onPressIn={handlePressIn}
-                onPressOut={handlePressOut}
-                disabled={!canRecord}
-                style={({ pressed }) => [
-                  styles.recordButton,
-                  isRecording && styles.recordButtonActive,
-                  (pressed || isRecording) && styles.recordButtonPressed,
-                  !canRecord && styles.recordButtonDisabled,
-                ]}
-                accessibilityRole="button"
-                accessibilityLabel={isRecording ? 'Recording reaction' : 'Hold to react'}
-                accessibilityHint="Press and hold to record your reaction while the Reflection plays"
-              >
-                <View style={[styles.recordButtonInner, isRecording && styles.recordButtonInnerActive]}>
-                  {isRecording ? (
-                    <View style={styles.recordingSquare} />
-                  ) : (
-                    <FontAwesome name="circle" size={18} color="#fff" />
-                  )}
-                </View>
-                <Text style={styles.recordButtonText}>
-                  {isRecording ? 'Recording…' : 'Hold to React'}
-                </Text>
-              </Pressable>
-            </View>
+            <Pressable
+              onPressIn={handlePressIn}
+              onPressOut={handlePressOut}
+              disabled={!canRecord}
+              style={({ pressed }) => [
+                styles.recordButton,
+                isRecording && styles.recordButtonActive,
+                (pressed || isRecording) && styles.recordButtonPressed,
+                !canRecord && styles.recordButtonDisabled,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={isRecording ? 'Recording reaction' : 'Hold to react'}
+              accessibilityHint="Press and hold to record your reaction while the Reflection plays"
+            >
+              <FontAwesome name="circle" size={14} color="#fff" />
+              <Text style={styles.recordButtonText}>
+                {isRecording ? 'Recording…' : 'Hold to React'}
+              </Text>
+            </Pressable>
           )}
         </View>
       </GestureHandlerRootView>
@@ -597,11 +854,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
   },
   parentVideoPane: {
-    flex: 1,
-    minHeight: 0,
-  },
-  parentVideoPressable: {
-    flex: 1,
+    flex: 2,
     minHeight: 0,
   },
   parentVideoSurface: {
@@ -609,8 +862,19 @@ const styles = StyleSheet.create({
     minHeight: 0,
     backgroundColor: '#101820',
   },
+  parentImageSurface: {
+    flex: 1,
+    minHeight: 0,
+    backgroundColor: '#101820',
+  },
   parentVideo: {
     flex: 1,
+    backgroundColor: '#101820',
+  },
+  parentImage: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
     backgroundColor: '#101820',
   },
   dragHintOverlay: {
@@ -628,26 +892,26 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 0.2,
   },
-  playHintOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playHintBadge: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.28)',
-    paddingLeft: 3,
-  },
   trimSliderWrap: {
     flexShrink: 0,
-    paddingBottom: 6,
+    paddingTop: 4,
+    paddingBottom: 4,
     backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  playbackControl: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.12)',
+  },
+  playbackControlText: {
+    color: 'rgba(255,255,255,0.88)',
+    fontSize: 13,
+    fontWeight: '600',
   },
   cameraPane: {
     flex: 1,
@@ -661,25 +925,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   cameraStage: {
-    flex: 1,
     width: '100%',
     maxHeight: '100%',
     aspectRatio: 3 / 4,
     alignSelf: 'center',
     overflow: 'hidden',
-    justifyContent: 'center',
-    alignItems: 'center',
     backgroundColor: '#000',
   },
   cameraPreview: {
     ...StyleSheet.absoluteFillObject,
-    width: '100%',
-    height: '100%',
   },
   selfiePreviewVideo: {
     ...StyleSheet.absoluteFillObject,
-    width: '100%',
-    height: '100%',
   },
   permissionFallback: {
     flex: 1,
@@ -710,25 +967,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     backgroundColor: '#000',
   },
-  recordSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    width: '100%',
-  },
-  recordHintText: {
-    color: 'rgba(255,255,255,0.58)',
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 0.3,
-  },
   recordButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 22,
+    gap: 8,
+    minWidth: 148,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
     borderRadius: 999,
     backgroundColor: 'rgba(46, 120, 183, 0.92)',
     borderWidth: 2,
@@ -737,36 +983,18 @@ const styles = StyleSheet.create({
   recordButtonActive: {
     backgroundColor: 'rgba(176, 32, 32, 0.95)',
     borderColor: 'rgba(255, 120, 120, 0.65)',
-    transform: [{ scale: 1.04 }],
+    transform: [{ scale: 1.03 }],
   },
   recordButtonPressed: {
-    transform: [{ scale: 1.04 }],
+    transform: [{ scale: 1.03 }],
   },
   recordButtonDisabled: {
     opacity: 0.45,
   },
-  recordButtonInner: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.14)',
-  },
-  recordButtonInnerActive: {
-    backgroundColor: 'rgba(255,255,255,0.18)',
-  },
-  recordingSquare: {
-    width: 18,
-    height: 18,
-    borderRadius: 4,
-    backgroundColor: '#fff',
-  },
   recordButtonText: {
     color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-    letterSpacing: 0.2,
+    fontSize: 14,
+    fontWeight: '700',
   },
   previewActions: {
     flexDirection: 'row',

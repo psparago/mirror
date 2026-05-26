@@ -40,7 +40,7 @@ import {
 } from 'react-native';
 
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
-import { ReactionSheet } from '@/components/ReactionSheet';
+import { ReactionSheet, type ReactionParentMedia } from '@/components/ReactionSheet';
 import { ReplayModal } from '@/components/ReplayModal';
 import {
   buildEventForReplay,
@@ -288,7 +288,7 @@ export default function SentTimelineScreen({
   }, []);
   const [selectedReflection, setSelectedReflection] = useState<Event | null>(null);
   const [selectedReactionSession, setSelectedReactionSession] = useState<ReactionPlaybackSession | null>(null);
-  const [reactionTarget, setReactionTarget] = useState<{ id: string; videoUrl: string } | null>(null);
+  const [reactionTarget, setReactionTarget] = useState<{ id: string; media: ReactionParentMedia } | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
@@ -1695,12 +1695,24 @@ export default function SentTimelineScreen({
                         ) : (
                           <Pressable
                             onPress={() => {
-                              const videoUrl = eventObjectsMap.get(item.event_id)?.video_url;
-                              if (!videoUrl) {
-                                showToast('This Reflection has no video to react to');
+                              const event = eventObjectsMap.get(item.event_id);
+                              const videoUrl = event?.video_url;
+                              const imageUrl = event?.image_url;
+                              if (videoUrl) {
+                                setReactionTarget({
+                                  id: item.event_id,
+                                  media: { mediaType: 'video', videoUrl },
+                                });
                                 return;
                               }
-                              setReactionTarget({ id: item.event_id, videoUrl });
+                              if (imageUrl) {
+                                setReactionTarget({
+                                  id: item.event_id,
+                                  media: { mediaType: 'image', imageUrl },
+                                });
+                                return;
+                              }
+                              showToast('This Reflection has no media to react to');
                             }}
                             style={({ pressed }) => [
                               styles.reactControl,
@@ -1822,7 +1834,7 @@ export default function SentTimelineScreen({
       <ReactionSheet
         visible={!!reactionTarget}
         parentReflectionId={reactionTarget?.id ?? ''}
-        parentVideoUrl={reactionTarget?.videoUrl ?? ''}
+        parentMedia={reactionTarget?.media ?? null}
         onClose={() => setReactionTarget(null)}
         onUploadSuccess={(parentReflectionId, relationshipId) => {
           setReflections((prev) =>
