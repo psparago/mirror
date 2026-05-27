@@ -1,3 +1,4 @@
+import { REACTION_PARENT_VOLUME } from '@/utils/reactionPlayback';
 import { uploadReaction } from '@/utils/reactionUpload';
 import { FontAwesome } from '@expo/vector-icons';
 import { useAuth, useExplorer, VideoTrimSlider, type ReactionType } from '@projectmirror/shared';
@@ -23,15 +24,28 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-g
 import { runOnJS } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const REACTION_PARENT_VOLUME = 0.15;
 const PREVIEW_END_EPSILON_MS = 80;
 const MIN_TRIM_GAP_MS = 500;
 const TYPED_MESSAGE_MAX_LENGTH = 120;
+const ANDROID_CAMERA_REMOUNT_MS = 300;
 
 type ReactionComposeMode = ReactionType;
 
 function isSeekInterrupted(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Seeking interrupted');
+}
+
+async function runVideoCommand(
+  command: () => Promise<unknown>,
+  logLabel: string,
+): Promise<void> {
+  try {
+    await command();
+  } catch (error) {
+    if (!isSeekInterrupted(error)) {
+      console.warn(`[ReactionSheet] ${logLabel}:`, error);
+    }
+  }
 }
 
 export type ReactionParentMedia =
@@ -75,11 +89,10 @@ export function ReactionSheet({
   const [typedMessage, setTypedMessage] = useState('');
   const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
-  const [cameraAccessGranted, setCameraAccessGranted] = useState<boolean | null>(null);
-  const [cameraStageReady, setCameraStageReady] = useState(false);
+  const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const prepareSelfieCameraRunRef = useRef(0);
+  const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isVideoParent = parentMedia?.mediaType === 'video';
   const isImageParent = parentMedia?.mediaType === 'image';
@@ -105,11 +118,21 @@ export function ReactionSheet({
   const seekChainRef = useRef(Promise.resolve());
   const pendingSeekTargetRef = useRef<number | null>(null);
   const isParentReflectionMutedRef = useRef(false);
+  const isPreviewPlayingRef = useRef(false);
+  const lastPanSeekAtRef = useRef(0);
+  const lastParentVolumeApplyRef = useRef(0);
 
   const getReactionParentVolume = useCallback(
     () => (isParentReflectionMutedRef.current ? 0 : REACTION_PARENT_VOLUME),
     [],
   );
+
+  const applyParentReflectionVolume = useCallback(async () => {
+    await runVideoCommand(
+      () => videoRef.current?.setVolumeAsync(getReactionParentVolume()),
+      'failed to update parent volume',
+    );
+  }, [getReactionParentVolume]);
 
   const SEEK_TOLERANCE = useMemo(
     () => ({ toleranceMillisBefore: 0, toleranceMillisAfter: 0 }),
@@ -137,6 +160,10 @@ export function ReactionSheet({
   }, [isParentReflectionMuted]);
 
   useEffect(() => {
+    isPreviewPlayingRef.current = isPreviewPlaying;
+  }, [isPreviewPlaying]);
+
+  useEffect(() => {
     if (durationMillis <= 0) return;
     setTrimEndMs((prev) => {
       const next = prev <= 0 ? durationMillis : Math.min(prev, durationMillis);
@@ -162,54 +189,56 @@ export function ReactionSheet({
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
+      let current = await Camera.getCameraPermissionsAsync();
+      if (!current.granted && current.canAskAgain) {
+        current = await Camera.requestCameraPermissionsAsync();
+      }
+      void requestCameraPermission();
+      setNativeCameraGranted(current.granted);
     })();
-  }, [visible]);
+  }, [visible, requestCameraPermission]);
 
-  const prepareSelfieCamera = useCallback(async () => {
-    const runId = ++prepareSelfieCameraRunRef.current;
+  const bumpCameraInstance = useCallback(() => {
+    setCameraReady(false);
+    setCameraInstanceKey((key) => key + 1);
+  }, []);
 
+  const scheduleAndroidCameraRemount = useCallback(() => {
+    if (Platform.OS !== 'android') return;
+    if (androidCameraRemountTimerRef.current) {
+      clearTimeout(androidCameraRemountTimerRef.current);
+    }
+    androidCameraRemountTimerRef.current = setTimeout(() => {
+      androidCameraRemountTimerRef.current = null;
+      bumpCameraInstance();
+    }, ANDROID_CAMERA_REMOUNT_MS);
+  }, [bumpCameraInstance]);
+
+  const ensureCameraPermission = useCallback(async () => {
     let current = await Camera.getCameraPermissionsAsync();
     if (!current.granted && current.canAskAgain) {
       current = await Camera.requestCameraPermissionsAsync();
     }
-    // Keep the hook in sync without blocking on its promise (can hang after native grant).
     void requestCameraPermission();
-
-    if (runId !== prepareSelfieCameraRunRef.current) return;
-
-    setCameraAccessGranted(current.granted);
-    if (!current.granted) {
-      setCameraStageReady(false);
-      setCameraReady(false);
-      return;
-    }
-
-    setCameraReady(false);
-    if (Platform.OS === 'android') {
-      setCameraStageReady(false);
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      if (runId !== prepareSelfieCameraRunRef.current) return;
-      setCameraStageReady(true);
-      setCameraInstanceKey((key) => key + 1);
-      return;
-    }
-
-    setCameraStageReady(true);
-    setCameraInstanceKey((key) => key + 1);
+    setNativeCameraGranted(current.granted);
+    return current.granted;
   }, [requestCameraPermission]);
 
   const handleGrantCameraAccess = useCallback(async () => {
     const current = await Camera.getCameraPermissionsAsync();
     if (current.granted) {
-      await prepareSelfieCamera();
+      setNativeCameraGranted(true);
+      void requestCameraPermission();
+      scheduleAndroidCameraRemount();
       return;
     }
 
     if (current.canAskAgain) {
       const requested = await Camera.requestCameraPermissionsAsync();
       void requestCameraPermission();
+      setNativeCameraGranted(requested.granted);
       if (requested.granted) {
-        await prepareSelfieCamera();
+        scheduleAndroidCameraRemount();
         return;
       }
     }
@@ -222,28 +251,46 @@ export function ReactionSheet({
         { text: 'Cancel', style: 'cancel' },
       ],
     );
-  }, [prepareSelfieCamera, requestCameraPermission]);
-
-  useEffect(() => {
-    if (!visible || !hasValidParentMedia || reactionMode !== 'selfie') return;
-    void prepareSelfieCamera();
-  }, [visible, hasValidParentMedia, reactionMode, prepareSelfieCamera]);
+  }, [requestCameraPermission, scheduleAndroidCameraRemount]);
 
   useEffect(() => {
     if (!visible || reactionMode !== 'selfie') return;
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
-        void prepareSelfieCamera();
+        void ensureCameraPermission();
+        scheduleAndroidCameraRemount();
       }
     });
     return () => subscription.remove();
-  }, [visible, reactionMode, prepareSelfieCamera]);
+  }, [visible, reactionMode, ensureCameraPermission, scheduleAndroidCameraRemount]);
 
   const handleModalShow = useCallback(() => {
-    if (reactionMode === 'selfie') {
-      void prepareSelfieCamera();
+    if (reactionMode !== 'selfie') return;
+    if (Platform.OS === 'android') {
+      scheduleAndroidCameraRemount();
+    } else {
+      bumpCameraInstance();
     }
-  }, [prepareSelfieCamera, reactionMode]);
+  }, [bumpCameraInstance, reactionMode, scheduleAndroidCameraRemount]);
+
+  useEffect(() => {
+    if (!visible || reactionMode !== 'selfie' || recordedUri != null) return;
+    if (!(cameraPermission?.granted || nativeCameraGranted)) return;
+
+    setCameraReady(false);
+    const readyTimer = setTimeout(() => {
+      setCameraReady(true);
+    }, 500);
+
+    return () => clearTimeout(readyTimer);
+  }, [
+    visible,
+    reactionMode,
+    recordedUri,
+    cameraInstanceKey,
+    cameraPermission?.granted,
+    nativeCameraGranted,
+  ]);
 
   useEffect(() => {
     if (visible) return;
@@ -265,9 +312,11 @@ export function ReactionSheet({
     setVoiceRecordedUri(null);
     setIsVoiceRecording(false);
     setCameraInstanceKey(0);
-    setCameraAccessGranted(null);
-    setCameraStageReady(false);
-    prepareSelfieCameraRunRef.current += 1;
+    setNativeCameraGranted(null);
+    if (androidCameraRemountTimerRef.current) {
+      clearTimeout(androidCameraRemountTimerRef.current);
+      androidCameraRemountTimerRef.current = null;
+    }
     isVideoDragActiveRef.current = false;
     previewStopPendingRef.current = false;
     pendingSeekTargetRef.current = null;
@@ -282,29 +331,24 @@ export function ReactionSheet({
 
   useEffect(() => {
     if (!recordedUri || syncStartTimeMillis == null || !isVideoParent) return;
-    void (async () => {
-      try {
-        await videoRef.current?.setStatusAsync({
+    void runVideoCommand(
+      () =>
+        videoRef.current?.setStatusAsync({
           positionMillis: syncStartTimeMillis,
           shouldPlay: true,
           volume: getReactionParentVolume(),
-        });
-        positionMillisRef.current = syncStartTimeMillis;
-        setPositionMillis(syncStartTimeMillis);
-      } catch (error) {
-        console.warn('[ReactionSheet] failed to start preview loop:', error);
-      }
-    })();
+        }),
+      'failed to start preview loop',
+    ).then(() => {
+      positionMillisRef.current = syncStartTimeMillis;
+      setPositionMillis(syncStartTimeMillis);
+    });
   }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
 
   useEffect(() => {
     if (!isVideoParent || isRecording) return;
-    void videoRef.current
-      ?.setVolumeAsync(getReactionParentVolume())
-      .catch((error) => {
-        console.warn('[ReactionSheet] failed to update parent volume:', error);
-      });
-  }, [getReactionParentVolume, isParentReflectionMuted, isRecording, isVideoParent]);
+    void applyParentReflectionVolume();
+  }, [applyParentReflectionVolume, isParentReflectionMuted, isRecording, isVideoParent]);
 
   const clampTrimStart = useCallback((startMs: number) => {
     const end = trimEndMsRef.current || durationMillisRef.current;
@@ -343,13 +387,10 @@ export function ReactionSheet({
           while (pendingSeekTargetRef.current != null) {
             const nextTarget = pendingSeekTargetRef.current;
             pendingSeekTargetRef.current = null;
-            try {
-              await videoRef.current?.setPositionAsync(nextTarget, SEEK_TOLERANCE);
-            } catch (error) {
-              if (!isSeekInterrupted(error)) {
-                console.warn('[ReactionSheet] seek failed:', error);
-              }
-            }
+            await runVideoCommand(
+              () => videoRef.current?.setPositionAsync(nextTarget, SEEK_TOLERANCE),
+              'seek failed',
+            );
           }
         })
         .catch(() => {});
@@ -364,42 +405,48 @@ export function ReactionSheet({
       targetMs: number,
       options?: { shouldPlay?: boolean; volume?: number },
     ) => {
-      await queueVideoSeek(targetMs, { updateUi: true });
-      if (options?.shouldPlay == null) return;
       const end = trimEndMsRef.current || durationMillisRef.current;
       const target = Math.max(0, Math.min(targetMs, end));
-      try {
-        await videoRef.current?.setStatusAsync({
-          positionMillis: target,
-          shouldPlay: options.shouldPlay,
-          volume: options.volume ?? getReactionParentVolume(),
-        });
-      } catch (error) {
-        if (!isSeekInterrupted(error)) {
-          console.warn('[ReactionSheet] commit seek failed:', error);
-        }
+      positionMillisRef.current = target;
+      setPositionMillis(target);
+
+      if (options?.shouldPlay != null) {
+        await runVideoCommand(
+          () =>
+            videoRef.current?.setStatusAsync({
+              positionMillis: target,
+              shouldPlay: options.shouldPlay,
+              volume: options.volume ?? getReactionParentVolume(),
+            }),
+          'commit seek failed',
+        );
+        return;
       }
+
+      void queueVideoSeek(target, { updateUi: false });
     },
     [getReactionParentVolume, queueVideoSeek],
   );
 
   const stopPreviewAtTrimEnd = useCallback(async () => {
-    if (!isVideoParent || previewStopPendingRef.current) return;
+    if (!isVideoParent || previewStopPendingRef.current || !isPreviewPlayingRef.current) return;
     previewStopPendingRef.current = true;
+    setIsPreviewPlaying(false);
+    isPreviewPlayingRef.current = false;
     const start = trimStartMsRef.current;
     positionMillisRef.current = start;
     setPositionMillis(start);
-    setIsPreviewPlaying(false);
     try {
-      await videoRef.current?.setStatusAsync({
-        positionMillis: start,
-        shouldPlay: false,
-        volume: getReactionParentVolume(),
-      });
-    } catch (error) {
-      if (!isSeekInterrupted(error)) {
-        console.warn('[ReactionSheet] preview stop failed:', error);
-      }
+      await runVideoCommand(() => videoRef.current?.pauseAsync(), 'preview pause failed');
+      await runVideoCommand(
+        () =>
+          videoRef.current?.setStatusAsync({
+            positionMillis: start,
+            shouldPlay: false,
+            volume: getReactionParentVolume(),
+          }),
+        'preview stop failed',
+      );
     } finally {
       previewStopPendingRef.current = false;
     }
@@ -408,6 +455,14 @@ export function ReactionSheet({
   const handlePlaybackStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
       if (!status.isLoaded) return;
+
+      if (isVideoParent) {
+        const now = Date.now();
+        if (now - lastParentVolumeApplyRef.current >= 200) {
+          lastParentVolumeApplyRef.current = now;
+          void applyParentReflectionVolume();
+        }
+      }
 
       const duration = status.durationMillis ?? 0;
       if (duration > 0) {
@@ -424,13 +479,17 @@ export function ReactionSheet({
         if (
           syncStartTimeMillis != null &&
           syncEndTimeMillis != null &&
+          status.isPlaying &&
           status.positionMillis >= syncEndTimeMillis - PREVIEW_END_EPSILON_MS
         ) {
-          void videoRef.current?.setStatusAsync({
-            positionMillis: syncStartTimeMillis,
-            shouldPlay: true,
-            volume: getReactionParentVolume(),
-          });
+          void runVideoCommand(async () => {
+            await videoRef.current?.pauseAsync();
+            await videoRef.current?.setStatusAsync({
+              positionMillis: syncStartTimeMillis,
+              shouldPlay: true,
+              volume: getReactionParentVolume(),
+            });
+          }, 'reaction preview loop failed');
         }
         return;
       }
@@ -451,7 +510,11 @@ export function ReactionSheet({
         setIsPreviewPlaying(true);
 
         const end = trimEndMsRef.current || duration;
-        if (end > trimStartMsRef.current && status.positionMillis >= end - PREVIEW_END_EPSILON_MS) {
+        if (
+          end > trimStartMsRef.current &&
+          status.positionMillis >= end - PREVIEW_END_EPSILON_MS &&
+          status.positionMillis > trimStartMsRef.current + PREVIEW_END_EPSILON_MS
+        ) {
           void stopPreviewAtTrimEnd();
         }
         return;
@@ -462,6 +525,7 @@ export function ReactionSheet({
       }
     },
     [
+      applyParentReflectionVolume,
       getReactionParentVolume,
       isVideoParent,
       stopPreviewAtTrimEnd,
@@ -474,43 +538,40 @@ export function ReactionSheet({
 
   const pauseParentPreview = useCallback(async () => {
     if (!isVideoParent) return;
-    try {
-      await videoRef.current?.pauseAsync();
-      setIsPreviewPlaying(false);
-    } catch (error) {
-      console.warn('[ReactionSheet] pause preview failed:', error);
-    }
+    setIsPreviewPlaying(false);
+    isPreviewPlayingRef.current = false;
+    await runVideoCommand(() => videoRef.current?.pauseAsync(), 'pause preview failed');
   }, [isVideoParent]);
 
   const toggleParentPlayback = useCallback(async () => {
     if (!isVideoParent || isRecording || recordedUri) return;
-    try {
-      const status = await videoRef.current?.getStatusAsync();
-      if (!status?.isLoaded) return;
-      if (status.isPlaying) {
-        await pauseParentPreview();
-        const start = trimStartMsRef.current;
-        positionMillisRef.current = start;
-        setPositionMillis(start);
-        await commitVideoPosition(start, {
-          shouldPlay: false,
-          volume: getReactionParentVolume(),
-        });
-        return;
-      }
+    const status = await videoRef.current?.getStatusAsync();
+    if (!status?.isLoaded) return;
 
+    if (status.isPlaying) {
+      await pauseParentPreview();
       const start = trimStartMsRef.current;
-      positionMillisRef.current = start;
-      setPositionMillis(start);
-      await videoRef.current?.setStatusAsync({
-        positionMillis: start,
-        shouldPlay: true,
+      await commitVideoPosition(start, {
+        shouldPlay: false,
         volume: getReactionParentVolume(),
       });
-      setIsPreviewPlaying(true);
-    } catch (error) {
-      console.warn('[ReactionSheet] toggle playback failed:', error);
+      return;
     }
+
+    const start = trimStartMsRef.current;
+    positionMillisRef.current = start;
+    setPositionMillis(start);
+    await runVideoCommand(
+      () =>
+        videoRef.current?.setStatusAsync({
+          positionMillis: start,
+          shouldPlay: true,
+          volume: getReactionParentVolume(),
+        }),
+      'toggle playback failed',
+    );
+    setIsPreviewPlaying(true);
+    isPreviewPlayingRef.current = true;
   }, [
     commitVideoPosition,
     getReactionParentVolume,
@@ -559,7 +620,7 @@ export function ReactionSheet({
         volume: getReactionParentVolume(),
       });
       isScrubbingRef.current = false;
-    })();
+    })().catch(() => {});
   }, [commitVideoPosition, getReactionParentVolume]);
 
   const beginVideoDragScrub = useCallback(() => {
@@ -585,7 +646,11 @@ export function ReactionSheet({
 
       const deltaMs = (translationX / width) * duration;
       const start = setReactionStartMs(seekOriginMsRef.current + deltaMs);
-      void queueVideoSeek(start, { updateUi: false });
+      const now = Date.now();
+      if (now - lastPanSeekAtRef.current >= 120) {
+        lastPanSeekAtRef.current = now;
+        void queueVideoSeek(start, { updateUi: false });
+      }
     },
     [beginVideoDragScrub, queueVideoSeek, setReactionStartMs],
   );
@@ -593,11 +658,14 @@ export function ReactionSheet({
   const handleSeekDragEnd = useCallback(() => {
     void (async () => {
       const start = trimStartMsRef.current;
-      await queueVideoSeek(start, { updateUi: false });
+      await commitVideoPosition(start, {
+        shouldPlay: false,
+        volume: getReactionParentVolume(),
+      });
       isVideoDragActiveRef.current = false;
       isScrubbingRef.current = false;
-    })();
-  }, [queueVideoSeek]);
+    })().catch(() => {});
+  }, [commitVideoPosition, getReactionParentVolume]);
 
   const showScrubUi =
     reactionMode === 'selfie' && isVideoParent && !isRecording && recordedUri == null;
@@ -621,14 +689,14 @@ export function ReactionSheet({
     if (
       recordedUri ||
       !cameraReady ||
-      !(cameraPermission?.granted || cameraAccessGranted) ||
+      !(cameraPermission?.granted || nativeCameraGranted) ||
       !micReady
     ) {
       if (!recordedUri) {
         console.warn('[ReactionSheet] camera not ready for recording', {
           parentReflectionId,
           cameraReady,
-          cameraGranted: cameraPermission?.granted ?? cameraAccessGranted,
+          cameraGranted: cameraPermission?.granted ?? nativeCameraGranted,
           micReady,
         });
       }
@@ -655,25 +723,23 @@ export function ReactionSheet({
     }
 
     if (isVideoParent) {
-      void (async () => {
-        try {
-          await videoRef.current?.setStatusAsync({
+      void runVideoCommand(
+        () =>
+          videoRef.current?.setStatusAsync({
             positionMillis: syncStart,
             shouldPlay: true,
             volume: getReactionParentVolume(),
-          });
-        } catch (error) {
-          console.warn('[ReactionSheet] reaction playback failed:', error);
-        }
-      })();
+          }),
+        'reaction playback failed',
+      );
     }
   }, [
-    cameraAccessGranted,
     cameraPermission?.granted,
     cameraReady,
     getReactionParentVolume,
     isVideoParent,
     micReady,
+    nativeCameraGranted,
     parentReflectionId,
     recordedUri,
   ]);
@@ -713,16 +779,24 @@ export function ReactionSheet({
       setIsRecording(false);
       resetVoiceRecording();
       setTypedMessage('');
-      setCameraReady(false);
-      setCameraStageReady(false);
       if (nextMode === 'selfie') {
-        void prepareSelfieCamera();
-      } else {
-        setCameraAccessGranted(null);
+        void ensureCameraPermission();
+        if (Platform.OS === 'android') {
+          scheduleAndroidCameraRemount();
+        } else {
+          bumpCameraInstance();
+        }
       }
       void videoRef.current?.pauseAsync().catch(() => {});
     },
-    [isUploading, prepareSelfieCamera, reactionMode, resetVoiceRecording],
+    [
+      bumpCameraInstance,
+      ensureCameraPermission,
+      isUploading,
+      reactionMode,
+      resetVoiceRecording,
+      scheduleAndroidCameraRemount,
+    ],
   );
 
   const handleStartVoiceRecording = useCallback(async () => {
@@ -762,7 +836,8 @@ export function ReactionSheet({
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
     setCameraReady(false);
-    void prepareSelfieCamera();
+    bumpCameraInstance();
+    scheduleAndroidCameraRemount();
     void (async () => {
       if (isVideoParent && restartAt != null) {
         await commitVideoPosition(restartAt, {
@@ -772,7 +847,16 @@ export function ReactionSheet({
       }
       await videoRef.current?.pauseAsync().catch(() => {});
     })();
-  }, [commitVideoPosition, getReactionParentVolume, isVideoParent, prepareSelfieCamera, reactionMode, resetVoiceRecording, syncStartTimeMillis]);
+  }, [
+    bumpCameraInstance,
+    commitVideoPosition,
+    getReactionParentVolume,
+    isVideoParent,
+    reactionMode,
+    resetVoiceRecording,
+    scheduleAndroidCameraRemount,
+    syncStartTimeMillis,
+  ]);
 
   const handleSend = useCallback(() => {
     if (isUploading) return;
@@ -849,22 +933,20 @@ export function ReactionSheet({
     voiceRecordedUri,
   ]);
 
+  const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
+  const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
+  const isPreviewMode = isSelfiePreviewMode || isVoicePreviewMode;
   const isCameraGranted =
-    cameraPermission?.granted === true || cameraAccessGranted === true;
+    cameraPermission?.granted === true || nativeCameraGranted === true;
   const isCameraDenied =
-    cameraAccessGranted === false && cameraPermission?.granted !== true;
-  const showCameraPreview =
-    isCameraGranted && (Platform.OS !== 'android' || cameraStageReady);
+    nativeCameraGranted === false && cameraPermission?.granted !== true;
 
   const canRecordSelfie =
     reactionMode === 'selfie' &&
     !recordedUri &&
-    cameraReady &&
-    showCameraPreview &&
-    micReady;
-  const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
-  const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
-  const isPreviewMode = isSelfiePreviewMode || isVoicePreviewMode;
+    isCameraGranted &&
+    micReady &&
+    cameraReady;
   const canSendTyped = reactionMode === 'typed' && typedMessage.trim().length > 0;
   const scrubDurationMs = Math.max(durationMillis, 1);
   const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
@@ -910,6 +992,8 @@ export function ReactionSheet({
                         resizeMode={ResizeMode.CONTAIN}
                         shouldPlay={false}
                         isLooping={false}
+                        isMuted={isParentReflectionMuted}
+                        volume={isParentReflectionMuted ? 0 : REACTION_PARENT_VOLUME}
                         progressUpdateIntervalMillis={100}
                         onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                       />
@@ -1076,7 +1160,7 @@ export function ReactionSheet({
                     </Text>
                   </Pressable>
                 </View>
-              ) : showCameraPreview ? (
+              ) : isCameraGranted ? (
                 <View style={styles.cameraStageHost}>
                   <View style={styles.cameraStage}>
                     <CameraView
@@ -1112,9 +1196,9 @@ export function ReactionSheet({
                   </Pressable>
                 </View>
               ) : (
-                <View style={styles.altModePane}>
-                  <ActivityIndicator color="#fff" size="large" />
-                  <Text style={styles.altModeHint}>Starting camera…</Text>
+                <View style={styles.permissionFallback}>
+                  <ActivityIndicator color="#fff" />
+                  <Text style={styles.permissionText}>Checking camera access…</Text>
                 </View>
               )}
             </View>

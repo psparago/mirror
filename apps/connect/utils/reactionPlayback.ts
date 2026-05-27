@@ -13,6 +13,9 @@ import {
   where,
 } from '@projectmirror/shared/firebase';
 
+/** Parent Reflection playback level during Live Sync compose and reaction PiP replay. */
+export const REACTION_PARENT_VOLUME = 0.15;
+
 export type ReactionResponderFace = {
   key: string;
   userId: string;

@@ -14,7 +14,7 @@ import {
   type ReactionPlaybackSession,
   type ReactionResponderFace,
 } from '@/utils/reactionPlayback';
-import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds } from '@projectmirror/shared';
+import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds, WaitOverlay } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
 import { Audio, ResizeMode, Video as AvVideo } from 'expo-av';
 import { BlurView } from 'expo-blur';
@@ -22,7 +22,7 @@ import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Alert, ActivityIndicator, Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -141,6 +141,12 @@ export function ReplayModal({
   const captionSpeakerGlow = useSharedValue(1);
 
   useEffect(() => {
+    if (!visible) {
+      setIsDeletingReaction(false);
+    }
+  }, [visible]);
+
+  useEffect(() => {
     if (visible && reactionSession) {
       reactionSessionRef.current = reactionSession;
     }
@@ -194,6 +200,8 @@ export function ReplayModal({
     if (!isReactionPlayback) return;
     const syncMs = displayEvent?.syncStartTimeMillis ?? 0;
     try {
+      await pipVideoRef.current?.setIsMutedAsync(true);
+      await pipVideoRef.current?.setVolumeAsync(0);
       await pipVideoRef.current?.setPositionAsync(syncMs);
     } catch (error) {
       console.warn('[ReplayModal] PiP align failed:', error);
@@ -271,7 +279,15 @@ export function ReplayModal({
 
     const syncPipPlayback = (shouldPlay: boolean) => {
       if (shouldPlay) {
-        void pipVideoRef.current?.playAsync().catch(() => {});
+        void (async () => {
+          try {
+            await pipVideoRef.current?.setIsMutedAsync(true);
+            await pipVideoRef.current?.setVolumeAsync(0);
+            await pipVideoRef.current?.playAsync();
+          } catch {
+            // PiP sync is best-effort
+          }
+        })();
       } else {
         void pipVideoRef.current?.pauseAsync().catch(() => {});
       }
@@ -1156,6 +1172,7 @@ export function ReplayModal({
   const likeCount = likedBy.length;
 
   const handleSwipeClose = () => {
+    if (isDeletingReaction) return;
     sendRef.current({ type: 'CLOSE' });
     setTimeout(() => { onClose(); }, 100);
   };
@@ -1170,6 +1187,7 @@ export function ReplayModal({
           style={styles.reactionPipVideo}
           resizeMode={ResizeMode.CONTAIN}
           isMuted
+          volume={0}
           shouldPlay={false}
         />
       );
@@ -1482,8 +1500,12 @@ export function ReplayModal({
             ) : null}
             {isViewingChildReaction && reactionSessionForUi ? (
               <TouchableOpacity
-                style={styles.reactionBackButton}
+                style={[
+                  styles.reactionBackButton,
+                  isDeletingReaction && styles.deleteReactionButtonDisabled,
+                ]}
                 onPress={handleBackToParentReflection}
+                disabled={isDeletingReaction}
                 activeOpacity={0.85}
                 accessibilityRole="button"
                 accessibilityLabel={`Back to ${reactionSessionForUi.parentAuthorName}'s Reflection`}
@@ -1536,12 +1558,20 @@ export function ReplayModal({
                   accessibilityRole="button"
                   accessibilityLabel="Delete this reaction"
                 >
-                  <FontAwesome name="trash-o" size={17} color="#fff" />
+                  {isDeletingReaction ? (
+                    <ActivityIndicator color="#fff" size="small" />
+                  ) : (
+                    <FontAwesome name="trash-o" size={17} color="#fff" />
+                  )}
                 </TouchableOpacity>
                 <View style={styles.topControlGap} />
               </>
             ) : null}
-            <TouchableOpacity style={styles.closeButton} onPress={handleSwipeClose}>
+            <TouchableOpacity
+              style={[styles.closeButton, isDeletingReaction && styles.deleteReactionButtonDisabled]}
+              onPress={handleSwipeClose}
+              disabled={isDeletingReaction}
+            >
               <FontAwesome name="times" size={18} color="#fff" />
             </TouchableOpacity>
           </View>
@@ -1573,6 +1603,15 @@ export function ReplayModal({
                 ))}
               </View>
             </View>
+          ) : null}
+
+          {isDeletingReaction ? (
+            <WaitOverlay
+              title="Deleting reaction…"
+              detail="Removing your reaction from this Reflection."
+              icon={<FontAwesome name="trash-o" size={20} color="#fecaca" />}
+              tone="default"
+            />
           ) : null}
 
         </View>
