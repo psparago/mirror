@@ -12,6 +12,7 @@ import {
   useCompanionAvatars,
   useExplorer,
   useWaitOverlay,
+  type ReactionType,
 } from '@projectmirror/shared';
 import type { CompanionAvatar } from '@projectmirror/shared';
 import { collection, db, deleteDoc, doc, getCountFromServer, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from '@projectmirror/shared/firebase';
@@ -46,6 +47,7 @@ import {
   buildEventForReplay,
   fetchMirrorEventById,
   fetchReactionEventForPlayback,
+  fetchReactionTypesByRelationship,
   resolveReactionResponderFaces,
   type ReactionPlaybackSession,
   type ReactionResponderFace,
@@ -294,6 +296,9 @@ export default function SentTimelineScreen({
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
   const [eventObjectsMap, setEventObjectsMap] = useState<Map<string, Event>>(new Map()); // event_id -> full Event object
+  const [reactionTypesByParentId, setReactionTypesByParentId] = useState<
+    Map<string, Map<string, ReactionType>>
+  >(new Map());
   /** True total Firestore reflection signals for this Explorer (list query is capped at 100). */
   const [totalReflectionCount, setTotalReflectionCount] = useState<number | null>(null);
   const countRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -313,6 +318,33 @@ export default function SentTimelineScreen({
     () => new Map(companions.map((companion) => [companion.relationshipId, companion])),
     [companions]
   );
+
+  useEffect(() => {
+    const parents = reflections.filter((reflection) => (reflection.respondedRelationshipIds?.length ?? 0) > 0);
+    if (parents.length === 0) {
+      setReactionTypesByParentId(new Map());
+      return;
+    }
+
+    let cancelled = false;
+    void Promise.all(
+      parents.map(async (parent) => {
+        const types = await fetchReactionTypesByRelationship(parent.event_id);
+        return [parent.event_id, types] as const;
+      }),
+    )
+      .then((entries) => {
+        if (cancelled) return;
+        setReactionTypesByParentId(new Map(entries));
+      })
+      .catch((error) => {
+        console.warn('[Timeline] failed to load reaction types:', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reflections]);
 
   useEffect(() => {
     if (loading || explorerLoading || !currentExplorerId) {
@@ -1563,11 +1595,15 @@ export default function SentTimelineScreen({
               (!!activeRelationshipId && (item.respondedRelationshipIds?.includes(activeRelationshipId) ?? false)) ||
               (!!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false));
             const showReactAffordance = item.status !== 'deleted' && item.isReaction !== true;
+            const reactionTypeMap = reactionTypesByParentId.get(item.event_id);
             const reactionResponderFaces = resolveReactionResponderFaces(
               item,
               companionByRelationshipId,
-              companionById
-            );
+              companionById,
+            ).map((face) => ({
+              ...face,
+              reactionType: reactionTypeMap?.get(face.key) ?? 'selfie',
+            }));
 
             return (
               <View style={styles.reflectionItem}>

@@ -1,18 +1,22 @@
-import { uploadReactionSelfie } from '@/utils/reactionUpload';
+import { uploadReaction } from '@/utils/reactionUpload';
 import { FontAwesome } from '@expo/vector-icons';
-import { useAuth, useExplorer, VideoTrimSlider } from '@projectmirror/shared';
+import { useAuth, useExplorer, VideoTrimSlider, type ReactionType } from '@projectmirror/shared';
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { requestRecordingPermissionsAsync } from 'expo-audio';
+import { Camera, CameraView, useCameraPermissions } from 'expo-camera';
+import { RecordingPresets, requestRecordingPermissionsAsync, useAudioRecorder } from 'expo-audio';
 import { Image } from 'expo-image';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Linking,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -22,6 +26,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 const REACTION_PARENT_VOLUME = 0.15;
 const PREVIEW_END_EPSILON_MS = 80;
 const MIN_TRIM_GAP_MS = 500;
+const TYPED_MESSAGE_MAX_LENGTH = 120;
+
+type ReactionComposeMode = ReactionType;
 
 function isSeekInterrupted(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Seeking interrupted');
@@ -64,6 +71,15 @@ export function ReactionSheet({
   const [trimEndMs, setTrimEndMs] = useState(0);
   const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
   const [isParentReflectionMuted, setIsParentReflectionMuted] = useState(false);
+  const [reactionMode, setReactionMode] = useState<ReactionComposeMode>('selfie');
+  const [typedMessage, setTypedMessage] = useState('');
+  const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
+  const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [cameraAccessGranted, setCameraAccessGranted] = useState<boolean | null>(null);
+  const [cameraStageReady, setCameraStageReady] = useState(false);
+
+  const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const prepareSelfieCameraRunRef = useRef(0);
 
   const isVideoParent = parentMedia?.mediaType === 'video';
   const isImageParent = parentMedia?.mediaType === 'image';
@@ -71,6 +87,7 @@ export function ReactionSheet({
   const parentImageUrl = parentMedia?.mediaType === 'image' ? parentMedia.imageUrl : '';
   const hasValidParentMedia =
     (isVideoParent && !!parentVideoUrl) || (isImageParent && !!parentImageUrl);
+  const parentPosterUri = isVideoParent ? parentVideoUrl : parentImageUrl;
 
   const videoRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
@@ -129,17 +146,15 @@ export function ReactionSheet({
   }, [durationMillis]);
 
   useEffect(() => {
-    canScrubRef.current = isVideoParent && !isRecording && recordedUri == null;
-  }, [isRecording, isVideoParent, recordedUri]);
+    canScrubRef.current =
+      reactionMode === 'selfie' && isVideoParent && !isRecording && recordedUri == null;
+  }, [isRecording, isVideoParent, reactionMode, recordedUri]);
 
   useEffect(() => {
     if (!visible) return;
     void (async () => {
       const micPermission = await requestRecordingPermissionsAsync();
       setMicReady(micPermission.granted);
-      if (!cameraPermission?.granted) {
-        await requestCameraPermission();
-      }
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -148,7 +163,87 @@ export function ReactionSheet({
         playThroughEarpieceAndroid: false,
       });
     })();
-  }, [visible, cameraPermission?.granted, requestCameraPermission]);
+  }, [visible]);
+
+  const prepareSelfieCamera = useCallback(async () => {
+    const runId = ++prepareSelfieCameraRunRef.current;
+
+    let current = await Camera.getCameraPermissionsAsync();
+    if (!current.granted && current.canAskAgain) {
+      current = await Camera.requestCameraPermissionsAsync();
+    }
+    // Keep the hook in sync without blocking on its promise (can hang after native grant).
+    void requestCameraPermission();
+
+    if (runId !== prepareSelfieCameraRunRef.current) return;
+
+    setCameraAccessGranted(current.granted);
+    if (!current.granted) {
+      setCameraStageReady(false);
+      setCameraReady(false);
+      return;
+    }
+
+    setCameraReady(false);
+    if (Platform.OS === 'android') {
+      setCameraStageReady(false);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (runId !== prepareSelfieCameraRunRef.current) return;
+      setCameraStageReady(true);
+      setCameraInstanceKey((key) => key + 1);
+      return;
+    }
+
+    setCameraStageReady(true);
+    setCameraInstanceKey((key) => key + 1);
+  }, [requestCameraPermission]);
+
+  const handleGrantCameraAccess = useCallback(async () => {
+    const current = await Camera.getCameraPermissionsAsync();
+    if (current.granted) {
+      await prepareSelfieCamera();
+      return;
+    }
+
+    if (current.canAskAgain) {
+      const requested = await Camera.requestCameraPermissionsAsync();
+      void requestCameraPermission();
+      if (requested.granted) {
+        await prepareSelfieCamera();
+        return;
+      }
+    }
+
+    Alert.alert(
+      'Camera Access Needed',
+      'To record a selfie reaction, allow camera access in Settings.',
+      [
+        { text: 'Open Settings', onPress: () => void Linking.openSettings() },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  }, [prepareSelfieCamera, requestCameraPermission]);
+
+  useEffect(() => {
+    if (!visible || !hasValidParentMedia || reactionMode !== 'selfie') return;
+    void prepareSelfieCamera();
+  }, [visible, hasValidParentMedia, reactionMode, prepareSelfieCamera]);
+
+  useEffect(() => {
+    if (!visible || reactionMode !== 'selfie') return;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        void prepareSelfieCamera();
+      }
+    });
+    return () => subscription.remove();
+  }, [visible, reactionMode, prepareSelfieCamera]);
+
+  const handleModalShow = useCallback(() => {
+    if (reactionMode === 'selfie') {
+      void prepareSelfieCamera();
+    }
+  }, [prepareSelfieCamera, reactionMode]);
 
   useEffect(() => {
     if (visible) return;
@@ -165,7 +260,14 @@ export function ReactionSheet({
     trimEndMsRef.current = 0;
     setIsParentReflectionMuted(false);
     isParentReflectionMutedRef.current = false;
+    setReactionMode('selfie');
+    setTypedMessage('');
+    setVoiceRecordedUri(null);
+    setIsVoiceRecording(false);
     setCameraInstanceKey(0);
+    setCameraAccessGranted(null);
+    setCameraStageReady(false);
+    prepareSelfieCameraRunRef.current += 1;
     isVideoDragActiveRef.current = false;
     previewStopPendingRef.current = false;
     pendingSeekTargetRef.current = null;
@@ -497,7 +599,8 @@ export function ReactionSheet({
     })();
   }, [queueVideoSeek]);
 
-  const showScrubUi = isVideoParent && !isRecording && recordedUri == null;
+  const showScrubUi =
+    reactionMode === 'selfie' && isVideoParent && !isRecording && recordedUri == null;
 
   const videoPanGesture = useMemo(() => {
     return Gesture.Pan()
@@ -515,12 +618,17 @@ export function ReactionSheet({
   }, [handleSeekDrag, handleSeekDragEnd, handleSeekDragStart]);
 
   const handlePressIn = useCallback(() => {
-    if (recordedUri || !cameraReady || !cameraPermission?.granted || !micReady) {
+    if (
+      recordedUri ||
+      !cameraReady ||
+      !(cameraPermission?.granted || cameraAccessGranted) ||
+      !micReady
+    ) {
       if (!recordedUri) {
         console.warn('[ReactionSheet] camera not ready for recording', {
           parentReflectionId,
           cameraReady,
-          cameraGranted: cameraPermission?.granted,
+          cameraGranted: cameraPermission?.granted ?? cameraAccessGranted,
           micReady,
         });
       }
@@ -560,6 +668,7 @@ export function ReactionSheet({
       })();
     }
   }, [
+    cameraAccessGranted,
     cameraPermission?.granted,
     cameraReady,
     getReactionParentVolume,
@@ -588,14 +697,72 @@ export function ReactionSheet({
     })();
   }, [getReactionParentVolume, isRecording, isVideoParent]);
 
+  const resetVoiceRecording = useCallback(() => {
+    setVoiceRecordedUri(null);
+    setIsVoiceRecording(false);
+  }, []);
+
+  const handleReactionModeChange = useCallback(
+    (nextMode: ReactionComposeMode) => {
+      if (nextMode === reactionMode || isUploading) return;
+      setReactionMode(nextMode);
+      setRecordedUri(null);
+      setSyncStartTimeMillis(null);
+      setSyncEndTimeMillis(null);
+      setIsPreviewPlaying(false);
+      setIsRecording(false);
+      resetVoiceRecording();
+      setTypedMessage('');
+      setCameraReady(false);
+      setCameraStageReady(false);
+      if (nextMode === 'selfie') {
+        void prepareSelfieCamera();
+      } else {
+        setCameraAccessGranted(null);
+      }
+      void videoRef.current?.pauseAsync().catch(() => {});
+    },
+    [isUploading, prepareSelfieCamera, reactionMode, resetVoiceRecording],
+  );
+
+  const handleStartVoiceRecording = useCallback(async () => {
+    if (!micReady || isVoiceRecording) return;
+    try {
+      await voiceRecorder.prepareToRecordAsync();
+      voiceRecorder.record();
+      setIsVoiceRecording(true);
+    } catch (error) {
+      console.warn('[ReactionSheet] voice record start failed:', error);
+      Alert.alert('Recording Failed', 'Could not start voice recording.');
+    }
+  }, [isVoiceRecording, micReady, voiceRecorder]);
+
+  const handleStopVoiceRecording = useCallback(async () => {
+    if (!isVoiceRecording) return;
+    try {
+      await voiceRecorder.stop();
+      setIsVoiceRecording(false);
+      if (voiceRecorder.uri) {
+        setVoiceRecordedUri(voiceRecorder.uri);
+      }
+    } catch (error) {
+      console.warn('[ReactionSheet] voice record stop failed:', error);
+      setIsVoiceRecording(false);
+    }
+  }, [isVoiceRecording, voiceRecorder]);
+
   const handleRetake = useCallback(() => {
+    if (reactionMode === 'voice') {
+      resetVoiceRecording();
+      return;
+    }
     const restartAt = syncStartTimeMillis;
     setRecordedUri(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
     setCameraReady(false);
-    setCameraInstanceKey((key) => key + 1);
+    void prepareSelfieCamera();
     void (async () => {
       if (isVideoParent && restartAt != null) {
         await commitVideoPosition(restartAt, {
@@ -605,10 +772,10 @@ export function ReactionSheet({
       }
       await videoRef.current?.pauseAsync().catch(() => {});
     })();
-  }, [commitVideoPosition, getReactionParentVolume, isVideoParent, syncStartTimeMillis]);
+  }, [commitVideoPosition, getReactionParentVolume, isVideoParent, prepareSelfieCamera, reactionMode, resetVoiceRecording, syncStartTimeMillis]);
 
   const handleSend = useCallback(() => {
-    if (!recordedUri || isUploading) return;
+    if (isUploading) return;
     if (!currentExplorerId) {
       Alert.alert('Explorer Not Ready', 'Please wait for the Explorer profile to load before sending.');
       return;
@@ -621,22 +788,38 @@ export function ReactionSheet({
       Alert.alert('Unable to Send', 'Your Companion link to this Explorer is missing.');
       return;
     }
-    if (syncStartTimeMillis == null) {
-      Alert.alert('Unable to Send', 'Reaction sync timing is missing. Please retake your reaction.');
+
+    if (reactionMode === 'selfie') {
+      if (!recordedUri || syncStartTimeMillis == null) {
+        Alert.alert('Unable to Send', 'Reaction sync timing is missing. Please retake your reaction.');
+        return;
+      }
+    } else if (reactionMode === 'typed') {
+      if (!typedMessage.trim()) {
+        Alert.alert('Add a Message', 'Type a short reaction before sending.');
+        return;
+      }
+    } else if (!voiceRecordedUri) {
+      Alert.alert('Record a Message', 'Record a voice reaction before sending.');
       return;
     }
 
     void (async () => {
       setIsUploading(true);
       try {
-        await uploadReactionSelfie({
+        await uploadReaction({
+          reactionType: reactionMode,
           explorerId: currentExplorerId,
           parentReflectionId,
-          recordedUri,
-          syncStartTimeMillis,
+          syncStartTimeMillis:
+            reactionMode === 'selfie' ? (syncStartTimeMillis ?? 0) : 0,
           senderName: activeRelationship.companionName || 'Companion',
           senderId: user.uid,
           activeRelationshipId: activeRelationship.id,
+          recordedVideoUri: reactionMode === 'selfie' ? recordedUri ?? undefined : undefined,
+          messageText: reactionMode === 'typed' ? typedMessage.trim() : undefined,
+          recordedAudioUri: reactionMode === 'voice' ? voiceRecordedUri ?? undefined : undefined,
+          parentPosterUri,
         });
         onUploadSuccess?.(parentReflectionId, activeRelationship.id);
         onClose();
@@ -656,14 +839,33 @@ export function ReactionSheet({
     isUploading,
     onClose,
     onUploadSuccess,
+    parentPosterUri,
     parentReflectionId,
+    reactionMode,
     recordedUri,
     syncStartTimeMillis,
+    typedMessage,
     user?.uid,
+    voiceRecordedUri,
   ]);
 
-  const canRecord = !recordedUri && cameraReady && !!cameraPermission?.granted && micReady;
-  const isPreviewMode = recordedUri != null;
+  const isCameraGranted =
+    cameraPermission?.granted === true || cameraAccessGranted === true;
+  const isCameraDenied =
+    cameraAccessGranted === false && cameraPermission?.granted !== true;
+  const showCameraPreview =
+    isCameraGranted && (Platform.OS !== 'android' || cameraStageReady);
+
+  const canRecordSelfie =
+    reactionMode === 'selfie' &&
+    !recordedUri &&
+    cameraReady &&
+    showCameraPreview &&
+    micReady;
+  const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
+  const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
+  const isPreviewMode = isSelfiePreviewMode || isVoicePreviewMode;
+  const canSendTyped = reactionMode === 'typed' && typedMessage.trim().length > 0;
   const scrubDurationMs = Math.max(durationMillis, 1);
   const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
 
@@ -673,6 +875,7 @@ export function ReactionSheet({
       animationType="slide"
       presentationStyle="fullScreen"
       onRequestClose={onClose}
+      onShow={handleModalShow}
     >
       <GestureHandlerRootView style={styles.container}>
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
@@ -770,7 +973,7 @@ export function ReactionSheet({
                         </Pressable>
                       </View>
                     </>
-                  ) : isPreviewMode ? (
+                  ) : isSelfiePreviewMode ? (
                     <Pressable
                       style={styles.playbackControl}
                       onPress={toggleParentReflectionMute}
@@ -806,11 +1009,11 @@ export function ReactionSheet({
 
           <View style={styles.cameraPane}>
             <View style={styles.mediaCard}>
-              {isPreviewMode ? (
+              {isSelfiePreviewMode ? (
                 <View style={styles.cameraStageHost}>
                   <View style={styles.cameraStage}>
                     <Video
-                      source={{ uri: recordedUri }}
+                      source={{ uri: recordedUri! }}
                       style={styles.selfiePreviewVideo}
                       resizeMode={ResizeMode.COVER}
                       shouldPlay
@@ -818,7 +1021,62 @@ export function ReactionSheet({
                     />
                   </View>
                 </View>
-              ) : cameraPermission?.granted ? (
+              ) : isVoicePreviewMode ? (
+                <View style={styles.altModePane}>
+                  <FontAwesome name="microphone" size={36} color="#fff" />
+                  <Text style={styles.altModeTitle}>Voice message ready</Text>
+                  <Text style={styles.altModeHint}>Send it or retake below.</Text>
+                </View>
+              ) : reactionMode === 'typed' ? (
+                <View style={styles.altModePane}>
+                  <Text style={styles.altModeTitle}>Type your reaction</Text>
+                  <TextInput
+                    style={styles.typedInput}
+                    placeholder="Say something warm and short…"
+                    placeholderTextColor="rgba(255,255,255,0.4)"
+                    value={typedMessage}
+                    onChangeText={setTypedMessage}
+                    maxLength={TYPED_MESSAGE_MAX_LENGTH}
+                    multiline
+                    textAlignVertical="top"
+                    editable={!isUploading}
+                  />
+                  <Text style={styles.typedCounter}>
+                    {typedMessage.length}/{TYPED_MESSAGE_MAX_LENGTH}
+                  </Text>
+                </View>
+              ) : reactionMode === 'voice' ? (
+                <View style={styles.altModePane}>
+                  <FontAwesome name="microphone" size={36} color="#fff" />
+                  <Text style={styles.altModeTitle}>
+                    {isVoiceRecording ? 'Recording…' : 'Record a voice message'}
+                  </Text>
+                  <Text style={styles.altModeHint}>
+                    {isVoiceRecording
+                      ? 'Tap stop when you are done.'
+                      : 'Your voice, not AI — good for public places.'}
+                  </Text>
+                  <Pressable
+                    style={[
+                      styles.voiceRecordButton,
+                      isVoiceRecording && styles.voiceRecordButtonActive,
+                    ]}
+                    onPress={() => {
+                      if (isVoiceRecording) {
+                        void handleStopVoiceRecording();
+                      } else {
+                        void handleStartVoiceRecording();
+                      }
+                    }}
+                    disabled={!micReady || isUploading}
+                  >
+                    <FontAwesome name={isVoiceRecording ? 'stop' : 'microphone'} size={16} color="#fff" />
+                    <Text style={styles.voiceRecordButtonText}>
+                      {isVoiceRecording ? 'Stop recording' : 'Start recording'}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : showCameraPreview ? (
                 <View style={styles.cameraStageHost}>
                   <View style={styles.cameraStage}>
                     <CameraView
@@ -837,19 +1095,65 @@ export function ReactionSheet({
                     />
                   </View>
                 </View>
-              ) : (
+              ) : isCameraDenied ? (
                 <View style={styles.permissionFallback}>
-                  <Text style={styles.permissionText}>Camera access is required to record a reaction.</Text>
-                  <Pressable style={styles.permissionButton} onPress={() => void requestCameraPermission()}>
-                    <Text style={styles.permissionButtonText}>Grant Camera Access</Text>
+                  <Text style={styles.permissionText}>
+                    Camera access is required to record a selfie reaction.
+                  </Text>
+                  <Pressable
+                    style={styles.permissionButton}
+                    onPress={() => void handleGrantCameraAccess()}
+                  >
+                    <Text style={styles.permissionButtonText}>
+                      {cameraPermission?.canAskAgain === false
+                        ? 'Open Settings'
+                        : 'Grant Camera Access'}
+                    </Text>
                   </Pressable>
+                </View>
+              ) : (
+                <View style={styles.altModePane}>
+                  <ActivityIndicator color="#fff" size="large" />
+                  <Text style={styles.altModeHint}>Starting camera…</Text>
                 </View>
               )}
             </View>
           </View>
         </View>
 
-        <View style={[styles.interactionFooter, { height: 84 + insets.bottom, paddingBottom: insets.bottom }]}>
+        <View style={[styles.interactionFooter, { paddingBottom: insets.bottom }]}>
+          <View style={styles.modePicker}>
+            {(
+              [
+                { mode: 'selfie' as const, label: 'Selfie', icon: 'video-camera' as const },
+                { mode: 'typed' as const, label: 'Type', icon: 'keyboard-o' as const },
+                { mode: 'voice' as const, label: 'Voice', icon: 'microphone' as const },
+              ] as const
+            ).map(({ mode, label, icon }) => {
+              const isActive = reactionMode === mode;
+              return (
+                <Pressable
+                  key={mode}
+                  style={[styles.modeButton, isActive && styles.modeButtonActive]}
+                  onPress={() => handleReactionModeChange(mode)}
+                  disabled={isUploading || isPreviewMode || isVoiceRecording}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isActive }}
+                  accessibilityLabel={`${label} reaction`}
+                >
+                  <FontAwesome
+                    name={icon}
+                    size={13}
+                    color={isActive ? '#fff' : 'rgba(255,255,255,0.65)'}
+                  />
+                  <Text style={[styles.modeButtonText, isActive && styles.modeButtonTextActive]}>
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
           {isPreviewMode ? (
             <View style={styles.previewActions}>
               {isUploading ? (
@@ -876,16 +1180,37 @@ export function ReactionSheet({
                 <Text style={styles.sendButtonText}>Send</Text>
               </Pressable>
             </View>
-          ) : (
+          ) : reactionMode === 'typed' ? (
+            <Pressable
+              style={[
+                styles.sendButton,
+                styles.sendButtonStandalone,
+                (!canSendTyped || isUploading) && styles.previewButtonDisabled,
+              ]}
+              onPress={handleSend}
+              disabled={!canSendTyped || isUploading}
+              accessibilityRole="button"
+              accessibilityLabel="Send typed reaction"
+            >
+              {isUploading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <FontAwesome name="paper-plane" size={15} color="#fff" />
+                  <Text style={styles.sendButtonText}>Send</Text>
+                </>
+              )}
+            </Pressable>
+          ) : reactionMode === 'voice' ? null : (
             <Pressable
               onPressIn={handlePressIn}
               onPressOut={handlePressOut}
-              disabled={!canRecord}
+              disabled={!canRecordSelfie}
               style={({ pressed }) => [
                 styles.recordButton,
                 isRecording && styles.recordButtonActive,
                 (pressed || isRecording) && styles.recordButtonPressed,
-                !canRecord && styles.recordButtonDisabled,
+                !canRecordSelfie && styles.recordButtonDisabled,
               ]}
               accessibilityRole="button"
               accessibilityLabel={isRecording ? 'Recording reaction' : 'Hold to react'}
@@ -1063,6 +1388,9 @@ const styles = StyleSheet.create({
     fontSize: 15,
     textAlign: 'center',
   },
+  permissionSpinner: {
+    marginTop: 8,
+  },
   permissionButton: {
     backgroundColor: '#2e78b7',
     paddingHorizontal: 20,
@@ -1078,7 +1406,102 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
+    paddingTop: 10,
+    gap: 10,
     backgroundColor: '#000',
+  },
+  modePicker: {
+    flexDirection: 'row',
+    alignSelf: 'stretch',
+    gap: 8,
+  },
+  modeButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  modeButtonActive: {
+    backgroundColor: 'rgba(46, 120, 183, 0.55)',
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  modeButtonText: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  modeButtonTextActive: {
+    color: '#fff',
+  },
+  altModePane: {
+    flex: 1,
+    minHeight: 0,
+    padding: 20,
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: '#101820',
+  },
+  altModeTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  altModeHint: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  typedInput: {
+    minHeight: 120,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    color: '#fff',
+    fontSize: 16,
+    lineHeight: 22,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  typedCounter: {
+    alignSelf: 'flex-end',
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 12,
+  },
+  voiceRecordButton: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(46, 120, 183, 0.92)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  voiceRecordButtonActive: {
+    backgroundColor: 'rgba(176, 32, 32, 0.95)',
+    borderColor: 'rgba(255, 120, 120, 0.65)',
+  },
+  voiceRecordButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  sendButtonStandalone: {
+    alignSelf: 'stretch',
+    flex: undefined,
+    width: '100%',
+    marginBottom: 8,
   },
   recordButton: {
     flexDirection: 'row',

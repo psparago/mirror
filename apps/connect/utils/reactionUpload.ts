@@ -1,5 +1,6 @@
 import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
-import { API_ENDPOINTS, EventMetadata, ExplorerConfig } from '@projectmirror/shared';
+import { loadVoicePreferences } from '@/utils/ttsVoices';
+import { API_ENDPOINTS, EventMetadata, ExplorerConfig, type ReactionType } from '@projectmirror/shared';
 import {
   arrayUnion,
   collection,
@@ -53,7 +54,11 @@ async function safeUploadToS3(localUri: string, presignedUrl: string): Promise<v
         ? 'image/png'
         : extension === 'webp'
           ? 'image/webp'
-          : 'image/jpeg';
+          : extension === 'm4a' || extension === 'caf'
+            ? 'audio/mp4'
+            : extension === 'mp3'
+              ? 'audio/mpeg'
+              : 'image/jpeg';
     const uploadResult = await FileSystem.uploadAsync(presignedUrl, uriToUpload, {
       httpMethod: 'PUT',
       headers: { 'Content-Type': contentType },
@@ -81,27 +86,91 @@ async function extractReactionPosterUri(recordedUri: string): Promise<string> {
   }
 }
 
-export type UploadReactionSelfieParams = {
+async function resolvePosterUri(
+  reactionType: ReactionType,
+  options: {
+    recordedVideoUri?: string;
+    parentPosterUri?: string;
+  },
+): Promise<string> {
+  if (reactionType === 'selfie' && options.recordedVideoUri) {
+    return extractReactionPosterUri(options.recordedVideoUri);
+  }
+  if (options.parentPosterUri) {
+    if (options.parentPosterUri.startsWith('http')) {
+      return options.parentPosterUri;
+    }
+    return prepareImageForUpload(options.parentPosterUri);
+  }
+  return FALLBACK_POSTER_REMOTE_URL;
+}
+
+async function generateTypedReactionAudio(
+  messageText: string,
+  explorerId: string,
+  captionVoice: string,
+): Promise<string> {
+  const params = new URLSearchParams({
+    explorer_id: explorerId,
+    target_caption: messageText,
+    target_deep_dive: messageText,
+    caption_voice: captionVoice,
+  });
+  const response = await fetch(`${API_ENDPOINTS.AI_DESCRIPTION}?${params.toString()}`);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`TTS generation failed: ${response.status} ${errorText}`);
+  }
+  const json = await parseJsonRecord(response);
+  const audioUrl = asOptionalString(json?.audio_url);
+  if (!audioUrl) {
+    throw new Error('TTS generation returned no audio URL');
+  }
+  const localPath = `${FileSystem.cacheDirectory}reaction_tts_${Date.now()}.mp3`;
+  const download = await FileSystem.downloadAsync(audioUrl, localPath);
+  return download.uri;
+}
+
+export type UploadReactionParams = {
+  reactionType: ReactionType;
   explorerId: string;
   parentReflectionId: string;
-  recordedUri: string;
   syncStartTimeMillis: number;
   senderName: string;
   senderId: string;
   activeRelationshipId: string;
+  recordedVideoUri?: string;
+  messageText?: string;
+  recordedAudioUri?: string;
+  parentPosterUri?: string;
 };
 
-export async function uploadReactionSelfie({
+export async function uploadReaction({
+  reactionType,
   explorerId,
   parentReflectionId,
-  recordedUri,
   syncStartTimeMillis,
   senderName,
   senderId,
   activeRelationshipId,
-}: UploadReactionSelfieParams): Promise<string> {
+  recordedVideoUri,
+  messageText,
+  recordedAudioUri,
+  parentPosterUri,
+}: UploadReactionParams): Promise<string> {
+  if (reactionType === 'selfie' && !recordedVideoUri) {
+    throw new Error('Selfie reaction requires a recorded video');
+  }
+  if (reactionType === 'typed' && !messageText?.trim()) {
+    throw new Error('Typed reaction requires a message');
+  }
+  if (reactionType === 'voice' && !recordedAudioUri) {
+    throw new Error('Voice reaction requires a recorded audio clip');
+  }
+
   const eventID = Date.now().toString();
-  const filesToSign = ['image.jpg', 'video.mp4'];
+  const filesToSign =
+    reactionType === 'selfie' ? ['image.jpg', 'video.mp4'] : ['image.jpg', 'audio.m4a'];
 
   const batchRes = await fetch(API_ENDPOINTS.GET_BATCH_S3_UPLOAD_URLS, {
     method: 'POST',
@@ -125,35 +194,65 @@ export async function uploadReactionSelfie({
   }
 
   const imageUploadUrl = asOptionalString(urls['image.jpg']);
-  const videoUploadUrl = asOptionalString(urls['video.mp4']);
-  if (!imageUploadUrl || !videoUploadUrl) {
-    throw new Error('Upload service returned incomplete upload URLs');
+  if (!imageUploadUrl) {
+    throw new Error('Upload service returned no image upload URL');
   }
 
-  const posterUri = await extractReactionPosterUri(recordedUri);
-  await Promise.all([
-    safeUploadToS3(posterUri, imageUploadUrl),
-    FileSystem.uploadAsync(videoUploadUrl, recordedUri, {
-      httpMethod: 'PUT',
-      headers: { 'Content-Type': 'video/mp4' },
-    }).then((res) => {
-      if (res.status !== 200) {
-        throw new Error(`Video upload failed: ${res.status}`);
-      }
-    }),
-  ]);
+  const posterUri = await resolvePosterUri(reactionType, {
+    recordedVideoUri,
+    parentPosterUri,
+  });
+
+  const uploadPromises: Promise<void>[] = [safeUploadToS3(posterUri, imageUploadUrl)];
+
+  if (reactionType === 'selfie') {
+    const videoUploadUrl = asOptionalString(urls['video.mp4']);
+    if (!videoUploadUrl || !recordedVideoUri) {
+      throw new Error('Upload service returned incomplete selfie upload URLs');
+    }
+    uploadPromises.push(
+      FileSystem.uploadAsync(videoUploadUrl, recordedVideoUri, {
+        httpMethod: 'PUT',
+        headers: { 'Content-Type': 'video/mp4' },
+      }).then((res) => {
+        if (res.status !== 200) {
+          throw new Error(`Video upload failed: ${res.status}`);
+        }
+      }),
+    );
+  } else {
+    const audioUploadUrl = asOptionalString(urls['audio.m4a']);
+    if (!audioUploadUrl) {
+      throw new Error('Upload service returned no audio upload URL');
+    }
+
+    let audioSourceUri: string;
+    if (reactionType === 'typed') {
+      const { captionVoice } = await loadVoicePreferences();
+      audioSourceUri = await generateTypedReactionAudio(messageText!.trim(), explorerId, captionVoice);
+    } else {
+      audioSourceUri = recordedAudioUri!;
+    }
+
+    uploadPromises.push(safeUploadToS3(audioSourceUri, audioUploadUrl));
+  }
+
+  await Promise.all(uploadPromises);
 
   const timestamp = new Date().toISOString();
+  const trimmedMessage = messageText?.trim() ?? '';
   const eventMetadata: EventMetadata = {
-    description: 'Reaction',
-    short_caption: 'Reaction',
+    description: reactionType === 'typed' ? trimmedMessage : '',
     sender: senderName || 'Companion',
     sender_id: senderId,
     timestamp,
     event_id: eventID,
-    content_type: 'video',
+    content_type: reactionType === 'selfie' ? 'video' : 'audio',
     image_source: 'camera',
-    is_selfie: true,
+    ...(reactionType === 'selfie' ? { is_selfie: true } : {}),
+    ...(reactionType === 'typed'
+      ? { reaction_message: trimmedMessage, description: trimmedMessage }
+      : {}),
   };
 
   const firestorePayload: Record<string, unknown> = {
@@ -170,7 +269,7 @@ export async function uploadReactionSelfie({
     respondedRelationshipIds: [],
     isReaction: true,
     parentReflectionId,
-    reactionType: 'selfie',
+    reactionType,
     syncStartTimeMillis,
     responderRelationshipId: activeRelationshipId,
   };
@@ -184,4 +283,15 @@ export async function uploadReactionSelfie({
   });
 
   return eventID;
+}
+
+/** @deprecated Use uploadReaction instead */
+export async function uploadReactionSelfie(
+  params: Omit<UploadReactionParams, 'reactionType'> & { recordedUri: string },
+): Promise<string> {
+  return uploadReaction({
+    ...params,
+    reactionType: 'selfie',
+    recordedVideoUri: params.recordedUri,
+  });
 }

@@ -10,8 +10,16 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import { FontAwesome } from '@expo/vector-icons';
+import type { ReactionType } from '@projectmirror/shared';
 
 import type { ReactionResponderFace } from '@/utils/reactionPlayback';
+
+function reactionTypeIcon(type?: ReactionType) {
+  if (type === 'typed') return 'keyboard-o' as const;
+  if (type === 'voice') return 'microphone' as const;
+  return 'video-camera' as const;
+}
 
 export type ReactionRespondentsBarProps = {
   faces: ReactionResponderFace[];
@@ -97,6 +105,9 @@ export function ReactionRespondentsBar({
                 <ActivityIndicator size="small" color="#fff" />
               </View>
             ) : null}
+            <View style={styles.reactionTypeBadge}>
+              <FontAwesome name={reactionTypeIcon(face.reactionType)} size={9} color="#fff" />
+            </View>
           </Pressable>
           );
         })}
@@ -213,6 +224,19 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     borderRadius: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reactionTypeBadge: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(46, 120, 183, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
     alignItems: 'center',
     justifyContent: 'center',
   },

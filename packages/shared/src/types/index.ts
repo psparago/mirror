@@ -51,6 +51,8 @@ export interface EventMetadata {
   people_context_hints?: string;
   /** ISO timestamp when a Companion last saved edits to this reflection (metadata and/or media). */
   last_edited_at?: string;
+  /** Typed reaction message (display only; spoken via audio_url). */
+  reaction_message?: string;
   /** Playback trim: inclusive start time in milliseconds (video). */
   video_start_ms?: number;
   /** Playback trim: exclusive or inclusive end boundary in milliseconds (video); pair with `video_start_ms`. */
@@ -58,6 +60,8 @@ export interface EventMetadata {
   /** Poster frame position within the source video, in milliseconds. */
   thumbnail_time_ms?: number;
 }
+
+export type ReactionType = 'selfie' | 'typed' | 'voice';
 
 export interface Event {
   event_id: string;
@@ -75,6 +79,8 @@ export interface Event {
   parentReflectionId?: string | null;
   /** Parent playhead (ms) when the reaction recording started. */
   syncStartTimeMillis?: number;
+  /** Companion reaction capture mode. */
+  reactionType?: ReactionType;
 }
 
 /** Merged Firestore signal doc (`mirror_event` + engagement overlays); rich content lives in `metadata`. */
@@ -97,7 +103,7 @@ export interface ReflectionDocument {
   /** `relationships/{id}` for the Companion who recorded this reaction. */
   responderRelationshipId?: string;
   /** Companion reaction capture mode (e.g. live-sync selfie). */
-  reactionType?: 'selfie' | string;
+  reactionType?: ReactionType;
   /** Parent Reflection playhead (ms) when the reaction recording started. */
   syncStartTimeMillis?: number;
   /**

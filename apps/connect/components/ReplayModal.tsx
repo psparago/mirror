@@ -8,6 +8,7 @@ import {
   fetchReactionEventForPlayback,
   removeResponderFromParentReflection,
   resolveReactionParentPipMedia,
+  resolveReactionPlaybackType,
   resolveReactionResponderFaces,
   type ReactionParentPipMedia,
   type ReactionPlaybackSession,
@@ -111,6 +112,24 @@ export function ReplayModal({
 
   const displayEvent = playbackEvent ?? event;
   const isReactionPlayback = displayEvent?.isReaction === true;
+  const reactionPlaybackType = resolveReactionPlaybackType(displayEvent);
+  const isSelfieReactionPlayback = isReactionPlayback && reactionPlaybackType === 'selfie';
+  const preferParentImagePip = isReactionPlayback && reactionPlaybackType !== 'selfie';
+
+  const reactionCaptionText = useMemo(() => {
+    if (!isReactionPlayback) return null;
+    if (reactionPlaybackType === 'typed') {
+      return (
+        displayEvent?.metadata?.reaction_message ||
+        displayEvent?.metadata?.description ||
+        null
+      );
+    }
+    if (reactionPlaybackType === 'voice') {
+      return 'Voice message';
+    }
+    return null;
+  }, [displayEvent?.metadata?.description, displayEvent?.metadata?.reaction_message, isReactionPlayback, reactionPlaybackType]);
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
@@ -191,7 +210,9 @@ export function ReplayModal({
 
     const sessionParent =
       reactionSessionRef.current?.parentEvent ?? reactionSession?.parentEvent;
-    const sessionPip = resolveReactionParentPipMedia(sessionParent);
+    const sessionPip = resolveReactionParentPipMedia(sessionParent, {
+      preferImage: preferParentImagePip,
+    });
     if (sessionPip) {
       setResolvedParentPip(sessionPip);
       return;
@@ -207,7 +228,7 @@ export function ReplayModal({
     void fetchMirrorEventById(parentId, explorerId)
       .then((parentEvent) => {
         if (cancelled) return;
-        setResolvedParentPip(resolveReactionParentPipMedia(parentEvent));
+        setResolvedParentPip(resolveReactionParentPipMedia(parentEvent, { preferImage: preferParentImagePip }));
       })
       .catch((error) => {
         console.warn('[ReplayModal] failed to resolve parent media for PiP', error);
@@ -224,10 +245,13 @@ export function ReplayModal({
     displayEvent?.event_id,
     explorerId,
     reactionSession?.parentEvent,
+    preferParentImagePip,
   ]);
 
   const resolvedParentVideoUrl =
-    resolvedParentPip?.mediaType === 'video' ? resolvedParentPip.url : null;
+    resolvedParentPip?.mediaType === 'video' && isSelfieReactionPlayback
+      ? resolvedParentPip.url
+      : null;
 
   useEffect(() => {
     if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
@@ -608,6 +632,11 @@ export function ReplayModal({
       },
 
       speakCaption: () => {
+        if (eventRef.current?.isReaction) {
+          sendRef.current({ type: 'NARRATION_FINISHED' });
+          return;
+        }
+
         const audioUrl = normalizeAudioUrl(eventRef.current?.audio_url);
         // expo-av accepts http/https URLs and file:// URLs
         const isValidUrl = audioUrl && 
@@ -898,10 +927,14 @@ export function ReplayModal({
             return;
           }
           setShowManualReplayOverlay(false);
+          const playbackType = resolveReactionPlaybackType(displayEvent);
+          const useInstantVideo =
+            !displayEvent.isReaction || playbackType === 'selfie';
           sendRef.current({
-            type: 'SELECT_EVENT_INSTANT',
+            type: useInstantVideo ? 'SELECT_EVENT_INSTANT' : 'SELECT_EVENT',
             event: displayEvent,
             metadata: displayEvent.metadata || ({} as EventMetadata),
+            takeSelfie: false,
           });
         });
     } else {
@@ -1192,6 +1225,7 @@ export function ReplayModal({
     });
 
   const handlePlayCaption = async () => {
+    if (isReactionPlayback) return;
     if (isAnyAudioPlaying) return; // Prevent overlapping
 
     // Stop existing
@@ -1349,7 +1383,8 @@ export function ReplayModal({
               />
             ) : null}
             <View style={styles.captionMainRow}>
-              {(displayEvent?.audio_url || displayEvent?.metadata?.description) ? (
+              {!isReactionPlayback &&
+              (displayEvent?.audio_url || displayEvent?.metadata?.description) ? (
                 <Animated.View style={[styles.playCaptionButtonLeading, captionSpeakerAnimatedStyle]}>
                   <TouchableOpacity
                     style={[
@@ -1379,9 +1414,19 @@ export function ReplayModal({
               ) : null}
 
               <View style={styles.captionTextBlock}>
-                <Text style={styles.captionText} numberOfLines={2}>
-                  {displayEvent.metadata?.short_caption || displayEvent.metadata?.description || 'No caption'}
-                </Text>
+                {isReactionPlayback ? (
+                  reactionCaptionText ? (
+                    <Text style={styles.captionText} numberOfLines={3}>
+                      {reactionCaptionText}
+                    </Text>
+                  ) : null
+                ) : (
+                  <Text style={styles.captionText} numberOfLines={2}>
+                    {displayEvent.metadata?.short_caption ||
+                      displayEvent.metadata?.description ||
+                      'No caption'}
+                  </Text>
+                )}
               </View>
 
               <TouchableOpacity

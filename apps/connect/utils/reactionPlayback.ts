@@ -1,4 +1,4 @@
-import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, getAvatarColor, getAvatarInitial } from '@projectmirror/shared';
+import { API_ENDPOINTS, Event, EventMetadata, ExplorerConfig, getAvatarColor, getAvatarInitial, type ReactionType } from '@projectmirror/shared';
 import type { CompanionAvatar } from '@projectmirror/shared';
 import {
   arrayRemove,
@@ -20,6 +20,7 @@ export type ReactionResponderFace = {
   avatarUrl: string | null;
   color: string;
   initial: string;
+  reactionType?: ReactionType;
 };
 
 export type SentReflectionReactionFields = {
@@ -155,11 +156,14 @@ export function buildEventForReplay(
     isReaction?: boolean;
     parentReflectionId?: string | null;
     syncStartTimeMillis?: number;
+    reactionType?: ReactionType;
   },
 ): Event {
   const metadata = options.metadata ?? (options.fullEvent?.metadata as EventMetadata | undefined);
-  const description =
-    options.description || metadata?.description || metadata?.short_caption || 'Reflection';
+  const isReaction = options.isReaction === true;
+  const description = isReaction
+    ? metadata?.reaction_message || metadata?.description || ''
+    : options.description || metadata?.description || metadata?.short_caption || 'Reflection';
   return {
     event_id: eventId,
     image_url:
@@ -169,25 +173,38 @@ export function buildEventForReplay(
     audio_url: options.fullEvent?.audio_url,
     video_url: options.fullEvent?.video_url,
     deep_dive_audio_url: options.fullEvent?.deep_dive_audio_url,
-    ...(options.isReaction ? { isReaction: true } : {}),
+    ...(isReaction ? { isReaction: true } : {}),
     ...(options.parentReflectionId ? { parentReflectionId: options.parentReflectionId } : {}),
     ...(typeof options.syncStartTimeMillis === 'number'
       ? { syncStartTimeMillis: options.syncStartTimeMillis }
+      : {}),
+    ...(options.reactionType ? { reactionType: options.reactionType } : {}),
+    ...(options.fullEvent?.reactionType && !options.reactionType
+      ? { reactionType: options.fullEvent.reactionType }
       : {}),
     metadata: metadata
       ? {
           ...metadata,
           event_id: eventId,
-          description: metadata.description || description,
-          short_caption: metadata.short_caption || description,
+          description: isReaction ? metadata.description || description : metadata.description || description,
+          ...(isReaction
+            ? {}
+            : { short_caption: metadata.short_caption || description }),
         }
-      : {
-          description,
-          sender: options.senderLabel || 'Companion',
-          timestamp: timestampToISO(options.sentTimestamp || options.timestamp),
-          event_id: eventId,
-          short_caption: description,
-        },
+      : isReaction
+        ? {
+            description,
+            sender: options.senderLabel || 'Companion',
+            timestamp: timestampToISO(options.sentTimestamp || options.timestamp),
+            event_id: eventId,
+          }
+        : {
+            description,
+            sender: options.senderLabel || 'Companion',
+            timestamp: timestampToISO(options.sentTimestamp || options.timestamp),
+            event_id: eventId,
+            short_caption: description,
+          },
   };
 }
 
@@ -227,6 +244,11 @@ export async function fetchReactionEventForPlayback(
       : typeof fullEvent?.syncStartTimeMillis === 'number'
         ? fullEvent.syncStartTimeMillis
         : undefined;
+  const reactionType = coerceReactionType(
+    data?.reactionType ?? fullEvent?.reactionType,
+    fullEvent,
+    metadata,
+  );
 
   return buildEventForReplay(reactionEventId, {
     metadata: metadata
@@ -244,7 +266,44 @@ export async function fetchReactionEventForPlayback(
     isReaction: data?.isReaction === true || fullEvent?.isReaction === true,
     parentReflectionId: asOptionalString(data?.parentReflectionId) ?? parentEventId,
     syncStartTimeMillis,
+    reactionType,
   });
+}
+
+function coerceReactionType(raw: unknown, fullEvent: Event | null, metadata?: EventMetadata): ReactionType {
+  if (raw === 'selfie' || raw === 'typed' || raw === 'voice') {
+    return raw;
+  }
+  if (metadata?.reaction_message) {
+    return 'typed';
+  }
+  if (fullEvent?.video_url) return 'selfie';
+  if (fullEvent?.audio_url || metadata?.content_type === 'audio') return 'voice';
+  return 'selfie';
+}
+
+export async function fetchReactionTypesByRelationship(
+  parentEventId: string,
+): Promise<Map<string, ReactionType>> {
+  const reactionsQuery = query(
+    collection(db, ExplorerConfig.collections.reflections),
+    where('parentReflectionId', '==', parentEventId),
+    where('isReaction', '==', true),
+    limit(20),
+  );
+  const snap = await getDocs(reactionsQuery);
+  const map = new Map<string, ReactionType>();
+  for (const reactionDoc of snap.docs) {
+    const data = reactionDoc.data();
+    const metadata = coerceEmbeddedMetadata(data?.metadata, reactionDoc.id);
+    const relationshipId = asOptionalString(data?.responderRelationshipId);
+    if (!relationshipId) continue;
+    map.set(
+      relationshipId,
+      coerceReactionType(data?.reactionType, null, metadata),
+    );
+  }
+  return map;
 }
 
 export type ReactionPlaybackSession = {
@@ -258,14 +317,27 @@ export type ReactionParentPipMedia =
   | { mediaType: 'video'; url: string }
   | { mediaType: 'image'; url: string };
 
+export function resolveReactionPlaybackType(event: Event | null | undefined): ReactionType {
+  if (event?.reactionType === 'selfie' || event?.reactionType === 'typed' || event?.reactionType === 'voice') {
+    return event.reactionType;
+  }
+  if (event?.video_url) return 'selfie';
+  if (event?.audio_url) return 'voice';
+  return 'selfie';
+}
+
 export function resolveReactionParentPipMedia(
   event: Event | null | undefined,
+  options?: { preferImage?: boolean },
 ): ReactionParentPipMedia | null {
+  const imageUrl = asOptionalString(event?.image_url);
   const videoUrl = asOptionalString(event?.video_url);
+  if (options?.preferImage && imageUrl) {
+    return { mediaType: 'image', url: imageUrl };
+  }
   if (videoUrl) {
     return { mediaType: 'video', url: videoUrl };
   }
-  const imageUrl = asOptionalString(event?.image_url);
   if (imageUrl) {
     return { mediaType: 'image', url: imageUrl };
   }
