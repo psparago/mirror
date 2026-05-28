@@ -24,3 +24,9 @@ export function isPostingReminderCooldownElapsed(
   }
   return nowMillis - lastReminderSentAtMillis >= POSTING_REMINDER_INACTIVE_MS;
 }
+
+export function isPostingRemindersEnabled(
+  userData: { posting_reminders_enabled?: boolean } | null | undefined
+): boolean {
+  return userData?.posting_reminders_enabled !== false;
+}

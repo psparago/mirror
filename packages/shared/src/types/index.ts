@@ -115,7 +115,11 @@ export interface ReflectionDocument {
   respondedCompanionIds?: string[];
 }
 
-export type PendingNotificationTriggerType = 'companion_upload' | 'explorer_like' | 'companion_like';
+export type PendingNotificationTriggerType =
+  | 'companion_upload'
+  | 'companion_reaction'
+  | 'explorer_like'
+  | 'companion_like';
 export type PendingNotificationStatus = 'pending';
 
 // Collection: system_config
@@ -134,6 +138,7 @@ export interface PendingNotificationDocument {
   recipientIds: string[];
   triggerType: PendingNotificationTriggerType;
   reflectionId: string;
+  parentReflectionId?: string;
   senderName: string;
   likerId?: string;
   likerName?: string;
@@ -170,6 +175,8 @@ export interface UserProfile {
   upload_digest_mode?: 'off' | 'soon' | 'batched';
   /** Hours between batched digests when mode is batched. Default: 2. */
   upload_digest_hours?: number;
+  /** Server push when a Companion has not shared in 7 days. Default: true. */
+  posting_reminders_enabled?: boolean;
 }
 
 // The Explorer (Device/Context) Document

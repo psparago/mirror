@@ -90,9 +90,13 @@ export function ReactionSheet({
   const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
+  const [isSendPreviewPlaying, setIsSendPreviewPlaying] = useState(false);
+  const [showSendPreviewReplay, setShowSendPreviewReplay] = useState(false);
+  const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sendPreviewStopPendingRef = useRef(false);
 
   const isVideoParent = parentMedia?.mediaType === 'video';
   const isImageParent = parentMedia?.mediaType === 'image';
@@ -103,6 +107,7 @@ export function ReactionSheet({
   const parentPosterUri = isVideoParent ? parentVideoUrl : parentImageUrl;
 
   const videoRef = useRef<Video>(null);
+  const selfiePreviewRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
   const recordingPromiseRef = useRef<Promise<{ uri: string } | undefined> | null>(null);
   const parentVideoWidthRef = useRef(0);
@@ -133,6 +138,63 @@ export function ReactionSheet({
       'failed to update parent volume',
     );
   }, [getReactionParentVolume]);
+
+  const finishSendPreview = useCallback(async () => {
+    if (sendPreviewStopPendingRef.current) return;
+    sendPreviewStopPendingRef.current = true;
+    setIsSendPreviewPlaying(false);
+    setShowSendPreviewReplay(true);
+    await runVideoCommand(() => videoRef.current?.pauseAsync(), 'send preview pause failed');
+    if (isVideoParent && syncStartTimeMillis != null) {
+      positionMillisRef.current = syncStartTimeMillis;
+      setPositionMillis(syncStartTimeMillis);
+      await runVideoCommand(
+        () =>
+          videoRef.current?.setStatusAsync({
+            positionMillis: syncStartTimeMillis,
+            shouldPlay: false,
+            volume: getReactionParentVolume(),
+          }),
+        'send preview reset failed',
+      );
+    }
+    await selfiePreviewRef.current?.pauseAsync().catch(() => {});
+    sendPreviewStopPendingRef.current = false;
+  }, [getReactionParentVolume, isVideoParent, syncStartTimeMillis]);
+
+  const startSendPreview = useCallback(async () => {
+    if (!recordedUri) return;
+    setShowSendPreviewReplay(false);
+    setIsSendPreviewPlaying(true);
+    sendPreviewStopPendingRef.current = false;
+
+    await selfiePreviewRef.current
+      ?.setStatusAsync({ positionMillis: 0, shouldPlay: true })
+      .catch(() => {});
+
+    if (isVideoParent && syncStartTimeMillis != null) {
+      positionMillisRef.current = syncStartTimeMillis;
+      setPositionMillis(syncStartTimeMillis);
+      await runVideoCommand(
+        () =>
+          videoRef.current?.setStatusAsync({
+            positionMillis: syncStartTimeMillis,
+            shouldPlay: true,
+            volume: getReactionParentVolume(),
+          }),
+        'failed to start send preview',
+      );
+    }
+  }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
+
+  const replaySendPreview = useCallback(() => {
+    void startSendPreview();
+  }, [startSendPreview]);
+
+  useEffect(() => {
+    if (!recordedUri || reactionMode !== 'selfie') return;
+    void startSendPreview();
+  }, [recordedUri, reactionMode, startSendPreview]);
 
   const SEEK_TOLERANCE = useMemo(
     () => ({ toleranceMillisBefore: 0, toleranceMillisAfter: 0 }),
@@ -301,6 +363,10 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
+    setIsSendPreviewPlaying(false);
+    setShowSendPreviewReplay(false);
+    setShowTrimPreviewReplay(false);
+    sendPreviewStopPendingRef.current = false;
     setTrimStartMs(0);
     setTrimEndMs(0);
     trimStartMsRef.current = 0;
@@ -328,22 +394,6 @@ export function ReactionSheet({
     void videoRef.current?.setVolumeAsync(1).catch(() => {});
     cameraRef.current?.stopRecording();
   }, [visible]);
-
-  useEffect(() => {
-    if (!recordedUri || syncStartTimeMillis == null || !isVideoParent) return;
-    void runVideoCommand(
-      () =>
-        videoRef.current?.setStatusAsync({
-          positionMillis: syncStartTimeMillis,
-          shouldPlay: true,
-          volume: getReactionParentVolume(),
-        }),
-      'failed to start preview loop',
-    ).then(() => {
-      positionMillisRef.current = syncStartTimeMillis;
-      setPositionMillis(syncStartTimeMillis);
-    });
-  }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
 
   useEffect(() => {
     if (!isVideoParent || isRecording) return;
@@ -449,8 +499,19 @@ export function ReactionSheet({
       );
     } finally {
       previewStopPendingRef.current = false;
+      setShowTrimPreviewReplay(true);
     }
   }, [getReactionParentVolume, isVideoParent]);
+
+  const handleSelfiePreviewStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!status.isLoaded || !recordedUri || !isSendPreviewPlaying) return;
+      if (!status.didJustFinish) return;
+      if (isVideoParent) return;
+      void finishSendPreview();
+    },
+    [finishSendPreview, isSendPreviewPlaying, isVideoParent, recordedUri],
+  );
 
   const handlePlaybackStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
@@ -477,19 +538,19 @@ export function ReactionSheet({
         }
 
         if (
+          isSendPreviewPlaying &&
           syncStartTimeMillis != null &&
-          syncEndTimeMillis != null &&
-          status.isPlaying &&
-          status.positionMillis >= syncEndTimeMillis - PREVIEW_END_EPSILON_MS
+          status.isPlaying
         ) {
-          void runVideoCommand(async () => {
-            await videoRef.current?.pauseAsync();
-            await videoRef.current?.setStatusAsync({
-              positionMillis: syncStartTimeMillis,
-              shouldPlay: true,
-              volume: getReactionParentVolume(),
-            });
-          }, 'reaction preview loop failed');
+          const previewEndMs =
+            syncEndTimeMillis ??
+            (syncStartTimeMillis != null ? durationMillisRef.current : duration);
+          if (
+            previewEndMs > syncStartTimeMillis &&
+            status.positionMillis >= previewEndMs - PREVIEW_END_EPSILON_MS
+          ) {
+            void finishSendPreview();
+          }
         }
         return;
       }
@@ -526,7 +587,9 @@ export function ReactionSheet({
     },
     [
       applyParentReflectionVolume,
+      finishSendPreview,
       getReactionParentVolume,
+      isSendPreviewPlaying,
       isVideoParent,
       stopPreviewAtTrimEnd,
       recordedUri,
@@ -561,6 +624,7 @@ export function ReactionSheet({
     const start = trimStartMsRef.current;
     positionMillisRef.current = start;
     setPositionMillis(start);
+    setShowTrimPreviewReplay(false);
     await runVideoCommand(
       () =>
         videoRef.current?.setStatusAsync({
@@ -580,6 +644,10 @@ export function ReactionSheet({
     pauseParentPreview,
     recordedUri,
   ]);
+
+  const replayTrimPreview = useCallback(() => {
+    void toggleParentPlayback();
+  }, [toggleParentPlayback]);
 
   const toggleParentReflectionMute = useCallback(() => {
     setIsParentReflectionMuted((prev) => !prev);
@@ -835,6 +903,9 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
+    setIsSendPreviewPlaying(false);
+    setShowSendPreviewReplay(false);
+    sendPreviewStopPendingRef.current = false;
     setCameraReady(false);
     bumpCameraInstance();
     scheduleAndroidCameraRemount();
@@ -1002,6 +1073,19 @@ export function ReactionSheet({
                           <Text style={styles.dragHintText}>Drag to set start</Text>
                         </View>
                       ) : null}
+                      {showTrimPreviewReplay && showScrubUi ? (
+                        <View style={styles.replayOverlay}>
+                          <Pressable
+                            style={styles.replayButton}
+                            onPress={replayTrimPreview}
+                            accessibilityRole="button"
+                            accessibilityLabel="Replay Reflection preview"
+                          >
+                            <FontAwesome name="repeat" size={24} color="#fff" />
+                            <Text style={styles.replayText}>Replay</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
                     </View>
                   </GestureDetector>
 
@@ -1058,25 +1142,46 @@ export function ReactionSheet({
                       </View>
                     </>
                   ) : isSelfiePreviewMode ? (
-                    <Pressable
-                      style={styles.playbackControl}
-                      onPress={toggleParentReflectionMute}
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        isParentReflectionMuted
-                          ? 'Unmute Reflection audio'
-                          : 'Mute Reflection audio'
-                      }
-                    >
-                      <FontAwesome
-                        name={isParentReflectionMuted ? 'volume-off' : 'volume-down'}
-                        size={14}
-                        color="#fff"
-                      />
-                      <Text style={styles.playbackControlText}>
-                        {isParentReflectionMuted ? 'Reflection muted' : 'Reflection audio (15%)'}
+                    <>
+                      {!showSendPreviewReplay ? (
+                        <Pressable
+                          style={styles.playbackControl}
+                          onPress={toggleParentReflectionMute}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            isParentReflectionMuted
+                              ? 'Unmute Reflection audio'
+                              : 'Mute Reflection audio'
+                          }
+                        >
+                          <FontAwesome
+                            name={isParentReflectionMuted ? 'volume-off' : 'volume-down'}
+                            size={14}
+                            color="#fff"
+                          />
+                          <Text style={styles.playbackControlText}>
+                            {isParentReflectionMuted
+                              ? 'Reflection muted'
+                              : 'Reflection audio (15%) — preview sync'}
+                          </Text>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          style={styles.playbackControl}
+                          onPress={replaySendPreview}
+                          accessibilityRole="button"
+                          accessibilityLabel="Replay reaction preview"
+                        >
+                          <FontAwesome name="repeat" size={14} color="#fff" />
+                          <Text style={styles.playbackControlText}>Replay preview</Text>
+                        </Pressable>
+                      )}
+                      <Text style={styles.selfiePreviewHint}>
+                        {showSendPreviewReplay
+                          ? 'Preview finished. Tap replay to watch again before sending.'
+                          : 'Your voice is in the recording. This preview plays the Reflection quietly so you can check timing.'}
                       </Text>
-                    </Pressable>
+                    </>
                   ) : null}
                 </>
               ) : (
@@ -1097,12 +1202,29 @@ export function ReactionSheet({
                 <View style={styles.cameraStageHost}>
                   <View style={styles.cameraStage}>
                     <Video
+                      ref={selfiePreviewRef}
                       source={{ uri: recordedUri! }}
                       style={styles.selfiePreviewVideo}
                       resizeMode={ResizeMode.COVER}
-                      shouldPlay
-                      isLooping
+                      shouldPlay={isSendPreviewPlaying}
+                      isLooping={false}
+                      isMuted
+                      progressUpdateIntervalMillis={100}
+                      onPlaybackStatusUpdate={handleSelfiePreviewStatusUpdate}
                     />
+                    {showSendPreviewReplay ? (
+                      <View style={styles.replayOverlay}>
+                        <Pressable
+                          style={styles.replayButton}
+                          onPress={replaySendPreview}
+                          accessibilityRole="button"
+                          accessibilityLabel="Replay reaction preview"
+                        >
+                          <FontAwesome name="repeat" size={24} color="#fff" />
+                          <Text style={styles.replayText}>Replay</Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               ) : isVoicePreviewMode ? (
@@ -1366,6 +1488,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
     backgroundColor: '#101820',
+    overflow: 'hidden',
   },
   parentImageSurface: {
     flex: 1,
@@ -1434,6 +1557,13 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.88)',
     fontSize: 13,
     fontWeight: '600',
+  },
+  selfiePreviewHint: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    paddingBottom: 8,
   },
   cameraPane: {
     flex: 1,
@@ -1661,5 +1791,28 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: '800',
+  },
+  replayOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  replayButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  replayText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

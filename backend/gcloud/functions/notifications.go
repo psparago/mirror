@@ -21,9 +21,10 @@ const (
 	pendingNotificationsCollection = "pending_notifications"
 	relationshipsCollection        = "relationships"
 
-	triggerCompanionUpload = "companion_upload"
-	triggerExplorerLike    = "explorer_like"
-	triggerCompanionLike   = "companion_like"
+	triggerCompanionUpload   = "companion_upload"
+	triggerCompanionReaction = "companion_reaction"
+	triggerExplorerLike      = "explorer_like"
+	triggerCompanionLike     = "companion_like"
 	pendingStatus          = "pending"
 )
 
@@ -33,6 +34,7 @@ type pendingNotification struct {
 	RecipientIDs             []string `firestore:"recipientIds"`
 	TriggerType              string   `firestore:"triggerType"`
 	ReflectionID             string   `firestore:"reflectionId"`
+	ParentReflectionID       string   `firestore:"parentReflectionId,omitempty"`
 	SenderID                 string   `firestore:"senderId"`
 	SenderName               string   `firestore:"senderName"`
 	LikerID                  string   `firestore:"likerId,omitempty"`
@@ -138,6 +140,25 @@ func senderID(doc *firestoredata.Document) string {
 	return metadataStringField(doc, "sender_id")
 }
 
+func boolField(doc *firestoredata.Document, key string) bool {
+	if doc == nil {
+		return false
+	}
+	value, ok := doc.GetFields()[key]
+	if !ok {
+		return false
+	}
+	return value.GetBooleanValue()
+}
+
+func isReactionDocument(doc *firestoredata.Document) bool {
+	return boolField(doc, "isReaction")
+}
+
+func parentReflectionID(doc *firestoredata.Document) string {
+	return stringField(doc, "parentReflectionId")
+}
+
 func stringArrayField(doc *firestoredata.Document, key string) []string {
 	if doc == nil {
 		return nil
@@ -225,6 +246,9 @@ func createPendingNotification(ctx context.Context, client *firestore.Client, do
 	if notification.LikerName != "" {
 		data["likerName"] = notification.LikerName
 	}
+	if notification.ParentReflectionID != "" {
+		data["parentReflectionId"] = notification.ParentReflectionID
+	}
 	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, data)
 	if status.Code(err) == codes.AlreadyExists {
 		fmt.Printf("pending notification %s already exists; treating retry as success\n", docID)
@@ -266,7 +290,7 @@ func updateRelationshipLastReflectionSent(ctx context.Context, client *firestore
 	return nil
 }
 
-// OnReflectionCreated stages a notification whenever a Companion creates a new Reflection.
+// OnReflectionCreated stages a notification when a Companion creates a Reflection or Reaction.
 func OnReflectionCreated(ctx context.Context, e event.Event) error {
 	data, err := decodeDocumentEvent(e)
 	if err != nil {
@@ -290,13 +314,36 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 	}
 	defer client.Close()
 
+	sender := senderID(doc)
+	if isReactionDocument(doc) {
+		parentID := parentReflectionID(doc)
+		if parentID == "" {
+			fmt.Printf("OnReflectionCreated: skipping reaction %s; missing parentReflectionId\n", id)
+			return nil
+		}
+
+		notification := pendingNotification{
+			ExplorerID:               explorerID,
+			BroadcastToAllCompanions: true,
+			RecipientIDs:             []string{},
+			TriggerType:              triggerCompanionReaction,
+			ReflectionID:             id,
+			ParentReflectionID:       parentID,
+			SenderID:                 sender,
+			SenderName:               senderName(doc),
+			Status:                   pendingStatus,
+			CreatedAt:                firestore.ServerTimestamp,
+		}
+		return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s", triggerCompanionReaction, id), notification)
+	}
+
 	notification := pendingNotification{
 		ExplorerID:               explorerID,
 		BroadcastToAllCompanions: true,
 		RecipientIDs:             []string{},
 		TriggerType:              triggerCompanionUpload,
 		ReflectionID:             id,
-		SenderID:                 senderID(doc),
+		SenderID:                 sender,
 		SenderName:               senderName(doc),
 		Status:                   pendingStatus,
 		CreatedAt:                firestore.ServerTimestamp,
@@ -304,7 +351,7 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 	if err := createPendingNotification(ctx, client, fmt.Sprintf("%s_%s", triggerCompanionUpload, id), notification); err != nil {
 		return err
 	}
-	return updateRelationshipLastReflectionSent(ctx, client, explorerID, senderID(doc))
+	return updateRelationshipLastReflectionSent(ctx, client, explorerID, sender)
 }
 
 // OnReflectionUpdated stages fast-lane notifications when the Explorer or a Companion newly likes a Reflection.

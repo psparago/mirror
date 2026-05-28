@@ -11,6 +11,7 @@ const USERS_COLLECTION = 'users';
 const EXPLORERS_COLLECTION = 'explorers';
 const PENDING_STATUS = 'pending';
 const COMPANION_UPLOAD_TRIGGER = 'companion_upload';
+const COMPANION_REACTION_TRIGGER = 'companion_reaction';
 const EXPLORER_LIKE_TRIGGER = 'explorer_like';
 const COMPANION_LIKE_TRIGGER = 'companion_like';
 const FAST_LANE_LIKE_TRIGGERS = new Set([EXPLORER_LIKE_TRIGGER, COMPANION_LIKE_TRIGGER]);
@@ -65,6 +66,7 @@ type SlowLaneNotification = {
   doc: QueryDocumentSnapshot<DocumentData>;
   explorerId: string;
   reflectionId: string;
+  parentReflectionId: string;
   senderId: string;
   senderName: string;
   createdAtMillis: number;
@@ -323,6 +325,63 @@ function slowLanePushData(
   return data;
 }
 
+function explorerPossessive(explorerName: string): string {
+  const trimmed = explorerName.trim() || 'your Explorer';
+  return trimmed.endsWith('s') ? `${trimmed}'` : `${trimmed}'s`;
+}
+
+function reactionSlowLaneBody(senderNames: string[], explorerName: string): string {
+  const possessive = explorerPossessive(explorerName);
+  if (senderNames.length === 1) {
+    return `${senderNames[0]} added a Reaction to ${possessive} Reflection!`;
+  }
+  if (senderNames.length === 2) {
+    return `${senderNames[0]} and ${senderNames[1]} added Reactions to ${possessive} Reflection!`;
+  }
+  return `${senderNames[0]}, ${senderNames[1]}, and ${senderNames.length - 2} others added Reactions to ${possessive} Reflection!`;
+}
+
+function reactionSlowLanePushData(
+  explorerId: string,
+  eligibleNotifications: SlowLaneNotification[]
+): Record<string, string> {
+  const data: Record<string, string> = {
+    notificationType: 'companion_reaction_digest',
+    explorerId,
+  };
+
+  if (eligibleNotifications.length !== 1) {
+    return data;
+  }
+
+  const notification = eligibleNotifications[0];
+  const reflectionId =
+    notification.parentReflectionId?.trim() || notification.reflectionId?.trim() || '';
+  if (reflectionId) {
+    data.reflectionId = reflectionId;
+  }
+
+  return data;
+}
+
+async function resolveExplorerName(explorerId: string, cache: Map<string, string>): Promise<string> {
+  const cached = cache.get(explorerId);
+  if (cached) {
+    return cached;
+  }
+
+  const explorerSnapshot = await db.collection(EXPLORERS_COLLECTION).doc(explorerId).get();
+  const explorerData = explorerSnapshot.data() ?? {};
+  const explorerName =
+    (typeof explorerData.legalName === 'string' && explorerData.legalName.trim()) ||
+    (typeof explorerData.displayName === 'string' && explorerData.displayName.trim()) ||
+    (typeof explorerData.display_name === 'string' && explorerData.display_name.trim()) ||
+    (typeof explorerData.name === 'string' && explorerData.name.trim()) ||
+    'your Explorer';
+  cache.set(explorerId, explorerName);
+  return explorerName;
+}
+
 type UploadDigestMode = 'off' | 'soon' | 'batched';
 
 type UploadDigestPrefs = {
@@ -560,19 +619,40 @@ export async function sendFastLaneNotification(
 }
 
 export async function aggregateSlowLaneNotifications(): Promise<void> {
+  await aggregateSlowLaneNotificationsForTrigger(
+    COMPANION_UPLOAD_TRIGGER,
+    (senderNames) => slowLaneBody(senderNames),
+    (explorerId, eligibleNotifications) => slowLanePushData(explorerId, eligibleNotifications)
+  );
+  await aggregateSlowLaneNotificationsForTrigger(
+    COMPANION_REACTION_TRIGGER,
+    (senderNames, explorerName) => reactionSlowLaneBody(senderNames, explorerName),
+    (explorerId, eligibleNotifications) => reactionSlowLanePushData(explorerId, eligibleNotifications)
+  );
+}
+
+async function aggregateSlowLaneNotificationsForTrigger(
+  triggerType: string,
+  buildBody: (senderNames: string[], explorerName: string) => string,
+  buildPushData: (
+    explorerId: string,
+    eligibleNotifications: SlowLaneNotification[]
+  ) => Record<string, string>
+): Promise<void> {
   const pendingSnapshot = await db
     .collection(PENDING_NOTIFICATIONS_COLLECTION)
     .where('status', '==', PENDING_STATUS)
-    .where('triggerType', '==', COMPANION_UPLOAD_TRIGGER)
+    .where('triggerType', '==', triggerType)
     .get();
 
   if (pendingSnapshot.empty) {
-    console.log('aggregateSlowLaneNotifications: no pending companion uploads');
+    console.log(`aggregateSlowLaneNotifications: no pending ${triggerType} notifications`);
     return;
   }
 
   const now = Date.now();
   const byExplorer = new Map<string, SlowLaneNotification[]>();
+  const explorerNameCache = new Map<string, string>();
 
   for (const doc of pendingSnapshot.docs) {
     const data = doc.data();
@@ -586,6 +666,8 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
       doc,
       explorerId,
       reflectionId: typeof data.reflectionId === 'string' ? data.reflectionId.trim() : '',
+      parentReflectionId:
+        typeof data.parentReflectionId === 'string' ? data.parentReflectionId.trim() : '',
       senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
       senderName:
         typeof data.senderName === 'string' && data.senderName.trim()
@@ -606,7 +688,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
 
     if (now - oldestCreatedAt < debounceMillis) {
       console.log(
-        `aggregateSlowLaneNotifications: waiting for debounce window on explorer ${explorerId}`
+        `aggregateSlowLaneNotifications: waiting for debounce window on explorer ${explorerId} (${triggerType})`
       );
       continue;
     }
@@ -620,6 +702,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
     const activeCompanions = activeCompanionsFromSnapshot(relationshipsSnapshot.docs);
     const activeCompanionIds = activeCompanions.map((companion) => companion.userId);
     const recipientUpdates = new Map<string, Record<string, ProcessedRecipient>>();
+    const explorerName = await resolveExplorerName(explorerId, explorerNameCache);
 
     if (activeCompanionIds.length === 0) {
       console.log(`aggregateSlowLaneNotifications: no active companions for ${explorerId}`);
@@ -688,12 +771,8 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
 
       const lastDigestAt = timestampMillis(userData[LAST_UPLOAD_DIGEST_AT_FIELD]);
       if (lastDigestAt !== null && now - lastDigestAt < digestPrefs.cooldownMillis) {
-        // Do NOT mark these notifications processed — the companion has not received
-        // them yet. They were only blocked by the per-user digest interval. Leave
-        // processedRecipients unset so the next scheduler run can include this upload
-        // once the cooldown expires.
         console.log(
-          `aggregateSlowLaneNotifications: deferring ${eligibleNotifications.length} upload(s) for explorer ${explorerId} companion ${companionId} (cooldown)`
+          `aggregateSlowLaneNotifications: deferring ${eligibleNotifications.length} ${triggerType} notification(s) for explorer ${explorerId} companion ${companionId} (cooldown)`
         );
         continue;
       }
@@ -707,11 +786,12 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
       }
 
       try {
-        const body = slowLaneBody(uniqueSenderNames(eligibleNotifications));
+        const senderNames = uniqueSenderNames(eligibleNotifications);
+        const body = buildBody(senderNames, explorerName);
         const messageId = await sendExpoPushNotification(
           pushToken,
           body,
-          slowLanePushData(explorerId, eligibleNotifications)
+          buildPushData(explorerId, eligibleNotifications)
         );
 
         await userRef.update({
@@ -721,7 +801,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
           markProcessed(notification, companionId, recipientState('sent', messageId));
         }
         console.log(
-          `aggregateSlowLaneNotifications: sent digest for explorer ${explorerId} to ${companionId} as ${messageId}`
+          `aggregateSlowLaneNotifications: sent ${triggerType} digest for explorer ${explorerId} to ${companionId} as ${messageId}`
         );
       } catch (error) {
         if (isInvalidExpoPushTokenError(error)) {
@@ -738,7 +818,7 @@ export async function aggregateSlowLaneNotifications(): Promise<void> {
         }
 
         console.error(
-          `aggregateSlowLaneNotifications: failed sending digest for explorer ${explorerId} to ${companionId}`,
+          `aggregateSlowLaneNotifications: failed sending ${triggerType} digest for explorer ${explorerId} to ${companionId}`,
           error
         );
       }
@@ -887,6 +967,11 @@ export async function sendPostingReminders(): Promise<void> {
       const userData = userSnapshot.data() ?? {};
 
       if (userData.push_notifications_enabled === false) {
+        skipped++;
+        continue;
+      }
+
+      if (userData.posting_reminders_enabled === false) {
         skipped++;
         continue;
       }

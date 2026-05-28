@@ -118,6 +118,8 @@ export default function SettingsScreen() {
   const [uploadDigestMode, setUploadDigestMode] = useState<UploadDigestMode>('batched');
   const [uploadDigestHours, setUploadDigestHours] = useState<UploadDigestHourOption>(DEFAULT_UPLOAD_DIGEST_HOURS);
   const [uploadDigestLoading, setUploadDigestLoading] = useState(true);
+  const [postingRemindersEnabled, setPostingRemindersEnabled] = useState(true);
+  const [postingRemindersLoading, setPostingRemindersLoading] = useState(true);
 
   // DELETE ACCOUNT FLOW
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -217,6 +219,8 @@ export default function SettingsScreen() {
       setUploadDigestMode(normalizeUploadDigestMode(snap.data()?.upload_digest_mode));
       setUploadDigestHours(normalizeUploadDigestHours(snap.data()?.upload_digest_hours));
       setUploadDigestLoading(false);
+      setPostingRemindersEnabled(snap.data()?.posting_reminders_enabled !== false);
+      setPostingRemindersLoading(false);
     });
     return () => unsub();
   }, [user?.uid]);
@@ -230,6 +234,18 @@ export default function SettingsScreen() {
       console.error('Failed to update push notification preference:', error);
       setPushNotificationsEnabled(!enabled);
       Alert.alert('Update Failed', 'Could not save your notification preference. Please try again.');
+    }
+  }, [user?.uid]);
+
+  const togglePostingReminders = useCallback(async (enabled: boolean) => {
+    if (!user?.uid) return;
+    setPostingRemindersEnabled(enabled);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { posting_reminders_enabled: enabled });
+    } catch (error) {
+      console.error('Failed to update sharing reminder preference:', error);
+      setPostingRemindersEnabled(!enabled);
+      Alert.alert('Update Failed', 'Could not save your reminder preference. Please try again.');
     }
   }, [user?.uid]);
 
@@ -771,7 +787,7 @@ export default function SettingsScreen() {
           <View style={{ marginBottom: 10 }}>
             <Text style={styles.rowLabel}>New Reflection Alerts</Text>
             <Text style={styles.description}>
-              When others in your Circle share Reflections.
+              When others in your Circle share Reflections or add Reactions.
             </Text>
 
             {uploadDigestLoading ? (
@@ -825,12 +841,34 @@ export default function SettingsScreen() {
 
                 <Text style={[styles.helperText, { marginTop: 8 }]}>
                   {uploadDigestMode === 'off'
-                    ? 'No alerts when others share Reflections.'
+                    ? 'No alerts when others share Reflections or add Reactions.'
                     : uploadDigestMode === 'soon'
                       ? "We'll let you know shortly after others share — without making you wait hours."
                       : `At most one grouped alert every ${uploadDigestHours} hour${uploadDigestHours === 1 ? '' : 's'}.`}
                 </Text>
               </>
+            )}
+          </View>
+
+          <View style={styles.divider} />
+
+          <View style={[styles.row, { marginBottom: 0 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>7-Day Sharing Reminder</Text>
+              <Text style={styles.description}>
+                If you have not shared a Reflection in 7 days, we will send a gentle nudge.
+              </Text>
+            </View>
+            {postingRemindersLoading ? (
+              <ActivityIndicator size="small" />
+            ) : (
+              <Switch
+                value={postingRemindersEnabled}
+                onValueChange={togglePostingReminders}
+                trackColor={{ false: '#333', true: '#2e78b7' }}
+                thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
+                disabled={!pushNotificationsEnabled}
+              />
             )}
           </View>
 

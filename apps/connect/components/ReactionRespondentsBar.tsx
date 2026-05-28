@@ -54,7 +54,7 @@ export function ReactionRespondentsBar({
       accessibilityLabel={`${faces.length} Companion reactions`}
     >
       <Text style={isCaption ? styles.captionLabel : isPlayer ? styles.playerLabel : styles.timelineLabel}>
-        {variant === 'timeline' ? 'Reactions' : 'Responses'}
+        Reactions
       </Text>
       <ScrollView
         horizontal
