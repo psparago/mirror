@@ -369,7 +369,18 @@ function ReflectionComposerInner({
     const wasThinking = prevAiThinkingRef.current;
     prevAiThinkingRef.current = isAiThinking;
     if (wasThinking && !isAiThinking && !isAiCancelled) {
-      const resolvedCaption = aiArtifacts?.caption?.trim() || caption;
+      // Baseline must match the caption that will actually be displayed, not the
+      // raw AI text. The caption-sync effect only adopts the AI caption when the
+      // current caption is empty or still equals the previous AI output; otherwise
+      // it preserves the user's caption. Storing the AI text here when the sync
+      // will preserve a divergent caption keeps getStaleKind() non-'none' forever,
+      // which loops Finish/Preview/Send back through Sparkle regeneration.
+      const nextAiCaption = aiArtifacts?.caption?.trim();
+      const lastAiCaption = lastAiCaptionRef.current?.trim() ?? '';
+      const willAdoptAiCaption =
+        !!nextAiCaption &&
+        (caption.trim() === '' || caption.trim() === lastAiCaption);
+      const resolvedCaption = willAdoptAiCaption ? nextAiCaption : caption;
       aiSnapshotRef.current = {
         trimStart: videoRangeMs?.start ?? null,
         trimEnd: videoRangeMs?.end ?? null,
@@ -407,20 +418,26 @@ function ReflectionComposerInner({
     aiArtifacts?.caption,
   ]);
 
-  const isAiStale = useCallback((): boolean => {
+  // Classifies what changed since the last successful Sparkle run:
+  //  - 'full': image/video frame or people context changed → regenerate from media.
+  //  - 'tts':  only caption text or voice changed → preserve the user's text and
+  //            just regenerate audio (TTS-only), so Finish/Preview never silently
+  //            rewrites a caption the user typed or edited.
+  //  - 'none': nothing relevant changed.
+  const getStaleKind = useCallback((): 'none' | 'tts' | 'full' => {
     const snap = aiSnapshotRef.current;
-    if (!snap) return false;
-    if (caption.trim() !== snap.caption.trim()) return true;
-    if (photoEditRevision !== snap.photoEditRevision) return true;
-    if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
-    if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
-    if (thumbnailTimeMs !== snap.thumbMs) return true;
-    if (!!companionInReflection !== snap.companionInReflection) return true;
-    if (!!explorerInReflection !== snap.explorerInReflection) return true;
-    if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return true;
-    if (captionVoice !== snap.captionVoice) return true;
-    if (deepDiveVoice !== snap.deepDiveVoice) return true;
-    return false;
+    if (!snap) return 'none';
+    if (photoEditRevision !== snap.photoEditRevision) return 'full';
+    if ((videoRangeMs?.start ?? null) !== snap.trimStart) return 'full';
+    if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return 'full';
+    if (thumbnailTimeMs !== snap.thumbMs) return 'full';
+    if (!!companionInReflection !== snap.companionInReflection) return 'full';
+    if (!!explorerInReflection !== snap.explorerInReflection) return 'full';
+    if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return 'full';
+    if (caption.trim() !== snap.caption.trim()) return 'tts';
+    if (captionVoice !== snap.captionVoice) return 'tts';
+    if (deepDiveVoice !== snap.deepDiveVoice) return 'tts';
+    return 'none';
   }, [
     caption,
     photoEditRevision,
@@ -443,6 +460,18 @@ function ReflectionComposerInner({
       ),
     [aiArtifacts],
   );
+
+  // The existing AI voice-over always corresponds to `aiArtifacts.caption` (the
+  // text the backend spoke — whether AI-drafted or the user's echoed caption).
+  // So when the displayed caption diverges from it (and there's no human voice
+  // intro), the spoken audio is stale until the next Sparkle run re-records it.
+  const captionVoiceStale = useMemo(() => {
+    if (audioUri) return false;
+    if (!aiArtifacts?.audioUrl) return false;
+    const recordedFor = aiArtifacts?.caption?.trim() ?? '';
+    if (!recordedFor) return false;
+    return caption.trim() !== recordedFor;
+  }, [audioUri, aiArtifacts?.audioUrl, aiArtifacts?.caption, caption]);
 
   useEffect(() => {
     if (!hasAnyAiArtifacts) return;
@@ -473,15 +502,23 @@ function ReflectionComposerInner({
   ]);
 
   const buildSparkleOptions = useCallback(
-    (mode: 'full' | 'ttsOnly' = 'full'): TriggerMagicOptions => {
+    (mode: 'full' | 'ttsOnly' | 'keepCaption' = 'full'): TriggerMagicOptions => {
       const options: TriggerMagicOptions = {
         captionVoice,
         deepDiveVoice,
       };
       if (mode === 'ttsOnly') {
+        // Preserve both the user's caption and the existing deep dive; only the
+        // audio is regenerated (e.g. caption edit or voice change before Send).
         options.targetCaption = caption.trim() || undefined;
         options.targetDeepDive = aiArtifacts?.deepDive?.trim() || undefined;
         options.preserveStaging = true;
+      } else if (mode === 'keepCaption') {
+        // The user typed their own caption: it is authoritative. Lock it as the
+        // caption (and TTS source) but let Sparkle still draft the deep dive from
+        // the media/context. Omitting targetDeepDive makes the backend regenerate
+        // the deep dive while echoing the caption verbatim for the voice-over.
+        options.targetCaption = caption.trim() || undefined;
       }
       return options;
     },
@@ -535,17 +572,35 @@ function ReflectionComposerInner({
     ],
   );
 
+  // Decides which Sparkle mode a (re)run should use. Invariant: whatever the user
+  // has in the caption box is what gets spoken. If they typed their own caption
+  // (non-empty and different from the last AI draft) we lock it as the TTS source —
+  // 'ttsOnly' when only text/voice changed, 'keepCaption' when the deep dive must
+  // also be redrafted (media/context changed). Only an empty box or an untouched
+  // AI draft lets the backend draft (and speak) a fresh caption.
+  const resolveSparkleMode = useCallback(
+    (noPriorRun: boolean, staleKind: 'none' | 'tts' | 'full'): 'full' | 'ttsOnly' | 'keepCaption' => {
+      if (!noPriorRun && staleKind === 'tts') return 'ttsOnly';
+      const lastAi = lastAiCaptionRef.current?.trim() ?? '';
+      const userOwnsCaption = caption.trim() !== '' && caption.trim() !== lastAi;
+      return userOwnsCaption ? 'keepCaption' : 'full';
+    },
+    [caption],
+  );
+
   const ensureAiCurrent = useCallback(
     (): boolean => {
-      const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
-      if (!needsRun) return true;
+      const noPriorRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
+      const staleKind = getStaleKind();
+      if (!noPriorRun && staleKind === 'none') return true;
       autoAdvanceRef.current = false;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(buildSparkleOptions()).catch(() => {});
+      const mode = resolveSparkleMode(noPriorRun, staleKind);
+      onTriggerMagic(buildSparkleOptions(mode)).catch(() => {});
       return false;
     },
-    [hasAnyAiArtifacts, isAiStale, onTriggerMagic, buildSparkleOptions],
+    [hasAnyAiArtifacts, getStaleKind, resolveSparkleMode, onTriggerMagic, buildSparkleOptions],
   );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
@@ -1226,18 +1281,20 @@ function ReflectionComposerInner({
   const goToSend = useCallback(() => {
     void stopAiPreviewRef.current?.();
     Keyboard.dismiss();
-    const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
-    if (needsRun) {
+    const noPriorRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
+    const staleKind = getStaleKind();
+    if (noPriorRun || staleKind !== 'none') {
       autoAdvanceRef.current = true;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(buildSparkleOptions()).catch(() => {
+      const mode = resolveSparkleMode(noPriorRun, staleKind);
+      onTriggerMagic(buildSparkleOptions(mode)).catch(() => {
         autoAdvanceRef.current = false;
       });
       return;
     }
     onStageChange('send');
-  }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, buildSparkleOptions]);
+  }, [hasAnyAiArtifacts, getStaleKind, resolveSparkleMode, onStageChange, onTriggerMagic, buildSparkleOptions]);
 
   // Confirm before discarding whenever the user has Sparkle results, regardless of stage.
   const handleRequestClose = useCallback(() => {
@@ -1392,10 +1449,17 @@ function ReflectionComposerInner({
     wantsAutoPlayRef.current = true;
     autoAdvanceRef.current = false;
     setIsAiCancelled(false);
-    onTriggerMagic(buildSparkleOptions()).catch(() => {
+    // If the caption is the user's own text (non-empty and different from the
+    // last AI draft), Sparkle must keep and speak it rather than drafting and
+    // speaking a fresh AI caption. An empty caption or an untouched AI draft
+    // still gets a full (re)draft, preserving "run Sparkle again to refresh".
+    const lastAi = lastAiCaptionRef.current?.trim() ?? '';
+    const userOwnsCaption = caption.trim() !== '' && caption.trim() !== lastAi;
+    const mode = userOwnsCaption ? 'keepCaption' : 'full';
+    onTriggerMagic(buildSparkleOptions(mode)).catch(() => {
       wantsAutoPlayRef.current = false;
     });
-  }, [onTriggerMagic, buildSparkleOptions]);
+  }, [caption, onTriggerMagic, buildSparkleOptions]);
 
   // --- RENDERERS ---
 
@@ -2062,6 +2126,14 @@ function ReflectionComposerInner({
               <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
               <Text style={styles.aiCaptionDoneText}>Done editing</Text>
             </TouchableOpacity>
+          ) : null}
+          {captionVoiceStale ? (
+            <View style={styles.captionVoiceStaleRow}>
+              <FontAwesome name="magic" size={12} color="#f0c674" />
+              <Text style={styles.captionVoiceStaleText}>
+                Voice will update to match this caption on the next Sparkle run.
+              </Text>
+            </View>
           ) : null}
         </View>
 
@@ -3459,6 +3531,21 @@ const styles = StyleSheet.create({
     color: '#dbeafe',
     fontSize: 11,
     fontWeight: '700',
+  },
+  captionVoiceStaleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(240,198,116,0.18)',
+  },
+  captionVoiceStaleText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16,
+    color: 'rgba(240,198,116,0.85)',
   },
   aiFooter: {
     borderTopWidth: StyleSheet.hairlineWidth,
