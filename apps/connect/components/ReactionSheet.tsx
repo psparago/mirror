@@ -1,5 +1,9 @@
-import { REACTION_PARENT_VOLUME } from '@/utils/reactionPlayback';
+import { REACTION_PARENT_RECORDING_VOLUME } from '@/utils/reactionPlayback';
 import { uploadReaction } from '@/utils/reactionUpload';
+import {
+  configureConnectPlaybackAudioSessionAsync,
+  configureConnectReactionRecordingAudioSessionAsync,
+} from '@/utils/audioSession';
 import { FontAwesome } from '@expo/vector-icons';
 import { useAuth, useExplorer, VideoTrimSlider, type ReactionType } from '@projectmirror/shared';
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
@@ -90,13 +94,13 @@ export function ReactionSheet({
   const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
-  const [isSendPreviewPlaying, setIsSendPreviewPlaying] = useState(false);
-  const [showSendPreviewReplay, setShowSendPreviewReplay] = useState(false);
   const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
+  const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
+  const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sendPreviewStopPendingRef = useRef(false);
+  const companionPreviewStopPendingRef = useRef(false);
 
   const isVideoParent = parentMedia?.mediaType === 'video';
   const isImageParent = parentMedia?.mediaType === 'image';
@@ -107,7 +111,8 @@ export function ReactionSheet({
   const parentPosterUri = isVideoParent ? parentVideoUrl : parentImageUrl;
 
   const videoRef = useRef<Video>(null);
-  const selfiePreviewRef = useRef<Video>(null);
+  const companionParentRef = useRef<Video>(null);
+  const companionSelfieRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
   const recordingPromiseRef = useRef<Promise<{ uri: string } | undefined> | null>(null);
   const parentVideoWidthRef = useRef(0);
@@ -126,9 +131,10 @@ export function ReactionSheet({
   const isPreviewPlayingRef = useRef(false);
   const lastPanSeekAtRef = useRef(0);
   const lastParentVolumeApplyRef = useRef(0);
+  const lastCompanionParentVolumeApplyRef = useRef(0);
 
   const getReactionParentVolume = useCallback(
-    () => (isParentReflectionMutedRef.current ? 0 : REACTION_PARENT_VOLUME),
+    () => (isParentReflectionMutedRef.current ? 0 : REACTION_PARENT_RECORDING_VOLUME),
     [],
   );
 
@@ -139,62 +145,123 @@ export function ReactionSheet({
     );
   }, [getReactionParentVolume]);
 
-  const finishSendPreview = useCallback(async () => {
-    if (sendPreviewStopPendingRef.current) return;
-    sendPreviewStopPendingRef.current = true;
-    setIsSendPreviewPlaying(false);
-    setShowSendPreviewReplay(true);
-    await runVideoCommand(() => videoRef.current?.pauseAsync(), 'send preview pause failed');
+  const finishCompanionPreview = useCallback(async () => {
+    if (companionPreviewStopPendingRef.current) return;
+    companionPreviewStopPendingRef.current = true;
+    setCompanionPreviewPlaying(false);
+    await companionSelfieRef.current?.pauseAsync().catch(() => {});
+    await runVideoCommand(() => companionParentRef.current?.pauseAsync(), 'companion preview pause failed');
     if (isVideoParent && syncStartTimeMillis != null) {
-      positionMillisRef.current = syncStartTimeMillis;
-      setPositionMillis(syncStartTimeMillis);
       await runVideoCommand(
         () =>
-          videoRef.current?.setStatusAsync({
+          companionParentRef.current?.setStatusAsync({
             positionMillis: syncStartTimeMillis,
             shouldPlay: false,
             volume: getReactionParentVolume(),
           }),
-        'send preview reset failed',
+        'companion preview reset failed',
       );
     }
-    await selfiePreviewRef.current?.pauseAsync().catch(() => {});
-    sendPreviewStopPendingRef.current = false;
+    companionPreviewStopPendingRef.current = false;
   }, [getReactionParentVolume, isVideoParent, syncStartTimeMillis]);
 
-  const startSendPreview = useCallback(async () => {
+  const startCompanionPreview = useCallback(async () => {
     if (!recordedUri) return;
-    setShowSendPreviewReplay(false);
-    setIsSendPreviewPlaying(true);
-    sendPreviewStopPendingRef.current = false;
+    setCompanionPreviewPlaying(true);
+    companionPreviewStopPendingRef.current = false;
 
-    await selfiePreviewRef.current
-      ?.setStatusAsync({ positionMillis: 0, shouldPlay: true })
+    try {
+      await configureConnectPlaybackAudioSessionAsync();
+    } catch (error) {
+      console.warn('[ReactionSheet] preview audio session failed:', error);
+    }
+
+    await companionSelfieRef.current
+      ?.setStatusAsync({
+        positionMillis: 0,
+        shouldPlay: true,
+        isMuted: false,
+        volume: 1.0,
+      })
       .catch(() => {});
 
     if (isVideoParent && syncStartTimeMillis != null) {
-      positionMillisRef.current = syncStartTimeMillis;
-      setPositionMillis(syncStartTimeMillis);
       await runVideoCommand(
         () =>
-          videoRef.current?.setStatusAsync({
+          companionParentRef.current?.setStatusAsync({
             positionMillis: syncStartTimeMillis,
             shouldPlay: true,
+            isMuted: false,
             volume: getReactionParentVolume(),
           }),
-        'failed to start send preview',
+        'failed to start companion preview',
       );
     }
   }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
 
-  const replaySendPreview = useCallback(() => {
-    void startSendPreview();
-  }, [startSendPreview]);
+  const openCompanionPreview = useCallback(() => {
+    setCompanionPreviewOpen(true);
+  }, []);
+
+  const closeCompanionPreview = useCallback(() => {
+    setCompanionPreviewOpen(false);
+    setCompanionPreviewPlaying(false);
+    companionPreviewStopPendingRef.current = false;
+    void companionSelfieRef.current?.pauseAsync().catch(() => {});
+    void companionParentRef.current?.pauseAsync().catch(() => {});
+  }, []);
 
   useEffect(() => {
-    if (!recordedUri || reactionMode !== 'selfie') return;
-    void startSendPreview();
-  }, [recordedUri, reactionMode, startSendPreview]);
+    if (!companionPreviewOpen || !recordedUri) return;
+    void startCompanionPreview();
+  }, [companionPreviewOpen, recordedUri, startCompanionPreview]);
+
+  const handleCompanionParentStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!status.isLoaded || !companionPreviewOpen || !companionPreviewPlaying || !isVideoParent) {
+        return;
+      }
+      const now = Date.now();
+      if (now - lastCompanionParentVolumeApplyRef.current >= 200) {
+        lastCompanionParentVolumeApplyRef.current = now;
+        void companionParentRef.current
+          ?.setVolumeAsync(getReactionParentVolume())
+          .catch(() => {});
+      }
+      if (!status.isPlaying || syncStartTimeMillis == null) return;
+      const previewEndMs =
+        syncEndTimeMillis ??
+        (syncStartTimeMillis != null ? status.durationMillis ?? durationMillisRef.current : 0);
+      if (
+        previewEndMs > syncStartTimeMillis &&
+        status.positionMillis >= previewEndMs - PREVIEW_END_EPSILON_MS
+      ) {
+        void finishCompanionPreview();
+      }
+    },
+    [
+      companionPreviewOpen,
+      companionPreviewPlaying,
+      finishCompanionPreview,
+      getReactionParentVolume,
+      isVideoParent,
+      syncEndTimeMillis,
+      syncStartTimeMillis,
+    ],
+  );
+
+  const handleCompanionSelfieStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!status.isLoaded || !companionPreviewOpen || !companionPreviewPlaying) return;
+      if (!status.didJustFinish) return;
+      if (isVideoParent) {
+        void finishCompanionPreview();
+        return;
+      }
+      void finishCompanionPreview();
+    },
+    [companionPreviewOpen, companionPreviewPlaying, finishCompanionPreview, isVideoParent],
+  );
 
   const SEEK_TOLERANCE = useMemo(
     () => ({ toleranceMillisBefore: 0, toleranceMillisAfter: 0 }),
@@ -244,13 +311,7 @@ export function ReactionSheet({
     void (async () => {
       const micPermission = await requestRecordingPermissionsAsync();
       setMicReady(micPermission.granted);
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
+      await configureConnectReactionRecordingAudioSessionAsync();
       let current = await Camera.getCameraPermissionsAsync();
       if (!current.granted && current.canAskAgain) {
         current = await Camera.requestCameraPermissionsAsync();
@@ -363,10 +424,10 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
-    setIsSendPreviewPlaying(false);
-    setShowSendPreviewReplay(false);
+    setCompanionPreviewOpen(false);
+    setCompanionPreviewPlaying(false);
+    companionPreviewStopPendingRef.current = false;
     setShowTrimPreviewReplay(false);
-    sendPreviewStopPendingRef.current = false;
     setTrimStartMs(0);
     setTrimEndMs(0);
     trimStartMsRef.current = 0;
@@ -503,16 +564,6 @@ export function ReactionSheet({
     }
   }, [getReactionParentVolume, isVideoParent]);
 
-  const handleSelfiePreviewStatusUpdate = useCallback(
-    (status: AVPlaybackStatus) => {
-      if (!status.isLoaded || !recordedUri || !isSendPreviewPlaying) return;
-      if (!status.didJustFinish) return;
-      if (isVideoParent) return;
-      void finishSendPreview();
-    },
-    [finishSendPreview, isSendPreviewPlaying, isVideoParent, recordedUri],
-  );
-
   const handlePlaybackStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
       if (!status.isLoaded) return;
@@ -532,26 +583,6 @@ export function ReactionSheet({
       }
 
       if (recordedUri && isVideoParent) {
-        if (!isScrubbingRef.current) {
-          positionMillisRef.current = status.positionMillis;
-          setPositionMillis(status.positionMillis);
-        }
-
-        if (
-          isSendPreviewPlaying &&
-          syncStartTimeMillis != null &&
-          status.isPlaying
-        ) {
-          const previewEndMs =
-            syncEndTimeMillis ??
-            (syncStartTimeMillis != null ? durationMillisRef.current : duration);
-          if (
-            previewEndMs > syncStartTimeMillis &&
-            status.positionMillis >= previewEndMs - PREVIEW_END_EPSILON_MS
-          ) {
-            void finishSendPreview();
-          }
-        }
         return;
       }
 
@@ -587,14 +618,9 @@ export function ReactionSheet({
     },
     [
       applyParentReflectionVolume,
-      finishSendPreview,
-      getReactionParentVolume,
-      isSendPreviewPlaying,
       isVideoParent,
       stopPreviewAtTrimEnd,
       recordedUri,
-      syncEndTimeMillis,
-      syncStartTimeMillis,
       isRecording,
     ],
   );
@@ -791,6 +817,11 @@ export function ReactionSheet({
     }
 
     if (isVideoParent) {
+      try {
+        await configureConnectReactionRecordingAudioSessionAsync();
+      } catch (error) {
+        console.warn('[ReactionSheet] recording audio session failed:', error);
+      }
       void runVideoCommand(
         () =>
           videoRef.current?.setStatusAsync({
@@ -903,9 +934,9 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
-    setIsSendPreviewPlaying(false);
-    setShowSendPreviewReplay(false);
-    sendPreviewStopPendingRef.current = false;
+    setCompanionPreviewOpen(false);
+    setCompanionPreviewPlaying(false);
+    companionPreviewStopPendingRef.current = false;
     setCameraReady(false);
     bumpCameraInstance();
     scheduleAndroidCameraRemount();
@@ -1005,6 +1036,7 @@ export function ReactionSheet({
   ]);
 
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
+  const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
   const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
   const isPreviewMode = isSelfiePreviewMode || isVoicePreviewMode;
   const isCameraGranted =
@@ -1032,18 +1064,79 @@ export function ReactionSheet({
     >
       <GestureHandlerRootView style={styles.container}>
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
-          <Text style={styles.headerTitle}>Live Sync Reaction</Text>
-          <Pressable
-            style={styles.closeButton}
-            onPress={onClose}
-            disabled={isUploading}
-            accessibilityRole="button"
-            accessibilityLabel="Close reaction recorder"
-          >
-            <FontAwesome name="times" size={18} color="#fff" />
-          </Pressable>
+          {companionPreviewOpen ? (
+            <>
+              <Pressable
+                style={styles.backButton}
+                onPress={closeCompanionPreview}
+                disabled={isUploading}
+                accessibilityRole="button"
+                accessibilityLabel="Back to reaction"
+              >
+                <FontAwesome name="chevron-left" size={16} color="#fff" />
+              </Pressable>
+              <Text style={[styles.headerTitle, styles.headerTitleCentered]}>Preview</Text>
+              <View style={styles.closeButtonSpacer} />
+            </>
+          ) : (
+            <>
+              <Text style={styles.headerTitle}>Live Sync Reaction</Text>
+              <Pressable
+                style={styles.closeButton}
+                onPress={onClose}
+                disabled={isUploading}
+                accessibilityRole="button"
+                accessibilityLabel="Close reaction recorder"
+              >
+                <FontAwesome name="times" size={18} color="#fff" />
+              </Pressable>
+            </>
+          )}
         </View>
 
+        {companionPreviewOpen && recordedUri ? (
+          <View style={styles.companionPreviewStage}>
+            <View style={styles.companionPreviewFrame}>
+              {isVideoParent ? (
+                <Video
+                  ref={companionParentRef}
+                  source={{ uri: parentVideoUrl }}
+                  style={styles.companionPreviewMainVideo}
+                  resizeMode={ResizeMode.CONTAIN}
+                  shouldPlay={false}
+                  isLooping={false}
+                  isMuted={isParentReflectionMuted}
+                  volume={isParentReflectionMuted ? 0 : REACTION_PARENT_RECORDING_VOLUME}
+                  progressUpdateIntervalMillis={100}
+                  onPlaybackStatusUpdate={handleCompanionParentStatusUpdate}
+                />
+              ) : (
+                <Image
+                  source={{ uri: parentImageUrl }}
+                  style={styles.companionPreviewMainVideo}
+                  contentFit="contain"
+                />
+              )}
+              <Video
+                ref={companionSelfieRef}
+                source={{ uri: recordedUri }}
+                style={[styles.companionSelfiePip, styles.reactionPipVideo]}
+                resizeMode={ResizeMode.COVER}
+                shouldPlay={false}
+                isLooping={false}
+                isMuted={false}
+                volume={1.0}
+                progressUpdateIntervalMillis={100}
+                onPlaybackStatusUpdate={handleCompanionSelfieStatusUpdate}
+              />
+            </View>
+            <Text style={styles.companionPreviewHint}>
+              {isVideoParent
+                ? 'This is how your Companions will see your reaction. Your voice is front and center; the Reflection plays softly in the background.'
+                : 'This is how your Companions will see your reaction on this photo.'}
+            </Text>
+          </View>
+        ) : (
         <View style={styles.splitPane}>
           <View style={styles.parentVideoPane}>
             <View style={styles.mediaCard}>
@@ -1064,7 +1157,7 @@ export function ReactionSheet({
                         shouldPlay={false}
                         isLooping={false}
                         isMuted={isParentReflectionMuted}
-                        volume={isParentReflectionMuted ? 0 : REACTION_PARENT_VOLUME}
+                        volume={isParentReflectionMuted ? 0 : REACTION_PARENT_RECORDING_VOLUME}
                         progressUpdateIntervalMillis={100}
                         onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                       />
@@ -1141,47 +1234,10 @@ export function ReactionSheet({
                         </Pressable>
                       </View>
                     </>
-                  ) : isSelfiePreviewMode ? (
-                    <>
-                      {!showSendPreviewReplay ? (
-                        <Pressable
-                          style={styles.playbackControl}
-                          onPress={toggleParentReflectionMute}
-                          accessibilityRole="button"
-                          accessibilityLabel={
-                            isParentReflectionMuted
-                              ? 'Unmute Reflection audio'
-                              : 'Mute Reflection audio'
-                          }
-                        >
-                          <FontAwesome
-                            name={isParentReflectionMuted ? 'volume-off' : 'volume-down'}
-                            size={14}
-                            color="#fff"
-                          />
-                          <Text style={styles.playbackControlText}>
-                            {isParentReflectionMuted
-                              ? 'Reflection muted'
-                              : 'Reflection audio (15%) — preview sync'}
-                          </Text>
-                        </Pressable>
-                      ) : (
-                        <Pressable
-                          style={styles.playbackControl}
-                          onPress={replaySendPreview}
-                          accessibilityRole="button"
-                          accessibilityLabel="Replay reaction preview"
-                        >
-                          <FontAwesome name="repeat" size={14} color="#fff" />
-                          <Text style={styles.playbackControlText}>Replay preview</Text>
-                        </Pressable>
-                      )}
-                      <Text style={styles.selfiePreviewHint}>
-                        {showSendPreviewReplay
-                          ? 'Preview finished. Tap replay to watch again before sending.'
-                          : 'Your voice is in the recording. This preview plays the Reflection quietly so you can check timing.'}
-                      </Text>
-                    </>
+                  ) : isSelfieTakeComplete ? (
+                    <Text style={styles.selfiePreviewHint}>
+                      Tap Preview below to see how Companions will view your reaction.
+                    </Text>
                   ) : null}
                 </>
               ) : (
@@ -1198,34 +1254,13 @@ export function ReactionSheet({
 
           <View style={styles.cameraPane}>
             <View style={styles.mediaCard}>
-              {isSelfiePreviewMode ? (
-                <View style={styles.cameraStageHost}>
-                  <View style={styles.cameraStage}>
-                    <Video
-                      ref={selfiePreviewRef}
-                      source={{ uri: recordedUri! }}
-                      style={styles.selfiePreviewVideo}
-                      resizeMode={ResizeMode.COVER}
-                      shouldPlay={isSendPreviewPlaying}
-                      isLooping={false}
-                      isMuted
-                      progressUpdateIntervalMillis={100}
-                      onPlaybackStatusUpdate={handleSelfiePreviewStatusUpdate}
-                    />
-                    {showSendPreviewReplay ? (
-                      <View style={styles.replayOverlay}>
-                        <Pressable
-                          style={styles.replayButton}
-                          onPress={replaySendPreview}
-                          accessibilityRole="button"
-                          accessibilityLabel="Replay reaction preview"
-                        >
-                          <FontAwesome name="repeat" size={24} color="#fff" />
-                          <Text style={styles.replayText}>Replay</Text>
-                        </Pressable>
-                      </View>
-                    ) : null}
-                  </View>
+              {isSelfieTakeComplete ? (
+                <View style={styles.takeCompletePane}>
+                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
+                  <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
+                  <Text style={styles.takeCompleteHint}>
+                    Preview how Companions will see it, or retake if you want another try.
+                  </Text>
                 </View>
               ) : isVoicePreviewMode ? (
                 <View style={styles.altModePane}>
@@ -1326,8 +1361,10 @@ export function ReactionSheet({
             </View>
           </View>
         </View>
+        )}
 
         <View style={[styles.interactionFooter, { paddingBottom: insets.bottom }]}>
+          {!companionPreviewOpen ? (
           <View style={styles.modePicker}>
             {(
               [
@@ -1359,8 +1396,69 @@ export function ReactionSheet({
               );
             })}
           </View>
+          ) : null}
 
-          {isPreviewMode ? (
+          {companionPreviewOpen ? (
+            <View style={styles.previewActions}>
+              {isUploading ? (
+                <ActivityIndicator color="#fff" style={styles.uploadingSpinner} />
+              ) : null}
+              <Pressable
+                style={[styles.retakeButton, isUploading && styles.previewButtonDisabled]}
+                onPress={handleRetake}
+                disabled={isUploading}
+                accessibilityRole="button"
+                accessibilityLabel="Retake reaction"
+              >
+                <FontAwesome name="refresh" size={15} color="#fff" />
+                <Text style={styles.retakeButtonText}>Retake</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.previewPlayButton,
+                  (isUploading || companionPreviewPlaying) && styles.previewButtonDisabled,
+                ]}
+                onPress={() => void startCompanionPreview()}
+                disabled={isUploading || companionPreviewPlaying}
+                accessibilityRole="button"
+                accessibilityLabel="Preview reaction"
+              >
+                <FontAwesome name="play" size={15} color="#fff" />
+                <Text style={styles.previewPlayButtonText}>Preview</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.sendButton, isUploading && styles.previewButtonDisabled]}
+                onPress={handleSend}
+                disabled={isUploading}
+                accessibilityRole="button"
+                accessibilityLabel="Send reaction"
+              >
+                <FontAwesome name="paper-plane" size={15} color="#fff" />
+                <Text style={styles.sendButtonText}>Send</Text>
+              </Pressable>
+            </View>
+          ) : isSelfieTakeComplete ? (
+            <View style={styles.previewActions}>
+              <Pressable
+                style={styles.retakeButton}
+                onPress={handleRetake}
+                accessibilityRole="button"
+                accessibilityLabel="Retake reaction"
+              >
+                <FontAwesome name="refresh" size={15} color="#fff" />
+                <Text style={styles.retakeButtonText}>Retake</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.previewPlayButton, styles.previewPlayButtonFlex]}
+                onPress={openCompanionPreview}
+                accessibilityRole="button"
+                accessibilityLabel="Preview reaction"
+              >
+                <FontAwesome name="play" size={15} color="#fff" />
+                <Text style={styles.previewPlayButtonText}>Preview</Text>
+              </Pressable>
+            </View>
+          ) : isVoicePreviewMode ? (
             <View style={styles.previewActions}>
               {isUploading ? (
                 <ActivityIndicator color="#fff" style={styles.uploadingSpinner} />
@@ -1454,6 +1552,22 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '700',
+  },
+  headerTitleCentered: {
+    flex: 1,
+    textAlign: 'center',
+  },
+  backButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  closeButtonSpacer: {
+    width: 36,
+    height: 36,
   },
   closeButton: {
     width: 40,
@@ -1751,6 +1865,86 @@ const styles = StyleSheet.create({
     gap: 10,
     alignItems: 'center',
     width: '100%',
+  },
+  previewPlayButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  previewPlayButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  previewPlayButtonFlex: {
+    flex: 1,
+  },
+  companionPreviewStage: {
+    flex: 1,
+    minHeight: 0,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  companionPreviewFrame: {
+    flex: 1,
+    minHeight: 0,
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#1a3a44',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  companionPreviewMainVideo: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#101820',
+  },
+  reactionPipVideo: {
+    position: 'absolute',
+    top: 14,
+    right: 14,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.4)',
+    backgroundColor: '#000',
+    zIndex: 5,
+  },
+  companionSelfiePip: {
+    width: 112,
+    height: 150,
+    borderRadius: 14,
+  },
+  companionPreviewHint: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
+  takeCompletePane: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 20,
+  },
+  takeCompleteTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  takeCompleteHint: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 18,
   },
   uploadingSpinner: {
     marginRight: 4,

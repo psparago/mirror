@@ -10,13 +10,14 @@ import {
   resolveReactionParentPipMedia,
   resolveReactionPlaybackType,
   resolveReactionResponderFaces,
+  REACTION_PARENT_PLAYBACK_VOLUME,
   type ReactionParentPipMedia,
   type ReactionPlaybackSession,
   type ReactionResponderFace,
 } from '@/utils/reactionPlayback';
 import { CompanionAvatar, Event, EventMetadata, getCloudMasterTrimWindow, getVideoParkSeekSec, playerMachine, seekVideoToSeconds, WaitOverlay } from '@projectmirror/shared';
 import { useMachine } from '@xstate/react';
-import { Audio, ResizeMode, Video as AvVideo } from 'expo-av';
+import { Audio, ResizeMode, Video as AvVideo, type AVPlaybackStatus } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
@@ -109,12 +110,21 @@ export function ReplayModal({
   const [resolvedParentPip, setResolvedParentPip] = useState<ReactionParentPipMedia | null>(null);
   const pipVideoRef = useRef<AvVideo>(null);
   const pipAlignedForEventRef = useRef<string | null>(null);
+  const selfieUsesParentMainStageRef = useRef(false);
 
   const displayEvent = playbackEvent ?? event;
   const isReactionPlayback = displayEvent?.isReaction === true;
   const reactionPlaybackType = resolveReactionPlaybackType(displayEvent);
   const isSelfieReactionPlayback = isReactionPlayback && reactionPlaybackType === 'selfie';
   const preferParentImagePip = isReactionPlayback && reactionPlaybackType !== 'selfie';
+  const selfieUsesParentMainStage =
+    isSelfieReactionPlayback &&
+    resolvedParentPip?.mediaType === 'video' &&
+    !!displayEvent?.video_url;
+
+  useEffect(() => {
+    selfieUsesParentMainStageRef.current = selfieUsesParentMainStage;
+  }, [selfieUsesParentMainStage]);
 
   const reactionCaptionText = useMemo(() => {
     if (!isReactionPlayback) return null;
@@ -186,27 +196,54 @@ export function ReplayModal({
   }, [visible, event?.event_id]);
 
   useEffect(() => {
-    if (!visible || !displayEvent?.video_url) return;
+    if (!visible) return;
+    const url = selfieUsesParentMainStage
+      ? resolvedParentPip?.url
+      : displayEvent?.video_url;
+    if (!url) return;
     try {
-      videoPlayer.replace(displayEvent.video_url);
+      videoPlayer.replace(url);
+      videoPlayer.muted = false;
+      videoPlayer.volume = selfieUsesParentMainStage ? REACTION_PARENT_PLAYBACK_VOLUME : 1;
       setVideoReady(false);
       videoFinishHandledForEventRef.current = null;
     } catch (error) {
       console.warn('[ReplayModal] video replace failed:', error);
     }
-  }, [visible, displayEvent?.event_id, displayEvent?.video_url, videoPlayer]);
+  }, [
+    displayEvent?.event_id,
+    displayEvent?.video_url,
+    resolvedParentPip?.url,
+    selfieUsesParentMainStage,
+    videoPlayer,
+    visible,
+  ]);
 
-  const alignPipToSyncStart = useCallback(async () => {
+  const alignReactionPlayback = useCallback(async () => {
     if (!isReactionPlayback) return;
     const syncMs = displayEvent?.syncStartTimeMillis ?? 0;
     try {
+      if (selfieUsesParentMainStage) {
+        seekVideoToSeconds(videoPlayer, syncMs / 1000);
+        videoPlayer.muted = false;
+        videoPlayer.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+        await pipVideoRef.current?.setPositionAsync(0);
+        await pipVideoRef.current?.setIsMutedAsync(false);
+        await pipVideoRef.current?.setVolumeAsync(1);
+        return;
+      }
       await pipVideoRef.current?.setIsMutedAsync(true);
       await pipVideoRef.current?.setVolumeAsync(0);
       await pipVideoRef.current?.setPositionAsync(syncMs);
     } catch (error) {
-      console.warn('[ReplayModal] PiP align failed:', error);
+      console.warn('[ReplayModal] reaction playback align failed:', error);
     }
-  }, [displayEvent?.syncStartTimeMillis, isReactionPlayback]);
+  }, [
+    displayEvent?.syncStartTimeMillis,
+    isReactionPlayback,
+    selfieUsesParentMainStage,
+    videoPlayer,
+  ]);
 
   useEffect(() => {
     if (!visible || !isReactionPlayback) {
@@ -257,32 +294,40 @@ export function ReplayModal({
   ]);
 
   const resolvedParentVideoUrl =
-    resolvedParentPip?.mediaType === 'video' && isSelfieReactionPlayback
+    resolvedParentPip?.mediaType === 'video' && isSelfieReactionPlayback && !selfieUsesParentMainStage
       ? resolvedParentPip.url
       : null;
+  const reactionSelfiePipUrl =
+    selfieUsesParentMainStage ? displayEvent?.video_url ?? null : null;
+  const reactionPipVideoActive = !!(resolvedParentVideoUrl || reactionSelfiePipUrl);
 
   useEffect(() => {
-    if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
+    if (!visible || !isReactionPlayback || !reactionPipVideoActive) return;
     if (pipAlignedForEventRef.current === displayEvent?.event_id) return;
     pipAlignedForEventRef.current = displayEvent?.event_id ?? null;
-    void alignPipToSyncStart();
+    void alignReactionPlayback();
   }, [
-    alignPipToSyncStart,
+    alignReactionPlayback,
     displayEvent?.event_id,
     isReactionPlayback,
-    resolvedParentVideoUrl,
+    reactionPipVideoActive,
     visible,
   ]);
 
   useEffect(() => {
-    if (!visible || !isReactionPlayback || !resolvedParentVideoUrl) return;
+    if (!visible || !isReactionPlayback || !reactionPipVideoActive) return;
 
     const syncPipPlayback = (shouldPlay: boolean) => {
       if (shouldPlay) {
         void (async () => {
           try {
-            await pipVideoRef.current?.setIsMutedAsync(true);
-            await pipVideoRef.current?.setVolumeAsync(0);
+            if (selfieUsesParentMainStage) {
+              await pipVideoRef.current?.setIsMutedAsync(false);
+              await pipVideoRef.current?.setVolumeAsync(1);
+            } else {
+              await pipVideoRef.current?.setIsMutedAsync(true);
+              await pipVideoRef.current?.setVolumeAsync(0);
+            }
             await pipVideoRef.current?.playAsync();
           } catch {
             // PiP sync is best-effort
@@ -302,6 +347,7 @@ export function ReplayModal({
     });
 
     const endSub = videoPlayer.addListener('playToEnd', () => {
+      if (selfieUsesParentMainStage) return;
       void pipVideoRef.current?.pauseAsync().catch(() => {});
     });
 
@@ -313,7 +359,8 @@ export function ReplayModal({
   }, [
     displayEvent?.event_id,
     isReactionPlayback,
-    resolvedParentVideoUrl,
+    reactionPipVideoActive,
+    selfieUsesParentMainStage,
     videoPlayer,
     visible,
   ]);
@@ -706,9 +753,20 @@ export function ReplayModal({
           const trim = getCloudMasterTrimWindow(eventRef.current?.metadata);
           if (trim.active) {
             seekVideoToSeconds(videoPlayer, trim.startSec);
+          } else if (
+            eventRef.current?.isReaction &&
+            resolveReactionPlaybackType(eventRef.current) === 'selfie' &&
+            selfieUsesParentMainStageRef.current
+          ) {
+            seekVideoToSeconds(
+              videoPlayer,
+              (eventRef.current.syncStartTimeMillis ?? 0) / 1000,
+            );
           }
           videoPlayer.muted = false;
-          videoPlayer.volume = 1;
+          videoPlayer.volume = selfieUsesParentMainStageRef.current
+            ? REACTION_PARENT_PLAYBACK_VOLUME
+            : 1;
           videoPlayer.play();
         } catch (e) {
           console.warn('[ReplayModal] playVideo failed:', e);
@@ -873,12 +931,27 @@ export function ReplayModal({
       videoPlayer.pause();
       seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(meta));
       videoPlayer.muted = false;
-      videoPlayer.volume = 1;
+      videoPlayer.volume = selfieUsesParentMainStageRef.current
+        ? REACTION_PARENT_PLAYBACK_VOLUME
+        : 1;
     } catch {
       // player may be tearing down
     }
     setVideoReady(false);
   }, [videoPlayer]);
+
+  useEffect(() => {
+    if (!visible || !selfieUsesParentMainStage) return;
+    const sub = videoPlayer.addListener('playingChange', () => {
+      try {
+        videoPlayer.muted = false;
+        videoPlayer.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+      } catch {
+        // player may be tearing down
+      }
+    });
+    return () => sub.remove();
+  }, [selfieUsesParentMainStage, videoPlayer, visible]);
 
   const signalVideoFinished = useCallback(() => {
     const currentState = stateRef.current;
@@ -900,6 +973,20 @@ export function ReplayModal({
   useEffect(() => {
     signalVideoFinishedRef.current = signalVideoFinished;
   }, [signalVideoFinished]);
+
+  const handleSelfiePipStatusUpdate = useCallback(
+    (status: AVPlaybackStatus) => {
+      if (!selfieUsesParentMainStage || !status.isLoaded || !status.didJustFinish) return;
+      try {
+        videoPlayer.pause();
+      } catch {
+        // player may be tearing down
+      }
+      void pipVideoRef.current?.pauseAsync().catch(() => {});
+      signalVideoFinishedRef.current();
+    },
+    [selfieUsesParentMainStage, videoPlayer],
+  );
 
   useEffect(() => {
     if (!visible || !displayEvent?.video_url) return;
@@ -975,6 +1062,7 @@ export function ReplayModal({
 
   useEffect(() => {
     const subscription = videoPlayer.addListener('playToEnd', () => {
+      if (selfieUsesParentMainStageRef.current) return;
       signalVideoFinishedRef.current();
     });
     return () => subscription.remove();
@@ -1177,8 +1265,27 @@ export function ReplayModal({
     setTimeout(() => { onClose(); }, 100);
   };
 
-  const renderReactionParentPip = () => {
-    if (!isReactionPlayback || !resolvedParentPip) return null;
+  const renderReactionPip = () => {
+    if (!isReactionPlayback) return null;
+
+    if (selfieUsesParentMainStage && displayEvent?.video_url) {
+      return (
+        <AvVideo
+          ref={pipVideoRef}
+          source={{ uri: displayEvent.video_url }}
+          style={[styles.reactionPipVideo, styles.reactionSelfiePip]}
+          resizeMode={ResizeMode.COVER}
+          isMuted={false}
+          volume={1}
+          shouldPlay={false}
+          progressUpdateIntervalMillis={100}
+          onPlaybackStatusUpdate={handleSelfiePipStatusUpdate}
+        />
+      );
+    }
+
+    if (!resolvedParentPip) return null;
+
     if (resolvedParentPip.mediaType === 'video') {
       return (
         <AvVideo
@@ -1192,6 +1299,7 @@ export function ReplayModal({
         />
       );
     }
+
     return (
       <Image
         source={{ uri: resolvedParentPip.url }}
@@ -1218,7 +1326,7 @@ export function ReplayModal({
       metadata: displayEvent.metadata || ({} as EventMetadata)
     });
     pipAlignedForEventRef.current = null;
-    void alignPipToSyncStart();
+    void alignReactionPlayback();
   };
 
   const handleToggleLike = () => {
@@ -1348,8 +1456,8 @@ export function ReplayModal({
                     contentFit="contain"
                     nativeControls={false}
                   />
-                  {renderReactionParentPip()}
-                  {displayEvent.image_url && !videoReady ? (
+                  {renderReactionPip()}
+                  {displayEvent.image_url && !videoReady && !selfieUsesParentMainStage ? (
                     <Image
                       source={{ uri: displayEvent.image_url }}
                       style={[styles.mediaImage, styles.posterShield]}
@@ -1366,7 +1474,7 @@ export function ReplayModal({
                     contentFit="contain"
                     cachePolicy="memory-disk"
                   />
-                  {renderReactionParentPip()}
+                  {renderReactionPip()}
                 </>
               )}
 
@@ -1836,6 +1944,15 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.35)',
     backgroundColor: '#000',
     zIndex: 4,
+  },
+  reactionSelfiePip: {
+    top: 14,
+    right: 14,
+    width: 112,
+    height: 150,
+    borderRadius: 14,
+    borderColor: 'rgba(255,255,255,0.4)',
+    zIndex: 5,
   },
   posterShield: {
     position: 'absolute',

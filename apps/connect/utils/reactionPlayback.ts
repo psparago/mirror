@@ -13,8 +13,13 @@ import {
   where,
 } from '@projectmirror/shared/firebase';
 
-/** Parent Reflection playback level during Live Sync compose and reaction PiP replay. */
-export const REACTION_PARENT_VOLUME = 0.15;
+/** Parent Reflection volume during Live Sync recording. Low enough to act as a sync tracker;
+ *  on iOS hardware AEC (VoiceChat mode) removes the bleed, on Android the low volume itself
+ *  is the primary echo mitigation. */
+export const REACTION_PARENT_RECORDING_VOLUME = 0.10;
+
+/** Parent Reflection volume during timeline reaction replay (viewing experience). */
+export const REACTION_PARENT_PLAYBACK_VOLUME = 0.15;
 
 export type ReactionResponderFace = {
   key: string;
