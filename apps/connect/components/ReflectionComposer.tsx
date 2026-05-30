@@ -366,7 +366,18 @@ function ReflectionComposerInner({
     const wasThinking = prevAiThinkingRef.current;
     prevAiThinkingRef.current = isAiThinking;
     if (wasThinking && !isAiThinking && !isAiCancelled) {
-      const resolvedCaption = aiArtifacts?.caption?.trim() || caption;
+      // Baseline must match the caption that will actually be displayed, not the
+      // raw AI text. The caption-sync effect only adopts the AI caption when the
+      // current caption is empty or still equals the previous AI output; otherwise
+      // it preserves the user's caption. Storing the AI text here when the sync
+      // will preserve a divergent caption keeps getStaleKind() non-'none' forever,
+      // which loops Finish/Preview/Send back through Sparkle regeneration.
+      const nextAiCaption = aiArtifacts?.caption?.trim();
+      const lastAiCaption = lastAiCaptionRef.current?.trim() ?? '';
+      const willAdoptAiCaption =
+        !!nextAiCaption &&
+        (caption.trim() === '' || caption.trim() === lastAiCaption);
+      const resolvedCaption = willAdoptAiCaption ? nextAiCaption : caption;
       aiSnapshotRef.current = {
         trimStart: videoRangeMs?.start ?? null,
         trimEnd: videoRangeMs?.end ?? null,
@@ -404,20 +415,26 @@ function ReflectionComposerInner({
     aiArtifacts?.caption,
   ]);
 
-  const isAiStale = useCallback((): boolean => {
+  // Classifies what changed since the last successful Sparkle run:
+  //  - 'full': image/video frame or people context changed → regenerate from media.
+  //  - 'tts':  only caption text or voice changed → preserve the user's text and
+  //            just regenerate audio (TTS-only), so Finish/Preview never silently
+  //            rewrites a caption the user typed or edited.
+  //  - 'none': nothing relevant changed.
+  const getStaleKind = useCallback((): 'none' | 'tts' | 'full' => {
     const snap = aiSnapshotRef.current;
-    if (!snap) return false;
-    if (caption.trim() !== snap.caption.trim()) return true;
-    if (photoEditRevision !== snap.photoEditRevision) return true;
-    if ((videoRangeMs?.start ?? null) !== snap.trimStart) return true;
-    if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return true;
-    if (thumbnailTimeMs !== snap.thumbMs) return true;
-    if (!!companionInReflection !== snap.companionInReflection) return true;
-    if (!!explorerInReflection !== snap.explorerInReflection) return true;
-    if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return true;
-    if (captionVoice !== snap.captionVoice) return true;
-    if (deepDiveVoice !== snap.deepDiveVoice) return true;
-    return false;
+    if (!snap) return 'none';
+    if (photoEditRevision !== snap.photoEditRevision) return 'full';
+    if ((videoRangeMs?.start ?? null) !== snap.trimStart) return 'full';
+    if ((videoRangeMs?.end ?? null) !== snap.trimEnd) return 'full';
+    if (thumbnailTimeMs !== snap.thumbMs) return 'full';
+    if (!!companionInReflection !== snap.companionInReflection) return 'full';
+    if (!!explorerInReflection !== snap.explorerInReflection) return 'full';
+    if ((peopleContext ?? '').trim() !== snap.peopleContextNorm) return 'full';
+    if (caption.trim() !== snap.caption.trim()) return 'tts';
+    if (captionVoice !== snap.captionVoice) return 'tts';
+    if (deepDiveVoice !== snap.deepDiveVoice) return 'tts';
+    return 'none';
   }, [
     caption,
     photoEditRevision,
@@ -534,15 +551,17 @@ function ReflectionComposerInner({
 
   const ensureAiCurrent = useCallback(
     (): boolean => {
-      const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
-      if (!needsRun) return true;
+      const noPriorRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
+      const staleKind = getStaleKind();
+      if (!noPriorRun && staleKind === 'none') return true;
       autoAdvanceRef.current = false;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(buildSparkleOptions()).catch(() => {});
+      const mode = noPriorRun || staleKind === 'full' ? 'full' : 'ttsOnly';
+      onTriggerMagic(buildSparkleOptions(mode)).catch(() => {});
       return false;
     },
-    [hasAnyAiArtifacts, isAiStale, onTriggerMagic, buildSparkleOptions],
+    [hasAnyAiArtifacts, getStaleKind, onTriggerMagic, buildSparkleOptions],
   );
 
   const { height: screenHeight, width: screenWidth } = useWindowDimensions();
@@ -1223,18 +1242,20 @@ function ReflectionComposerInner({
   const goToSend = useCallback(() => {
     void stopAiPreviewRef.current?.();
     Keyboard.dismiss();
-    const needsRun = (!aiSnapshotRef.current && !hasAnyAiArtifacts) || isAiStale();
-    if (needsRun) {
+    const noPriorRun = !aiSnapshotRef.current && !hasAnyAiArtifacts;
+    const staleKind = getStaleKind();
+    if (noPriorRun || staleKind !== 'none') {
       autoAdvanceRef.current = true;
       wantsAutoPlayRef.current = false;
       setIsAiCancelled(false);
-      onTriggerMagic(buildSparkleOptions()).catch(() => {
+      const mode = noPriorRun || staleKind === 'full' ? 'full' : 'ttsOnly';
+      onTriggerMagic(buildSparkleOptions(mode)).catch(() => {
         autoAdvanceRef.current = false;
       });
       return;
     }
     onStageChange('send');
-  }, [hasAnyAiArtifacts, isAiStale, onStageChange, onTriggerMagic, buildSparkleOptions]);
+  }, [hasAnyAiArtifacts, getStaleKind, onStageChange, onTriggerMagic, buildSparkleOptions]);
 
   // Confirm before discarding whenever the user has Sparkle results, regardless of stage.
   const handleRequestClose = useCallback(() => {
