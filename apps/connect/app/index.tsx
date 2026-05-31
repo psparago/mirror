@@ -4,7 +4,7 @@ import {
   isBootPathname,
   tabsHomeHref,
 } from '@/utils/pendingNotificationRoute';
-import { usePathname, useRouter } from 'expo-router';
+import { usePathname, useRootNavigationState, useRouter } from 'expo-router';
 import { useEffect, useRef } from 'react';
 import { View } from 'react-native';
 import { FontAwesome } from '@expo/vector-icons';
@@ -12,6 +12,7 @@ import { FontAwesome } from '@expo/vector-icons';
 export default function BootScreen() {
   const router = useRouter();
   const pathname = usePathname();
+  const rootNavigationState = useRootNavigationState();
   const waitOverlay = useWaitOverlay();
   const { user, loading: authLoading } = useAuth();
   const { relationships, loading: relLoading } = useRelationships(user?.uid);
@@ -21,6 +22,11 @@ export default function BootScreen() {
     if (!isBootPathname(pathname)) return;
     if (authLoading) return;
     if (hasNavigatedRef.current) return;
+    // Wait for the navigator to be mounted before calling router.replace().
+    // On Android cold starts the navigator tree may not be ready yet, and a
+    // premature replace() silently no-ops, leaving the app on the black boot
+    // screen with hasNavigatedRef already set so it never retries.
+    if (!rootNavigationState?.key) return;
 
     if (!user) {
       hasNavigatedRef.current = true;
@@ -38,7 +44,7 @@ export default function BootScreen() {
 
     hasNavigatedRef.current = true;
     router.replace(tabsHomeHref());
-  }, [user, authLoading, relationships, relLoading, pathname, router]);
+  }, [user, authLoading, relationships, relLoading, pathname, router, rootNavigationState?.key]);
 
   useEffect(() => {
     if (authLoading || relLoading) {

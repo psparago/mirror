@@ -23,6 +23,8 @@ var voices = []string{
 	"en-US-Journey-D",
 	"en-US-Studio-Q",
 	"en-US-Casual-K",
+	"en-US-Chirp3-HD-Puck",
+	"en-US-Chirp3-HD-Achird",
 	"en-US-Chirp3-HD-Sulafat",
 	"en-US-Chirp3-HD-Achernar",
 	"en-US-Chirp3-HD-Despina",
