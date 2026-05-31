@@ -2,6 +2,24 @@ import { NativeModule, requireNativeModule } from 'expo';
 
 import type { AudioOutputRoute, ReflectionsAudioModuleEvents } from './ReflectionsAudio.types';
 
+export type AudioSessionInfo = {
+  category: string;
+  mode: string;
+  isPlayAndRecord?: boolean;
+  isVoiceChatMode?: boolean;
+  isOtherAudioPlaying?: boolean;
+  voiceChatGuardActive: boolean;
+  nativeParentPlaybackActive: boolean;
+  nativeParentPlaying?: boolean;
+  nativeParentVolume?: number;
+  nativeParentRate?: number;
+  nativeParentTimeSec?: number;
+  nativeModuleLoaded: boolean;
+  outputs?: string[];
+  inputs?: string[];
+  hasHeadphones?: boolean;
+};
+
 export declare class ReflectionsAudioModule extends NativeModule<ReflectionsAudioModuleEvents> {
   /**
    * iOS: switches the shared `AVAudioSession` to `PlayAndRecord` + `VoiceChat` mode, which routes
@@ -15,6 +33,32 @@ export declare class ReflectionsAudioModule extends NativeModule<ReflectionsAudi
   setVoiceChatModeAsync(): Promise<void>;
 
   /**
+   * iOS: enables VoiceChat and keeps re-applying it while expo-camera may clobber the session.
+   * Android: no-op.
+   */
+  beginVoiceChatGuardAsync(): Promise<void>;
+
+  /** iOS: re-applies VoiceChat when the guard is active. Android: no-op. */
+  reassertVoiceChatModeAsync(): Promise<void>;
+
+  /** iOS: tears down the guard and native parent playback. Android: no-op. */
+  endVoiceChatGuardAsync(): Promise<void>;
+
+  /**
+   * iOS: plays parent Reflection audio through the VoiceChat session during selfie recording so
+   * hardware AEC receives a reference signal. expo-av bypasses this path and causes mic bleed.
+   * Android: no-op (expo-av handles parent audio).
+   */
+  startParentRecordingPlaybackAsync(
+    url: string,
+    startMs: number,
+    volume: number,
+  ): Promise<void>;
+
+  /** Stops native parent playback started by `startParentRecordingPlaybackAsync`. */
+  stopParentRecordingPlaybackAsync(): Promise<void>;
+
+  /**
    * iOS: restores a playback-optimised `AVAudioSession` (`Playback` + `MoviePlayback`) after a
    * recording session so subsequent video playback is full fidelity. Android: no-op.
    */
@@ -22,6 +66,9 @@ export declare class ReflectionsAudioModule extends NativeModule<ReflectionsAudi
 
   /** Returns the device's current audio output route (synchronous). */
   getAudioRoute(): AudioOutputRoute;
+
+  /** Returns the current AVAudioSession category/mode for dev diagnostics. */
+  getAudioSessionInfo(): AudioSessionInfo;
 }
 
 /**

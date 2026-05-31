@@ -3,6 +3,10 @@ import AVFoundation
 
 public class ReflectionsAudioModule: Module {
   private var routeChangeObserver: NSObjectProtocol?
+  private var voiceChatRouteObserver: NSObjectProtocol?
+  private var interruptionObserver: NSObjectProtocol?
+  private var voiceChatGuardActive = false
+  private var parentRecordingPlayer: AVPlayer?
 
   public func definition() -> ModuleDefinition {
     // Referenced from JS via `requireNativeModule('ReflectionsAudio')`.
@@ -10,28 +14,71 @@ public class ReflectionsAudioModule: Module {
 
     Events("onAudioRouteChange")
 
-    // Enables hardware acoustic echo cancellation for record-while-playing (selfie reactions).
-    // `.voiceChat` activates Apple's Voice-Processing I/O unit — the same path used by FaceTime —
-    // which subtracts the speaker reference signal from the mic input in real time.
-    AsyncFunction("setVoiceChatModeAsync") {
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(
-        .playAndRecord,
-        mode: .voiceChat,
-        options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
-      )
-      try session.setActive(true, options: [])
+    AsyncFunction("setVoiceChatModeAsync") { () in
+      try self.applyVoiceChatSession(reason: "setVoiceChatModeAsync")
     }
 
-    // Restores a playback-optimised session after recording so video playback is full fidelity.
+    AsyncFunction("beginVoiceChatGuardAsync") { () in
+      self.voiceChatGuardActive = true
+      try self.applyVoiceChatSession(reason: "beginVoiceChatGuardAsync")
+      self.installVoiceChatGuardObservers()
+      self.logNative("beginVoiceChatGuardAsync — guard ON")
+    }
+
+    AsyncFunction("reassertVoiceChatModeAsync") { () in
+      guard self.voiceChatGuardActive else {
+        self.logNative("reassertVoiceChatModeAsync — skipped (guard OFF)")
+        return
+      }
+      try self.applyVoiceChatSession(reason: "reassertVoiceChatModeAsync")
+    }
+
+    AsyncFunction("endVoiceChatGuardAsync") { () in
+      self.logNative("endVoiceChatGuardAsync — guard OFF")
+      self.voiceChatGuardActive = false
+      self.removeVoiceChatGuardObservers()
+      self.stopParentRecordingPlaybackInternal(reason: "endVoiceChatGuardAsync")
+    }
+
+    AsyncFunction("startParentRecordingPlaybackAsync") { (urlString: String, startMs: Double, volume: Double) async throws in
+      guard let url = URL(string: urlString) else {
+        self.logNative("startParentRecordingPlaybackAsync — invalid URL")
+        return
+      }
+
+      try self.applyVoiceChatSession(reason: "startParentRecordingPlaybackAsync")
+      self.stopParentRecordingPlaybackInternal(reason: "startParentRecordingPlaybackAsync-replace")
+
+      let item = AVPlayerItem(url: url)
+      let player = AVPlayer(playerItem: item)
+      player.volume = Float(max(0, min(volume, 1)))
+      let start = CMTime(seconds: startMs / 1000.0, preferredTimescale: 1000)
+      await player.seek(to: start, toleranceBefore: .zero, toleranceAfter: .zero)
+      player.play()
+      self.parentRecordingPlayer = player
+
+      self.logNative(
+        "startParentRecordingPlaybackAsync — play startMs=\(startMs) volume=\(volume) urlHost=\(url.host ?? "?")"
+      )
+    }
+
+    AsyncFunction("stopParentRecordingPlaybackAsync") { () in
+      self.stopParentRecordingPlaybackInternal(reason: "stopParentRecordingPlaybackAsync")
+    }
+
     AsyncFunction("setPlaybackModeAsync") {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .moviePlayback, options: [])
       try session.setActive(true, options: [])
+      self.logNative("setPlaybackModeAsync — category=Playback mode=MoviePlayback")
     }
 
     Function("getAudioRoute") { () -> [String: Any] in
       return ReflectionsAudioModule.describeCurrentRoute()
+    }
+
+    Function("getAudioSessionInfo") { () -> [String: Any] in
+      return self.describeAudioSessionInfo()
     }
 
     OnStartObserving {
@@ -40,7 +87,8 @@ public class ReflectionsAudioModule: Module {
         object: AVAudioSession.sharedInstance(),
         queue: OperationQueue.main
       ) { [weak self] _ in
-        self?.sendEvent("onAudioRouteChange", ReflectionsAudioModule.describeCurrentRoute())
+        guard let self else { return }
+        self.sendEvent("onAudioRouteChange", ReflectionsAudioModule.describeCurrentRoute())
       }
     }
 
@@ -50,6 +98,115 @@ public class ReflectionsAudioModule: Module {
         self.routeChangeObserver = nil
       }
     }
+  }
+
+  private func applyVoiceChatSession(reason: String) throws {
+    let session = AVAudioSession.sharedInstance()
+    let beforeCategory = session.category.rawValue
+    let beforeMode = session.mode.rawValue
+
+    try session.setCategory(
+      .playAndRecord,
+      mode: .voiceChat,
+      options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+    )
+    try session.setActive(true, options: [])
+    try session.overrideOutputAudioPort(.speaker)
+
+    let afterCategory = session.category.rawValue
+    let afterMode = session.mode.rawValue
+    self.logNative(
+      "applyVoiceChatSession(\(reason)) — \(beforeCategory)/\(beforeMode) → \(afterCategory)/\(afterMode)"
+    )
+  }
+
+  private func installVoiceChatGuardObservers() {
+    removeVoiceChatGuardObservers()
+
+    voiceChatRouteObserver = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.routeChangeNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: OperationQueue.main
+    ) { [weak self] _ in
+      guard let self, self.voiceChatGuardActive else { return }
+      let route = ReflectionsAudioModule.describeCurrentRoute()
+      self.logNative("routeChange during guard — outputs=\(route["outputs"] ?? [])")
+      try? self.applyVoiceChatSession(reason: "routeChange-guard")
+    }
+
+    interruptionObserver = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.interruptionNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: OperationQueue.main
+    ) { [weak self] notification in
+      guard let self, self.voiceChatGuardActive else { return }
+      guard
+        let userInfo = notification.userInfo,
+        let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+        let type = AVAudioSession.InterruptionType(rawValue: typeValue)
+      else {
+        return
+      }
+
+      if type == .ended {
+        self.logNative("interruption ended during guard — re-applying VoiceChat")
+        try? self.applyVoiceChatSession(reason: "interruptionEnded-guard")
+        self.parentRecordingPlayer?.play()
+      } else {
+        self.logNative("interruption began during guard")
+      }
+    }
+  }
+
+  private func removeVoiceChatGuardObservers() {
+    if let observer = voiceChatRouteObserver {
+      NotificationCenter.default.removeObserver(observer)
+      voiceChatRouteObserver = nil
+    }
+    if let observer = interruptionObserver {
+      NotificationCenter.default.removeObserver(observer)
+      interruptionObserver = nil
+    }
+  }
+
+  private func stopParentRecordingPlaybackInternal(reason: String) {
+    if parentRecordingPlayer != nil {
+      self.logNative("stopParentRecordingPlaybackInternal(\(reason))")
+    }
+    parentRecordingPlayer?.pause()
+    parentRecordingPlayer = nil
+  }
+
+  private func describeAudioSessionInfo() -> [String: Any] {
+    let session = AVAudioSession.sharedInstance()
+    let route = ReflectionsAudioModule.describeCurrentRoute()
+    let player = parentRecordingPlayer
+    let playerTimeSec = CMTimeGetSeconds(player?.currentTime() ?? .zero)
+    let playerRate = player?.rate ?? 0
+
+    return [
+      "category": session.category.rawValue,
+      "mode": session.mode.rawValue,
+      "isPlayAndRecord": session.category == .playAndRecord,
+      "isVoiceChatMode": session.mode == .voiceChat,
+      "isOtherAudioPlaying": session.isOtherAudioPlaying,
+      "voiceChatGuardActive": voiceChatGuardActive,
+      "nativeParentPlaybackActive": player != nil,
+      "nativeParentPlaying": playerRate > 0,
+      "nativeParentVolume": player?.volume ?? 0,
+      "nativeParentRate": playerRate,
+      "nativeParentTimeSec": playerTimeSec.isFinite ? playerTimeSec : 0,
+      "nativeModuleLoaded": true,
+      "outputs": route["outputs"] ?? [],
+      "inputs": session.currentRoute.inputs.map { $0.portType.rawValue },
+      "hasHeadphones": route["hasHeadphones"] ?? false,
+    ]
+  }
+
+  private func logNative(_ message: String) {
+    #if DEBUG
+    print("[ReflectionsAudio] \(message)")
+    #endif
   }
 
   private static func describeCurrentRoute() -> [String: Any] {

@@ -2,6 +2,8 @@ import ReflectionsAudio from '@/modules/reflections-audio';
 import { Audio } from 'expo-av';
 import { setAudioModeAsync as setExpoAudioModeAsync } from 'expo-audio';
 
+import { traceReactionAudio } from './reactionRecordingAudio';
+
 /**
  * Reflections Connect uses expo-audio for recording and expo-av/expo-video for playback.
  * On iOS the underlying AVAudioSession is global, so always reset both facades before playback.
@@ -10,6 +12,7 @@ import { setAudioModeAsync as setExpoAudioModeAsync } from 'expo-audio';
  * (see modules/reflections-audio). On Android that native module is a no-op by design.
  */
 export async function configureConnectPlaybackAudioSessionAsync(): Promise<void> {
+  traceReactionAudio('audioSession:playback:start');
   await Promise.all([
     setExpoAudioModeAsync({
       allowsRecording: false,
@@ -30,6 +33,7 @@ export async function configureConnectPlaybackAudioSessionAsync(): Promise<void>
   } catch (error) {
     console.warn('[audioSession] setPlaybackModeAsync failed:', error);
   }
+  traceReactionAudio('audioSession:playback:complete');
 }
 
 /**
@@ -46,8 +50,18 @@ export async function configureConnectPlaybackAudioSessionAsync(): Promise<void>
  *
  * The native VoiceChat call is applied LAST, after the expo-av/expo-audio facades, so their mode
  * changes cannot clobber the VoiceChat configuration.
+ *
+ * During selfie recording on iOS, parent Reflection *audio* is played by the native module
+ * (`startParentRecordingPlaybackAsync`) so it shares the VoiceChat session with capture. expo-av
+ * only drives muted parent video for visual sync.
  */
-export async function configureConnectReactionRecordingAudioSessionAsync(): Promise<void> {
+export async function configureConnectReactionRecordingAudioSessionAsync(options?: {
+  /** Selfie uses VoiceChat (intended AEC). Voice-only skips it so parent playback stays audible. */
+  voiceChatAec?: boolean;
+}): Promise<void> {
+  const voiceChatAec = options?.voiceChatAec !== false;
+  traceReactionAudio('audioSession:recording:start', { voiceChatAec });
+
   await Promise.all([
     Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -62,9 +76,19 @@ export async function configureConnectReactionRecordingAudioSessionAsync(): Prom
     }),
   ]);
 
+  if (!voiceChatAec) {
+    traceReactionAudio('audioSession:recording:complete-no-voicechat', { voiceChatAec: false });
+    return;
+  }
+
   try {
     await ReflectionsAudio?.setVoiceChatModeAsync();
+    traceReactionAudio('audioSession:recording:voicechat-applied', { voiceChatAec: true });
   } catch (error) {
     console.warn('[audioSession] setVoiceChatModeAsync failed:', error);
+    traceReactionAudio('audioSession:recording:voicechat-failed', {
+      voiceChatAec: true,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }

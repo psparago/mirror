@@ -1320,10 +1320,15 @@ export function ReplayModal({
       deepDiveBreathTimeoutRef.current = null;
     }
 
+    const playbackType = resolveReactionPlaybackType(displayEvent);
+    const useInstantVideo =
+      !displayEvent.isReaction || playbackType === 'selfie';
+
     send({
-      type: 'SELECT_EVENT_INSTANT',
+      type: useInstantVideo ? 'SELECT_EVENT_INSTANT' : 'SELECT_EVENT',
       event: displayEvent,
-      metadata: displayEvent.metadata || ({} as EventMetadata)
+      metadata: displayEvent.metadata || ({} as EventMetadata),
+      takeSelfie: false,
     });
     pipAlignedForEventRef.current = null;
     void alignReactionPlayback();

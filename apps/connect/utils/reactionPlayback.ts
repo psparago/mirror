@@ -13,9 +13,9 @@ import {
   where,
 } from '@projectmirror/shared/firebase';
 
-/** Parent Reflection volume during Live Sync recording when played out loud through the speaker.
- *  Low enough to act as a sync tracker; on iOS hardware AEC (VoiceChat mode) removes the bleed. */
-export const REACTION_PARENT_RECORDING_VOLUME = 0.10;
+/** Parent Reflection volume during Live Sync recording on speaker when Original audio is on.
+ *  Audible enough to narrate over; expect some echo without headphones. */
+export const REACTION_PARENT_RECORDING_VOLUME = 0.40;
 
 /** Parent Reflection volume during recording when headphones/Bluetooth are connected. There is no
  *  acoustic echo path, so the Companion can hear the Reflection at full volume while recording. */
@@ -42,18 +42,15 @@ export function resolveReactionRecordingVolume(options: {
 
 /**
  * Whether the parent Reflection's audio ("Original audio") should default to ON for the current
- * platform and audio route.
+ * audio route.
  *
- * - Headphones connected → ON everywhere (no echo path).
- * - iOS speaker → ON (hardware Voice-Processing AEC cancels the bleed).
- * - Android speaker → OFF (no AEC; muting the speaker is the only way to guarantee a clean recording).
+ * Headphones / Bluetooth only — no speaker echo path. On the built-in speaker we default OFF on
+ * every platform until the Companion opts in (expo-camera does not reliably get hardware AEC).
  */
 export function defaultReactionOriginalAudioEnabled(options: {
-  platform: string;
   hasHeadphones: boolean;
 }): boolean {
-  if (options.hasHeadphones) return true;
-  return options.platform === 'ios';
+  return options.hasHeadphones;
 }
 
 export type ReactionResponderFace = {

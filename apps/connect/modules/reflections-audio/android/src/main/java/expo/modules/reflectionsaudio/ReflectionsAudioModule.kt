@@ -27,12 +27,52 @@ class ReflectionsAudioModule : Module() {
       // no-op
     }
 
+    AsyncFunction("beginVoiceChatGuardAsync") {
+      // no-op
+    }
+
+    AsyncFunction("reassertVoiceChatModeAsync") {
+      // no-op
+    }
+
+    AsyncFunction("endVoiceChatGuardAsync") {
+      // no-op
+    }
+
+    AsyncFunction("startParentRecordingPlaybackAsync") { _: String, _: Double, _: Double ->
+      // no-op — parent audio stays on expo-av during recording on Android.
+    }
+
+    AsyncFunction("stopParentRecordingPlaybackAsync") {
+      // no-op
+    }
+
     AsyncFunction("setPlaybackModeAsync") {
       // no-op
     }
 
     Function("getAudioRoute") {
       describeCurrentRoute()
+    }
+
+    Function("getAudioSessionInfo") {
+      mapOf(
+        "category" to "android",
+        "mode" to "none",
+        "isPlayAndRecord" to false,
+        "isVoiceChatMode" to false,
+        "isOtherAudioPlaying" to false,
+        "voiceChatGuardActive" to false,
+        "nativeParentPlaybackActive" to false,
+        "nativeParentPlaying" to false,
+        "nativeParentVolume" to 0,
+        "nativeParentRate" to 0,
+        "nativeParentTimeSec" to 0,
+        "nativeModuleLoaded" to true,
+        "outputs" to describeCurrentRoute()["outputs"],
+        "inputs" to emptyList<String>(),
+        "hasHeadphones" to (describeCurrentRoute()["hasHeadphones"] == true),
+      )
     }
 
     OnStartObserving {
