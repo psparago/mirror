@@ -13,13 +13,48 @@ import {
   where,
 } from '@projectmirror/shared/firebase';
 
-/** Parent Reflection volume during Live Sync recording. Low enough to act as a sync tracker;
- *  on iOS hardware AEC (VoiceChat mode) removes the bleed, on Android the low volume itself
- *  is the primary echo mitigation. */
+/** Parent Reflection volume during Live Sync recording when played out loud through the speaker.
+ *  Low enough to act as a sync tracker; on iOS hardware AEC (VoiceChat mode) removes the bleed. */
 export const REACTION_PARENT_RECORDING_VOLUME = 0.10;
+
+/** Parent Reflection volume during recording when headphones/Bluetooth are connected. There is no
+ *  acoustic echo path, so the Companion can hear the Reflection at full volume while recording. */
+export const REACTION_PARENT_HEADPHONES_VOLUME = 1.0;
 
 /** Parent Reflection volume during timeline reaction replay (viewing experience). */
 export const REACTION_PARENT_PLAYBACK_VOLUME = 0.15;
+
+/**
+ * Resolves the parent Reflection volume to use while recording a reaction.
+ *
+ * Instagram-style "Original audio" mix: the video always plays for visual sync, but whether its
+ * audio is audible depends on capability. Headphones → full volume (no echo). Speaker → low volume
+ * (iOS hardware AEC keeps the recording clean; on Android the user opts in and accepts some echo).
+ * Muted → silent.
+ */
+export function resolveReactionRecordingVolume(options: {
+  muted: boolean;
+  hasHeadphones: boolean;
+}): number {
+  if (options.muted) return 0;
+  return options.hasHeadphones ? REACTION_PARENT_HEADPHONES_VOLUME : REACTION_PARENT_RECORDING_VOLUME;
+}
+
+/**
+ * Whether the parent Reflection's audio ("Original audio") should default to ON for the current
+ * platform and audio route.
+ *
+ * - Headphones connected → ON everywhere (no echo path).
+ * - iOS speaker → ON (hardware Voice-Processing AEC cancels the bleed).
+ * - Android speaker → OFF (no AEC; muting the speaker is the only way to guarantee a clean recording).
+ */
+export function defaultReactionOriginalAudioEnabled(options: {
+  platform: string;
+  hasHeadphones: boolean;
+}): boolean {
+  if (options.hasHeadphones) return true;
+  return options.platform === 'ios';
+}
 
 export type ReactionResponderFace = {
   key: string;

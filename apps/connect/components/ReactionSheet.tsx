@@ -1,5 +1,9 @@
-import { REACTION_PARENT_RECORDING_VOLUME } from '@/utils/reactionPlayback';
+import {
+  defaultReactionOriginalAudioEnabled,
+  resolveReactionRecordingVolume,
+} from '@/utils/reactionPlayback';
 import { uploadReaction } from '@/utils/reactionUpload';
+import { useAudioRoute } from '@/utils/audioRoute';
 import {
   configureConnectPlaybackAudioSessionAsync,
   configureConnectReactionRecordingAudioSessionAsync,
@@ -19,9 +23,11 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -40,7 +46,7 @@ function isSeekInterrupted(error: unknown): boolean {
 }
 
 async function runVideoCommand(
-  command: () => Promise<unknown>,
+  command: () => Promise<unknown> | undefined,
   logLabel: string,
 ): Promise<void> {
   try {
@@ -97,10 +103,16 @@ export function ReactionSheet({
   const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
+  const [isInfoOpen, setIsInfoOpen] = useState(false);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const companionPreviewStopPendingRef = useRef(false);
+
+  // Live audio output route. Headphones/Bluetooth → the parent Reflection can play out loud during
+  // recording (no echo path); otherwise we fall back to the platform echo policy.
+  const audioRoute = useAudioRoute(visible);
+  const hasHeadphones = audioRoute.hasHeadphones;
 
   const isVideoParent = parentMedia?.mediaType === 'video';
   const isImageParent = parentMedia?.mediaType === 'image';
@@ -132,9 +144,16 @@ export function ReactionSheet({
   const lastPanSeekAtRef = useRef(0);
   const lastParentVolumeApplyRef = useRef(0);
   const lastCompanionParentVolumeApplyRef = useRef(0);
+  const hasHeadphonesRef = useRef(false);
+  // True once the Companion manually toggles "Original audio", so we stop applying the smart default.
+  const userToggledMuteRef = useRef(false);
 
   const getReactionParentVolume = useCallback(
-    () => (isParentReflectionMutedRef.current ? 0 : REACTION_PARENT_RECORDING_VOLUME),
+    () =>
+      resolveReactionRecordingVolume({
+        muted: isParentReflectionMutedRef.current,
+        hasHeadphones: hasHeadphonesRef.current,
+      }),
     [],
   );
 
@@ -198,6 +217,9 @@ export function ReactionSheet({
       );
     }
   }, [getReactionParentVolume, isVideoParent, recordedUri, syncStartTimeMillis]);
+
+  const openHowItWorks = useCallback(() => setIsInfoOpen(true), []);
+  const closeHowItWorks = useCallback(() => setIsInfoOpen(false), []);
 
   const openCompanionPreview = useCallback(() => {
     setCompanionPreviewOpen(true);
@@ -287,6 +309,22 @@ export function ReactionSheet({
   useEffect(() => {
     isParentReflectionMutedRef.current = isParentReflectionMuted;
   }, [isParentReflectionMuted]);
+
+  useEffect(() => {
+    hasHeadphonesRef.current = hasHeadphones;
+  }, [hasHeadphones]);
+
+  // Apply the Instagram-style "Original audio" default for the current platform/route until the
+  // Companion manually overrides it: iOS speaker & any-headphones → audio on; Android speaker → off.
+  useEffect(() => {
+    if (!visible || userToggledMuteRef.current) return;
+    const enabled = defaultReactionOriginalAudioEnabled({
+      platform: Platform.OS,
+      hasHeadphones,
+    });
+    setIsParentReflectionMuted(!enabled);
+    isParentReflectionMutedRef.current = !enabled;
+  }, [visible, hasHeadphones]);
 
   useEffect(() => {
     isPreviewPlayingRef.current = isPreviewPlaying;
@@ -434,6 +472,7 @@ export function ReactionSheet({
     trimEndMsRef.current = 0;
     setIsParentReflectionMuted(false);
     isParentReflectionMutedRef.current = false;
+    userToggledMuteRef.current = false;
     setReactionMode('selfie');
     setTypedMessage('');
     setVoiceRecordedUri(null);
@@ -459,7 +498,7 @@ export function ReactionSheet({
   useEffect(() => {
     if (!isVideoParent || isRecording) return;
     void applyParentReflectionVolume();
-  }, [applyParentReflectionVolume, isParentReflectionMuted, isRecording, isVideoParent]);
+  }, [applyParentReflectionVolume, hasHeadphones, isParentReflectionMuted, isRecording, isVideoParent]);
 
   const clampTrimStart = useCallback((startMs: number) => {
     const end = trimEndMsRef.current || durationMillisRef.current;
@@ -676,6 +715,7 @@ export function ReactionSheet({
   }, [toggleParentPlayback]);
 
   const toggleParentReflectionMute = useCallback(() => {
+    userToggledMuteRef.current = true;
     setIsParentReflectionMuted((prev) => !prev);
   }, []);
 
@@ -802,36 +842,40 @@ export function ReactionSheet({
     setIsRecording(true);
     setIsPreviewPlaying(false);
 
-    const recordingPromise = cameraRef.current?.recordAsync();
-    if (recordingPromise) {
-      recordingPromiseRef.current = recordingPromise;
-      void recordingPromise
-        .then((result) => {
-          if (result?.uri) {
-            setRecordedUri(result.uri);
-          }
-        })
-        .catch((error) => {
-          console.warn('[ReactionSheet] recordAsync failed:', error);
-        });
-    }
-
-    if (isVideoParent) {
-      try {
-        await configureConnectReactionRecordingAudioSessionAsync();
-      } catch (error) {
-        console.warn('[ReactionSheet] recording audio session failed:', error);
+    void (async () => {
+      const recordingPromise = cameraRef.current?.recordAsync();
+      if (recordingPromise) {
+        recordingPromiseRef.current = recordingPromise;
+        void recordingPromise
+          .then((result) => {
+            if (result?.uri) {
+              setRecordedUri(result.uri);
+            }
+          })
+          .catch((error) => {
+            console.warn('[ReactionSheet] recordAsync failed:', error);
+          });
       }
-      void runVideoCommand(
-        () =>
-          videoRef.current?.setStatusAsync({
-            positionMillis: syncStart,
-            shouldPlay: true,
-            volume: getReactionParentVolume(),
-          }),
-        'reaction playback failed',
-      );
-    }
+
+      if (isVideoParent) {
+        // Re-assert the AEC session after the camera capture session has started, then begin
+        // synced playback at the policy volume (headphones → full, iOS speaker → low, else muted).
+        try {
+          await configureConnectReactionRecordingAudioSessionAsync();
+        } catch (error) {
+          console.warn('[ReactionSheet] recording audio session failed:', error);
+        }
+        void runVideoCommand(
+          () =>
+            videoRef.current?.setStatusAsync({
+              positionMillis: syncStart,
+              shouldPlay: true,
+              volume: getReactionParentVolume(),
+            }),
+          'reaction playback failed',
+        );
+      }
+    })();
   }, [
     cameraPermission?.granted,
     cameraReady,
@@ -901,18 +945,36 @@ export function ReactionSheet({
   const handleStartVoiceRecording = useCallback(async () => {
     if (!micReady || isVoiceRecording) return;
     try {
+      await configureConnectReactionRecordingAudioSessionAsync();
       await voiceRecorder.prepareToRecordAsync();
       voiceRecorder.record();
       setIsVoiceRecording(true);
+      // Instagram-style "Original audio": play the parent Reflection while the Companion narrates so
+      // they can talk over it. Volume follows the same policy as selfie recording (headphones →
+      // audible; iOS speaker → low with hardware AEC; Android speaker → muted).
+      if (isVideoParent) {
+        void runVideoCommand(
+          () =>
+            videoRef.current?.setStatusAsync({
+              positionMillis: 0,
+              shouldPlay: true,
+              volume: getReactionParentVolume(),
+            }),
+          'voice reaction playback failed',
+        );
+      }
     } catch (error) {
       console.warn('[ReactionSheet] voice record start failed:', error);
       Alert.alert('Recording Failed', 'Could not start voice recording.');
     }
-  }, [isVoiceRecording, micReady, voiceRecorder]);
+  }, [getReactionParentVolume, isVideoParent, isVoiceRecording, micReady, voiceRecorder]);
 
   const handleStopVoiceRecording = useCallback(async () => {
     if (!isVoiceRecording) return;
     try {
+      if (isVideoParent) {
+        await runVideoCommand(() => videoRef.current?.pauseAsync(), 'voice reaction pause failed');
+      }
       await voiceRecorder.stop();
       setIsVoiceRecording(false);
       if (voiceRecorder.uri) {
@@ -922,7 +984,7 @@ export function ReactionSheet({
       console.warn('[ReactionSheet] voice record stop failed:', error);
       setIsVoiceRecording(false);
     }
-  }, [isVoiceRecording, voiceRecorder]);
+  }, [isVideoParent, isVoiceRecording, voiceRecorder]);
 
   const handleRetake = useCallback(() => {
     if (reactionMode === 'voice') {
@@ -1053,6 +1115,19 @@ export function ReactionSheet({
   const canSendTyped = reactionMode === 'typed' && typedMessage.trim().length > 0;
   const scrubDurationMs = Math.max(durationMillis, 1);
   const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
+  const parentRecordingVolume = resolveReactionRecordingVolume({
+    muted: isParentReflectionMuted,
+    hasHeadphones,
+  });
+  // A gentle, non-imposing one-liner that only appears when the parent has audio worth hearing.
+  const showAudioHint =
+    isVideoParent &&
+    !companionPreviewOpen &&
+    !isPreviewMode &&
+    (reactionMode === 'selfie' || reactionMode === 'voice');
+  const audioHintText = hasHeadphones
+    ? 'Headphones connected — you’ll hear the Reflection as you record.'
+    : 'Pop in headphones to hear the Reflection while recording. Otherwise it stays quiet so it won’t echo.';
 
   return (
     <Modal
@@ -1106,7 +1181,7 @@ export function ReactionSheet({
                   shouldPlay={false}
                   isLooping={false}
                   isMuted={isParentReflectionMuted}
-                  volume={isParentReflectionMuted ? 0 : REACTION_PARENT_RECORDING_VOLUME}
+                  volume={parentRecordingVolume}
                   progressUpdateIntervalMillis={100}
                   onPlaybackStatusUpdate={handleCompanionParentStatusUpdate}
                 />
@@ -1157,7 +1232,7 @@ export function ReactionSheet({
                         shouldPlay={false}
                         isLooping={false}
                         isMuted={isParentReflectionMuted}
-                        volume={isParentReflectionMuted ? 0 : REACTION_PARENT_RECORDING_VOLUME}
+                        volume={parentRecordingVolume}
                         progressUpdateIntervalMillis={100}
                         onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                       />
@@ -1364,6 +1439,17 @@ export function ReactionSheet({
         )}
 
         <View style={[styles.interactionFooter, { paddingBottom: insets.bottom }]}>
+          {showAudioHint ? (
+            <View style={styles.audioHintRow}>
+              <FontAwesome
+                name={hasHeadphones ? 'headphones' : 'volume-down'}
+                size={12}
+                color="rgba(255,255,255,0.5)"
+              />
+              <Text style={styles.audioHintText}>{audioHintText}</Text>
+            </View>
+          ) : null}
+
           {!companionPreviewOpen ? (
           <View style={styles.modePicker}>
             {(
@@ -1530,7 +1616,110 @@ export function ReactionSheet({
               </Text>
             </Pressable>
           )}
+
+          {!companionPreviewOpen ? (
+            <TouchableOpacity
+              style={styles.infoBtn}
+              onPress={openHowItWorks}
+              accessibilityRole="button"
+              accessibilityLabel="How this works"
+            >
+              <FontAwesome name="info-circle" size={15} color="#4a90d9" />
+              <Text style={styles.infoBtnText}>How this works</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
+
+        <Modal
+          visible={isInfoOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={closeHowItWorks}
+          statusBarTranslucent
+        >
+          <View style={styles.infoModalRoot}>
+            <Pressable style={styles.infoModalBackdrop} onPress={closeHowItWorks} />
+            <View style={[styles.infoModalCard, { paddingBottom: Math.max(insets.bottom, 16) + 16 }]}>
+              <View style={styles.infoModalHeader}>
+                <View style={styles.sheetHandle} />
+                <TouchableOpacity
+                  onPress={closeHowItWorks}
+                  style={styles.infoModalCloseBtn}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close how this works"
+                >
+                  <FontAwesome name="close" size={18} color="#fff" />
+                </TouchableOpacity>
+              </View>
+              <ScrollView
+                style={styles.infoModalScrollHost}
+                contentContainerStyle={styles.infoSheetScroll}
+                showsVerticalScrollIndicator
+              >
+                <Text style={styles.infoTitle}>Reacting to a Reflection</Text>
+                <Text style={styles.infoSubtitle}>
+                  A reaction lets you respond in the moment — point something out, share a memory, or
+                  just smile back. Pick whichever feels easiest; there’s no wrong way.
+                </Text>
+
+                <View style={styles.infoRow}>
+                  <View style={styles.infoIconWrap}>
+                    <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+                  </View>
+                  <View style={styles.infoTextWrap}>
+                    <Text style={styles.infoLabel}>Selfie</Text>
+                    <Text style={styles.infoDesc}>
+                      Hold the button to record. The Reflection plays beside you so you can react
+                      along with it — for videos, drag to choose where it starts first.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.infoRow}>
+                  <View style={styles.infoIconWrap}>
+                    <FontAwesome name="microphone" size={14} color="#4ade80" />
+                  </View>
+                  <View style={styles.infoTextWrap}>
+                    <Text style={styles.infoLabel}>Voice</Text>
+                    <Text style={styles.infoDesc}>
+                      Just your voice — great for narrating or for quieter, public places where you’d
+                      rather not be on camera.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.infoRow}>
+                  <View style={styles.infoIconWrap}>
+                    <FontAwesome name="keyboard-o" size={14} color="#f39c12" />
+                  </View>
+                  <View style={styles.infoTextWrap}>
+                    <Text style={styles.infoLabel}>Type</Text>
+                    <Text style={styles.infoDesc}>
+                      Write a short note and we’ll read it aloud to the Explorer in a friendly voice.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.infoDivider} />
+
+                <Text style={styles.infoProTipHeader}>About sound &amp; echo</Text>
+                <Text style={styles.infoProTip}>
+                  While you record, the Reflection keeps playing so you can react to it. The picture is
+                  always there for you to follow.
+                </Text>
+                <Text style={styles.infoProTip}>
+                  <Text style={styles.infoProTipStrong}>Headphones are the sweet spot:</Text> plug them
+                  in and you’ll hear the Reflection clearly with no echo in your recording.
+                </Text>
+                <Text style={styles.infoProTip}>
+                  Without headphones we keep the Reflection’s sound low (or silent) while you record so
+                  it doesn’t echo back into your reaction. You can always preview before you send.
+                </Text>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
       </GestureHandlerRootView>
     </Modal>
   );
@@ -2007,6 +2196,145 @@ const styles = StyleSheet.create({
   replayText: {
     color: '#fff',
     fontSize: 14,
+    fontWeight: '600',
+  },
+  audioHintRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingHorizontal: 20,
+    paddingBottom: 10,
+  },
+  audioHintText: {
+    flexShrink: 1,
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: 'center',
+  },
+  infoBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    marginTop: 6,
+  },
+  infoBtnText: {
+    color: '#4a90d9',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  infoModalRoot: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  infoModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  infoModalCard: {
+    backgroundColor: '#1a1a1a',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '85%',
+    overflow: 'hidden',
+  },
+  infoModalHeader: {
+    paddingTop: 4,
+    paddingBottom: 4,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+  },
+  sheetHandle: {
+    backgroundColor: '#666',
+    width: 40,
+    height: 5,
+    borderRadius: 3,
+    alignSelf: 'center',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  infoModalCloseBtn: {
+    position: 'absolute',
+    top: 6,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  infoModalScrollHost: {
+    flexGrow: 0,
+  },
+  infoSheetScroll: {
+    paddingHorizontal: 24,
+    paddingTop: 18,
+    paddingBottom: 24,
+  },
+  infoTitle: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  infoSubtitle: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 18,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginBottom: 16,
+  },
+  infoIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  infoTextWrap: {
+    flex: 1,
+  },
+  infoLabel: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  infoDesc: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  infoDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    marginVertical: 16,
+  },
+  infoProTipHeader: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  infoProTip: {
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 13,
+    lineHeight: 19,
+    marginBottom: 10,
+  },
+  infoProTipStrong: {
+    color: 'rgba(255,255,255,0.7)',
     fontWeight: '600',
   },
 });
