@@ -37,6 +37,16 @@ export const VOICE_OPTIONS = [
     description: 'Conversational, imperfect, casual male style.',
   },
   {
+    label: 'Chirp3 Puck',
+    value: 'en-US-Chirp3-HD-Puck',
+    description: 'Upbeat, energetic male voice with peer-like warmth.',
+  },
+  {
+    label: 'Chirp3 Achird',
+    value: 'en-US-Chirp3-HD-Achird',
+    description: 'Friendly, approachable male voice.',
+  },
+  {
     label: 'Chirp3 Sulafat',
     value: 'en-US-Chirp3-HD-Sulafat',
     description: 'Google-classified warm female voice.',
