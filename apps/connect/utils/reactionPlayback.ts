@@ -392,6 +392,75 @@ export function resolveReactionPlaybackType(event: Event | null | undefined): Re
   return 'selfie';
 }
 
+/** Typed and voice reactions show the responding Companion's avatar in PiP. */
+export function shouldUseCompanionAvatarReactionPip(reactionType: ReactionType): boolean {
+  return reactionType === 'typed' || reactionType === 'voice';
+}
+
+export function resolveReactionResponderFaceForPlayback(
+  event: Event | null | undefined,
+  options: {
+    companionByRelationshipId: Map<string, CompanionAvatar>;
+    companionByUserId: Map<string, CompanionAvatar>;
+    activeFaceKey?: string | null;
+    responderFaces?: ReactionResponderFace[];
+    reactionType?: ReactionType;
+  },
+): ReactionResponderFace | null {
+  const { companionByRelationshipId, companionByUserId, activeFaceKey, responderFaces, reactionType } =
+    options;
+
+  if (activeFaceKey && responderFaces?.length) {
+    const matched = responderFaces.find((face) => face.key === activeFaceKey);
+    if (matched) return matched;
+  }
+
+  const senderId = asOptionalString(event?.metadata?.sender_id);
+  if (senderId) {
+    const companion = companionByUserId.get(senderId);
+    if (companion) {
+      return {
+        key: companion.relationshipId,
+        userId: companion.userId,
+        companionName: companion.companionName,
+        avatarUrl: companion.avatarUrl,
+        color: companion.color,
+        initial: companion.initial,
+        reactionType,
+      };
+    }
+    return {
+      key: senderId,
+      userId: senderId,
+      companionName: event?.metadata?.sender || 'Companion',
+      avatarUrl: null,
+      color: getAvatarColor(senderId),
+      initial: getAvatarInitial(event?.metadata?.sender || 'Companion'),
+      reactionType,
+    };
+  }
+
+  const relationshipId = asOptionalString(
+    (event as { responderRelationshipId?: string } | null | undefined)?.responderRelationshipId,
+  );
+  if (relationshipId) {
+    const companion = companionByRelationshipId.get(relationshipId);
+    if (companion) {
+      return {
+        key: companion.relationshipId,
+        userId: companion.userId,
+        companionName: companion.companionName,
+        avatarUrl: companion.avatarUrl,
+        color: companion.color,
+        initial: companion.initial,
+        reactionType,
+      };
+    }
+  }
+
+  return null;
+}
+
 export function resolveReactionParentPipMedia(
   event: Event | null | undefined,
   options?: { preferImage?: boolean },

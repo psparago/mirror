@@ -1,5 +1,8 @@
 import { Audio } from 'expo-av';
-import { setAudioModeAsync as setExpoAudioModeAsync } from 'expo-audio';
+import {
+  setAudioModeAsync as setExpoAudioModeAsync,
+  setIsAudioActiveAsync,
+} from 'expo-audio';
 
 /**
  * Reflections Connect uses expo-audio for recording and expo-av for playback.
@@ -18,6 +21,7 @@ export async function configureConnectPlaybackAudioSessionAsync(options?: {
     }
 
     try {
+      await setIsAudioActiveAsync(true);
       await Promise.all([
         setExpoAudioModeAsync({
           allowsRecording: false,

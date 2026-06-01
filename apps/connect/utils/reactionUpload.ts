@@ -105,7 +105,7 @@ async function resolvePosterUri(
   return FALLBACK_POSTER_REMOTE_URL;
 }
 
-async function generateTypedReactionAudio(
+export async function generateTypedReactionAudio(
   messageText: string,
   explorerId: string,
   captionVoice: string,
