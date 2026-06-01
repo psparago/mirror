@@ -2211,8 +2211,8 @@ export function ReactionSheet({
                   <View style={styles.infoTextWrap}>
                     <Text style={styles.infoLabel}>Selfie</Text>
                     <Text style={styles.infoDesc}>
-                      Hold the button to record. The Reflection plays beside you so you can react
-                      along with it — for videos, drag to choose where it starts first.
+                      Hold the button to record yourself reacting. On videos, drag to choose where the
+                      Reflection starts. When you’re done, tap Preview, then Send.
                     </Text>
                   </View>
                 </View>
@@ -2224,8 +2224,8 @@ export function ReactionSheet({
                   <View style={styles.infoTextWrap}>
                     <Text style={styles.infoLabel}>Voice</Text>
                     <Text style={styles.infoDesc}>
-                      Just your voice — great for narrating or for quieter, public places where you’d
-                      rather not be on camera.
+                      Record a short voice message — great for narrating or for quieter places where
+                      you’d rather not be on camera. Tap Preview when you’re ready, then Send.
                     </Text>
                   </View>
                 </View>
@@ -2237,17 +2237,40 @@ export function ReactionSheet({
                   <View style={styles.infoTextWrap}>
                     <Text style={styles.infoLabel}>Type</Text>
                     <Text style={styles.infoDesc}>
-                      Write a short note and we’ll read it aloud to the Explorer in a friendly voice.
+                      Write a short note. We’ll deliver it in your AI voice (the one you picked in
+                      Settings). Tap Preview to hear it, then Send.
                     </Text>
                   </View>
                 </View>
 
                 <View style={styles.infoDivider} />
 
+                <Text style={styles.infoProTipHeader}>What Preview shows</Text>
+                <Text style={styles.infoProTip}>
+                  Preview matches what the Explorer will see — the Reflection fills the screen, with
+                  your reaction in the corner.
+                </Text>
+                <Text style={styles.infoProTip}>
+                  <Text style={styles.infoProTipStrong}>Selfie:</Text> your selfie video plays in the
+                  corner. On video Reflections, the Reflection plays softly on the main screen. On
+                  photos, the picture stays on the main screen.
+                </Text>
+                <Text style={styles.infoProTip}>
+                  <Text style={styles.infoProTipStrong}>Voice &amp; Type:</Text> your profile photo
+                  appears in the corner while your message plays — your recorded voice for Voice, or
+                  your AI voice for Type.
+                </Text>
+                <Text style={styles.infoProTip}>
+                  Use the ✕ to close and discard, or Retake if you want another try. The back arrow in
+                  Preview returns you to edit without losing your draft.
+                </Text>
+
+                <View style={styles.infoDivider} />
+
                 <Text style={styles.infoProTipHeader}>About sound &amp; echo</Text>
                 <Text style={styles.infoProTip}>
-                  While you record, the Reflection keeps playing so you can react to it. The picture is
-                  always there for you to follow.
+                  For Selfie and Voice, the Reflection can keep playing while you record so you can
+                  react in sync. The picture is always there to follow along.
                 </Text>
                 <Text style={styles.infoProTip}>
                   <Text style={styles.infoProTipStrong}>Headphones are the sweet spot:</Text> plug them
@@ -2255,8 +2278,7 @@ export function ReactionSheet({
                 </Text>
                 <Text style={styles.infoProTip}>
                   On speaker, leave Original audio off while you record — the video still plays for
-                  sync. Preview shows how Companions will hear your voice with the Reflection softly
-                  in the background.
+                  sync without bleeding into your reaction.
                 </Text>
               </ScrollView>
             </View>

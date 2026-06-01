@@ -61,6 +61,28 @@ interface ReplayModalProps {
   explorerId?: string;
 }
 
+async function unloadAvSoundSafely(sound: Audio.Sound | null | undefined): Promise<void> {
+  if (!sound) return;
+  try {
+    await sound.stopAsync();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await sound.unloadAsync();
+  } catch {
+    /* ignore */
+  }
+}
+
+async function takeAndUnloadSoundRef(
+  ref: React.MutableRefObject<Audio.Sound | null>,
+): Promise<void> {
+  const sound = ref.current;
+  ref.current = null;
+  await unloadAvSoundSafely(sound);
+}
+
 export function ReplayModal({
   visible,
   event,
@@ -550,24 +572,15 @@ export function ReplayModal({
 
     setIsDeletingReaction(true);
     try {
-      // Stop reaction playback before URLs are deleted (prevents speakCaption -1100).
-      sendRef.current({ type: 'CLOSE' });
       try {
         Speech.stop();
       } catch {
         /* ignore */
       }
-      if (captionSoundRef.current) {
-        await captionSoundRef.current.stopAsync().catch(() => {});
-        await captionSoundRef.current.unloadAsync().catch(() => {});
-        captionSoundRef.current = null;
-        setCaptionSound(null);
-      }
-      if (soundRef.current) {
-        await soundRef.current.stopAsync().catch(() => {});
-        await soundRef.current.unloadAsync().catch(() => {});
-        soundRef.current = null;
-      }
+      await takeAndUnloadSoundRef(captionSoundRef);
+      setCaptionSound(null);
+      await takeAndUnloadSoundRef(soundRef);
+      void pipVideoRef.current?.pauseAsync().catch(() => {});
       try {
         videoPlayer.pause();
       } catch {
@@ -575,6 +588,7 @@ export function ReplayModal({
       }
       videoFinishHandledForEventRef.current = null;
       setVideoReady(false);
+      sendRef.current({ type: 'CLOSE' });
 
       // Heal parent first so avatar stack updates even if media delete fails.
       await removeResponderFromParentReflection(
@@ -711,24 +725,12 @@ export function ReplayModal({
       // --- MEDIA CONTROL ---
       stopAllMedia: async () => {
         try { Speech.stop(); } catch (e) {}
-        
-        if (soundRef.current) {
-          try {
-            await soundRef.current.stopAsync();
-            await soundRef.current.unloadAsync();
-          } catch (e) {}
-          soundRef.current = null;
-        }
-        
-        if (captionSoundRef.current) {
-          try {
-            await captionSoundRef.current.stopAsync();
-            await captionSoundRef.current.unloadAsync();
-          } catch (e) {}
-          captionSoundRef.current = null;
-        }
+
+        await takeAndUnloadSoundRef(soundRef);
+        await takeAndUnloadSoundRef(captionSoundRef);
         setCaptionSound(null);
-        
+        void pipVideoRef.current?.pauseAsync().catch(() => {});
+
         try {
           videoPlayer.pause();
           seekVideoToSeconds(videoPlayer, getVideoParkSeekSec(eventRef.current?.metadata));
@@ -1209,15 +1211,9 @@ export function ReplayModal({
     setIsDeepDivePending(false);
 
     Speech.stop();
-    if (captionSoundRef.current) {
-      await captionSoundRef.current.unloadAsync().catch(() => {});
-      captionSoundRef.current = null;
-      setCaptionSound(null);
-    }
-    if (soundRef.current) {
-      await soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
-    }
+    await takeAndUnloadSoundRef(captionSoundRef);
+    setCaptionSound(null);
+    await takeAndUnloadSoundRef(soundRef);
 
     const deepDiveAudioUrl = normalizeAudioUrl(eventRef.current?.deep_dive_audio_url);
     const isValidUrl = !!deepDiveAudioUrl &&
