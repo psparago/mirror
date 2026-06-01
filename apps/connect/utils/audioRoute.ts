@@ -1,41 +1,22 @@
-import ReflectionsAudio, { type AudioOutputRoute } from '@/modules/reflections-audio';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+
+export type AudioOutputRoute = {
+  hasHeadphones: boolean;
+  outputs: string[];
+};
 
 const EMPTY_ROUTE: AudioOutputRoute = { hasHeadphones: false, outputs: [] };
 
-/** Synchronously reads the current audio output route, falling back safely if the native module
- *  is unavailable (web bundling, Expo Go, or an out-of-date dev client). */
+/** Returns the current audio output route (speaker assumed when detection is unavailable). */
 export function getAudioRoute(): AudioOutputRoute {
-  try {
-    return ReflectionsAudio?.getAudioRoute() ?? EMPTY_ROUTE;
-  } catch {
-    return EMPTY_ROUTE;
-  }
+  return EMPTY_ROUTE;
 }
 
 /**
- * Subscribes to the device's audio output route while `active`. Used by the reaction recorder to
- * decide whether the parent Reflection audio can play out loud (headphones connected → no echo).
+ * Subscribes to the device's audio output route while `active`.
+ * Without a native route module, defaults to speaker — Original audio stays off until toggled.
  */
-export function useAudioRoute(active: boolean): AudioOutputRoute {
-  const [route, setRoute] = useState<AudioOutputRoute>(EMPTY_ROUTE);
-
-  useEffect(() => {
-    if (!active || !ReflectionsAudio) return;
-
-    setRoute(getAudioRoute());
-
-    let subscription: { remove: () => void } | undefined;
-    try {
-      subscription = ReflectionsAudio.addListener('onAudioRouteChange', (next) => {
-        setRoute(next ?? EMPTY_ROUTE);
-      });
-    } catch {
-      subscription = undefined;
-    }
-
-    return () => subscription?.remove();
-  }, [active]);
-
+export function useAudioRoute(_active: boolean): AudioOutputRoute {
+  const [route] = useState<AudioOutputRoute>(EMPTY_ROUTE);
   return route;
 }

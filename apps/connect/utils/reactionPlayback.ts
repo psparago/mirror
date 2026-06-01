@@ -14,7 +14,7 @@ import {
 } from '@projectmirror/shared/firebase';
 
 /** Parent Reflection volume during Live Sync recording on speaker when Original audio is on.
- *  Audible enough to narrate over; expect some echo without headphones. */
+ *  Companions should keep Original audio off on speaker to avoid echo in the recording. */
 export const REACTION_PARENT_RECORDING_VOLUME = 0.40;
 
 /** Parent Reflection volume during recording when headphones/Bluetooth are connected. There is no
@@ -28,21 +28,18 @@ export const REACTION_PARENT_PLAYBACK_VOLUME = 0.15;
 export type SelfieRecordingAudioSnapshot = {
   originalAudioMuted: boolean;
   hasHeadphones: boolean;
-  /** True when iOS VoiceChat + native parent path was used (hardware AEC). */
-  usedVoiceChatAecPath: boolean;
 };
 
 /**
  * Whether companion/timeline preview should mix in a separate parent audio track.
- * When Original audio played on the speaker without AEC, parent bleed is already baked into
- * the selfie file — adding 15% parent again sounds like echo.
+ * When Original audio played on the speaker, parent bleed may be baked into the selfie file —
+ * adding 15% parent again sounds like echo.
  */
 export function shouldPlaySeparateParentInPreview(
   snapshot: SelfieRecordingAudioSnapshot,
 ): boolean {
   if (snapshot.originalAudioMuted) return true;
   if (snapshot.hasHeadphones) return true;
-  if (snapshot.usedVoiceChatAecPath) return true;
   return false;
 }
 
@@ -58,9 +55,8 @@ export function resolveCompanionPreviewParentVolume(
  * Resolves the parent Reflection volume to use while recording a reaction.
  *
  * Instagram-style "Original audio" mix: the video always plays for visual sync, but whether its
- * audio is audible depends on capability. Headphones → full volume. iOS speaker → low volume with
- * hardware AEC during selfie record. Android speaker → muted by default (no platform AEC).
- * Muted → silent.
+ * audio is audible depends on capability. Headphones → full volume. Speaker → off by default
+ * (Companion can opt in; expect echo). Muted → silent.
  */
 export function resolveReactionRecordingVolume(options: {
   muted: boolean;
@@ -74,16 +70,13 @@ export function resolveReactionRecordingVolume(options: {
  * Whether the parent Reflection's audio ("Original audio") should default to ON for the current
  * audio route.
  *
- * Headphones → always on. iOS selfie with VoiceChat AEC → on over speaker too. Android speaker
- * (and voice mode without AEC) → off until the Companion opts in.
+ * Headphones / Bluetooth only — no speaker echo path. On the built-in speaker we default OFF until
+ * the Companion opts in.
  */
 export function defaultReactionOriginalAudioEnabled(options: {
   hasHeadphones: boolean;
-  /** iOS selfie path with hardware AEC — safe to default Original audio on over speaker. */
-  supportsSpeakerOriginalAudio?: boolean;
 }): boolean {
-  if (options.hasHeadphones) return true;
-  return options.supportsSpeakerOriginalAudio === true;
+  return options.hasHeadphones;
 }
 
 export type ReactionResponderFace = {
