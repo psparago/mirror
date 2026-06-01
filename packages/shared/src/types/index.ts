@@ -139,6 +139,7 @@ export interface PendingNotificationDocument {
   triggerType: PendingNotificationTriggerType;
   reflectionId: string;
   parentReflectionId?: string;
+  parentReflectionAuthorName?: string;
   senderName: string;
   likerId?: string;
   likerName?: string;

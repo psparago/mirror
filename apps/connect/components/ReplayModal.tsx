@@ -131,9 +131,12 @@ export function ReplayModal({
   const suppressInstantPlayEventIdRef = useRef<string | null>(null);
   const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
   const [isDeletingReaction, setIsDeletingReaction] = useState(false);
-  const [resolvedParentPip, setResolvedParentPip] = useState<ReactionParentPipMedia | null>(null);
+  const [fetchedParentPip, setFetchedParentPip] = useState<
+    ReactionParentPipMedia | null | undefined
+  >(undefined);
   const pipVideoRef = useRef<AvVideo>(null);
   const pipAlignedForEventRef = useRef<string | null>(null);
+  const selfieImagePlaybackStartedForEventRef = useRef<string | null>(null);
   const selfieUsesParentMainStageRef = useRef(false);
   const selfieUsesParentImageMainStageRef = useRef(false);
   const selfieUsesParentOnMainStageRef = useRef(false);
@@ -141,6 +144,31 @@ export function ReplayModal({
   const displayEvent = playbackEvent ?? event;
   const isReactionPlayback = displayEvent?.isReaction === true;
   const reactionPlaybackType = resolveReactionPlaybackType(displayEvent);
+
+  const sessionParentPip = useMemo((): ReactionParentPipMedia | null => {
+    if (!visible || !isReactionPlayback) return null;
+    const sessionParent =
+      reactionSessionRef.current?.parentEvent ?? reactionSession?.parentEvent;
+    if (!sessionParent) return null;
+    return resolveReactionParentPipMedia(sessionParent, { preferImage: false });
+  }, [visible, isReactionPlayback, reactionSession?.parentEvent, displayEvent?.event_id]);
+
+  const resolvedParentPip =
+    sessionParentPip ?? (fetchedParentPip === undefined ? null : fetchedParentPip);
+
+  const reactionParentPipReady = useMemo(() => {
+    if (!isReactionPlayback) return true;
+    if (sessionParentPip) return true;
+    if (!displayEvent?.parentReflectionId) return true;
+    if (!explorerId) return true;
+    return fetchedParentPip !== undefined;
+  }, [
+    displayEvent?.parentReflectionId,
+    explorerId,
+    fetchedParentPip,
+    isReactionPlayback,
+    sessionParentPip,
+  ]);
   const isSelfieReactionPlayback = isReactionPlayback && reactionPlaybackType === 'selfie';
   const usesCompanionAvatarPip = shouldUseCompanionAvatarReactionPip(reactionPlaybackType);
   const selfieUsesParentMainStage =
@@ -171,6 +199,10 @@ export function ReplayModal({
     }
     if (reactionPlaybackType === 'voice') {
       return 'Voice message';
+    }
+    if (reactionPlaybackType === 'selfie') {
+      const sender = displayEvent?.metadata?.sender;
+      return sender ? `${sender}'s selfie` : 'Selfie reaction';
     }
     return null;
   }, [displayEvent?.metadata?.description, displayEvent?.metadata?.reaction_message, isReactionPlayback, reactionPlaybackType]);
@@ -288,39 +320,51 @@ export function ReplayModal({
     videoPlayer,
   ]);
 
+  const startSelfieImageMainStagePlayback = useCallback(async () => {
+    try {
+      await pipVideoRef.current?.setStatusAsync({
+        positionMillis: 0,
+        shouldPlay: true,
+        isMuted: false,
+        volume: 1,
+      });
+    } catch {
+      // PiP may not be mounted yet; onLoad handler will retry.
+    }
+  }, []);
+
   useEffect(() => {
     if (!visible || !isReactionPlayback) {
-      setResolvedParentPip(null);
+      setFetchedParentPip(undefined);
       pipAlignedForEventRef.current = null;
+      selfieImagePlaybackStartedForEventRef.current = null;
       void pipVideoRef.current?.pauseAsync().catch(() => {});
       return;
     }
 
-    const sessionParent =
-      reactionSessionRef.current?.parentEvent ?? reactionSession?.parentEvent;
-    const sessionPip = resolveReactionParentPipMedia(sessionParent, {
-      preferImage: false,
-    });
-    if (sessionPip) {
-      setResolvedParentPip(sessionPip);
+    if (sessionParentPip) {
+      setFetchedParentPip(undefined);
       return;
     }
 
     const parentId = displayEvent?.parentReflectionId;
     if (!parentId || !explorerId) {
-      setResolvedParentPip(null);
+      setFetchedParentPip(null);
       return;
     }
 
     let cancelled = false;
+    setFetchedParentPip(undefined);
     void fetchMirrorEventById(parentId, explorerId)
       .then((parentEvent) => {
         if (cancelled) return;
-        setResolvedParentPip(resolveReactionParentPipMedia(parentEvent, { preferImage: false }));
+        setFetchedParentPip(
+          resolveReactionParentPipMedia(parentEvent, { preferImage: false }),
+        );
       })
       .catch((error) => {
         console.warn('[ReplayModal] failed to resolve parent media for PiP', error);
-        if (!cancelled) setResolvedParentPip(null);
+        if (!cancelled) setFetchedParentPip(null);
       });
 
     return () => {
@@ -329,10 +373,10 @@ export function ReplayModal({
   }, [
     visible,
     isReactionPlayback,
+    sessionParentPip,
     displayEvent?.parentReflectionId,
     displayEvent?.event_id,
     explorerId,
-    reactionSession?.parentEvent,
   ]);
 
   const resolvedParentVideoUrl =
@@ -534,7 +578,10 @@ export function ReplayModal({
     reactionSession,
   ]);
 
-  const showReactionResponses = reactionResponderFaces.length > 0;
+  const showReactionResponsesInCaption =
+    reactionResponderFaces.length > 0 && !isViewingChildReaction;
+  const showReactionSwitcherOnStage =
+    reactionResponderFaces.length > 0 && isViewingChildReaction;
 
   const returnToParentReflection = useCallback((session: ReactionPlaybackSession) => {
     if (!session.parentEvent) return;
@@ -695,6 +742,7 @@ export function ReplayModal({
     setShowLikesModal(false);
     setVideoReady(false);
     videoFinishHandledForEventRef.current = null;
+    selfieImagePlaybackStartedForEventRef.current = null;
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
@@ -799,14 +847,7 @@ export function ReplayModal({
             selfieUsesParentImageMainStageRef.current &&
             eventRef.current?.video_url
           ) {
-            void pipVideoRef.current
-              ?.setStatusAsync({
-                positionMillis: 0,
-                shouldPlay: true,
-                isMuted: false,
-                volume: 1,
-              })
-              .catch(() => {});
+            void startSelfieImageMainStagePlayback();
             return;
           }
 
@@ -881,7 +922,7 @@ export function ReplayModal({
       
       resumeMedia: () => {
         if (selfieUsesParentImageMainStageRef.current) {
-          void pipVideoRef.current?.playAsync().catch(() => {});
+          void startSelfieImageMainStagePlayback();
           return;
         }
         try {
@@ -951,7 +992,7 @@ export function ReplayModal({
         }
       },
     }
-  }), [videoPlayer, preferRecordedAudioOnly]);
+  }), [startSelfieImageMainStagePlayback, videoPlayer, preferRecordedAudioOnly]);
 
   const [state, send] = useMachine(machine);
 
@@ -1039,6 +1080,19 @@ export function ReplayModal({
     signalVideoFinishedRef.current = signalVideoFinished;
   }, [signalVideoFinished]);
 
+  const handleSelfiePipReady = useCallback(async () => {
+    if (!selfieUsesParentImageMainStageRef.current) return;
+    const isMachinePlaying =
+      stateRef.current?.matches({ playingVideoInstant: { playback: 'playing' } }) ||
+      stateRef.current?.matches({ playingVideo: { playback: 'playing' } });
+    if (!isMachinePlaying) return;
+    const eventId = eventRef.current?.event_id;
+    if (!eventId || selfieImagePlaybackStartedForEventRef.current === eventId) return;
+    await alignReactionPlayback();
+    await startSelfieImageMainStagePlayback();
+    selfieImagePlaybackStartedForEventRef.current = eventId;
+  }, [alignReactionPlayback, startSelfieImageMainStagePlayback]);
+
   const handleSelfiePipStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
       if (!selfieUsesParentOnMainStage || !status.isLoaded || !status.didJustFinish) return;
@@ -1082,8 +1136,32 @@ export function ReplayModal({
   }, [visible, state, displayEvent?.event_id, displayEvent?.video_url, displayEvent?.metadata, videoPlayer]);
 
   useEffect(() => {
+    if (!visible || !selfieUsesParentImageMainStage || !displayEvent?.event_id) return;
+    const isMachinePlaying =
+      state.matches({ playingVideoInstant: { playback: 'playing' } }) ||
+      state.matches({ playingVideo: { playback: 'playing' } });
+    if (!isMachinePlaying) return;
+    if (selfieImagePlaybackStartedForEventRef.current === displayEvent.event_id) return;
+
+    void (async () => {
+      await alignReactionPlayback();
+      await startSelfieImageMainStagePlayback();
+      selfieImagePlaybackStartedForEventRef.current = displayEvent.event_id;
+    })();
+  }, [
+    alignReactionPlayback,
+    displayEvent?.event_id,
+    selfieUsesParentImageMainStage,
+    startSelfieImageMainStagePlayback,
+    state,
+    visible,
+  ]);
+
+  useEffect(() => {
     let cancelled = false;
     if (visible && displayEvent) {
+      if (!reactionParentPipReady) return;
+
       configureConnectPlaybackAudioSessionAsync()
         .catch((error) => {
           console.error('Failed to prepare playback audio session:', error);
@@ -1114,7 +1192,7 @@ export function ReplayModal({
       cancelled = true;
       sendRef.current({ type: 'CLOSE' });
     };
-  }, [visible, displayEvent?.event_id, send]);
+  }, [visible, displayEvent?.event_id, reactionParentPipReady, send]);
 
   useEffect(() => {
     if (!showManualReplayOverlay || !displayEvent?.video_url) return;
@@ -1344,6 +1422,9 @@ export function ReplayModal({
           volume={1}
           shouldPlay={false}
           progressUpdateIntervalMillis={100}
+          onLoad={() => {
+            void handleSelfiePipReady();
+          }}
           onPlaybackStatusUpdate={handleSelfiePipStatusUpdate}
         />
       );
@@ -1421,6 +1502,7 @@ export function ReplayModal({
       takeSelfie: false,
     });
     pipAlignedForEventRef.current = null;
+    selfieImagePlaybackStartedForEventRef.current = null;
     void alignReactionPlayback();
   };
 
@@ -1566,12 +1648,27 @@ export function ReplayModal({
                   <Image
                     source={{ uri: parentMainImageUrl }}
                     style={styles.mediaImage}
-                    contentFit="contain"
+                    contentFit={selfieUsesParentImageMainStage ? 'cover' : 'contain'}
                     cachePolicy="memory-disk"
                   />
                   {renderReactionPip()}
                 </>
               )}
+
+              {showReactionSwitcherOnStage ? (
+                <View style={styles.reactionSwitcherOverlay} pointerEvents="box-none">
+                  <ReactionRespondentsBar
+                    variant="player"
+                    label="Switch"
+                    faces={reactionResponderFaces}
+                    fetchingFaceKey={fetchingReactionFaceKey}
+                    activeFaceKey={activeReactionFaceKey}
+                    onPressFace={(face) => {
+                      void handleInPlayerReactionPress(face);
+                    }}
+                  />
+                </View>
+              ) : null}
 
               {/* Replay overlay — appears after caption + deep dive completes */}
               {showReplayOverlay && (
@@ -1592,7 +1689,7 @@ export function ReplayModal({
 
           {/* CAPTION BAR */}
           <View style={[styles.captionBar, { paddingBottom: insets.bottom + 16 }]}>
-            {showReactionResponses ? (
+            {showReactionResponsesInCaption ? (
               <ReactionRespondentsBar
                 variant="caption"
                 faces={reactionResponderFaces}
@@ -1634,7 +1731,7 @@ export function ReplayModal({
                 </Animated.View>
               ) : null}
 
-              <View style={styles.captionTextBlock}>
+              <View style={[styles.captionTextBlock, isReactionPlayback && styles.captionTextBlockReaction]}>
                 {isReactionPlayback ? (
                   reactionCaptionText ? (
                     <Text style={styles.captionText} numberOfLines={3}>
@@ -1650,6 +1747,7 @@ export function ReplayModal({
                 )}
               </View>
 
+              {!isReactionPlayback ? (
               <TouchableOpacity
                 style={[styles.likeButton, likedByMe && styles.likeButtonActive]}
                 onPress={handleToggleLike}
@@ -1668,8 +1766,9 @@ export function ReplayModal({
                   <Text style={[styles.likeButtonCount, likedByMe && styles.likeButtonCountActive]}>{likeCount}</Text>
                 ) : null}
               </TouchableOpacity>
+              ) : null}
             </View>
-            {displayEvent.metadata?.sender ? (
+            {displayEvent.metadata?.sender && !(isReactionPlayback && reactionCaptionText) ? (
               <Text style={styles.senderText}>From {displayEvent.metadata.sender}</Text>
             ) : null}
           </View>
@@ -2049,6 +2148,14 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.4)',
     zIndex: 5,
   },
+  reactionSwitcherOverlay: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 12,
+    zIndex: 6,
+    alignItems: 'flex-start',
+  },
   reactionCompanionAvatarPip: {
     top: 14,
     right: 14,
@@ -2101,6 +2208,9 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     paddingRight: 8,
+  },
+  captionTextBlockReaction: {
+    paddingRight: 0,
   },
   tellMeMoreTopButton: {
     width: 40,

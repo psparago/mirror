@@ -20,6 +20,7 @@ import (
 const (
 	pendingNotificationsCollection = "pending_notifications"
 	relationshipsCollection        = "relationships"
+	reflectionsCollection          = "reflections"
 
 	triggerCompanionUpload   = "companion_upload"
 	triggerCompanionReaction = "companion_reaction"
@@ -34,9 +35,10 @@ type pendingNotification struct {
 	RecipientIDs             []string `firestore:"recipientIds"`
 	TriggerType              string   `firestore:"triggerType"`
 	ReflectionID             string   `firestore:"reflectionId"`
-	ParentReflectionID       string   `firestore:"parentReflectionId,omitempty"`
-	SenderID                 string   `firestore:"senderId"`
-	SenderName               string   `firestore:"senderName"`
+	ParentReflectionID           string `firestore:"parentReflectionId,omitempty"`
+	ParentReflectionAuthorName   string `firestore:"parentReflectionAuthorName,omitempty"`
+	SenderID                     string `firestore:"senderId"`
+	SenderName                   string `firestore:"senderName"`
 	LikerID                  string   `firestore:"likerId,omitempty"`
 	LikerName                string   `firestore:"likerName,omitempty"`
 	Status                   string   `firestore:"status"`
@@ -203,6 +205,39 @@ func newlyAddedLikedBy(before, after []string) []string {
 	return added
 }
 
+func senderNameFromReflectionData(data map[string]any, explorerID string, client *firestore.Client, ctx context.Context) string {
+	if data == nil {
+		return "a Companion"
+	}
+	if sender, ok := data["sender"].(string); ok && strings.TrimSpace(sender) != "" {
+		return strings.TrimSpace(sender)
+	}
+	if metadata, ok := data["metadata"].(map[string]any); ok {
+		if sender, ok := metadata["sender"].(string); ok && strings.TrimSpace(sender) != "" {
+			return strings.TrimSpace(sender)
+		}
+		if senderID, ok := metadata["sender_id"].(string); ok && strings.TrimSpace(senderID) != "" {
+			return companionNameForUser(ctx, client, explorerID, strings.TrimSpace(senderID))
+		}
+	}
+	if senderID, ok := data["sender_id"].(string); ok && strings.TrimSpace(senderID) != "" {
+		return companionNameForUser(ctx, client, explorerID, strings.TrimSpace(senderID))
+	}
+	return "a Companion"
+}
+
+func parentReflectionAuthorName(ctx context.Context, client *firestore.Client, explorerID, parentReflectionID string) string {
+	if parentReflectionID == "" {
+		return "a Companion"
+	}
+	doc, err := client.Collection(reflectionsCollection).Doc(parentReflectionID).Get(ctx)
+	if err != nil {
+		fmt.Printf("parentReflectionAuthorName: fetch %s failed: %v\n", parentReflectionID, err)
+		return "a Companion"
+	}
+	return senderNameFromReflectionData(doc.Data(), explorerID, client, ctx)
+}
+
 func companionNameForUser(ctx context.Context, client *firestore.Client, explorerID, userID string) string {
 	if userID == "" {
 		return "A Companion"
@@ -248,6 +283,9 @@ func createPendingNotification(ctx context.Context, client *firestore.Client, do
 	}
 	if notification.ParentReflectionID != "" {
 		data["parentReflectionId"] = notification.ParentReflectionID
+	}
+	if notification.ParentReflectionAuthorName != "" {
+		data["parentReflectionAuthorName"] = notification.ParentReflectionAuthorName
 	}
 	_, err := client.Collection(pendingNotificationsCollection).Doc(docID).Create(ctx, data)
 	if status.Code(err) == codes.AlreadyExists {
@@ -323,16 +361,17 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 		}
 
 		notification := pendingNotification{
-			ExplorerID:               explorerID,
-			BroadcastToAllCompanions: true,
-			RecipientIDs:             []string{},
-			TriggerType:              triggerCompanionReaction,
-			ReflectionID:             id,
-			ParentReflectionID:       parentID,
-			SenderID:                 sender,
-			SenderName:               senderName(doc),
-			Status:                   pendingStatus,
-			CreatedAt:                firestore.ServerTimestamp,
+			ExplorerID:                 explorerID,
+			BroadcastToAllCompanions:   true,
+			RecipientIDs:               []string{},
+			TriggerType:                triggerCompanionReaction,
+			ReflectionID:               id,
+			ParentReflectionID:         parentID,
+			ParentReflectionAuthorName: parentReflectionAuthorName(ctx, client, explorerID, parentID),
+			SenderID:                   sender,
+			SenderName:                 senderName(doc),
+			Status:                     pendingStatus,
+			CreatedAt:                  firestore.ServerTimestamp,
 		}
 		return createPendingNotification(ctx, client, fmt.Sprintf("%s_%s", triggerCompanionReaction, id), notification)
 	}

@@ -12,6 +12,7 @@ const EXPLORERS_COLLECTION = 'explorers';
 const PENDING_STATUS = 'pending';
 const COMPANION_UPLOAD_TRIGGER = 'companion_upload';
 const COMPANION_REACTION_TRIGGER = 'companion_reaction';
+const REFLECTIONS_COLLECTION = 'reflections';
 const EXPLORER_LIKE_TRIGGER = 'explorer_like';
 const COMPANION_LIKE_TRIGGER = 'companion_like';
 const FAST_LANE_LIKE_TRIGGERS = new Set([EXPLORER_LIKE_TRIGGER, COMPANION_LIKE_TRIGGER]);
@@ -67,6 +68,7 @@ type SlowLaneNotification = {
   explorerId: string;
   reflectionId: string;
   parentReflectionId: string;
+  parentReflectionAuthorName: string;
   senderId: string;
   senderName: string;
   createdAtMillis: number;
@@ -275,6 +277,96 @@ function positiveNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function possessiveName(name: string): string {
+  const trimmed = name.trim() || 'a Companion';
+  return trimmed.endsWith('s') ? `${trimmed}'` : `${trimmed}'s`;
+}
+
+function formatNameList(names: string[]): string {
+  if (names.length === 1) {
+    return names[0];
+  }
+  if (names.length === 2) {
+    return `${names[0]} and ${names[1]}`;
+  }
+  return `${names[0]}, ${names[1]}, and ${names.length - 2} others`;
+}
+
+function uniqueParentReflectionAuthorNames(notifications: SlowLaneNotification[]): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+
+  for (const notification of notifications) {
+    const name = notification.parentReflectionAuthorName?.trim() ?? '';
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    names.push(name);
+  }
+
+  return names;
+}
+
+function reflectionAuthorNameFromData(data: DocumentData | undefined): string {
+  if (!data) {
+    return '';
+  }
+
+  const topLevelSender = typeof data.sender === 'string' ? data.sender.trim() : '';
+  if (topLevelSender) {
+    return topLevelSender;
+  }
+
+  const metadata = data.metadata;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const metadataRecord = metadata as Record<string, unknown>;
+    const metadataSender =
+      typeof metadataRecord.sender === 'string' ? metadataRecord.sender.trim() : '';
+    if (metadataSender) {
+      return metadataSender;
+    }
+  }
+
+  return '';
+}
+
+async function resolveParentReflectionAuthorName(
+  parentReflectionId: string,
+  cache: Map<string, string>
+): Promise<string> {
+  const cached = cache.get(parentReflectionId);
+  if (cached) {
+    return cached;
+  }
+
+  const snapshot = await db.collection(REFLECTIONS_COLLECTION).doc(parentReflectionId).get();
+  const authorName = reflectionAuthorNameFromData(snapshot.data()) || 'a Companion';
+  cache.set(parentReflectionId, authorName);
+  return authorName;
+}
+
+async function enrichParentReflectionAuthorNames(
+  notifications: SlowLaneNotification[],
+  cache: Map<string, string>
+): Promise<void> {
+  for (const notification of notifications) {
+    if (notification.parentReflectionAuthorName?.trim()) {
+      continue;
+    }
+
+    const parentReflectionId = notification.parentReflectionId?.trim() ?? '';
+    if (!parentReflectionId) {
+      continue;
+    }
+
+    notification.parentReflectionAuthorName = await resolveParentReflectionAuthorName(
+      parentReflectionId,
+      cache
+    );
+  }
+}
+
 function uniqueSenderNames(notifications: SlowLaneNotification[]): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
@@ -300,6 +392,23 @@ function slowLaneBody(senderNames: string[]): string {
   return `${senderNames[0]}, ${senderNames[1]}, and ${senderNames.length - 2} others posted new Reflections.`;
 }
 
+function reactionSlowLaneBody(notifications: SlowLaneNotification[]): string {
+  const reactorNames = uniqueSenderNames(notifications);
+  const reactors = formatNameList(reactorNames);
+  const parentAuthors = uniqueParentReflectionAuthorNames(notifications);
+
+  if (parentAuthors.length === 1) {
+    const reflectionOwner = possessiveName(parentAuthors[0]);
+    return `${reactors} reacted to ${reflectionOwner} Reflection!`;
+  }
+
+  if (reactorNames.length === 1) {
+    return `${reactorNames[0]} added a Reaction!`;
+  }
+
+  return `${reactors} added Reactions!`;
+}
+
 function slowLanePushData(
   explorerId: string,
   eligibleNotifications: SlowLaneNotification[]
@@ -323,22 +432,6 @@ function slowLanePushData(
   }
 
   return data;
-}
-
-function explorerPossessive(explorerName: string): string {
-  const trimmed = explorerName.trim() || 'your Explorer';
-  return trimmed.endsWith('s') ? `${trimmed}'` : `${trimmed}'s`;
-}
-
-function reactionSlowLaneBody(senderNames: string[], explorerName: string): string {
-  const possessive = explorerPossessive(explorerName);
-  if (senderNames.length === 1) {
-    return `${senderNames[0]} added a Reaction to ${possessive} Reflection!`;
-  }
-  if (senderNames.length === 2) {
-    return `${senderNames[0]} and ${senderNames[1]} added Reactions to ${possessive} Reflection!`;
-  }
-  return `${senderNames[0]}, ${senderNames[1]}, and ${senderNames.length - 2} others added Reactions to ${possessive} Reflection!`;
 }
 
 function reactionSlowLanePushData(
@@ -621,19 +714,19 @@ export async function sendFastLaneNotification(
 export async function aggregateSlowLaneNotifications(): Promise<void> {
   await aggregateSlowLaneNotificationsForTrigger(
     COMPANION_UPLOAD_TRIGGER,
-    (senderNames) => slowLaneBody(senderNames),
+    (notifications) => slowLaneBody(uniqueSenderNames(notifications)),
     (explorerId, eligibleNotifications) => slowLanePushData(explorerId, eligibleNotifications)
   );
   await aggregateSlowLaneNotificationsForTrigger(
     COMPANION_REACTION_TRIGGER,
-    (senderNames, explorerName) => reactionSlowLaneBody(senderNames, explorerName),
+    (notifications) => reactionSlowLaneBody(notifications),
     (explorerId, eligibleNotifications) => reactionSlowLanePushData(explorerId, eligibleNotifications)
   );
 }
 
 async function aggregateSlowLaneNotificationsForTrigger(
   triggerType: string,
-  buildBody: (senderNames: string[], explorerName: string) => string,
+  buildBody: (notifications: SlowLaneNotification[]) => string,
   buildPushData: (
     explorerId: string,
     eligibleNotifications: SlowLaneNotification[]
@@ -652,7 +745,7 @@ async function aggregateSlowLaneNotificationsForTrigger(
 
   const now = Date.now();
   const byExplorer = new Map<string, SlowLaneNotification[]>();
-  const explorerNameCache = new Map<string, string>();
+  const parentReflectionAuthorCache = new Map<string, string>();
 
   for (const doc of pendingSnapshot.docs) {
     const data = doc.data();
@@ -668,6 +761,10 @@ async function aggregateSlowLaneNotificationsForTrigger(
       reflectionId: typeof data.reflectionId === 'string' ? data.reflectionId.trim() : '',
       parentReflectionId:
         typeof data.parentReflectionId === 'string' ? data.parentReflectionId.trim() : '',
+      parentReflectionAuthorName:
+        typeof data.parentReflectionAuthorName === 'string'
+          ? data.parentReflectionAuthorName.trim()
+          : '',
       senderId: typeof data.senderId === 'string' ? data.senderId.trim() : '',
       senderName:
         typeof data.senderName === 'string' && data.senderName.trim()
@@ -702,7 +799,6 @@ async function aggregateSlowLaneNotificationsForTrigger(
     const activeCompanions = activeCompanionsFromSnapshot(relationshipsSnapshot.docs);
     const activeCompanionIds = activeCompanions.map((companion) => companion.userId);
     const recipientUpdates = new Map<string, Record<string, ProcessedRecipient>>();
-    const explorerName = await resolveExplorerName(explorerId, explorerNameCache);
 
     if (activeCompanionIds.length === 0) {
       console.log(`aggregateSlowLaneNotifications: no active companions for ${explorerId}`);
@@ -750,6 +846,13 @@ async function aggregateSlowLaneNotificationsForTrigger(
         continue;
       }
 
+      if (triggerType === COMPANION_REACTION_TRIGGER) {
+        await enrichParentReflectionAuthorNames(
+          eligibleNotifications,
+          parentReflectionAuthorCache
+        );
+      }
+
       const userRef = db.collection(USERS_COLLECTION).doc(companionId);
       const userSnapshot = await userRef.get();
       const userData = userSnapshot.data() ?? {};
@@ -786,8 +889,7 @@ async function aggregateSlowLaneNotificationsForTrigger(
       }
 
       try {
-        const senderNames = uniqueSenderNames(eligibleNotifications);
-        const body = buildBody(senderNames, explorerName);
+        const body = buildBody(eligibleNotifications);
         const messageId = await sendExpoPushNotification(
           pushToken,
           body,

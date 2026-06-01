@@ -29,6 +29,8 @@ export type ReactionRespondentsBarProps = {
   onPressFace: (face: ReactionResponderFace) => void;
   /** Timeline card, full-width caption strip, or legacy compact overlay. */
   variant?: 'timeline' | 'caption' | 'player';
+  /** Override the default "Reactions" label. */
+  label?: string;
   style?: StyleProp<ViewStyle>;
 };
 
@@ -38,6 +40,7 @@ export function ReactionRespondentsBar({
   activeFaceKey = null,
   onPressFace,
   variant = 'timeline',
+  label,
   style,
 }: ReactionRespondentsBarProps) {
   if (faces.length === 0) return null;
@@ -54,7 +57,7 @@ export function ReactionRespondentsBar({
       accessibilityLabel={`${faces.length} Companion reactions`}
     >
       <Text style={isCaption ? styles.captionLabel : isPlayer ? styles.playerLabel : styles.timelineLabel}>
-        Reactions
+        {label ?? 'Reactions'}
       </Text>
       <ScrollView
         horizontal
