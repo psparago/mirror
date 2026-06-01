@@ -1,6 +1,9 @@
 {
-  "platforms": ["apple", "android"],
+  "platforms": ["apple", "ios", "android"],
   "apple": {
+    "modules": ["ReflectionsAudioModule"]
+  },
+  "ios": {
     "modules": ["ReflectionsAudioModule"]
   },
   "android": {

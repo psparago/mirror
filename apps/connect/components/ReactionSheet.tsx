@@ -1,7 +1,10 @@
 import {
   defaultReactionOriginalAudioEnabled,
   REACTION_PARENT_PLAYBACK_VOLUME,
+  resolveCompanionPreviewParentVolume,
   resolveReactionRecordingVolume,
+  shouldPlaySeparateParentInPreview,
+  type SelfieRecordingAudioSnapshot,
 } from '@/utils/reactionPlayback';
 import { uploadReaction } from '@/utils/reactionUpload';
 import { useAudioRoute } from '@/utils/audioRoute';
@@ -10,11 +13,13 @@ import {
   configureConnectReactionRecordingAudioSessionAsync,
 } from '@/utils/audioSession';
 import {
-  beginSelfieReactionRecordingAudioGuardAsync,
-  endSelfieReactionRecordingAudioGuardAsync,
-  isNativeSelfieRecordingAudioAvailable,
+  beginSelfieReactionRecordingSessionAsync,
+  endSelfieReactionRecordingSessionAsync,
+  prepareNativeParentRecordingPlaybackAsync,
   reassertSelfieReactionRecordingAudioAsync,
-  scheduleSelfieRecordingAudioReasserts,
+  scheduleExpoAvParentPlaybackReasserts,
+  scheduleSelfieRecordingVoiceChatReasserts,
+  shouldUseNativeParentRecordingPlayback,
   startNativeParentRecordingPlaybackAsync,
   stopNativeParentRecordingPlaybackAsync,
   traceReactionAudio,
@@ -117,6 +122,8 @@ export function ReactionSheet({
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
   const [showCompanionPreviewReplay, setShowCompanionPreviewReplay] = useState(false);
+  const [recordedAudioSnapshot, setRecordedAudioSnapshot] =
+    useState<SelfieRecordingAudioSnapshot | null>(null);
   const [isInfoOpen, setIsInfoOpen] = useState(false);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -162,7 +169,10 @@ export function ReactionSheet({
   // True once the Companion manually toggles "Original audio", so we stop applying the smart default.
   const userToggledMuteRef = useRef(false);
   const isRecordingRef = useRef(false);
+  const recordingSessionIdRef = useRef(0);
   const recordingAudioReassertCancelRef = useRef<(() => void) | null>(null);
+  const nativeParentWarmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopSelfieRecordingRef = useRef<(() => void) | null>(null);
 
   const getReactionParentVolume = useCallback(
     () =>
@@ -184,6 +194,40 @@ export function ReactionSheet({
     [getReactionParentVolume, syncStartTimeMillis],
   );
 
+  const scheduleNativeParentWarm = useCallback(
+    (startMs: number) => {
+      if (!shouldUseNativeParentRecordingPlayback() || !isVideoParent) return;
+      if (isRecordingRef.current || recordedUri) return;
+      if (isParentReflectionMutedRef.current) return;
+
+      const volume = getReactionParentVolume();
+      if (volume <= 0) return;
+
+      if (nativeParentWarmTimerRef.current) {
+        clearTimeout(nativeParentWarmTimerRef.current);
+      }
+
+      nativeParentWarmTimerRef.current = setTimeout(() => {
+        nativeParentWarmTimerRef.current = null;
+        if (isRecordingRef.current || isParentReflectionMutedRef.current) return;
+
+        void prepareNativeParentRecordingPlaybackAsync(
+          parentVideoUrl,
+          startMs,
+          getReactionParentVolume(),
+          buildRecordingAudioTraceContext({ syncStartMs: startMs }),
+        ).catch(() => {});
+      }, 400);
+    },
+    [
+      buildRecordingAudioTraceContext,
+      getReactionParentVolume,
+      isVideoParent,
+      parentVideoUrl,
+      recordedUri,
+    ],
+  );
+
   /** Keep expo-av mute flag and volume in sync — setStatusAsync(volume) alone clears isMuted. */
   const syncParentVideoAudioAsync = useCallback(
     async (target: Video | null | undefined) => {
@@ -203,10 +247,13 @@ export function ReactionSheet({
   }, [syncParentVideoAudioAsync]);
 
   const startParentRecordingPlayback = useCallback(
-    async (startMs: number, options?: { useNativeVoiceChatAudio?: boolean }) => {
+    async (
+      startMs: number,
+      options?: { useNativeVoiceChatAudio?: boolean; backgroundNativeAudio?: boolean },
+    ) => {
       if (!isVideoParent) return;
       const useNativeVoiceChatAudio =
-        options?.useNativeVoiceChatAudio !== false && isNativeSelfieRecordingAudioAvailable();
+        options?.useNativeVoiceChatAudio !== false && shouldUseNativeParentRecordingPlayback();
       const muted = isParentReflectionMutedRef.current;
       const volume = getReactionParentVolume();
       const traceContext = buildRecordingAudioTraceContext({
@@ -220,6 +267,7 @@ export function ReactionSheet({
           ...traceContext,
           parentPlaybackPath: muted || volume <= 0 ? 'silent' : 'native-voicechat',
         });
+        // Warm visual sync on expo-av first (often already buffered), then native audio for AEC.
         await runVideoCommand(
           () =>
             videoRef.current?.setStatusAsync({
@@ -230,8 +278,28 @@ export function ReactionSheet({
             }),
           'reaction visual sync failed',
         );
+        const startNativeAudio = async () => {
+          if (!isRecordingRef.current) return;
+          const status = await videoRef.current?.getStatusAsync();
+          const audioStartMs =
+            status?.isLoaded && typeof status.positionMillis === 'number'
+              ? status.positionMillis
+              : startMs;
+          if (!isRecordingRef.current) return;
+          await startNativeParentRecordingPlaybackAsync(
+            parentVideoUrl,
+            audioStartMs,
+            volume,
+            traceContext,
+          );
+        };
+
         if (!muted && volume > 0) {
-          await startNativeParentRecordingPlaybackAsync(parentVideoUrl, startMs, volume, traceContext);
+          if (options?.backgroundNativeAudio) {
+            void startNativeAudio();
+          } else {
+            await startNativeAudio();
+          }
         } else {
           await stopNativeParentRecordingPlaybackAsync(traceContext);
         }
@@ -253,6 +321,13 @@ export function ReactionSheet({
           }),
         'reaction playback failed',
       );
+      const status = await videoRef.current?.getStatusAsync();
+      traceReactionAudio('recording-playback:expo-av-complete', {
+        ...traceContext,
+        parentPlaybackPath: muted || volume <= 0 ? 'silent' : 'expo-av',
+        parentVideoPlaying: status?.isLoaded ? status.isPlaying : false,
+        parentVideoPositionMs: status?.isLoaded ? status.positionMillis : null,
+      });
     },
     [
       buildRecordingAudioTraceContext,
@@ -263,6 +338,11 @@ export function ReactionSheet({
     ],
   );
 
+  const getCompanionPreviewParentVolume = useCallback(() => {
+    if (!recordedAudioSnapshot) return REACTION_PARENT_PLAYBACK_VOLUME;
+    return resolveCompanionPreviewParentVolume(recordedAudioSnapshot);
+  }, [recordedAudioSnapshot]);
+
   const finishCompanionPreview = useCallback(async () => {
     if (companionPreviewStopPendingRef.current) return;
     companionPreviewStopPendingRef.current = true;
@@ -270,12 +350,14 @@ export function ReactionSheet({
     await companionSelfieRef.current?.pauseAsync().catch(() => {});
     await runVideoCommand(() => companionParentRef.current?.pauseAsync(), 'companion preview pause failed');
     if (isVideoParent && syncStartTimeMillis != null) {
+      const parentPreviewVolume = getCompanionPreviewParentVolume();
       await runVideoCommand(
         () =>
           companionParentRef.current?.setStatusAsync({
             positionMillis: syncStartTimeMillis,
             shouldPlay: false,
-            volume: getReactionParentVolume(),
+            isMuted: parentPreviewVolume <= 0,
+            volume: parentPreviewVolume,
           }),
         'companion preview reset failed',
       );
@@ -283,7 +365,12 @@ export function ReactionSheet({
     companionPreviewStopPendingRef.current = false;
     setShowCompanionPreviewReplay(true);
     traceReactionAudio('companion-preview:finished', buildRecordingAudioTraceContext());
-  }, [buildRecordingAudioTraceContext, getReactionParentVolume, isVideoParent, syncStartTimeMillis]);
+  }, [
+    buildRecordingAudioTraceContext,
+    getCompanionPreviewParentVolume,
+    isVideoParent,
+    syncStartTimeMillis,
+  ]);
 
   const startCompanionPreview = useCallback(async () => {
     if (!recordedUri) return;
@@ -291,15 +378,21 @@ export function ReactionSheet({
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
 
+    const parentPreviewVolume = getCompanionPreviewParentVolume();
+    const separateParentInPreview = recordedAudioSnapshot
+      ? shouldPlaySeparateParentInPreview(recordedAudioSnapshot)
+      : true;
+
     traceReactionAudio('companion-preview:start', {
       ...buildRecordingAudioTraceContext(),
       parentPlaybackPath: 'expo-av',
-      parentVolume: REACTION_PARENT_PLAYBACK_VOLUME,
-      originalAudioMuted: false,
+      parentVolume: parentPreviewVolume,
+      originalAudioMuted: parentPreviewVolume <= 0,
+      separateParentInPreview,
     });
 
     try {
-      await configureConnectPlaybackAudioSessionAsync();
+      await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
     } catch (error) {
       console.warn('[ReactionSheet] preview audio session failed:', error);
       traceReactionAudio('companion-preview:session-failed', {
@@ -322,8 +415,8 @@ export function ReactionSheet({
           companionParentRef.current?.setStatusAsync({
             positionMillis: syncStartTimeMillis,
             shouldPlay: true,
-            isMuted: false,
-            volume: REACTION_PARENT_PLAYBACK_VOLUME,
+            isMuted: parentPreviewVolume <= 0,
+            volume: parentPreviewVolume,
           }),
         'failed to start companion preview',
       );
@@ -331,9 +424,17 @@ export function ReactionSheet({
 
     traceReactionAudio('companion-preview:playing', buildRecordingAudioTraceContext({
       parentPlaybackPath: 'expo-av',
-      parentVolume: REACTION_PARENT_PLAYBACK_VOLUME,
+      parentVolume: parentPreviewVolume,
+      separateParentInPreview,
     }));
-  }, [buildRecordingAudioTraceContext, isVideoParent, recordedUri, syncStartTimeMillis]);
+  }, [
+    buildRecordingAudioTraceContext,
+    getCompanionPreviewParentVolume,
+    isVideoParent,
+    recordedAudioSnapshot,
+    recordedUri,
+    syncStartTimeMillis,
+  ]);
 
   const replayCompanionPreview = useCallback(() => {
     setShowCompanionPreviewReplay(false);
@@ -367,13 +468,12 @@ export function ReactionSheet({
         return;
       }
       const now = Date.now();
-      if (now - lastCompanionParentVolumeApplyRef.current >= 200) {
+      const parentPreviewVolume = getCompanionPreviewParentVolume();
+      if (parentPreviewVolume > 0 && now - lastCompanionParentVolumeApplyRef.current >= 200) {
         lastCompanionParentVolumeApplyRef.current = now;
         void companionParentRef.current
           ?.setIsMutedAsync(false)
-          .then(() =>
-            companionParentRef.current?.setVolumeAsync(REACTION_PARENT_PLAYBACK_VOLUME),
-          )
+          .then(() => companionParentRef.current?.setVolumeAsync(parentPreviewVolume))
           .catch(() => {});
       }
       if (!status.isPlaying || syncStartTimeMillis == null) return;
@@ -391,6 +491,7 @@ export function ReactionSheet({
       companionPreviewOpen,
       companionPreviewPlaying,
       finishCompanionPreview,
+      getCompanionPreviewParentVolume,
       isVideoParent,
       syncEndTimeMillis,
       syncStartTimeMillis,
@@ -439,13 +540,17 @@ export function ReactionSheet({
     hasHeadphonesRef.current = hasHeadphones;
   }, [hasHeadphones]);
 
-  // Default Original audio: on with headphones, off on speaker (both platforms).
+  // Default Original audio: on with headphones; iOS selfie speaker uses AEC; Android speaker stays off.
   useEffect(() => {
     if (!visible || userToggledMuteRef.current) return;
-    const enabled = defaultReactionOriginalAudioEnabled({ hasHeadphones });
+    const enabled = defaultReactionOriginalAudioEnabled({
+      hasHeadphones,
+      supportsSpeakerOriginalAudio:
+        reactionMode === 'selfie' && shouldUseNativeParentRecordingPlayback(),
+    });
     setIsParentReflectionMuted(!enabled);
     isParentReflectionMutedRef.current = !enabled;
-  }, [visible, hasHeadphones]);
+  }, [visible, hasHeadphones, reactionMode]);
 
   useEffect(() => {
     isPreviewPlayingRef.current = isPreviewPlaying;
@@ -461,8 +566,19 @@ export function ReactionSheet({
   }, [durationMillis]);
 
   useEffect(() => {
-    isRecordingRef.current = isRecording;
-  }, [isRecording]);
+    if (!visible || reactionMode !== 'selfie' || !isVideoParent) return;
+    if (isRecording || recordedUri != null || isParentReflectionMuted) return;
+    scheduleNativeParentWarm(trimStartMs);
+  }, [
+    visible,
+    reactionMode,
+    isVideoParent,
+    isRecording,
+    recordedUri,
+    isParentReflectionMuted,
+    trimStartMs,
+    scheduleNativeParentWarm,
+  ]);
 
   useEffect(() => {
     canScrubRef.current =
@@ -546,6 +662,13 @@ export function ReactionSheet({
       if (nextState === 'active') {
         void ensureCameraPermission();
         scheduleAndroidCameraRemount();
+        return;
+      }
+      if (isRecordingRef.current) {
+        traceReactionAudio('record-appstate-interrupt', {
+          appState: nextState,
+        });
+        stopSelfieRecordingRef.current?.();
       }
     });
     return () => subscription.remove();
@@ -585,6 +708,7 @@ export function ReactionSheet({
     setPositionMillis(0);
     setDurationMillis(0);
     setRecordedUri(null);
+    setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
@@ -619,9 +743,13 @@ export function ReactionSheet({
     recordingPromiseRef.current = null;
     recordingAudioReassertCancelRef.current?.();
     recordingAudioReassertCancelRef.current = null;
+    if (nativeParentWarmTimerRef.current) {
+      clearTimeout(nativeParentWarmTimerRef.current);
+      nativeParentWarmTimerRef.current = null;
+    }
     isRecordingRef.current = false;
     void stopNativeParentRecordingPlaybackAsync();
-    void endSelfieReactionRecordingAudioGuardAsync();
+    void endSelfieReactionRecordingSessionAsync();
     void videoRef.current?.pauseAsync().catch(() => {});
     void videoRef.current?.setVolumeAsync(1).catch(() => {});
     cameraRef.current?.stopRecording();
@@ -743,7 +871,8 @@ export function ReactionSheet({
     (status: AVPlaybackStatus) => {
       if (!status.isLoaded) return;
 
-      if (isVideoParent) {
+      // During native-path recording the parent Video stays muted; re-applying volume fights VoiceChat.
+      if (isVideoParent && !isRecordingRef.current) {
         const now = Date.now();
         if (now - lastParentVolumeApplyRef.current >= 200) {
           lastParentVolumeApplyRef.current = now;
@@ -863,9 +992,14 @@ export function ReactionSheet({
           hasHeadphones: hasHeadphonesRef.current,
         }),
       }));
+      if (next) {
+        void stopNativeParentRecordingPlaybackAsync(buildRecordingAudioTraceContext());
+      } else if (shouldUseNativeParentRecordingPlayback() && reactionMode === 'selfie') {
+        scheduleNativeParentWarm(trimStartMsRef.current);
+      }
       return next;
     });
-  }, [buildRecordingAudioTraceContext]);
+  }, [buildRecordingAudioTraceContext, reactionMode, scheduleNativeParentWarm]);
 
   const handleTrimChange = useCallback(
     (start: number, end: number) => {
@@ -902,8 +1036,9 @@ export function ReactionSheet({
         volume: getReactionParentVolume(),
       });
       isScrubbingRef.current = false;
+      scheduleNativeParentWarm(trimStartMsRef.current);
     })().catch(() => {});
-  }, [commitVideoPosition, getReactionParentVolume]);
+  }, [commitVideoPosition, getReactionParentVolume, scheduleNativeParentWarm]);
 
   const beginVideoDragScrub = useCallback(() => {
     if (isVideoDragActiveRef.current) return;
@@ -967,6 +1102,169 @@ export function ReactionSheet({
       });
   }, [handleSeekDrag, handleSeekDragEnd, handleSeekDragStart]);
 
+  const beginCameraRecording = useCallback(
+    (sessionId: number, syncStart: number) => {
+      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+
+      traceReactionAudio('recordAsync:starting', buildRecordingAudioTraceContext({ syncStartMs: syncStart }));
+
+      const recordingPromise = cameraRef.current?.recordAsync({ maxDuration: 120 });
+      if (!recordingPromise) {
+        console.warn('[ReactionSheet] recordAsync returned no promise — camera ref missing?');
+        traceReactionAudio('recordAsync:no-promise', buildRecordingAudioTraceContext({ syncStartMs: syncStart }));
+        return;
+      }
+
+      recordingPromiseRef.current = recordingPromise;
+      void recordingPromise
+        .then((result) => {
+          // Press-out bumps sessionId to cancel audio setup — never block accepting the file URI.
+          if (recordingPromiseRef.current !== recordingPromise) return;
+          recordingPromiseRef.current = null;
+
+          traceReactionAudio('recordAsync:complete', {
+            ...buildRecordingAudioTraceContext({ syncStartMs: syncStart }),
+            recordedUri: result?.uri ?? null,
+          });
+          if (result?.uri) {
+            setRecordedUri(result.uri);
+            setRecordedAudioSnapshot({
+              originalAudioMuted: isParentReflectionMutedRef.current,
+              hasHeadphones: hasHeadphonesRef.current,
+              usedVoiceChatAecPath: shouldUseNativeParentRecordingPlayback(),
+            });
+            void configureConnectPlaybackAudioSessionAsync({ retries: 2 }).catch((error) => {
+              console.warn('[ReactionSheet] post-record playback session restore failed:', error);
+            });
+          }
+        })
+        .catch((error) => {
+          if (recordingPromiseRef.current !== recordingPromise) return;
+          recordingPromiseRef.current = null;
+          console.warn('[ReactionSheet] recordAsync failed:', error);
+          traceReactionAudio('recordAsync:failed', {
+            ...buildRecordingAudioTraceContext({ syncStartMs: syncStart }),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    },
+    [buildRecordingAudioTraceContext],
+  );
+
+  const traceExpoAvParentStatus = useCallback(
+    async (phase: string, syncStart: number, extra: ReactionAudioTraceContext = {}) => {
+      const status = await videoRef.current?.getStatusAsync();
+      traceReactionAudio(phase, {
+        ...buildRecordingAudioTraceContext({ syncStartMs: syncStart, ...extra }),
+        parentPlaybackPath: 'expo-av',
+        parentVideoPlaying: status?.isLoaded ? status.isPlaying : false,
+        parentVideoPositionMs: status?.isLoaded ? status.positionMillis : null,
+      });
+    },
+    [buildRecordingAudioTraceContext],
+  );
+
+  const scheduleRecordingVoiceChatReasserts = useCallback(
+    (sessionId: number, syncStart: number) => {
+      const reassertVoiceChatOnly = async (reassertDelayMs: number) => {
+        if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+        try {
+          await reassertSelfieReactionRecordingAudioAsync(reassertDelayMs);
+          if (recordingSessionIdRef.current !== sessionId) return;
+          traceReactionAudio('record-reassert:voicechat-only', {
+            ...buildRecordingAudioTraceContext({ syncStartMs: syncStart, reassertDelayMs }),
+          });
+        } catch (error) {
+          console.warn('[ReactionSheet] VoiceChat reassert failed:', error);
+        }
+      };
+
+      recordingAudioReassertCancelRef.current?.();
+      recordingAudioReassertCancelRef.current =
+        scheduleSelfieRecordingVoiceChatReasserts(reassertVoiceChatOnly);
+    },
+    [buildRecordingAudioTraceContext],
+  );
+
+  const scheduleRecordingExpoAvParentReasserts = useCallback(
+    (sessionId: number, syncStart: number) => {
+      const reassertParentPlayback = async (reassertDelayMs: number) => {
+        if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+        try {
+          await startParentRecordingPlayback(syncStart, { useNativeVoiceChatAudio: false });
+          await traceExpoAvParentStatus('record-reassert:expo-av-parent', syncStart, { reassertDelayMs });
+        } catch (error) {
+          console.warn('[ReactionSheet] expo-av parent reassert failed:', error);
+        }
+      };
+
+      recordingAudioReassertCancelRef.current?.();
+      recordingAudioReassertCancelRef.current =
+        scheduleExpoAvParentPlaybackReasserts(reassertParentPlayback);
+    },
+    [startParentRecordingPlayback, traceExpoAvParentStatus],
+  );
+
+  const stopSelfieRecording = useCallback(() => {
+    if (!isRecordingRef.current) return;
+
+    recordingSessionIdRef.current += 1;
+    isRecordingRef.current = false;
+    recordingAudioReassertCancelRef.current?.();
+    recordingAudioReassertCancelRef.current = null;
+    setIsRecording(false);
+
+    // Stop the camera immediately — do not wait on audio teardown (press-out can be lost on iOS).
+    cameraRef.current?.stopRecording();
+
+    traceReactionAudio('record-press-out:start', buildRecordingAudioTraceContext({
+      parentPlaybackPath: shouldUseNativeParentRecordingPlayback() ? 'native-voicechat' : 'expo-av',
+    }));
+
+    void (async () => {
+      if (isVideoParent) {
+        const status = await videoRef.current?.getStatusAsync();
+        const syncEndMs = status?.isLoaded ? status.positionMillis : undefined;
+        if (status?.isLoaded) {
+          setSyncEndTimeMillis(status.positionMillis);
+        }
+        const stopContext = buildRecordingAudioTraceContext({
+          syncEndMs,
+          parentPlaybackPath: shouldUseNativeParentRecordingPlayback() ? 'native-voicechat' : 'expo-av',
+          recordingDurationMs:
+            syncEndMs != null && syncStartTimeMillis != null
+              ? syncEndMs - syncStartTimeMillis
+              : undefined,
+        });
+        await stopNativeParentRecordingPlaybackAsync(stopContext);
+        await videoRef.current?.pauseAsync().catch(() => {});
+        await syncParentVideoAudioAsync(videoRef.current);
+        try {
+          await endSelfieReactionRecordingSessionAsync(stopContext);
+          await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
+        } catch (error) {
+          console.warn('[ReactionSheet] failed to restore playback audio session:', error);
+          traceReactionAudio('record-press-out:restore-failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        traceReactionAudio('record-press-out:complete', stopContext);
+      } else {
+        setSyncEndTimeMillis(0);
+        traceReactionAudio('record-press-out:complete', buildRecordingAudioTraceContext());
+      }
+    })();
+  }, [
+    buildRecordingAudioTraceContext,
+    isVideoParent,
+    syncParentVideoAudioAsync,
+    syncStartTimeMillis,
+  ]);
+
+  useEffect(() => {
+    stopSelfieRecordingRef.current = stopSelfieRecording;
+  }, [stopSelfieRecording]);
+
   const handlePressIn = useCallback(() => {
     if (
       recordedUri ||
@@ -986,17 +1284,32 @@ export function ReactionSheet({
     }
 
     const syncStart = isVideoParent ? trimStartMsRef.current : 0;
+    const sessionId = recordingSessionIdRef.current + 1;
+    recordingSessionIdRef.current = sessionId;
+    recordingPromiseRef.current = null;
     setSyncStartTimeMillis(syncStart);
     setIsRecording(true);
+    isRecordingRef.current = true;
     setIsPreviewPlaying(false);
 
     traceReactionAudio('record-press-in', buildRecordingAudioTraceContext({ syncStartMs: syncStart }));
 
     void (async () => {
+      let useNativeParentPlayback = false;
+
       if (isVideoParent) {
         try {
-          await beginSelfieReactionRecordingAudioGuardAsync();
-          await startParentRecordingPlayback(syncStart);
+          ({ useNativeParentPlayback } = await beginSelfieReactionRecordingSessionAsync());
+          if (recordingSessionIdRef.current !== sessionId) return;
+
+          await startParentRecordingPlayback(syncStart, {
+            useNativeVoiceChatAudio: useNativeParentPlayback,
+          });
+          if (recordingSessionIdRef.current !== sessionId) return;
+
+          if (!useNativeParentPlayback) {
+            await traceExpoAvParentStatus('record-parent-before-camera', syncStart);
+          }
         } catch (error) {
           console.warn('[ReactionSheet] recording audio session failed:', error);
           traceReactionAudio('record-press-in:audio-failed', {
@@ -1006,134 +1319,37 @@ export function ReactionSheet({
         }
       }
 
-      traceReactionAudio('recordAsync:starting', buildRecordingAudioTraceContext({ syncStartMs: syncStart }));
+      if (recordingSessionIdRef.current !== sessionId) return;
 
-      const recordingPromise = cameraRef.current?.recordAsync();
-      if (recordingPromise) {
-        recordingPromiseRef.current = recordingPromise;
-        void recordingPromise
-          .then((result) => {
-            traceReactionAudio('recordAsync:complete', {
-              ...buildRecordingAudioTraceContext({ syncStartMs: syncStart }),
-              recordedUri: result?.uri ?? null,
-            });
-            if (result?.uri) {
-              setRecordedUri(result.uri);
-            }
-          })
-          .catch((error) => {
-            console.warn('[ReactionSheet] recordAsync failed:', error);
-            traceReactionAudio('recordAsync:failed', {
-              ...buildRecordingAudioTraceContext({ syncStartMs: syncStart }),
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      }
+      beginCameraRecording(sessionId, syncStart);
 
       if (isVideoParent) {
-        const reassertRecordingAudio = async (reassertDelayMs: number) => {
-          if (!isRecordingRef.current) return;
-          const traceContext = buildRecordingAudioTraceContext({
-            syncStartMs: syncStart,
-            reassertDelayMs,
-          });
-          try {
-            traceReactionAudio('record-reassert:start', traceContext);
-            await reassertSelfieReactionRecordingAudioAsync(reassertDelayMs);
-            if (isNativeSelfieRecordingAudioAvailable()) {
-              const volume = getReactionParentVolume();
-              if (!isParentReflectionMutedRef.current && volume > 0) {
-                await startNativeParentRecordingPlaybackAsync(
-                  parentVideoUrl,
-                  syncStart,
-                  volume,
-                  traceContext,
-                );
-              } else {
-                await stopNativeParentRecordingPlaybackAsync(traceContext);
-              }
-            } else {
-              await startParentRecordingPlayback(syncStart, { useNativeVoiceChatAudio: false });
-            }
-            traceReactionAudio('record-reassert:complete', traceContext);
-          } catch (error) {
-            console.warn('[ReactionSheet] recording audio reassert failed:', error);
-            traceReactionAudio('record-reassert:failed', {
-              ...traceContext,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        };
-
-        recordingAudioReassertCancelRef.current?.();
-        recordingAudioReassertCancelRef.current =
-          scheduleSelfieRecordingAudioReasserts(reassertRecordingAudio);
+        if (useNativeParentPlayback) {
+          scheduleRecordingVoiceChatReasserts(sessionId, syncStart);
+        } else {
+          scheduleRecordingExpoAvParentReasserts(sessionId, syncStart);
+        }
       }
     })();
   }, [
+    beginCameraRecording,
     buildRecordingAudioTraceContext,
     cameraPermission?.granted,
     cameraReady,
-    getReactionParentVolume,
     isVideoParent,
     micReady,
     nativeCameraGranted,
     parentReflectionId,
-    parentVideoUrl,
     recordedUri,
+    scheduleRecordingExpoAvParentReasserts,
+    scheduleRecordingVoiceChatReasserts,
     startParentRecordingPlayback,
+    traceExpoAvParentStatus,
   ]);
 
   const handlePressOut = useCallback(() => {
-    if (!isRecording) return;
-
-    void (async () => {
-      recordingAudioReassertCancelRef.current?.();
-      recordingAudioReassertCancelRef.current = null;
-
-      traceReactionAudio('record-press-out:start', buildRecordingAudioTraceContext());
-
-      if (isVideoParent) {
-        const status = await videoRef.current?.getStatusAsync();
-        const syncEndMs = status?.isLoaded ? status.positionMillis : undefined;
-        if (status?.isLoaded) {
-          setSyncEndTimeMillis(status.positionMillis);
-        }
-        const stopContext = buildRecordingAudioTraceContext({
-          syncEndMs,
-          recordingDurationMs:
-            syncEndMs != null && syncStartTimeMillis != null
-              ? syncEndMs - syncStartTimeMillis
-              : undefined,
-        });
-        await stopNativeParentRecordingPlaybackAsync(stopContext);
-        await videoRef.current?.pauseAsync().catch(() => {});
-        await syncParentVideoAudioAsync(videoRef.current);
-        try {
-          await endSelfieReactionRecordingAudioGuardAsync(stopContext);
-          await configureConnectPlaybackAudioSessionAsync();
-        } catch (error) {
-          console.warn('[ReactionSheet] failed to restore playback audio session:', error);
-          traceReactionAudio('record-press-out:restore-failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-        traceReactionAudio('record-press-out:complete', stopContext);
-      } else {
-        setSyncEndTimeMillis(0);
-        traceReactionAudio('record-press-out:complete', buildRecordingAudioTraceContext());
-      }
-      setIsRecording(false);
-      isRecordingRef.current = false;
-      cameraRef.current?.stopRecording();
-    })();
-  }, [
-    buildRecordingAudioTraceContext,
-    isRecording,
-    isVideoParent,
-    syncParentVideoAudioAsync,
-    syncStartTimeMillis,
-  ]);
+    stopSelfieRecording();
+  }, [stopSelfieRecording]);
 
   const resetVoiceRecording = useCallback(() => {
     setVoiceRecordedUri(null);
@@ -1217,7 +1433,9 @@ export function ReactionSheet({
       return;
     }
     const restartAt = syncStartTimeMillis;
+    recordingPromiseRef.current = null;
     setRecordedUri(null);
+    setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
@@ -1323,6 +1541,10 @@ export function ReactionSheet({
     voiceRecordedUri,
   ]);
 
+  const companionPreviewParentVolume = recordedAudioSnapshot
+    ? resolveCompanionPreviewParentVolume(recordedAudioSnapshot)
+    : REACTION_PARENT_PLAYBACK_VOLUME;
+
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
   const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
   const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
@@ -1353,7 +1575,9 @@ export function ReactionSheet({
     (reactionMode === 'selfie' || reactionMode === 'voice');
   const audioHintText = hasHeadphones
     ? 'Headphones connected — turn Original audio on to hear the Reflection while you record.'
-    : 'On speaker, keep Original audio off to avoid echo. Plug in headphones to listen while recording.';
+    : reactionMode === 'selfie' && Platform.OS === 'ios' && shouldUseNativeParentRecordingPlayback()
+      ? 'On speaker, Original audio stays on — iPhone echo cancellation keeps your voice clean in the recording.'
+      : 'On speaker, keep Original audio off to avoid echo. Plug in headphones to listen while recording.';
   const renderOriginalAudioToggle = () => (
     <Pressable
       style={styles.originalAudioToggle}
@@ -1447,8 +1671,8 @@ export function ReactionSheet({
                   resizeMode={ResizeMode.CONTAIN}
                   shouldPlay={false}
                   isLooping={false}
-                  isMuted={false}
-                  volume={REACTION_PARENT_PLAYBACK_VOLUME}
+                  isMuted={companionPreviewParentVolume <= 0}
+                  volume={companionPreviewParentVolume}
                   progressUpdateIntervalMillis={100}
                   onPlaybackStatusUpdate={handleCompanionParentStatusUpdate}
                 />
@@ -1972,11 +2196,19 @@ export function ReactionSheet({
                   <Text style={styles.infoProTipStrong}>Headphones are the sweet spot:</Text> plug them
                   in and you’ll hear the Reflection clearly with no echo in your recording.
                 </Text>
-                <Text style={styles.infoProTip}>
-                  On speaker, leave Original audio off while you record — the video still plays for
-                  sync. Preview shows how Companions will hear your voice with the Reflection softly
-                  in the background.
-                </Text>
+                {Platform.OS === 'ios' ? (
+                  <Text style={styles.infoProTip}>
+                    On iPhone, Original audio can stay on over the speaker while you record a selfie —
+                    echo cancellation keeps your voice clean. Preview shows how Companions will hear your
+                    voice with the Reflection softly in the background.
+                  </Text>
+                ) : (
+                  <Text style={styles.infoProTip}>
+                    On speaker, leave Original audio off while you record — the video still plays for
+                    sync. Preview shows how Companions will hear your voice with the Reflection softly
+                    in the background.
+                  </Text>
+                )}
               </ScrollView>
             </View>
           </View>

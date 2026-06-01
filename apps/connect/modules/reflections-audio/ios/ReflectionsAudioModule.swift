@@ -7,6 +7,8 @@ public class ReflectionsAudioModule: Module {
   private var interruptionObserver: NSObjectProtocol?
   private var voiceChatGuardActive = false
   private var parentRecordingPlayer: AVPlayer?
+  private var preparedParentUrl: String?
+  private var preparedStartMs: Double?
 
   public func definition() -> ModuleDefinition {
     // Referenced from JS via `requireNativeModule('ReflectionsAudio')`.
@@ -40,9 +42,86 @@ public class ReflectionsAudioModule: Module {
       self.stopParentRecordingPlaybackInternal(reason: "endVoiceChatGuardAsync")
     }
 
+    AsyncFunction("prepareParentRecordingPlaybackAsync") { (urlString: String, startMs: Double, volume: Double) async throws in
+      guard let url = URL(string: urlString) else {
+        self.logNative("prepareParentRecordingPlaybackAsync — invalid URL")
+        return
+      }
+
+      let clampedVolume = Float(max(0, min(volume, 1)))
+      let start = CMTime(seconds: startMs / 1000.0, preferredTimescale: 1000)
+
+      if
+        let player = self.parentRecordingPlayer,
+        self.preparedParentUrl == urlString,
+        player.rate == 0
+      {
+        player.volume = clampedVolume
+        await player.seek(
+          to: start,
+          toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 1000),
+          toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 1000)
+        )
+        self.preparedStartMs = startMs
+        self.logNative("prepareParentRecordingPlaybackAsync — re-seek startMs=\(startMs)")
+        return
+      }
+
+      self.stopParentRecordingPlaybackInternal(reason: "prepareParentRecordingPlaybackAsync-replace")
+
+      let item = AVPlayerItem(url: url)
+      let player = AVPlayer(playerItem: item)
+      player.volume = clampedVolume
+      player.pause()
+      self.parentRecordingPlayer = player
+      self.preparedParentUrl = urlString
+      self.preparedStartMs = startMs
+
+      await player.seek(
+        to: start,
+        toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 1000),
+        toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 1000)
+      )
+
+      self.logNative(
+        "prepareParentRecordingPlaybackAsync — ready startMs=\(startMs) volume=\(volume) urlHost=\(url.host ?? "?")"
+      )
+    }
+
     AsyncFunction("startParentRecordingPlaybackAsync") { (urlString: String, startMs: Double, volume: Double) async throws in
       guard let url = URL(string: urlString) else {
         self.logNative("startParentRecordingPlaybackAsync — invalid URL")
+        return
+      }
+
+      // Avoid tearing down a playing player (reassert paths must not restart S3 seeks).
+      if let player = self.parentRecordingPlayer, player.rate > 0 {
+        try self.applyVoiceChatSession(reason: "startParentRecordingPlaybackAsync-alreadyPlaying")
+        self.logNative("startParentRecordingPlaybackAsync — already playing, VoiceChat re-applied only")
+        return
+      }
+
+      // Resume a pre-warmed paused player instead of cold-loading S3 on record press.
+      if
+        let player = self.parentRecordingPlayer,
+        self.preparedParentUrl == urlString,
+        player.rate == 0
+      {
+        try self.applyVoiceChatSession(reason: "startParentRecordingPlaybackAsync-resumePrepared")
+        player.volume = Float(max(0, min(volume, 1)))
+        let start = CMTime(seconds: startMs / 1000.0, preferredTimescale: 1000)
+        if let prepared = self.preparedStartMs, abs(prepared - startMs) > 250 {
+          await player.seek(
+            to: start,
+            toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 1000),
+            toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 1000)
+          )
+        }
+        self.preparedStartMs = startMs
+        player.play()
+        self.logNative(
+          "startParentRecordingPlaybackAsync — resumed prepared startMs=\(startMs) volume=\(volume)"
+        )
         return
       }
 
@@ -53,9 +132,13 @@ public class ReflectionsAudioModule: Module {
       let player = AVPlayer(playerItem: item)
       player.volume = Float(max(0, min(volume, 1)))
       let start = CMTime(seconds: startMs / 1000.0, preferredTimescale: 1000)
-      await player.seek(to: start, toleranceBefore: .zero, toleranceAfter: .zero)
       player.play()
       self.parentRecordingPlayer = player
+      await player.seek(
+        to: start,
+        toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 1000),
+        toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 1000)
+      )
 
       self.logNative(
         "startParentRecordingPlaybackAsync — play startMs=\(startMs) volume=\(volume) urlHost=\(url.host ?? "?")"
@@ -79,7 +162,7 @@ public class ReflectionsAudioModule: Module {
 
     Function("getAudioSessionInfo") { () -> [String: Any] in
       var info = self.describeAudioSessionInfo()
-      info["nativeModuleVersion"] = 2
+      info["nativeModuleVersion"] = 3
       return info
     }
 
@@ -177,6 +260,8 @@ public class ReflectionsAudioModule: Module {
     }
     parentRecordingPlayer?.pause()
     parentRecordingPlayer = nil
+    preparedParentUrl = nil
+    preparedStartMs = nil
   }
 
   private func describeAudioSessionInfo() -> [String: Any] {

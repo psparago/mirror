@@ -39,6 +39,10 @@ class ReflectionsAudioModule : Module() {
       // no-op
     }
 
+    AsyncFunction("prepareParentRecordingPlaybackAsync") { _: String, _: Double, _: Double ->
+      // no-op — iOS only; Android uses expo-av with muted speaker policy.
+    }
+
     AsyncFunction("startParentRecordingPlaybackAsync") { _: String, _: Double, _: Double ->
       // no-op — parent audio stays on expo-av during recording on Android.
     }
@@ -69,7 +73,7 @@ class ReflectionsAudioModule : Module() {
         "nativeParentRate" to 0,
         "nativeParentTimeSec" to 0,
         "nativeModuleLoaded" to true,
-        "nativeModuleVersion" to 2,
+        "nativeModuleVersion" to 3,
         "outputs" to describeCurrentRoute()["outputs"],
         "inputs" to emptyList<String>(),
         "hasHeadphones" to (describeCurrentRoute()["hasHeadphones"] == true),

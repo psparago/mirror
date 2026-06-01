@@ -9,26 +9,43 @@ import { setAudioModeAsync as setExpoAudioModeAsync } from 'expo-audio';
  * The low-level AVAudioSession category/mode is owned by the local `reflections-audio` Expo module
  * (see modules/reflections-audio). On Android that native module is a no-op by design.
  */
-export async function configureConnectPlaybackAudioSessionAsync(): Promise<void> {
-  await Promise.all([
-    setExpoAudioModeAsync({
-      allowsRecording: false,
-      playsInSilentMode: true,
-    }),
-    Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: false,
-      playThroughEarpieceAndroid: false,
-    }),
-  ]);
+export async function configureConnectPlaybackAudioSessionAsync(options?: {
+  /** Retry after recording teardown when iOS AVAudioSession is briefly busy (OSStatus 561017449). */
+  retries?: number;
+}): Promise<void> {
+  const maxAttempts = (options?.retries ?? 0) + 1;
+  let lastError: unknown;
 
-  // Restore a playback-optimised AVAudioSession after any recording session (no-op on Android).
-  try {
-    await ReflectionsAudio?.setPlaybackModeAsync();
-  } catch (error) {
-    console.warn('[audioSession] setPlaybackModeAsync failed:', error);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+
+    try {
+      await Promise.all([
+        setExpoAudioModeAsync({
+          allowsRecording: false,
+          playsInSilentMode: true,
+        }),
+        Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: false,
+          playThroughEarpieceAndroid: false,
+        }),
+      ]);
+
+      await ReflectionsAudio?.setPlaybackModeAsync();
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn(`[audioSession] playback session attempt ${attempt + 1}/${maxAttempts} failed:`, error);
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
   }
 }
 
@@ -47,9 +64,9 @@ export async function configureConnectPlaybackAudioSessionAsync(): Promise<void>
  * The native VoiceChat call is applied LAST, after the expo-av/expo-audio facades, so their mode
  * changes cannot clobber the VoiceChat configuration.
  *
- * During selfie recording on iOS, parent Reflection *audio* is played by the native module
- * (`startParentRecordingPlaybackAsync`) so it shares the VoiceChat session with capture. expo-av
- * only drives muted parent video for visual sync.
+ * During iOS selfie recording, parent video plays through muted expo-av; parent audio uses the
+ * native module's VoiceChat AVPlayer so hardware AEC receives a reference signal. Android uses
+ * expo-av for both with Original audio off on speaker by default.
  */
 export async function configureConnectReactionRecordingAudioSessionAsync(options?: {
   /** Selfie uses VoiceChat (intended AEC). Voice-only skips it so parent playback stays audible. */

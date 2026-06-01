@@ -1,0 +1,7 @@
+{
+  "name": "reflections-audio",
+  "version": "1.0.0",
+  "description": "Local Expo module: VoiceChat AEC + audio route for Reflections Connect reaction recording",
+  "main": "index.ts",
+  "private": true
+}

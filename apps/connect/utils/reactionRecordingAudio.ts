@@ -4,8 +4,18 @@ import { Platform } from 'react-native';
 
 import { configureConnectReactionRecordingAudioSessionAsync } from './audioSession';
 
-const RECORDING_AUDIO_REASSERT_DELAYS_MS = [0, 100, 250, 500];
+const RECORDING_VOICECHAT_REASSERT_DELAYS_MS = [150, 400];
+const RECORDING_EXPO_AV_PARENT_REASSERT_DELAYS_MS = [250, 600];
 const LOG_PREFIX = '[reaction-audio]';
+
+/**
+ * iOS selfie recording: VoiceChat guard + native AVPlayer for parent audio (hardware AEC reference).
+ * Parent video stays on muted expo-av for visual sync. Android uses expo-av with Original audio off
+ * on speaker by default — no platform AEC.
+ */
+export function shouldUseNativeParentRecordingPlayback(): boolean {
+  return Platform.OS === 'ios' && isNativeSelfieRecordingAudioAvailable();
+}
 
 export type ParentRecordingPlaybackPath = 'native-voicechat' | 'expo-av' | 'silent';
 
@@ -30,6 +40,9 @@ export type ReactionAudioTraceContext = Record<string, unknown> & {
   reassertDelayMs?: number;
   voiceChatAec?: boolean;
   recordingDurationMs?: number;
+  /** From expo-av getStatusAsync after starting parent playback during record. */
+  parentVideoPlaying?: boolean;
+  parentVideoPositionMs?: number | null;
 };
 
 export type ReactionAudioDiagnosticVerdict = {
@@ -43,6 +56,7 @@ const NATIVE_API_CHECKS: Array<{ key: keyof NonNullable<typeof ReflectionsAudio>
   { key: 'beginVoiceChatGuardAsync', label: 'beginVoiceChatGuardAsync' },
   { key: 'reassertVoiceChatModeAsync', label: 'reassertVoiceChatModeAsync' },
   { key: 'endVoiceChatGuardAsync', label: 'endVoiceChatGuardAsync' },
+  { key: 'prepareParentRecordingPlaybackAsync', label: 'prepareParentRecordingPlaybackAsync' },
   { key: 'startParentRecordingPlaybackAsync', label: 'startParentRecordingPlaybackAsync' },
   { key: 'stopParentRecordingPlaybackAsync', label: 'stopParentRecordingPlaybackAsync' },
   { key: 'getAudioSessionInfo', label: 'getAudioSessionInfo' },
@@ -107,12 +121,16 @@ export function evaluateReactionAudioDiagnostics(
   const issues: string[] = [];
   const hints: string[] = [];
 
+  const expoAvBufferedPath =
+    context.parentPlaybackPath === 'expo-av' && !shouldUseNativeParentRecordingPlayback();
+  const expectVoiceChat = !expoAvBufferedPath && Platform.OS === 'ios';
+
   if (Platform.OS === 'ios') {
     if (!caps.nativeModuleLoaded) {
       issues.push('ReflectionsAudio native module not loaded — install a Connect (Dev) build.');
     } else if (caps.nativeModuleVersion != null && caps.nativeModuleVersion < 2) {
       issues.push(
-        `Native ReflectionsAudio v${caps.nativeModuleVersion} on device; v2 required for AEC guard + native parent playback. JS logging can be newer than native (Metro vs EAS). Rebuild from commit 48e8353 or later.`,
+        `Native ReflectionsAudio v${caps.nativeModuleVersion} on device; v2+ required for AEC guard + native parent playback. Rebuild the Connect dev client.`,
       );
     } else if (!caps.nativeSelfiePathAvailable) {
       issues.push(
@@ -121,13 +139,19 @@ export function evaluateReactionAudioDiagnostics(
     }
 
     if (context.parentPlaybackPath === 'expo-av' && context.originalAudioMuted === false) {
-      issues.push(
-        'Parent audio is on expo-av during recording — hardware AEC reference path is bypassed.',
-      );
+      if (shouldUseNativeParentRecordingPlayback()) {
+        issues.push(
+          'Parent audio is on expo-av during recording — hardware AEC reference path is bypassed.',
+        );
+      } else {
+        hints.push(
+          'Buffered expo-av parent path (VideoRecording session — compatible with expo-camera + expo-av).',
+        );
+      }
     }
 
     if (session) {
-      if (!session.isVoiceChatMode) {
+      if (expectVoiceChat && !session.isVoiceChatMode) {
         issues.push(
           `AVAudioSession mode is "${session.mode}" (expected AVAudioSessionModeVoiceChat). AEC likely inactive.`,
         );
@@ -138,14 +162,27 @@ export function evaluateReactionAudioDiagnostics(
         );
       }
       if (
+        !expoAvBufferedPath &&
         context.originalAudioMuted === false &&
         (context.parentVolume ?? 0) > 0 &&
         !session.nativeParentPlaybackActive
       ) {
         issues.push('Original audio On but native parent AVPlayer is not active.');
       }
-      if (context.originalAudioMuted === false && session.nativeParentPlaybackActive && !session.nativeParentPlaying) {
+      if (
+        context.originalAudioMuted === false &&
+        session.nativeParentPlaybackActive &&
+        !session.nativeParentPlaying
+      ) {
         issues.push('Native parent AVPlayer exists but rate is 0 (not playing).');
+      }
+      if (
+        expoAvBufferedPath &&
+        context.originalAudioMuted === false &&
+        (context.parentVolume ?? 0) > 0 &&
+        context.parentVideoPlaying === false
+      ) {
+        issues.push('Original audio On but expo-av parent Video is not playing.');
       }
     } else if (caps.nativeModuleLoaded) {
       issues.push('Could not read getAudioSessionInfo() from native module.');
@@ -211,6 +248,36 @@ export async function beginSelfieReactionRecordingAudioGuardAsync(): Promise<voi
   traceReactionAudio('begin-guard:complete', { voiceChatAec: true });
 }
 
+/**
+ * Configures the audio session for selfie recording. Native S3 parent path uses VoiceChat guard;
+ * buffered expo-av path uses VideoRecording so expo-camera and expo-av can share one session.
+ */
+export async function beginSelfieReactionRecordingSessionAsync(): Promise<{
+  useNativeParentPlayback: boolean;
+}> {
+  const useNativeParentPlayback = shouldUseNativeParentRecordingPlayback();
+  if (useNativeParentPlayback) {
+    await beginSelfieReactionRecordingAudioGuardAsync();
+    return { useNativeParentPlayback: true };
+  }
+
+  traceReactionAudio('begin-session:expo-av', { voiceChatAec: false, parentPlaybackPath: 'expo-av' });
+  await configureConnectReactionRecordingAudioSessionAsync({ voiceChatAec: false });
+  traceReactionAudio('begin-session:expo-av-complete', { voiceChatAec: false, parentPlaybackPath: 'expo-av' });
+  return { useNativeParentPlayback: false };
+}
+
+export async function endSelfieReactionRecordingSessionAsync(
+  context: ReactionAudioTraceContext = {},
+): Promise<void> {
+  if (shouldUseNativeParentRecordingPlayback()) {
+    await endSelfieReactionRecordingAudioGuardAsync(context);
+    return;
+  }
+  traceReactionAudio('end-session:expo-av', context);
+  await ReflectionsAudio?.stopParentRecordingPlaybackAsync?.().catch(() => {});
+}
+
 export async function reassertSelfieReactionRecordingAudioAsync(reassertDelayMs?: number): Promise<void> {
   traceReactionAudio('reassert-voicechat:start', { reassertDelayMs, voiceChatAec: true });
 
@@ -233,6 +300,28 @@ export async function endSelfieReactionRecordingAudioGuardAsync(context: Reactio
   await ReflectionsAudio.stopParentRecordingPlaybackAsync?.().catch(() => {});
   await ReflectionsAudio.endVoiceChatGuardAsync?.().catch(() => {});
   traceReactionAudio('end-guard:complete', context);
+}
+
+/** Loads and seeks native parent audio while paused so record press does not cold-seek S3. */
+export async function prepareNativeParentRecordingPlaybackAsync(
+  url: string,
+  startMs: number,
+  volume: number,
+  context: ReactionAudioTraceContext = {},
+): Promise<void> {
+  if (!isNativeSelfieRecordingAudioAvailable() || volume <= 0 || !ReflectionsAudio?.prepareParentRecordingPlaybackAsync) {
+    return;
+  }
+
+  traceReactionAudio('native-parent-playback:prepare', {
+    ...context,
+    parentPlaybackPath: 'native-voicechat',
+    parentVolume: volume,
+    syncStartMs: startMs,
+    parentUrlHost: safeUrlHost(url),
+  });
+
+  await ReflectionsAudio.prepareParentRecordingPlaybackAsync(url, startMs, volume);
 }
 
 export async function startNativeParentRecordingPlaybackAsync(
@@ -277,17 +366,17 @@ export async function stopNativeParentRecordingPlaybackAsync(
 }
 
 /**
- * Re-applies VoiceChat and native parent playback shortly after expo-camera starts capture.
- * Returns a cancel function to clear pending timers when recording ends early.
+ * Re-applies VoiceChat after expo-camera starts capture. Does NOT restart parent AVPlayer —
+ * restarting forces a fresh network seek on the S3 URL and stalls recording.
  */
-export function scheduleSelfieRecordingAudioReasserts(
+export function scheduleSelfieRecordingVoiceChatReasserts(
   onReassert: (delayMs: number) => Promise<void>,
 ): () => void {
-  traceReactionAudio('schedule-reasserts', {
-    delaysMs: RECORDING_AUDIO_REASSERT_DELAYS_MS,
+  traceReactionAudio('schedule-voicechat-reasserts', {
+    delaysMs: RECORDING_VOICECHAT_REASSERT_DELAYS_MS,
   });
 
-  const timers = RECORDING_AUDIO_REASSERT_DELAYS_MS.map((delay) =>
+  const timers = RECORDING_VOICECHAT_REASSERT_DELAYS_MS.map((delay) =>
     setTimeout(() => {
       void onReassert(delay);
     }, delay),
@@ -297,7 +386,36 @@ export function scheduleSelfieRecordingAudioReasserts(
     for (const timer of timers) {
       clearTimeout(timer);
     }
-    traceReactionAudio('cancel-reasserts');
+    traceReactionAudio('cancel-voicechat-reasserts');
+  };
+}
+
+/** @deprecated Use scheduleSelfieRecordingVoiceChatReasserts — only reasserts VoiceChat now. */
+export function scheduleSelfieRecordingAudioReasserts(
+  onReassert: (delayMs: number) => Promise<void>,
+): () => void {
+  return scheduleSelfieRecordingVoiceChatReasserts(onReassert);
+}
+
+/** Re-starts buffered expo-av parent playback after expo-camera clobbers the session. */
+export function scheduleExpoAvParentPlaybackReasserts(
+  onReassert: (delayMs: number) => Promise<void>,
+): () => void {
+  traceReactionAudio('schedule-expo-av-parent-reasserts', {
+    delaysMs: RECORDING_EXPO_AV_PARENT_REASSERT_DELAYS_MS,
+  });
+
+  const timers = RECORDING_EXPO_AV_PARENT_REASSERT_DELAYS_MS.map((delay) =>
+    setTimeout(() => {
+      void onReassert(delay);
+    }, delay),
+  );
+
+  return () => {
+    for (const timer of timers) {
+      clearTimeout(timer);
+    }
+    traceReactionAudio('cancel-expo-av-parent-reasserts');
   };
 }
 

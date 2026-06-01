@@ -47,6 +47,12 @@ export declare class ReflectionsAudioModule extends NativeModule<ReflectionsAudi
   endVoiceChatGuardAsync(): Promise<void>;
 
   /**
+   * iOS: loads parent Reflection audio into a paused native AVPlayer at the trim position so
+   * record press can resume instantly without a cold S3 seek. Android: no-op.
+   */
+  prepareParentRecordingPlaybackAsync(url: string, startMs: number, volume: number): Promise<void>;
+
+  /**
    * iOS: plays parent Reflection audio through the VoiceChat session during selfie recording so
    * hardware AEC receives a reference signal. expo-av bypasses this path and causes mic bleed.
    * Android: no-op (expo-av handles parent audio).
