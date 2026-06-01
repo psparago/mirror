@@ -78,7 +78,9 @@ public class ReflectionsAudioModule: Module {
     }
 
     Function("getAudioSessionInfo") { () -> [String: Any] in
-      return self.describeAudioSessionInfo()
+      var info = self.describeAudioSessionInfo()
+      info["nativeModuleVersion"] = 2
+      return info
     }
 
     OnStartObserving {

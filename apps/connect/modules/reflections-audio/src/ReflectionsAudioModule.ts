@@ -15,6 +15,8 @@ export type AudioSessionInfo = {
   nativeParentRate?: number;
   nativeParentTimeSec?: number;
   nativeModuleLoaded: boolean;
+  /** Increment when native ReflectionsAudio API surface changes (helps diagnose EAS vs Metro drift). */
+  nativeModuleVersion?: number;
   outputs?: string[];
   inputs?: string[];
   hasHeadphones?: boolean;

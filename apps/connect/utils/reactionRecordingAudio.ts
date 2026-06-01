@@ -12,6 +12,8 @@ export type ParentRecordingPlaybackPath = 'native-voicechat' | 'expo-av' | 'sile
 export type NativeRecordingAudioCapabilities = {
   platform: string;
   nativeModuleLoaded: boolean;
+  /** From native getAudioSessionInfo when available; 2 = AEC guard + native parent playback. */
+  nativeModuleVersion: number | null;
   nativeSelfiePathAvailable: boolean;
   /** Native APIs present on the loaded module (helps spot stale dev clients). */
   availableApis: string[];
@@ -72,6 +74,7 @@ export function getNativeRecordingAudioCapabilities(): NativeRecordingAudioCapab
   return {
     platform: Platform.OS,
     nativeModuleLoaded: !!ReflectionsAudio,
+    nativeModuleVersion: readSessionInfo()?.nativeModuleVersion ?? null,
     nativeSelfiePathAvailable: isNativeSelfieRecordingAudioAvailable(),
     availableApis,
     missingApis,
@@ -106,10 +109,14 @@ export function evaluateReactionAudioDiagnostics(
 
   if (Platform.OS === 'ios') {
     if (!caps.nativeModuleLoaded) {
-      issues.push('ReflectionsAudio native module not loaded — rebuild Connect (Dev) dev client.');
+      issues.push('ReflectionsAudio native module not loaded — install a Connect (Dev) build.');
+    } else if (caps.nativeModuleVersion != null && caps.nativeModuleVersion < 2) {
+      issues.push(
+        `Native ReflectionsAudio v${caps.nativeModuleVersion} on device; v2 required for AEC guard + native parent playback. JS logging can be newer than native (Metro vs EAS). Rebuild from commit 48e8353 or later.`,
+      );
     } else if (!caps.nativeSelfiePathAvailable) {
       issues.push(
-        `Stale dev client — missing APIs: ${caps.missingApis.join(', ') || 'unknown'}. Rebuild required.`,
+        `Native module missing APIs: ${caps.missingApis.join(', ') || 'unknown'}. JS bundle may be ahead of the EAS-installed binary.`,
       );
     }
 

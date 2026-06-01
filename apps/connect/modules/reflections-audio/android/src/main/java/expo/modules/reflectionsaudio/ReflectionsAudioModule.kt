@@ -69,6 +69,7 @@ class ReflectionsAudioModule : Module() {
         "nativeParentRate" to 0,
         "nativeParentTimeSec" to 0,
         "nativeModuleLoaded" to true,
+        "nativeModuleVersion" to 2,
         "outputs" to describeCurrentRoute()["outputs"],
         "inputs" to emptyList<String>(),
         "hasHeadphones" to (describeCurrentRoute()["hasHeadphones"] == true),
