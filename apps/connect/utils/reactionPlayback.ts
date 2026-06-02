@@ -24,6 +24,17 @@ export const REACTION_PARENT_HEADPHONES_VOLUME = 1.0;
 /** Parent Reflection volume during timeline reaction replay (viewing experience). */
 export const REACTION_PARENT_PLAYBACK_VOLUME = 0.15;
 
+/** Spoken + on-screen intro for typed reactions read by AI voice. */
+export function formatTypedReactionSpeechText(
+  companionName: string,
+  messageText: string,
+): string {
+  const name = (companionName || 'Companion').trim() || 'Companion';
+  const message = messageText.trim();
+  if (!message) return name;
+  return `${name} says, ${message}`;
+}
+
 /** Audio conditions captured when a selfie reaction finishes recording. */
 export type SelfieRecordingAudioSnapshot = {
   originalAudioMuted: boolean;

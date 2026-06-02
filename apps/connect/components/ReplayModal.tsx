@@ -12,6 +12,7 @@ import {
   resolveReactionResponderFaceForPlayback,
   resolveReactionResponderFaces,
   shouldUseCompanionAvatarReactionPip,
+  formatTypedReactionSpeechText,
   REACTION_PARENT_PLAYBACK_VOLUME,
   type ReactionParentPipMedia,
   type ReactionPlaybackSession,
@@ -136,10 +137,15 @@ export function ReplayModal({
   >(undefined);
   const pipVideoRef = useRef<AvVideo>(null);
   const pipAlignedForEventRef = useRef<string | null>(null);
-  const selfieImagePlaybackStartedForEventRef = useRef<string | null>(null);
+  const selfieMainStagePlaybackStartedForEventRef = useRef<string | null>(null);
+  const companionMessagePlaybackStartedForEventRef = useRef<string | null>(null);
   const selfieUsesParentMainStageRef = useRef(false);
   const selfieUsesParentImageMainStageRef = useRef(false);
   const selfieUsesParentOnMainStageRef = useRef(false);
+  const companionMessageUsesParentVideoMainStageRef = useRef(false);
+  const resolvedParentPipRef = useRef<ReactionParentPipMedia | null>(null);
+  const ensureCompanionMessageVideoPlayingRef = useRef<() => void>(() => {});
+  const companionMessageVideoRetryTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
 
   const displayEvent = playbackEvent ?? event;
   const isReactionPlayback = displayEvent?.isReaction === true;
@@ -181,20 +187,48 @@ export function ReplayModal({
     !!displayEvent?.video_url;
   const selfieUsesParentOnMainStage =
     selfieUsesParentMainStage || selfieUsesParentImageMainStage;
+  const companionMessageUsesParentVideoMainStage =
+    usesCompanionAvatarPip &&
+    isReactionPlayback &&
+    resolvedParentPip?.mediaType === 'video';
+  const companionMessageUsesParentImageMainStage =
+    usesCompanionAvatarPip &&
+    isReactionPlayback &&
+    resolvedParentPip?.mediaType === 'image';
+  const parentReflectionUsesVideoMainStage =
+    selfieUsesParentMainStage || companionMessageUsesParentVideoMainStage;
+  const parentReflectionUsesImageMainStage =
+    selfieUsesParentImageMainStage || companionMessageUsesParentImageMainStage;
 
   useEffect(() => {
     selfieUsesParentMainStageRef.current = selfieUsesParentMainStage;
     selfieUsesParentImageMainStageRef.current = selfieUsesParentImageMainStage;
     selfieUsesParentOnMainStageRef.current = selfieUsesParentOnMainStage;
-  }, [selfieUsesParentImageMainStage, selfieUsesParentMainStage, selfieUsesParentOnMainStage]);
+    companionMessageUsesParentVideoMainStageRef.current =
+      companionMessageUsesParentVideoMainStage;
+  }, [
+    companionMessageUsesParentVideoMainStage,
+    selfieUsesParentImageMainStage,
+    selfieUsesParentMainStage,
+    selfieUsesParentOnMainStage,
+  ]);
+
+  useEffect(() => {
+    resolvedParentPipRef.current = resolvedParentPip;
+    companionMessagePlaybackStartedForEventRef.current = null;
+  }, [displayEvent?.event_id, resolvedParentPip?.url]);
 
   const reactionCaptionText = useMemo(() => {
     if (!isReactionPlayback) return null;
     if (reactionPlaybackType === 'typed') {
-      return (
+      const message =
         displayEvent?.metadata?.reaction_message ||
         displayEvent?.metadata?.description ||
-        null
+        '';
+      if (!message.trim()) return null;
+      return formatTypedReactionSpeechText(
+        displayEvent?.metadata?.sender || 'Companion',
+        message,
       );
     }
     if (reactionPlaybackType === 'voice') {
@@ -205,7 +239,13 @@ export function ReplayModal({
       return sender ? `${sender}'s selfie` : 'Selfie reaction';
     }
     return null;
-  }, [displayEvent?.metadata?.description, displayEvent?.metadata?.reaction_message, isReactionPlayback, reactionPlaybackType]);
+  }, [
+    displayEvent?.metadata?.description,
+    displayEvent?.metadata?.reaction_message,
+    displayEvent?.metadata?.sender,
+    isReactionPlayback,
+    reactionPlaybackType,
+  ]);
 
   // 2. Video Player Setup
   const videoPlayer = useVideoPlayer(event?.video_url || '', player => {
@@ -263,26 +303,35 @@ export function ReplayModal({
 
   useEffect(() => {
     if (!visible) return;
-    if (selfieUsesParentImageMainStage) return;
-    const url = selfieUsesParentMainStage
+    if (parentReflectionUsesImageMainStage) return;
+    const url = parentReflectionUsesVideoMainStage
       ? resolvedParentPip?.url
       : displayEvent?.video_url;
     if (!url) return;
     try {
       videoPlayer.replace(url);
       videoPlayer.muted = false;
-      videoPlayer.volume = selfieUsesParentMainStage ? REACTION_PARENT_PLAYBACK_VOLUME : 1;
+      videoPlayer.volume = parentReflectionUsesVideoMainStage
+        ? REACTION_PARENT_PLAYBACK_VOLUME
+        : 1;
       setVideoReady(false);
       videoFinishHandledForEventRef.current = null;
+      if (
+        parentReflectionUsesVideoMainStage &&
+        stateRef.current?.matches({ playingAudio: { playback: 'playing' } })
+      ) {
+        companionMessagePlaybackStartedForEventRef.current = null;
+        ensureCompanionMessageVideoPlayingRef.current();
+      }
     } catch (error) {
       console.warn('[ReplayModal] video replace failed:', error);
     }
   }, [
     displayEvent?.event_id,
     displayEvent?.video_url,
+    parentReflectionUsesImageMainStage,
+    parentReflectionUsesVideoMainStage,
     resolvedParentPip?.url,
-    selfieUsesParentImageMainStage,
-    selfieUsesParentMainStage,
     videoPlayer,
     visible,
   ]);
@@ -320,6 +369,78 @@ export function ReplayModal({
     videoPlayer,
   ]);
 
+  const startCompanionMessageVideoPlayback = useCallback(async () => {
+    const syncMs = eventRef.current?.syncStartTimeMillis ?? 0;
+    try {
+      seekVideoToSeconds(videoPlayer, syncMs / 1000);
+      videoPlayer.muted = false;
+      videoPlayer.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+      videoPlayer.play();
+    } catch {
+      // Parent video may not be ready yet; kickstart effect will retry.
+    }
+  }, [videoPlayer]);
+
+  const shouldPlayParentVideoForCompanionMessage = useCallback(
+    (playbackEvent: Event | null | undefined) => {
+      if (!playbackEvent?.isReaction) return false;
+      const type = resolveReactionPlaybackType(playbackEvent);
+      if (type !== 'voice' && type !== 'typed') return false;
+      return resolvedParentPipRef.current?.mediaType === 'video';
+    },
+    [],
+  );
+
+  const clearCompanionMessageVideoRetryTimeouts = useCallback(() => {
+    for (const timeoutId of companionMessageVideoRetryTimeoutsRef.current) {
+      clearTimeout(timeoutId);
+    }
+    companionMessageVideoRetryTimeoutsRef.current = [];
+  }, []);
+
+  const ensureCompanionMessageParentVideoPlaying = useCallback(() => {
+    if (!shouldPlayParentVideoForCompanionMessage(eventRef.current)) return;
+    if (!stateRef.current?.matches({ playingAudio: { playback: 'playing' } })) return;
+
+    const eventId = eventRef.current?.event_id;
+    if (!eventId) return;
+    if (companionMessagePlaybackStartedForEventRef.current === eventId) return;
+
+    clearCompanionMessageVideoRetryTimeouts();
+
+    const attemptStart = (attempt: number) => {
+      if (companionMessagePlaybackStartedForEventRef.current === eventId) return;
+      if (!stateRef.current?.matches({ playingAudio: { playback: 'playing' } })) return;
+      if (!shouldPlayParentVideoForCompanionMessage(eventRef.current)) return;
+
+      try {
+        void startCompanionMessageVideoPlayback();
+      } catch {
+        // expo-video may not be ready until the source finishes loading.
+      }
+
+      if (attempt >= 5) return;
+      const timeoutId = setTimeout(() => attemptStart(attempt + 1), 120 * (attempt + 1));
+      companionMessageVideoRetryTimeoutsRef.current.push(timeoutId);
+    };
+
+    attemptStart(0);
+  }, [
+    clearCompanionMessageVideoRetryTimeouts,
+    shouldPlayParentVideoForCompanionMessage,
+    startCompanionMessageVideoPlayback,
+  ]);
+
+  useEffect(() => {
+    ensureCompanionMessageVideoPlayingRef.current = ensureCompanionMessageParentVideoPlaying;
+  }, [ensureCompanionMessageParentVideoPlaying]);
+
+  useEffect(() => {
+    return () => {
+      clearCompanionMessageVideoRetryTimeouts();
+    };
+  }, [clearCompanionMessageVideoRetryTimeouts, displayEvent?.event_id, visible]);
+
   const startSelfieImageMainStagePlayback = useCallback(async () => {
     try {
       await pipVideoRef.current?.setStatusAsync({
@@ -333,11 +454,38 @@ export function ReplayModal({
     }
   }, []);
 
+  const startSelfieVideoMainStagePlayback = useCallback(async () => {
+    const syncMs = eventRef.current?.syncStartTimeMillis ?? 0;
+    try {
+      seekVideoToSeconds(videoPlayer, syncMs / 1000);
+      videoPlayer.muted = false;
+      videoPlayer.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+      videoPlayer.play();
+      await pipVideoRef.current?.setPositionAsync(0);
+      await pipVideoRef.current?.setIsMutedAsync(false);
+      await pipVideoRef.current?.setVolumeAsync(1);
+      await pipVideoRef.current?.playAsync();
+    } catch {
+      // PiP may not be mounted yet; onLoad handler will retry.
+    }
+  }, [videoPlayer]);
+
+  const startSelfieMainStagePlayback = useCallback(async () => {
+    if (selfieUsesParentImageMainStageRef.current) {
+      await startSelfieImageMainStagePlayback();
+      return;
+    }
+    if (selfieUsesParentMainStageRef.current) {
+      await startSelfieVideoMainStagePlayback();
+    }
+  }, [startSelfieImageMainStagePlayback, startSelfieVideoMainStagePlayback]);
+
   useEffect(() => {
     if (!visible || !isReactionPlayback) {
       setFetchedParentPip(undefined);
       pipAlignedForEventRef.current = null;
-      selfieImagePlaybackStartedForEventRef.current = null;
+      selfieMainStagePlaybackStartedForEventRef.current = null;
+      companionMessagePlaybackStartedForEventRef.current = null;
       void pipVideoRef.current?.pauseAsync().catch(() => {});
       return;
     }
@@ -600,6 +748,7 @@ export function ReplayModal({
 
   const handleBackToParentReflection = useCallback(() => {
     const session = reactionSessionRef.current ?? reactionSession;
+    if (!session) return;
     returnToParentReflection(session);
   }, [reactionSession, returnToParentReflection]);
 
@@ -742,7 +891,8 @@ export function ReplayModal({
     setShowLikesModal(false);
     setVideoReady(false);
     videoFinishHandledForEventRef.current = null;
-    selfieImagePlaybackStartedForEventRef.current = null;
+    selfieMainStagePlaybackStartedForEventRef.current = null;
+    companionMessagePlaybackStartedForEventRef.current = null;
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
       deepDiveBreathTimeoutRef.current = null;
@@ -844,10 +994,10 @@ export function ReplayModal({
           setVideoReady(false);
 
           if (
-            selfieUsesParentImageMainStageRef.current &&
+            selfieUsesParentOnMainStageRef.current &&
             eventRef.current?.video_url
           ) {
-            void startSelfieImageMainStagePlayback();
+            void startSelfieMainStagePlayback();
             return;
           }
 
@@ -875,6 +1025,8 @@ export function ReplayModal({
       },
 
       playAudio: async () => {
+        ensureCompanionMessageVideoPlayingRef.current();
+
         // This is the main audio for an "Image + Audio" reflection
         const audioUrl = normalizeAudioUrl(eventRef.current?.audio_url);
         // expo-av accepts http/https URLs and file:// URLs
@@ -894,6 +1046,13 @@ export function ReplayModal({
             
             sound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
+                if (companionMessageUsesParentVideoMainStageRef.current) {
+                  try {
+                    videoPlayer.pause();
+                  } catch {
+                    // player may be tearing down
+                  }
+                }
                 // CRITICAL FIX: Send AUDIO_FINISHED when playback is done.
                 // In Companion mode, we do not wait for the selfie.
                 debugLog("✅ Main Audio Finished");
@@ -921,8 +1080,14 @@ export function ReplayModal({
       },
       
       resumeMedia: () => {
-        if (selfieUsesParentImageMainStageRef.current) {
-          void startSelfieImageMainStagePlayback();
+        if (selfieUsesParentOnMainStageRef.current) {
+          void startSelfieMainStagePlayback();
+          return;
+        }
+        if (companionMessageUsesParentVideoMainStageRef.current) {
+          companionMessagePlaybackStartedForEventRef.current = null;
+          ensureCompanionMessageVideoPlayingRef.current();
+          if (soundRef.current) soundRef.current.playAsync();
           return;
         }
         try {
@@ -992,7 +1157,7 @@ export function ReplayModal({
         }
       },
     }
-  }), [startSelfieImageMainStagePlayback, videoPlayer, preferRecordedAudioOnly]);
+  }), [startCompanionMessageVideoPlayback, startSelfieMainStagePlayback, videoPlayer, preferRecordedAudioOnly]);
 
   const [state, send] = useMachine(machine);
 
@@ -1081,17 +1246,32 @@ export function ReplayModal({
   }, [signalVideoFinished]);
 
   const handleSelfiePipReady = useCallback(async () => {
-    if (!selfieUsesParentImageMainStageRef.current) return;
+    if (!selfieUsesParentOnMainStageRef.current) return;
     const isMachinePlaying =
       stateRef.current?.matches({ playingVideoInstant: { playback: 'playing' } }) ||
       stateRef.current?.matches({ playingVideo: { playback: 'playing' } });
     if (!isMachinePlaying) return;
     const eventId = eventRef.current?.event_id;
-    if (!eventId || selfieImagePlaybackStartedForEventRef.current === eventId) return;
+    if (!eventId || selfieMainStagePlaybackStartedForEventRef.current === eventId) return;
+
     await alignReactionPlayback();
-    await startSelfieImageMainStagePlayback();
-    selfieImagePlaybackStartedForEventRef.current = eventId;
-  }, [alignReactionPlayback, startSelfieImageMainStagePlayback]);
+    if (selfieUsesParentImageMainStageRef.current) {
+      await startSelfieImageMainStagePlayback();
+    } else if (selfieUsesParentMainStageRef.current) {
+      try {
+        await pipVideoRef.current?.setIsMutedAsync(false);
+        await pipVideoRef.current?.setVolumeAsync(1);
+        await pipVideoRef.current?.playAsync();
+      } catch {
+        await startSelfieVideoMainStagePlayback();
+      }
+    }
+    selfieMainStagePlaybackStartedForEventRef.current = eventId;
+  }, [
+    alignReactionPlayback,
+    startSelfieImageMainStagePlayback,
+    startSelfieVideoMainStagePlayback,
+  ]);
 
   const handleSelfiePipStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
@@ -1136,24 +1316,72 @@ export function ReplayModal({
   }, [visible, state, displayEvent?.event_id, displayEvent?.video_url, displayEvent?.metadata, videoPlayer]);
 
   useEffect(() => {
-    if (!visible || !selfieUsesParentImageMainStage || !displayEvent?.event_id) return;
+    if (!visible || !selfieUsesParentOnMainStage || !displayEvent?.event_id) return;
+    if (selfieUsesParentMainStage && !resolvedParentPip?.url) return;
     const isMachinePlaying =
       state.matches({ playingVideoInstant: { playback: 'playing' } }) ||
       state.matches({ playingVideo: { playback: 'playing' } });
     if (!isMachinePlaying) return;
-    if (selfieImagePlaybackStartedForEventRef.current === displayEvent.event_id) return;
+    if (selfieMainStagePlaybackStartedForEventRef.current === displayEvent.event_id) return;
 
     void (async () => {
       await alignReactionPlayback();
-      await startSelfieImageMainStagePlayback();
-      selfieImagePlaybackStartedForEventRef.current = displayEvent.event_id;
+      await startSelfieMainStagePlayback();
+      selfieMainStagePlaybackStartedForEventRef.current = displayEvent.event_id;
     })();
   }, [
     alignReactionPlayback,
     displayEvent?.event_id,
-    selfieUsesParentImageMainStage,
-    startSelfieImageMainStagePlayback,
+    resolvedParentPip?.url,
+    selfieUsesParentMainStage,
+    selfieUsesParentOnMainStage,
+    startSelfieMainStagePlayback,
     state,
+    visible,
+  ]);
+
+  useEffect(() => {
+    if (!visible || !companionMessageUsesParentVideoMainStage || !displayEvent?.event_id) return;
+    if (!resolvedParentPip?.url) return;
+    if (!state.matches({ playingAudio: { playback: 'playing' } })) return;
+
+    ensureCompanionMessageParentVideoPlaying();
+
+    const maybeStartAfterLoad = () => {
+      if (videoPlayer.status === 'readyToPlay') {
+        ensureCompanionMessageVideoPlayingRef.current();
+      }
+    };
+    maybeStartAfterLoad();
+
+    const statusSub = videoPlayer.addListener('statusChange', maybeStartAfterLoad);
+    const sub = videoPlayer.addListener('playingChange', (evt: unknown) => {
+      const isPlaying =
+        evt && typeof evt === 'object' && 'isPlaying' in evt
+          ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
+          : false;
+      if (isPlaying) {
+        companionMessagePlaybackStartedForEventRef.current = displayEvent.event_id;
+        clearCompanionMessageVideoRetryTimeouts();
+        return;
+      }
+      if (stateRef.current?.matches({ playingAudio: { playback: 'playing' } })) {
+        ensureCompanionMessageVideoPlayingRef.current();
+      }
+    });
+
+    return () => {
+      statusSub.remove();
+      sub.remove();
+    };
+  }, [
+    clearCompanionMessageVideoRetryTimeouts,
+    companionMessageUsesParentVideoMainStage,
+    displayEvent?.event_id,
+    ensureCompanionMessageParentVideoPlaying,
+    resolvedParentPip?.url,
+    state,
+    videoPlayer,
     visible,
   ]);
 
@@ -1391,9 +1619,11 @@ export function ReplayModal({
 
   // --- RENDER ---
   const hasVideo = !!displayEvent?.video_url;
-  const usesVideoMainStage = (hasVideo || state.hasTag('video_mode')) && !selfieUsesParentImageMainStage;
+  const usesVideoMainStage =
+    parentReflectionUsesVideoMainStage ||
+    ((hasVideo || state.hasTag('video_mode')) && !parentReflectionUsesImageMainStage);
   const parentMainImageUrl =
-    selfieUsesParentImageMainStage && resolvedParentPip?.mediaType === 'image'
+    parentReflectionUsesImageMainStage && resolvedParentPip?.mediaType === 'image'
       ? resolvedParentPip.url
       : displayEvent.image_url;
   const isSpeaking = state.hasTag('speaking');
@@ -1502,7 +1732,8 @@ export function ReplayModal({
       takeSelfie: false,
     });
     pipAlignedForEventRef.current = null;
-    selfieImagePlaybackStartedForEventRef.current = null;
+    selfieMainStagePlaybackStartedForEventRef.current = null;
+    companionMessagePlaybackStartedForEventRef.current = null;
     void alignReactionPlayback();
   };
 
@@ -1634,7 +1865,7 @@ export function ReplayModal({
                     nativeControls={false}
                   />
                   {renderReactionPip()}
-                  {displayEvent.image_url && !videoReady && !selfieUsesParentMainStage ? (
+                  {displayEvent.image_url && !videoReady && !parentReflectionUsesVideoMainStage ? (
                     <Image
                       source={{ uri: displayEvent.image_url }}
                       style={[styles.mediaImage, styles.posterShield]}
@@ -1648,7 +1879,7 @@ export function ReplayModal({
                   <Image
                     source={{ uri: parentMainImageUrl }}
                     style={styles.mediaImage}
-                    contentFit={selfieUsesParentImageMainStage ? 'cover' : 'contain'}
+                    contentFit={parentReflectionUsesImageMainStage ? 'cover' : 'contain'}
                     cachePolicy="memory-disk"
                   />
                   {renderReactionPip()}

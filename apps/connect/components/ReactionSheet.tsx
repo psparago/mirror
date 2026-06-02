@@ -1,5 +1,6 @@
 import {
   defaultReactionOriginalAudioEnabled,
+  formatTypedReactionSpeechText,
   REACTION_PARENT_PLAYBACK_VOLUME,
   resolveCompanionPreviewParentVolume,
   resolveReactionRecordingVolume,
@@ -384,12 +385,19 @@ export function ReactionSheet({
       setTypedPreviewLoading(true);
       try {
         const trimmed = typedMessage.trim();
+        const companionName = companionAvatar?.companionName || 'Companion';
+        const spokenPreviewKey = formatTypedReactionSpeechText(companionName, trimmed);
         let audioUri = typedPreviewAudioUriRef.current;
-        if (typedPreviewMessageRef.current !== trimmed || !audioUri) {
+        if (typedPreviewMessageRef.current !== spokenPreviewKey || !audioUri) {
           const { captionVoice } = await loadVoicePreferences();
-          audioUri = await generateTypedReactionAudio(trimmed, currentExplorerId, captionVoice);
+          audioUri = await generateTypedReactionAudio(
+            trimmed,
+            currentExplorerId,
+            captionVoice,
+            companionName,
+          );
           typedPreviewAudioUriRef.current = audioUri;
-          typedPreviewMessageRef.current = trimmed;
+          typedPreviewMessageRef.current = spokenPreviewKey;
         }
         const player = createAudioPlayer(audioUri);
         player.volume = 1;
@@ -418,6 +426,7 @@ export function ReactionSheet({
     finishCompanionPreview,
     getCompanionPreviewParentVolume,
     getParentPreviewStartMs,
+    companionAvatar?.companionName,
     isVideoParent,
     reactionMode,
     recordedUri,
@@ -1471,7 +1480,11 @@ export function ReactionSheet({
           explorerId: currentExplorerId,
           parentReflectionId,
           syncStartTimeMillis:
-            reactionMode === 'selfie' ? (syncStartTimeMillis ?? 0) : 0,
+            reactionMode === 'selfie'
+              ? (syncStartTimeMillis ?? 0)
+              : isVideoParent && (reactionMode === 'voice' || reactionMode === 'typed')
+                ? trimStartMs
+                : 0,
           senderName: activeRelationship.companionName || 'Companion',
           senderId: user.uid,
           activeRelationshipId: activeRelationship.id,
@@ -1496,6 +1509,7 @@ export function ReactionSheet({
     activeRelationship,
     currentExplorerId,
     isUploading,
+    isVideoParent,
     onClose,
     onUploadSuccess,
     parentPosterUri,
@@ -1503,6 +1517,7 @@ export function ReactionSheet({
     reactionMode,
     recordedUri,
     syncStartTimeMillis,
+    trimStartMs,
     typedMessage,
     user?.uid,
     voiceRecordedUri,
@@ -1549,7 +1564,16 @@ export function ReactionSheet({
     !isPreviewMode &&
     (reactionMode === 'selfie' || reactionMode === 'voice');
   const audioHintText =
-    'Original audio defaults to Off to avoid echo when recording your reaction. Use headphones to listen while recording.';
+    reactionMode === 'voice'
+      ? 'Use headphones to hear the Reflection while you record without echo.'
+      : 'Original audio defaults to Off to avoid echo when recording your reaction. Use headphones to listen while recording.';
+  const voiceModeHint = isVideoParent
+    ? isVoiceRecording
+      ? 'The Reflection plays with you. Tap Stop when you’re done.'
+      : 'Your message sets how long the Reflection plays.'
+    : isVoiceRecording
+      ? 'Tap Stop when you’re done.'
+      : 'Your voice, not AI — good for quieter places.';
   const renderOriginalAudioToggle = () => (
     <Pressable
       style={styles.originalAudioToggle}
@@ -1709,7 +1733,10 @@ export function ReactionSheet({
               {reactionMode === 'typed' && typedMessage.trim() ? (
                 <View style={styles.companionPreviewCaptionBar}>
                   <Text style={styles.companionPreviewCaptionText} numberOfLines={4}>
-                    {typedMessage.trim()}
+                    {formatTypedReactionSpeechText(
+                      companionAvatar?.companionName || 'Companion',
+                      typedMessage.trim(),
+                    )}
                   </Text>
                 </View>
               ) : null}
@@ -1735,7 +1762,9 @@ export function ReactionSheet({
             </View>
             <Text style={styles.companionPreviewHint}>
               {reactionMode === 'voice'
-                ? 'This is how your reaction will look. Your voice plays while the Reflection runs softly in the background.'
+                ? isVideoParent
+                  ? 'Your voice and the Reflection play together and stop when your message ends.'
+                  : 'This is how your reaction will look. Your voice plays while the Reflection runs softly in the background.'
                 : reactionMode === 'typed'
                   ? 'This is how your reaction will look. Your message is read in your AI voice while the Reflection plays softly in the background.'
                   : reactionMode === 'selfie' && (isVideoParent || isImageParent)
@@ -1750,6 +1779,7 @@ export function ReactionSheet({
             style={[
               styles.parentVideoPane,
               reactionMode === 'typed' && styles.parentVideoPaneTyped,
+              reactionMode === 'voice' && isVideoParent && styles.parentVideoPaneVoice,
             ]}
           >
             <View style={styles.mediaCard}>
@@ -1911,16 +1941,18 @@ export function ReactionSheet({
                   </View>
                 </View>
               ) : reactionMode === 'voice' ? (
-                <View style={styles.altModePane}>
-                  <FontAwesome name="microphone" size={36} color="#fff" />
+                <ScrollView
+                  style={styles.altModePaneScroll}
+                  contentContainerStyle={styles.altModePaneContent}
+                  showsVerticalScrollIndicator={false}
+                  bounces={false}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  <FontAwesome name="microphone" size={28} color="#fff" />
                   <Text style={styles.altModeTitle}>
                     {isVoiceRecording ? 'Recording…' : 'Record a voice message'}
                   </Text>
-                  <Text style={styles.altModeHint}>
-                    {isVoiceRecording
-                      ? 'Tap stop when you are done.'
-                      : 'Your voice, not AI — good for public places.'}
-                  </Text>
+                  <Text style={styles.altModeHint}>{voiceModeHint}</Text>
                   <Pressable
                     style={[
                       styles.voiceRecordButton,
@@ -1940,7 +1972,7 @@ export function ReactionSheet({
                       {isVoiceRecording ? 'Stop recording' : 'Start recording'}
                     </Text>
                   </Pressable>
-                </View>
+                </ScrollView>
               ) : isCameraGranted ? (
                 <View style={styles.cameraStageHost}>
                   <View style={styles.cameraStage}>
@@ -2225,7 +2257,8 @@ export function ReactionSheet({
                     <Text style={styles.infoLabel}>Voice</Text>
                     <Text style={styles.infoDesc}>
                       Record a short voice message — great for narrating or for quieter places where
-                      you’d rather not be on camera. Tap Preview when you’re ready, then Send.
+                      you’d rather not be on camera. On video Reflections, the clip plays for as long
+                      as you talk, not the whole video. Tap Preview, then Send.
                     </Text>
                   </View>
                 </View>
@@ -2258,7 +2291,9 @@ export function ReactionSheet({
                 <Text style={styles.infoProTip}>
                   <Text style={styles.infoProTipStrong}>Voice &amp; Type:</Text> your profile photo
                   appears in the corner while your message plays — your recorded voice for Voice, or
-                  your AI voice for Type.
+                  your AI voice for Type. Typed messages begin with your name (for example,
+                  “Grandad says,”) so the Explorer knows who is speaking. On video Reflections,
+                  playback stops when your message ends.
                 </Text>
                 <Text style={styles.infoProTip}>
                   Use the ✕ to close and discard, or Retake if you want another try. The back arrow in
@@ -2354,6 +2389,9 @@ const styles = StyleSheet.create({
   parentVideoPaneTyped: {
     flex: 0.55,
     maxHeight: 180,
+  },
+  parentVideoPaneVoice: {
+    flex: 1.25,
   },
   splitPaneTyped: {
     gap: 8,
@@ -2525,6 +2563,19 @@ const styles = StyleSheet.create({
     gap: 12,
     backgroundColor: '#101820',
   },
+  altModePaneScroll: {
+    flex: 1,
+    minHeight: 0,
+    backgroundColor: '#101820',
+  },
+  altModePaneContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    gap: 10,
+  },
   altModeTitle: {
     color: '#fff',
     fontSize: 17,
@@ -2536,6 +2587,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
+    paddingHorizontal: 4,
+    maxWidth: '100%',
   },
   typedComposePane: {
     flex: 1,

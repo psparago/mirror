@@ -1,4 +1,5 @@
 import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
+import { formatTypedReactionSpeechText } from '@/utils/reactionPlayback';
 import { loadVoicePreferences } from '@/utils/ttsVoices';
 import { API_ENDPOINTS, EventMetadata, ExplorerConfig, type ReactionType } from '@projectmirror/shared';
 import {
@@ -109,11 +110,15 @@ export async function generateTypedReactionAudio(
   messageText: string,
   explorerId: string,
   captionVoice: string,
+  companionName?: string,
 ): Promise<string> {
+  const spokenText = companionName
+    ? formatTypedReactionSpeechText(companionName, messageText)
+    : messageText.trim();
   const params = new URLSearchParams({
     explorer_id: explorerId,
-    target_caption: messageText,
-    target_deep_dive: messageText,
+    target_caption: spokenText,
+    target_deep_dive: spokenText,
     caption_voice: captionVoice,
   });
   const response = await fetch(`${API_ENDPOINTS.AI_DESCRIPTION}?${params.toString()}`);
@@ -229,7 +234,12 @@ export async function uploadReaction({
     let audioSourceUri: string;
     if (reactionType === 'typed') {
       const { captionVoice } = await loadVoicePreferences();
-      audioSourceUri = await generateTypedReactionAudio(messageText!.trim(), explorerId, captionVoice);
+      audioSourceUri = await generateTypedReactionAudio(
+        messageText!.trim(),
+        explorerId,
+        captionVoice,
+        senderName,
+      );
     } else {
       audioSourceUri = recordedAudioUri!;
     }
