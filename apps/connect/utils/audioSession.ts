@@ -3,6 +3,7 @@ import {
   setAudioModeAsync as setExpoAudioModeAsync,
   setIsAudioActiveAsync,
 } from 'expo-audio';
+import { Platform } from 'react-native';
 
 /**
  * Reflections Connect uses expo-audio for recording and expo-av for playback.
@@ -49,6 +50,7 @@ export async function configureConnectPlaybackAudioSessionAsync(options?: {
 
 /** Recording mode for selfie/voice reactions (expo-camera + expo-av parent sync). */
 export async function configureConnectReactionRecordingAudioSessionAsync(): Promise<void> {
+  await setIsAudioActiveAsync(true);
   await Promise.all([
     Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -62,4 +64,52 @@ export async function configureConnectReactionRecordingAudioSessionAsync(): Prom
       playsInSilentMode: true,
     }),
   ]);
+}
+
+/**
+ * Voice-only reaction on a photo parent — expo-audio recorder only (iOS).
+ * Avoids putting expo-av into recording mode on Android, which can block the recorder.
+ */
+export async function configureConnectVoiceReactionRecordingAsync(): Promise<void> {
+  if (Platform.OS === 'android') {
+    try {
+      await setIsAudioActiveAsync(false);
+    } catch {
+      /* ignore */
+    }
+  }
+  await setIsAudioActiveAsync(true);
+  await setExpoAudioModeAsync({
+    allowsRecording: true,
+    playsInSilentMode: true,
+  });
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: false,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: false,
+    shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
+  });
+}
+
+/**
+ * Release mic/audio after expo-camera selfie capture on Android.
+ * Camera + expo-av recording mode can block expo-audio; call before voice or camera remount.
+ */
+export async function releaseConnectCaptureAudioAsync(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+
+  try {
+    await setIsAudioActiveAsync(false);
+  } catch (error) {
+    console.warn('[audioSession] release capture: deactivate failed:', error);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  try {
+    await configureConnectPlaybackAudioSessionAsync({ retries: 1 });
+  } catch (error) {
+    console.warn('[audioSession] release capture: playback session failed:', error);
+  }
 }

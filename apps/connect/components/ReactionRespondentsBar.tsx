@@ -79,7 +79,6 @@ export function ReactionRespondentsBar({
             disabled={isDisabled}
             style={({ pressed }) => [
               styles.avatarWrap,
-              index > 0 && styles.avatarOverlap,
               isActive && styles.avatarActive,
               pressed && !isDisabled && styles.avatarPressed,
               isDisabled && !isActive && !isFetching && styles.avatarDisabled,
@@ -188,6 +187,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingRight: 4,
+    gap: 6,
   },
   avatarWrap: {
     borderRadius: 16,
@@ -199,9 +199,6 @@ const styles = StyleSheet.create({
   avatarActive: {
     borderColor: 'rgba(79, 195, 247, 0.85)',
     opacity: 0.55,
-  },
-  avatarOverlap: {
-    marginLeft: -10,
   },
   avatarPressed: {
     opacity: 0.85,

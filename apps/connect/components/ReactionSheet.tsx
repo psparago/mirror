@@ -7,11 +7,14 @@ import {
   type SelfieRecordingAudioSnapshot,
 } from '@/utils/reactionPlayback';
 import { uploadReaction, generateTypedReactionAudio } from '@/utils/reactionUpload';
+import { ensureFileUri } from '@/utils/mediaProcessor';
 import { loadVoicePreferences } from '@/utils/ttsVoices';
 import { useAudioRoute } from '@/utils/audioRoute';
 import {
   configureConnectPlaybackAudioSessionAsync,
   configureConnectReactionRecordingAudioSessionAsync,
+  configureConnectVoiceReactionRecordingAsync,
+  releaseConnectCaptureAudioAsync,
 } from '@/utils/audioSession';
 import { FontAwesome } from '@expo/vector-icons';
 import {
@@ -27,12 +30,11 @@ import {
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
 import { Camera, CameraView, useCameraPermissions } from 'expo-camera';
 import {
-  createAudioPlayer,
-  PLAYBACK_STATUS_UPDATE,
   RecordingPresets,
   requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  setIsAudioActiveAsync,
   useAudioRecorder,
-  type AudioPlayer,
 } from 'expo-audio';
 import { Image } from 'expo-image';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -60,7 +62,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 const PREVIEW_END_EPSILON_MS = 80;
 const MIN_TRIM_GAP_MS = 500;
 const TYPED_MESSAGE_MAX_LENGTH = 120;
-const ANDROID_CAMERA_REMOUNT_MS = 300;
+const ANDROID_CAMERA_REMOUNT_MS = 400;
 const RECORDING_PARENT_REASSERT_DELAYS_MS = [250, 600];
 
 type ReactionComposeMode = ReactionType;
@@ -80,6 +82,166 @@ async function runVideoCommand(
       console.warn(`[ReactionSheet] ${logLabel}:`, error);
     }
   }
+}
+
+const RECORDING_START_TIMEOUT_MS = 8000;
+
+function logReactionDebug(step: string, detail?: Record<string, unknown>): void {
+  if (Platform.OS !== 'android') return;
+  if (detail) {
+    console.log(`[ReactionSheet:android] ${step}`, detail);
+  } else {
+    console.log(`[ReactionSheet:android] ${step}`);
+  }
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${ms}ms`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function ensureMicPermissionAsync(): Promise<boolean> {
+  try {
+    const existing = await Audio.getPermissionsAsync();
+    if (existing.granted) return true;
+    if (!existing.canAskAgain) return false;
+  } catch (error) {
+    console.warn('[ReactionSheet] expo-av mic permission read failed:', error);
+  }
+
+  if (Platform.OS === 'android') {
+    try {
+      const fromExpoAv = await Audio.requestPermissionsAsync();
+      return fromExpoAv.granted;
+    } catch (error) {
+      console.warn('[ReactionSheet] expo-av mic permission failed:', error);
+      return false;
+    }
+  }
+
+  try {
+    const fromExpoAudio = await requestRecordingPermissionsAsync();
+    if (fromExpoAudio.granted) return true;
+  } catch (error) {
+    console.warn('[ReactionSheet] expo-audio mic permission failed:', error);
+  }
+  try {
+    const fromExpoAv = await Audio.requestPermissionsAsync();
+    return fromExpoAv.granted;
+  } catch (error) {
+    console.warn('[ReactionSheet] expo-av mic permission failed:', error);
+    return false;
+  }
+}
+
+async function prepareExpoAvRecordingSessionAsync(): Promise<void> {
+  if (Platform.OS === 'android') {
+    try {
+      await setIsAudioActiveAsync(false);
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    await setIsAudioActiveAsync(true);
+  } catch (error) {
+    console.warn('[ReactionSheet] setIsAudioActiveAsync failed:', error);
+  }
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: true,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: false,
+    shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
+  });
+}
+
+type ExpoAudioVoiceRecorder = Pick<
+  ReturnType<typeof useAudioRecorder>,
+  'isRecording' | 'stop' | 'prepareToRecordAsync' | 'record'
+>;
+
+async function startExpoAudioVoiceRecordingAsync(
+  recorder: ExpoAudioVoiceRecorder,
+  options?: { skipSessionConfigure?: boolean },
+): Promise<void> {
+  if (!options?.skipSessionConfigure) {
+    await configureConnectVoiceReactionRecordingAsync();
+  }
+  try {
+    if (recorder.isRecording) {
+      await recorder.stop();
+    }
+  } catch {
+    /* ignore stale stop */
+  }
+  await setAudioModeAsync({
+    allowsRecording: true,
+    playsInSilentMode: true,
+  });
+  await recorder.prepareToRecordAsync();
+  recorder.record();
+  if (recorder.isRecording) return;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (recorder.isRecording) return;
+  }
+  const status = recorder.getStatus();
+  throw new Error(
+    `Voice recorder did not start (canRecord=${status.canRecord}, isRecording=${status.isRecording}, mediaReset=${status.mediaServicesDidReset})`,
+  );
+}
+
+async function startAndroidExpoAvVoiceRecordingAsync(options: {
+  isVideoParent: boolean;
+  trimStartMs: number;
+  startParentPlayback?: (startMs: number) => Promise<void>;
+}): Promise<Audio.Recording> {
+  logReactionDebug('voice:release-capture');
+  await releaseConnectCaptureAudioAsync();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  logReactionDebug('voice:prepare-session');
+  await prepareExpoAvRecordingSessionAsync();
+
+  if (options.isVideoParent && options.startParentPlayback) {
+    logReactionDebug('voice:parent-playback', { trimStartMs: options.trimStartMs });
+    await options.startParentPlayback(options.trimStartMs);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  const recording = new Audio.Recording();
+  logReactionDebug('voice:prepare-recording');
+  await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+  logReactionDebug('voice:start-recording');
+  await recording.startAsync();
+  const status = await recording.getStatusAsync();
+  logReactionDebug('voice:recording-status', {
+    isRecording: status.isRecording,
+    canRecord: status.canRecord,
+    durationMillis: status.durationMillis,
+  });
+  if (!status.isRecording) {
+    throw new Error(
+      `Android voice did not start (isRecording=${status.isRecording}, canRecord=${status.canRecord})`,
+    );
+  }
+  return recording;
 }
 
 export type ReactionParentMedia =
@@ -131,7 +293,9 @@ export function ReactionSheet({
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [micReady, setMicReady] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
+  const [isCameraRestoring, setIsCameraRestoring] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSelfieSaving, setIsSelfieSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [positionMillis, setPositionMillis] = useState(0);
   const [durationMillis, setDurationMillis] = useState(0);
@@ -147,6 +311,8 @@ export function ReactionSheet({
   const [typedMessage, setTypedMessage] = useState('');
   const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
+  const [isStartingVoiceRecording, setIsStartingVoiceRecording] = useState(false);
+  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
   const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
@@ -157,6 +323,8 @@ export function ReactionSheet({
   const [isInfoOpen, setIsInfoOpen] = useState(false);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const voiceExpoAvRecordingRef = useRef<Audio.Recording | null>(null);
+  const isStartingVoiceRecordingRef = useRef(false);
   const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const companionPreviewStopPendingRef = useRef(false);
 
@@ -178,6 +346,8 @@ export function ReactionSheet({
   const companionSelfieRef = useRef<Video>(null);
   const cameraRef = useRef<CameraView>(null);
   const recordingPromiseRef = useRef<Promise<{ uri: string } | undefined> | null>(null);
+  const recordingStartedAtRef = useRef(0);
+  const cameraRecordingStartedRef = useRef(false);
   const parentVideoWidthRef = useRef(0);
   const seekOriginMsRef = useRef(0);
   const durationMillisRef = useRef(0);
@@ -201,11 +371,11 @@ export function ReactionSheet({
   const isRecordingRef = useRef(false);
   const recordingSessionIdRef = useRef(0);
   const recordingAudioReassertCancelRef = useRef<(() => void) | null>(null);
-  const voicePreviewPlayerRef = useRef<AudioPlayer | null>(null);
-  const voicePreviewListenerRef = useRef<{ remove: () => void } | null>(null);
+  const voicePreviewPlayerRef = useRef<Audio.Sound | null>(null);
   const typedPreviewAudioUriRef = useRef<string | null>(null);
   const typedPreviewMessageRef = useRef<string | null>(null);
   const [isTypedKeyboardVisible, setIsTypedKeyboardVisible] = useState(false);
+  const [typedMessageReady, setTypedMessageReady] = useState(false);
   const [typedPreviewLoading, setTypedPreviewLoading] = useState(false);
   const stopSelfieRecordingRef = useRef<(() => void) | null>(null);
 
@@ -264,21 +434,54 @@ export function ReactionSheet({
   }, [recordedAudioSnapshot]);
 
   const getParentPreviewStartMs = useCallback(() => {
-    if (reactionMode === 'selfie') return syncStartTimeMillis;
+    if (reactionMode === 'selfie') {
+      return syncStartTimeMillis ?? trimStartMsRef.current ?? 0;
+    }
     return trimStartMsRef.current;
   }, [reactionMode, syncStartTimeMillis]);
 
-  const unloadPreviewAudio = useCallback(() => {
-    voicePreviewListenerRef.current?.remove();
-    voicePreviewListenerRef.current = null;
-    const player = voicePreviewPlayerRef.current;
+  const unloadPreviewAudio = useCallback(async () => {
+    const sound = voicePreviewPlayerRef.current;
     voicePreviewPlayerRef.current = null;
-    if (!player) return;
+    if (!sound) return;
     try {
-      player.pause();
-      player.remove();
+      await sound.stopAsync();
     } catch {
       /* ignore */
+    }
+    try {
+      await sound.unloadAsync();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const playCompanionPreviewClip = useCallback(
+    async (uri: string, onFinished: () => void) => {
+      await unloadPreviewAudio();
+      await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: ensureFileUri(uri) },
+        { shouldPlay: true, volume: 1.0 },
+      );
+      voicePreviewPlayerRef.current = sound;
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (!status.isLoaded || !status.didJustFinish) return;
+        if (voicePreviewPlayerRef.current === sound) {
+          voicePreviewPlayerRef.current = null;
+        }
+        void sound.unloadAsync().catch(() => {});
+        onFinished();
+      });
+    },
+    [unloadPreviewAudio],
+  );
+
+  const restoreReactionRecordingAudioSession = useCallback(async () => {
+    try {
+      await configureConnectReactionRecordingAudioSessionAsync();
+    } catch (error) {
+      console.warn('[ReactionSheet] failed to restore recording audio session:', error);
     }
   }, []);
 
@@ -287,7 +490,7 @@ export function ReactionSheet({
     companionPreviewStopPendingRef.current = true;
     setCompanionPreviewPlaying(false);
     await companionSelfieRef.current?.pauseAsync().catch(() => {});
-    unloadPreviewAudio();
+    await unloadPreviewAudio();
     await runVideoCommand(() => companionParentRef.current?.pauseAsync(), 'companion preview pause failed');
     const parentPreviewStartMs = getParentPreviewStartMs();
     if (isVideoParent && parentPreviewStartMs != null) {
@@ -331,37 +534,6 @@ export function ReactionSheet({
       console.warn('[ReactionSheet] preview audio session failed:', error);
     }
 
-    if (isVoicePreview && voiceRecordedUri) {
-      unloadPreviewAudio();
-      try {
-        const player = createAudioPlayer(voiceRecordedUri);
-        player.volume = 1;
-        voicePreviewPlayerRef.current = player;
-        voicePreviewListenerRef.current = player.addListener(
-          PLAYBACK_STATUS_UPDATE,
-          (status) => {
-            if (!status.isLoaded || !status.didJustFinish) return;
-            void finishCompanionPreview();
-          },
-        );
-        player.play();
-      } catch (error) {
-        console.warn('[ReactionSheet] voice preview playback failed:', error);
-        setCompanionPreviewPlaying(false);
-      }
-    }
-
-    if (isSelfiePreview) {
-      await companionSelfieRef.current
-        ?.setStatusAsync({
-          positionMillis: 0,
-          shouldPlay: true,
-          isMuted: false,
-          volume: 1.0,
-        })
-        .catch(() => {});
-    }
-
     if (isVideoParent && parentPreviewStartMs != null) {
       await runVideoCommand(
         () =>
@@ -375,8 +547,29 @@ export function ReactionSheet({
       );
     }
 
+    if (isSelfiePreview) {
+      await companionSelfieRef.current
+        ?.setStatusAsync({
+          positionMillis: 0,
+          shouldPlay: true,
+          isMuted: false,
+          volume: 1.0,
+        })
+        .catch(() => {});
+    }
+
+    if (isVoicePreview && voiceRecordedUri) {
+      try {
+        await playCompanionPreviewClip(voiceRecordedUri, () => {
+          void finishCompanionPreview();
+        });
+      } catch (error) {
+        console.warn('[ReactionSheet] voice preview playback failed:', error);
+        setCompanionPreviewPlaying(false);
+      }
+    }
+
     if (isTypedPreview) {
-      unloadPreviewAudio();
       if (!currentExplorerId) {
         setCompanionPreviewPlaying(false);
         Alert.alert('Explorer Not Ready', 'Please wait for the Explorer profile to load before previewing.');
@@ -399,17 +592,9 @@ export function ReactionSheet({
           typedPreviewAudioUriRef.current = audioUri;
           typedPreviewMessageRef.current = spokenPreviewKey;
         }
-        const player = createAudioPlayer(audioUri);
-        player.volume = 1;
-        voicePreviewPlayerRef.current = player;
-        voicePreviewListenerRef.current = player.addListener(
-          PLAYBACK_STATUS_UPDATE,
-          (status) => {
-            if (!status.isLoaded || !status.didJustFinish) return;
-            void finishCompanionPreview();
-          },
-        );
-        player.play();
+        await playCompanionPreviewClip(audioUri, () => {
+          void finishCompanionPreview();
+        });
       } catch (error) {
         console.warn('[ReactionSheet] typed preview TTS failed:', error);
         setCompanionPreviewPlaying(false);
@@ -422,16 +607,16 @@ export function ReactionSheet({
       }
     }
   }, [
+    companionAvatar?.companionName,
     currentExplorerId,
     finishCompanionPreview,
     getCompanionPreviewParentVolume,
     getParentPreviewStartMs,
-    companionAvatar?.companionName,
     isVideoParent,
+    playCompanionPreviewClip,
     reactionMode,
     recordedUri,
     typedMessage,
-    unloadPreviewAudio,
     voiceRecordedUri,
   ]);
 
@@ -455,8 +640,11 @@ export function ReactionSheet({
     setTypedPreviewLoading(false);
     void companionSelfieRef.current?.pauseAsync().catch(() => {});
     void companionParentRef.current?.pauseAsync().catch(() => {});
-    unloadPreviewAudio();
-  }, [unloadPreviewAudio]);
+    void (async () => {
+      await unloadPreviewAudio();
+      await restoreReactionRecordingAudioSession();
+    })();
+  }, [restoreReactionRecordingAudioSession, unloadPreviewAudio]);
 
   const handleAbandonReaction = useCallback(() => {
     if (isUploading) return;
@@ -467,7 +655,7 @@ export function ReactionSheet({
     companionPreviewStopPendingRef.current = false;
     typedPreviewAudioUriRef.current = null;
     typedPreviewMessageRef.current = null;
-    unloadPreviewAudio();
+    void unloadPreviewAudio();
     void companionSelfieRef.current?.pauseAsync().catch(() => {});
     void companionParentRef.current?.pauseAsync().catch(() => {});
     void videoRef.current?.pauseAsync().catch(() => {});
@@ -583,6 +771,13 @@ export function ReactionSheet({
   useEffect(() => {
     typedPreviewAudioUriRef.current = null;
     typedPreviewMessageRef.current = null;
+    setTypedMessageReady(false);
+  }, [typedMessage]);
+
+  const commitTypedMessage = useCallback(() => {
+    if (!typedMessage.trim()) return;
+    setTypedMessageReady(true);
+    Keyboard.dismiss();
   }, [typedMessage]);
 
   useEffect(() => {
@@ -593,12 +788,19 @@ export function ReactionSheet({
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
     const showSub = Keyboard.addListener(showEvent, () => setIsTypedKeyboardVisible(true));
-    const hideSub = Keyboard.addListener(hideEvent, () => setIsTypedKeyboardVisible(false));
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setIsTypedKeyboardVisible(false);
+      // Android fires spurious keyboard events when KeyboardAvoidingView resizes;
+      // typedMessageReady is explicit so layout cannot oscillate.
+      if (Platform.OS === 'android' && typedMessage.trim()) {
+        setTypedMessageReady(true);
+      }
+    });
     return () => {
       showSub.remove();
       hideSub.remove();
     };
-  }, [reactionMode, visible]);
+  }, [reactionMode, typedMessage, visible]);
 
   useEffect(() => {
     if (!visible || !currentExplorerId || !user?.uid) {
@@ -654,9 +856,15 @@ export function ReactionSheet({
   useEffect(() => {
     if (!visible) return;
     void (async () => {
-      const micPermission = await requestRecordingPermissionsAsync();
-      setMicReady(micPermission.granted);
-      await configureConnectReactionRecordingAudioSessionAsync();
+      const micGranted = await ensureMicPermissionAsync();
+      setMicReady(micGranted);
+      try {
+        if (Platform.OS === 'ios') {
+          await configureConnectReactionRecordingAudioSessionAsync();
+        }
+      } catch (error) {
+        console.warn('[ReactionSheet] initial audio session failed:', error);
+      }
       let current = await Camera.getCameraPermissionsAsync();
       if (!current.granted && current.canAskAgain) {
         current = await Camera.requestCameraPermissionsAsync();
@@ -665,6 +873,13 @@ export function ReactionSheet({
       setNativeCameraGranted(current.granted);
     })();
   }, [visible, requestCameraPermission]);
+
+  useEffect(() => {
+    if (!visible || !isVideoParent || reactionMode !== 'selfie') return;
+    void configureConnectReactionRecordingAudioSessionAsync().catch((error) => {
+      console.warn('[ReactionSheet] video selfie audio pre-warm failed:', error);
+    });
+  }, [visible, isVideoParent, reactionMode]);
 
   const bumpCameraInstance = useCallback(() => {
     setCameraReady(false);
@@ -676,8 +891,11 @@ export function ReactionSheet({
     if (androidCameraRemountTimerRef.current) {
       clearTimeout(androidCameraRemountTimerRef.current);
     }
+    logReactionDebug('camera:schedule-remount');
+    setIsCameraRestoring(true);
     androidCameraRemountTimerRef.current = setTimeout(() => {
       androidCameraRemountTimerRef.current = null;
+      logReactionDebug('camera:remount');
       bumpCameraInstance();
     }, ANDROID_CAMERA_REMOUNT_MS);
   }, [bumpCameraInstance]);
@@ -739,15 +957,29 @@ export function ReactionSheet({
   const handleModalShow = useCallback(() => {
     if (reactionMode !== 'selfie') return;
     if (Platform.OS === 'android') {
-      scheduleAndroidCameraRemount();
-    } else {
-      bumpCameraInstance();
+      // Remounting on every modal show often leaves a zero-size SurfaceView (black box).
+      return;
     }
-  }, [bumpCameraInstance, reactionMode, scheduleAndroidCameraRemount]);
+    bumpCameraInstance();
+  }, [bumpCameraInstance, reactionMode]);
 
   useEffect(() => {
     if (!visible || reactionMode !== 'selfie' || recordedUri != null) return;
     if (!(cameraPermission?.granted || nativeCameraGranted)) return;
+
+    if (Platform.OS === 'android') {
+      const readyTimer = setTimeout(() => {
+        setCameraReady((ready) => ready || true);
+      }, 400);
+      const fallbackTimer = setTimeout(() => {
+        setCameraReady(true);
+        setIsCameraRestoring(false);
+      }, 2000);
+      return () => {
+        clearTimeout(readyTimer);
+        clearTimeout(fallbackTimer);
+      };
+    }
 
     setCameraReady(false);
     const readyTimer = setTimeout(() => {
@@ -770,6 +1002,8 @@ export function ReactionSheet({
     setPositionMillis(0);
     setDurationMillis(0);
     setRecordedUri(null);
+    setIsSelfieSaving(false);
+    cameraRecordingStartedRef.current = false;
     setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
@@ -788,8 +1022,11 @@ export function ReactionSheet({
     userToggledMuteRef.current = false;
     setReactionMode('selfie');
     setTypedMessage('');
+    setTypedMessageReady(false);
     setVoiceRecordedUri(null);
     setIsVoiceRecording(false);
+    setIsStartingVoiceRecording(false);
+    setIsVoiceProcessing(false);
     setCameraInstanceKey(0);
     setNativeCameraGranted(null);
     if (androidCameraRemountTimerRef.current) {
@@ -801,12 +1038,24 @@ export function ReactionSheet({
     pendingSeekTargetRef.current = null;
     seekChainRef.current = Promise.resolve();
     setCameraReady(false);
+    setIsCameraRestoring(false);
     setIsUploading(false);
     recordingPromiseRef.current = null;
     recordingAudioReassertCancelRef.current?.();
     recordingAudioReassertCancelRef.current = null;
     isRecordingRef.current = false;
-    unloadPreviewAudio();
+    isStartingVoiceRecordingRef.current = false;
+    void (async () => {
+      try {
+        if (voiceExpoAvRecordingRef.current) {
+          await voiceExpoAvRecordingRef.current.stopAndUnloadAsync();
+        }
+      } catch {
+        /* ignore */
+      }
+      voiceExpoAvRecordingRef.current = null;
+      await unloadPreviewAudio();
+    })();
     typedPreviewAudioUriRef.current = null;
     typedPreviewMessageRef.current = null;
     void videoRef.current?.pauseAsync().catch(() => {});
@@ -1131,7 +1380,7 @@ export function ReactionSheet({
   }, [commitVideoPosition, getReactionParentVolume]);
 
   const showScrubUi =
-    reactionMode === 'selfie' && isVideoParent && !isRecording && recordedUri == null;
+    reactionMode === 'selfie' && isVideoParent && recordedUri == null;
 
   const videoPanGesture = useMemo(() => {
     return Gesture.Pan()
@@ -1148,34 +1397,79 @@ export function ReactionSheet({
       });
   }, [handleSeekDrag, handleSeekDragEnd, handleSeekDragStart]);
 
-  const beginCameraRecording = useCallback((sessionId: number, syncStart: number) => {
-      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
-
-      const recordingPromise = cameraRef.current?.recordAsync({ maxDuration: 120 });
-      if (!recordingPromise) {
-        console.warn('[ReactionSheet] recordAsync returned no promise — camera ref missing?');
-        return;
-      }
-
+  const beginCameraRecording = useCallback((sessionId: number) => {
+    const attachPromise = (recordingPromise: Promise<{ uri: string } | undefined>) => {
       recordingPromiseRef.current = recordingPromise;
       void recordingPromise
         .then((result) => {
           if (recordingPromiseRef.current !== recordingPromise) return;
           recordingPromiseRef.current = null;
+          setIsSelfieSaving(false);
           if (result?.uri) {
             setRecordedUri(result.uri);
             setRecordedAudioSnapshot({
               originalAudioMuted: isParentReflectionMutedRef.current,
               hasHeadphones: hasHeadphonesRef.current,
             });
+          } else {
+            Alert.alert(
+              'Recording Too Short',
+              'Hold the button a little longer so we can capture your reaction.',
+            );
           }
         })
         .catch((error) => {
           if (recordingPromiseRef.current !== recordingPromise) return;
           recordingPromiseRef.current = null;
+          setIsSelfieSaving(false);
           console.warn('[ReactionSheet] recordAsync failed:', error);
+          Alert.alert(
+            'Recording Failed',
+            'Could not save your selfie reaction. Please try again.',
+          );
         });
-    }, []);
+    };
+
+    type TryStartResult = 'started' | 'retry' | 'cancelled';
+    const tryStart = (): TryStartResult => {
+      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+        return 'cancelled';
+      }
+      const recordingPromise = cameraRef.current?.recordAsync({ maxDuration: 120 });
+      if (!recordingPromise) return 'retry';
+      attachPromise(recordingPromise);
+      cameraRecordingStartedRef.current = true;
+      return 'started';
+    };
+
+    const first = tryStart();
+    if (first === 'started' || first === 'cancelled') return;
+
+    if (Platform.OS !== 'android') {
+      console.warn('[ReactionSheet] recordAsync returned no promise — camera ref missing?');
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      return;
+    }
+
+    void (async () => {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 100));
+        const result = tryStart();
+        if (result === 'started' || result === 'cancelled') return;
+      }
+      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      console.warn('[ReactionSheet] recordAsync never started — camera ref missing?');
+      cameraRecordingStartedRef.current = false;
+      setIsSelfieSaving(false);
+      Alert.alert(
+        'Camera Not Ready',
+        'Wait for the camera preview to appear, then hold the button again.',
+      );
+    })();
+  }, []);
 
   const scheduleRecordingParentReasserts = useCallback(
     (sessionId: number, syncStart: number) => {
@@ -1206,13 +1500,26 @@ export function ReactionSheet({
   const stopSelfieRecording = useCallback(() => {
     if (!isRecordingRef.current) return;
 
+    const sessionId = recordingSessionIdRef.current;
     recordingSessionIdRef.current += 1;
     isRecordingRef.current = false;
     recordingAudioReassertCancelRef.current?.();
     recordingAudioReassertCancelRef.current = null;
     setIsRecording(false);
+    setIsSelfieSaving(cameraRecordingStartedRef.current);
 
-    cameraRef.current?.stopRecording();
+    void (async () => {
+      const minHoldMs = Platform.OS === 'android' && isVideoParent ? 450 : 0;
+      const elapsed = Date.now() - recordingStartedAtRef.current;
+      if (minHoldMs > 0 && elapsed < minHoldMs) {
+        await new Promise((resolve) => setTimeout(resolve, minHoldMs - elapsed));
+      }
+      if (recordingSessionIdRef.current !== sessionId + 1) {
+        setIsSelfieSaving(false);
+        return;
+      }
+      cameraRef.current?.stopRecording();
+    })();
 
     void (async () => {
       if (isVideoParent) {
@@ -1243,20 +1550,14 @@ export function ReactionSheet({
   }, [stopSelfieRecording]);
 
   const handlePressIn = useCallback(() => {
-    if (
-      recordedUri ||
-      !cameraReady ||
-      !(cameraPermission?.granted || nativeCameraGranted) ||
-      !micReady
-    ) {
-      if (!recordedUri) {
-        console.warn('[ReactionSheet] camera not ready for recording', {
-          parentReflectionId,
-          cameraReady,
-          cameraGranted: cameraPermission?.granted ?? nativeCameraGranted,
-          micReady,
-        });
-      }
+    if (recordedUri) return;
+
+    const cameraGranted = cameraPermission?.granted || nativeCameraGranted;
+    if (!cameraGranted) {
+      void ensureCameraPermission();
+      return;
+    }
+    if (Platform.OS !== 'android' && !cameraReady) {
       return;
     }
 
@@ -1264,33 +1565,69 @@ export function ReactionSheet({
     const sessionId = recordingSessionIdRef.current + 1;
     recordingSessionIdRef.current = sessionId;
     recordingPromiseRef.current = null;
+    recordingStartedAtRef.current = Date.now();
+    cameraRecordingStartedRef.current = false;
     setSyncStartTimeMillis(syncStart);
     setIsRecording(true);
     isRecordingRef.current = true;
     setIsPreviewPlaying(false);
 
-    beginCameraRecording(sessionId, syncStart);
+    if (!isVideoParent) {
+      beginCameraRecording(sessionId);
+    }
 
     void (async () => {
+      if (isVideoParent) {
+        try {
+          await configureConnectReactionRecordingAudioSessionAsync();
+          if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+          await startParentRecordingPlayback(syncStart);
+        } catch (error) {
+          console.warn('[ReactionSheet] parent playback during selfie failed:', error);
+        }
+      }
+
+      const micGranted = micReady || (await ensureMicPermissionAsync());
+      setMicReady(micGranted);
+      if (!micGranted) {
+        if (recordingSessionIdRef.current === sessionId && isRecordingRef.current) {
+          isRecordingRef.current = false;
+          setIsRecording(false);
+          recordingSessionIdRef.current += 1;
+          await videoRef.current?.pauseAsync().catch(() => {});
+          Alert.alert(
+            'Microphone Access Needed',
+            'Allow microphone access to record a selfie reaction.',
+          );
+        }
+        return;
+      }
+
       if (!isVideoParent) return;
-      try {
-        await configureConnectReactionRecordingAudioSessionAsync();
+
+      if (Platform.OS === 'android') {
+        await new Promise((resolve) => setTimeout(resolve, 120));
         if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
-        await startParentRecordingPlayback(syncStart);
+      }
+
+      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+      beginCameraRecording(sessionId);
+
+      try {
         if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
         scheduleRecordingParentReasserts(sessionId, syncStart);
       } catch (error) {
-        console.warn('[ReactionSheet] recording audio session failed:', error);
+        console.warn('[ReactionSheet] parent playback reassert schedule failed:', error);
       }
     })();
   }, [
     beginCameraRecording,
     cameraPermission?.granted,
     cameraReady,
+    ensureCameraPermission,
     isVideoParent,
     micReady,
     nativeCameraGranted,
-    parentReflectionId,
     recordedUri,
     scheduleRecordingParentReasserts,
     startParentRecordingPlayback,
@@ -1304,12 +1641,38 @@ export function ReactionSheet({
     setVoiceRecordedUri(null);
     setRecordedAudioSnapshot(null);
     setIsVoiceRecording(false);
-    void unloadPreviewAudio();
-  }, [unloadPreviewAudio]);
+    setIsStartingVoiceRecording(false);
+    setIsVoiceProcessing(false);
+    isStartingVoiceRecordingRef.current = false;
+    void (async () => {
+      try {
+        if (voiceExpoAvRecordingRef.current) {
+          await voiceExpoAvRecordingRef.current.stopAndUnloadAsync();
+        }
+      } catch {
+        /* ignore */
+      }
+      voiceExpoAvRecordingRef.current = null;
+      try {
+        if (voiceRecorder.isRecording) {
+          await voiceRecorder.stop();
+        }
+      } catch {
+        /* ignore */
+      }
+      await unloadPreviewAudio();
+    })();
+  }, [unloadPreviewAudio, voiceRecorder]);
 
   const handleReactionModeChange = useCallback(
     (nextMode: ReactionComposeMode) => {
       if (nextMode === reactionMode || isUploading) return;
+
+      if (nextMode !== 'selfie' && androidCameraRemountTimerRef.current) {
+        clearTimeout(androidCameraRemountTimerRef.current);
+        androidCameraRemountTimerRef.current = null;
+      }
+
       setReactionMode(nextMode);
       setRecordedUri(null);
       setSyncStartTimeMillis(null);
@@ -1318,13 +1681,36 @@ export function ReactionSheet({
       setIsRecording(false);
       resetVoiceRecording();
       setTypedMessage('');
+      setTypedMessageReady(false);
       if (nextMode === 'selfie') {
+        logReactionDebug('mode:selfie', { from: reactionMode });
         void ensureCameraPermission();
         if (Platform.OS === 'android') {
-          scheduleAndroidCameraRemount();
+          void configureConnectPlaybackAudioSessionAsync({ retries: 1 }).catch((error) => {
+            console.warn('[ReactionSheet] selfie mode playback session failed:', error);
+          });
         } else {
           bumpCameraInstance();
         }
+      }
+      if (nextMode === 'voice') {
+        void (async () => {
+          logReactionDebug('mode:voice', { from: reactionMode });
+          const micGranted = await ensureMicPermissionAsync();
+          setMicReady(micGranted);
+          if (!micGranted) {
+            Alert.alert(
+              'Microphone Access Needed',
+              'Allow microphone access to record a voice reaction.',
+            );
+            return;
+          }
+        })();
+      }
+      if (nextMode === 'selfie' && Platform.OS === 'ios') {
+        void configureConnectReactionRecordingAudioSessionAsync().catch((error) => {
+          console.warn('[ReactionSheet] selfie mode audio session failed:', error);
+        });
       }
       void videoRef.current?.pauseAsync().catch(() => {});
     },
@@ -1339,61 +1725,156 @@ export function ReactionSheet({
   );
 
   const handleStartVoiceRecording = useCallback(async () => {
-    if (!micReady || isVoiceRecording) return;
+    if (isVoiceRecording || isStartingVoiceRecording || isStartingVoiceRecordingRef.current) {
+      return;
+    }
+    if (Platform.OS !== 'android' && voiceRecorder.isRecording) {
+      return;
+    }
+    isStartingVoiceRecordingRef.current = true;
+    setIsStartingVoiceRecording(true);
+    logReactionDebug('voice:start-tap', { micReady, isVideoParent, isImageParent });
     try {
-      await configureConnectReactionRecordingAudioSessionAsync();
+      let micGranted = micReady;
+      if (!micGranted) {
+        micGranted = await ensureMicPermissionAsync();
+      }
+      setMicReady(micGranted);
+      if (!micGranted) {
+        Alert.alert(
+          'Microphone Access Needed',
+          'Allow microphone access to record a voice reaction.',
+        );
+        return;
+      }
+
+      void unloadPreviewAudio();
+
+      if (Platform.OS === 'android') {
+        const recording = await startAndroidExpoAvVoiceRecordingAsync({
+          isVideoParent,
+          trimStartMs: trimStartMsRef.current,
+          startParentPlayback: isVideoParent ? startParentRecordingPlayback : undefined,
+        });
+        voiceExpoAvRecordingRef.current = recording;
+        setIsVoiceRecording(true);
+        return;
+      }
+
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+      });
       if (isVideoParent) {
+        await configureConnectReactionRecordingAudioSessionAsync();
         const startMs = trimStartMsRef.current;
         await startParentRecordingPlayback(startMs);
+        await startExpoAudioVoiceRecordingAsync(voiceRecorder, { skipSessionConfigure: true });
+      } else {
+        await startExpoAudioVoiceRecordingAsync(voiceRecorder);
       }
-      await voiceRecorder.prepareToRecordAsync();
-      voiceRecorder.record();
       setIsVoiceRecording(true);
     } catch (error) {
       console.warn('[ReactionSheet] voice record start failed:', error);
-      Alert.alert('Recording Failed', 'Could not start voice recording.');
+      logReactionDebug('voice:start-failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      voiceExpoAvRecordingRef.current = null;
+      setIsVoiceRecording(false);
+      Alert.alert(
+        'Recording Failed',
+        error instanceof Error ? error.message : 'Could not start voice recording.',
+      );
+    } finally {
+      isStartingVoiceRecordingRef.current = false;
+      setIsStartingVoiceRecording(false);
     }
   }, [
+    isStartingVoiceRecording,
     isVideoParent,
     isVoiceRecording,
     micReady,
     startParentRecordingPlayback,
+    unloadPreviewAudio,
     voiceRecorder,
   ]);
-
   const handleStopVoiceRecording = useCallback(async () => {
-    if (!isVoiceRecording) return;
+    if (!isVoiceRecording || isVoiceProcessing) return;
+    setIsVoiceProcessing(true);
+    logReactionDebug('voice:stop-start');
     try {
       if (isVideoParent) {
         await runVideoCommand(() => videoRef.current?.pauseAsync(), 'voice reaction pause failed');
       }
-      await voiceRecorder.stop();
+
+      let recordingUri: string | null = null;
+      if (Platform.OS === 'android' && voiceExpoAvRecordingRef.current) {
+        const recording = voiceExpoAvRecordingRef.current;
+        voiceExpoAvRecordingRef.current = null;
+        await recording.stopAndUnloadAsync();
+        recordingUri = recording.getURI();
+      } else {
+        await voiceRecorder.stop();
+        recordingUri = voiceRecorder.uri ?? voiceRecorder.getStatus().url ?? null;
+      }
+
       setIsVoiceRecording(false);
-      const recordingUri = voiceRecorder.uri ?? voiceRecorder.getStatus().url;
       if (recordingUri) {
         setVoiceRecordedUri(recordingUri);
         setRecordedAudioSnapshot({
           originalAudioMuted: isParentReflectionMutedRef.current,
           hasHeadphones: hasHeadphonesRef.current,
         });
-        try {
-          await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
-        } catch (error) {
+        void configureConnectPlaybackAudioSessionAsync({ retries: 2 }).catch((error) => {
           console.warn('[ReactionSheet] voice playback session reset failed:', error);
-        }
+        });
       }
     } catch (error) {
       console.warn('[ReactionSheet] voice record stop failed:', error);
       setIsVoiceRecording(false);
+      voiceExpoAvRecordingRef.current = null;
+    } finally {
+      setIsVoiceProcessing(false);
+      logReactionDebug('voice:stop-done');
     }
-  }, [isVideoParent, isVoiceRecording, voiceRecorder]);
+  }, [isVideoParent, isVoiceProcessing, isVoiceRecording, voiceRecorder]);
 
   const handleRetake = useCallback(() => {
     if (reactionMode === 'voice') {
       setCompanionPreviewOpen(false);
       setCompanionPreviewPlaying(false);
       setShowCompanionPreviewReplay(false);
-      resetVoiceRecording();
+      setIsVoiceProcessing(true);
+      void (async () => {
+        try {
+          setVoiceRecordedUri(null);
+          setRecordedAudioSnapshot(null);
+          setIsVoiceRecording(false);
+          isStartingVoiceRecordingRef.current = false;
+          setIsStartingVoiceRecording(false);
+          try {
+            if (voiceExpoAvRecordingRef.current) {
+              await voiceExpoAvRecordingRef.current.stopAndUnloadAsync();
+            }
+          } catch {
+            /* ignore */
+          }
+          voiceExpoAvRecordingRef.current = null;
+          try {
+            if (voiceRecorder.isRecording) {
+              await voiceRecorder.stop();
+            }
+          } catch {
+            /* ignore */
+          }
+          await unloadPreviewAudio();
+          await configureConnectPlaybackAudioSessionAsync({ retries: 1 });
+        } catch (error) {
+          console.warn('[ReactionSheet] voice retake cleanup failed:', error);
+        } finally {
+          setIsVoiceProcessing(false);
+        }
+      })();
       return;
     }
     if (reactionMode === 'typed') {
@@ -1406,10 +1887,14 @@ export function ReactionSheet({
       typedPreviewMessageRef.current = null;
       unloadPreviewAudio();
       setTypedMessage('');
+      setTypedMessageReady(false);
+      void restoreReactionRecordingAudioSession();
       return;
     }
     const restartAt = syncStartTimeMillis;
     recordingPromiseRef.current = null;
+    cameraRecordingStartedRef.current = false;
+    setIsSelfieSaving(false);
     setRecordedUri(null);
     setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
@@ -1419,26 +1904,23 @@ export function ReactionSheet({
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
-    setCameraReady(false);
-    bumpCameraInstance();
-    scheduleAndroidCameraRemount();
-    void (async () => {
-      if (isVideoParent && restartAt != null) {
-        await commitVideoPosition(restartAt, {
-          shouldPlay: false,
-          volume: getReactionParentVolume(),
-        });
-      }
-      await videoRef.current?.pauseAsync().catch(() => {});
-    })();
+
+    logReactionDebug('retake:selfie-sync', { isVideoParent });
+
+    if (isVideoParent && restartAt != null) {
+      void commitVideoPosition(restartAt, {
+        shouldPlay: false,
+        volume: getReactionParentVolume(),
+      });
+    }
+    void videoRef.current?.pauseAsync().catch(() => {});
   }, [
-    bumpCameraInstance,
     commitVideoPosition,
     getReactionParentVolume,
     isVideoParent,
     reactionMode,
-    resetVoiceRecording,
-    scheduleAndroidCameraRemount,
+    unloadPreviewAudio,
+    voiceRecorder,
     syncStartTimeMillis,
   ]);
 
@@ -1529,28 +2011,44 @@ export function ReactionSheet({
 
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
   const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
+  const isAndroidVideoSelfie =
+    Platform.OS === 'android' && reactionMode === 'selfie' && isVideoParent && !companionPreviewOpen;
   const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
   const isVoiceTakeComplete = isVoicePreviewMode && !companionPreviewOpen;
   const isTypedPreviewMode =
-    reactionMode === 'typed' && typedMessage.trim().length > 0 && !isTypedKeyboardVisible;
+    reactionMode === 'typed' && typedMessage.trim().length > 0 && typedMessageReady;
   const isTypedTakeComplete = isTypedPreviewMode && !companionPreviewOpen;
   const isPreviewMode = isSelfiePreviewMode || isVoicePreviewMode || isTypedPreviewMode;
+  const isInteractionBusy =
+    isUploading ||
+    isSelfieSaving ||
+    isVoiceProcessing ||
+    isStartingVoiceRecording ||
+    isRecording;
   const showCompanionPreviewStage =
     companionPreviewOpen &&
     ((reactionMode === 'selfie' && !!recordedUri) ||
       (reactionMode === 'voice' && !!voiceRecordedUri) ||
       (reactionMode === 'typed' && !!typedMessage.trim()));
+  const isSelfieCameraActive =
+    visible &&
+    reactionMode === 'selfie' &&
+    !isUploading &&
+    !companionPreviewOpen &&
+    !recordedUri &&
+    !isSelfieSaving &&
+    !isRecording;
   const isCameraGranted =
     cameraPermission?.granted === true || nativeCameraGranted === true;
   const isCameraDenied =
     nativeCameraGranted === false && cameraPermission?.granted !== true;
+  const useAndroidPersistentCamera = Platform.OS === 'android' && isCameraGranted;
 
   const canRecordSelfie =
     reactionMode === 'selfie' &&
     !recordedUri &&
     isCameraGranted &&
-    micReady &&
-    cameraReady;
+    (Platform.OS === 'android' || (micReady && cameraReady));
   const scrubDurationMs = Math.max(durationMillis, 1);
   const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
   const parentRecordingVolume = resolveReactionRecordingVolume({
@@ -1687,9 +2185,9 @@ export function ReactionSheet({
 
         <KeyboardAvoidingView
           style={styles.sheetBodyKeyboardAvoid}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           keyboardVerticalOffset={0}
-          enabled={reactionMode === 'typed' && !companionPreviewOpen}
+          enabled={Platform.OS === 'ios' && reactionMode === 'typed' && !companionPreviewOpen}
         >
         {showCompanionPreviewStage ? (
           <View style={styles.companionPreviewStage}>
@@ -1773,21 +2271,49 @@ export function ReactionSheet({
             </Text>
           </View>
         ) : (
-        <View style={[styles.splitPane, reactionMode === 'typed' && styles.splitPaneTyped]}>
-          {!(reactionMode === 'typed' && isTypedKeyboardVisible) ? (
+        <View
+          style={[
+            styles.splitPane,
+            reactionMode === 'typed' && styles.splitPaneTyped,
+            reactionMode === 'selfie' &&
+              Platform.OS === 'android' &&
+              isImageParent &&
+              styles.splitPaneAndroidSelfie,
+          ]}
+        >
           <View
             style={[
               styles.parentVideoPane,
               reactionMode === 'typed' && styles.parentVideoPaneTyped,
               reactionMode === 'voice' && isVideoParent && styles.parentVideoPaneVoice,
+              reactionMode === 'selfie' &&
+                Platform.OS === 'android' &&
+                isImageParent &&
+                styles.parentVideoPaneAndroidSelfie,
+              reactionMode === 'selfie' &&
+                Platform.OS === 'android' &&
+                isVideoParent &&
+                styles.parentVideoPaneAndroidSelfieVideo,
             ]}
           >
-            <View style={styles.mediaCard}>
+            <View
+              style={[
+                styles.mediaCard,
+                isAndroidVideoSelfie && styles.mediaCardAndroidVideoSelfie,
+              ]}
+            >
               {isVideoParent ? (
                 <>
-                  <GestureDetector gesture={showScrubUi ? videoPanGesture : Gesture.Pan().enabled(false)}>
+                  <GestureDetector
+                    gesture={
+                      showScrubUi && !isRecording ? videoPanGesture : Gesture.Pan().enabled(false)
+                    }
+                  >
                     <View
-                      style={styles.parentVideoSurface}
+                      style={[
+                        styles.parentVideoSurface,
+                        isAndroidVideoSelfie && styles.parentVideoSurfaceAndroidVideoSelfie,
+                      ]}
                       onLayout={(event) => {
                         parentVideoWidthRef.current = event.nativeEvent.layout.width;
                       }}
@@ -1804,9 +2330,17 @@ export function ReactionSheet({
                         progressUpdateIntervalMillis={100}
                         onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                       />
-                      {showScrubUi ? (
+                      {showScrubUi && !isRecording ? (
                         <View style={styles.dragHintOverlay} pointerEvents="none">
                           <Text style={styles.dragHintText}>Drag to set start</Text>
+                        </View>
+                      ) : null}
+                      {isRecording && isVideoParent ? (
+                        <View style={styles.recordingSyncOverlay} pointerEvents="none">
+                          <View style={styles.recordingSyncBadge}>
+                            <FontAwesome name="circle" size={10} color="#ff6b6b" />
+                            <Text style={styles.recordingSyncText}>Recording with Reflection</Text>
+                          </View>
                         </View>
                       ) : null}
                       {showTrimPreviewReplay && showScrubUi ? (
@@ -1827,7 +2361,12 @@ export function ReactionSheet({
 
                   {showScrubUi && durationMillis > 0 ? (
                     <>
-                      <View style={styles.trimSliderWrap}>
+                      <View
+                        style={[
+                          styles.trimSliderWrap,
+                          isAndroidVideoSelfie && styles.trimSliderWrapAndroidVideoSelfie,
+                        ]}
+                      >
                         <VideoTrimSlider
                           durationMs={scrubDurationMs}
                           startMs={trimStartMs}
@@ -1843,6 +2382,7 @@ export function ReactionSheet({
                         <Pressable
                           style={[styles.playbackControl, styles.playbackControlFlex]}
                           onPress={toggleParentPlayback}
+                          disabled={isRecording}
                           accessibilityRole="button"
                           accessibilityLabel={
                             isPreviewPlaying
@@ -1878,27 +2418,81 @@ export function ReactionSheet({
               )}
             </View>
           </View>
-          ) : null}
 
-          <View style={styles.cameraPane}>
+          <View
+            style={[
+              styles.cameraPane,
+              reactionMode === 'selfie' &&
+                Platform.OS === 'android' &&
+                isImageParent &&
+                styles.cameraPaneAndroidSelfie,
+              isAndroidVideoSelfie && styles.cameraPaneAndroidSelfieVideo,
+            ]}
+          >
             <View style={styles.mediaCard}>
-              {isSelfieTakeComplete ? (
-                <View style={styles.takeCompletePane}>
-                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                  <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
-                  <Text style={styles.takeCompleteHint}>
-                    Preview how Companions will see it, or retake if you want another try.
-                  </Text>
+              {useAndroidPersistentCamera ? (
+                <View
+                  style={[
+                    styles.cameraStageHost,
+                    styles.cameraStagePersist,
+                    Platform.OS === 'android' &&
+                      isVideoParent &&
+                      styles.cameraStageHostAndroidVideoSelfie,
+                  ]}
+                  collapsable={false}
+                  pointerEvents={reactionMode === 'selfie' ? 'auto' : 'none'}
+                >
+                  <CameraView
+                    key={cameraInstanceKey}
+                    ref={cameraRef}
+                    style={styles.cameraPreview}
+                    facing="front"
+                    mode="video"
+                    mirror={false}
+                    videoQuality={isVideoParent ? '480p' : '720p'}
+                    active={isSelfieCameraActive}
+                    onCameraReady={() => {
+                      logReactionDebug('camera:ready', { cameraInstanceKey, reactionMode });
+                      setCameraReady(true);
+                      setIsCameraRestoring(false);
+                    }}
+                    onMountError={(event) => {
+                      logReactionDebug('camera:mount-error', {
+                        message: event.message,
+                        cameraInstanceKey,
+                      });
+                      console.warn('[ReactionSheet] camera mount error:', event.message);
+                      setCameraReady(false);
+                      setIsCameraRestoring(false);
+                    }}
+                  />
+                  {reactionMode === 'selfie' && isSelfieTakeComplete ? (
+                    <View style={styles.takeCompleteOverlay} pointerEvents="none">
+                      <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
+                      <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
+                      <Text style={styles.takeCompleteHint}>
+                        Preview how Companions will see it, or retake if you want another try.
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
-              ) : isVoiceTakeComplete ? (
-                <View style={styles.takeCompletePane}>
-                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                  <Text style={styles.takeCompleteTitle}>Voice message ready</Text>
-                  <Text style={styles.takeCompleteHint}>
-                    Tap Preview below to see how Companions will view your reaction.
-                  </Text>
-                </View>
-              ) : isTypedTakeComplete ? (
+              ) : null}
+
+              <View
+                style={[
+                  styles.modeForeground,
+                  reactionMode === 'selfie' &&
+                    useAndroidPersistentCamera &&
+                    !isSelfieSaving &&
+                    styles.modeForegroundTransparent,
+                ]}
+                pointerEvents={
+                  reactionMode === 'selfie' && useAndroidPersistentCamera && !isSelfieSaving
+                    ? 'box-none'
+                    : 'auto'
+                }
+              >
+              {reactionMode === 'typed' && isTypedTakeComplete ? (
                 <View style={styles.takeCompletePane}>
                   <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
                   <Text style={styles.takeCompleteTitle}>Message ready</Text>
@@ -1921,24 +2515,40 @@ export function ReactionSheet({
                     editable={!isUploading}
                     returnKeyType="done"
                     blurOnSubmit
-                    onSubmitEditing={() => Keyboard.dismiss()}
+                    onSubmitEditing={commitTypedMessage}
                     scrollEnabled
                   />
                   <View style={styles.typedComposeMeta}>
                     <Text style={styles.typedCounter}>
                       {typedMessage.length}/{TYPED_MESSAGE_MAX_LENGTH}
                     </Text>
-                    {isTypedKeyboardVisible ? (
+                    {typedMessage.trim() ? (
                       <Pressable
                         style={styles.keyboardDismissButton}
-                        onPress={() => Keyboard.dismiss()}
+                        onPress={commitTypedMessage}
                         accessibilityRole="button"
-                        accessibilityLabel="Dismiss keyboard"
+                        accessibilityLabel="Done typing"
                       >
-                        <Text style={styles.keyboardDismissButtonText}>Done typing</Text>
+                        <Text style={styles.keyboardDismissButtonText}>
+                          {isTypedKeyboardVisible ? 'Done typing' : 'Message ready'}
+                        </Text>
                       </Pressable>
                     ) : null}
                   </View>
+                </View>
+              ) : reactionMode === 'voice' && isVoiceProcessing ? (
+                <View style={styles.takeCompletePane}>
+                  <ActivityIndicator color="#fff" size="large" />
+                  <Text style={styles.takeCompleteTitle}>Saving voice message…</Text>
+                  <Text style={styles.takeCompleteHint}>Processing your recording.</Text>
+                </View>
+              ) : reactionMode === 'voice' && isVoiceTakeComplete ? (
+                <View style={styles.takeCompletePane}>
+                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
+                  <Text style={styles.takeCompleteTitle}>Voice message ready</Text>
+                  <Text style={styles.takeCompleteHint}>
+                    Tap Preview below to see how Companions will view your reaction.
+                  </Text>
                 </View>
               ) : reactionMode === 'voice' ? (
                 <ScrollView
@@ -1965,34 +2575,67 @@ export function ReactionSheet({
                         void handleStartVoiceRecording();
                       }
                     }}
-                    disabled={!micReady || isUploading}
+                    disabled={isUploading || isStartingVoiceRecording || isVoiceProcessing}
                   >
                     <FontAwesome name={isVoiceRecording ? 'stop' : 'microphone'} size={16} color="#fff" />
                     <Text style={styles.voiceRecordButtonText}>
-                      {isVoiceRecording ? 'Stop recording' : 'Start recording'}
+                      {isStartingVoiceRecording
+                        ? 'Starting…'
+                        : isVoiceRecording
+                          ? 'Stop recording'
+                          : 'Start recording'}
                     </Text>
                   </Pressable>
                 </ScrollView>
-              ) : isCameraGranted ? (
-                <View style={styles.cameraStageHost}>
-                  <View style={styles.cameraStage}>
-                    <CameraView
-                      key={cameraInstanceKey}
-                      ref={cameraRef}
-                      style={styles.cameraPreview}
-                      facing="front"
-                      mode="video"
-                      mirror
-                      videoQuality="720p"
-                      onCameraReady={() => setCameraReady(true)}
-                      onMountError={(event) => {
-                        console.warn('[ReactionSheet] camera mount error:', event.message);
-                        setCameraReady(false);
-                      }}
-                    />
-                  </View>
+              ) : reactionMode === 'selfie' && isSelfieSaving ? (
+                <View style={styles.takeCompletePane}>
+                  <ActivityIndicator color="#fff" size="large" />
+                  <Text style={styles.takeCompleteTitle}>Saving reaction…</Text>
+                  <Text style={styles.takeCompleteHint}>Hang tight while we finish your recording.</Text>
                 </View>
-              ) : isCameraDenied ? (
+              ) : !useAndroidPersistentCamera && reactionMode === 'selfie' && isCameraGranted ? (
+                <View
+                  style={[
+                    styles.cameraStageHost,
+                    isAndroidVideoSelfie && styles.cameraStageHostAndroidVideoSelfie,
+                  ]}
+                  collapsable={false}
+                >
+                  <CameraView
+                    key={cameraInstanceKey}
+                    ref={cameraRef}
+                    style={styles.cameraPreview}
+                    facing="front"
+                    mode="video"
+                    mirror={Platform.OS === 'ios'}
+                    videoQuality={Platform.OS === 'android' && isVideoParent ? '480p' : '720p'}
+                    active={isSelfieCameraActive}
+                    onCameraReady={() => {
+                      logReactionDebug('camera:ready', { cameraInstanceKey, reactionMode });
+                      setCameraReady(true);
+                      setIsCameraRestoring(false);
+                    }}
+                    onMountError={(event) => {
+                      logReactionDebug('camera:mount-error', {
+                        message: event.message,
+                        cameraInstanceKey,
+                      });
+                      console.warn('[ReactionSheet] camera mount error:', event.message);
+                      setCameraReady(false);
+                      setIsCameraRestoring(false);
+                    }}
+                  />
+                  {isSelfieTakeComplete ? (
+                    <View style={styles.takeCompleteOverlay} pointerEvents="none">
+                      <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
+                      <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
+                      <Text style={styles.takeCompleteHint}>
+                        Preview how Companions will see it, or retake if you want another try.
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : reactionMode === 'selfie' && useAndroidPersistentCamera ? null : reactionMode === 'selfie' && isCameraDenied ? (
                 <View style={styles.permissionFallback}>
                   <Text style={styles.permissionText}>
                     Camera access is required to record a selfie reaction.
@@ -2014,6 +2657,7 @@ export function ReactionSheet({
                   <Text style={styles.permissionText}>Checking camera access…</Text>
                 </View>
               )}
+              </View>
             </View>
           </View>
         </View>
@@ -2024,6 +2668,23 @@ export function ReactionSheet({
             <View style={styles.audioHintBlock}>
               {renderOriginalAudioToggle()}
               <Text style={styles.audioHintText}>{audioHintText}</Text>
+            </View>
+          ) : null}
+
+          {isInteractionBusy && !companionPreviewOpen ? (
+            <View style={styles.processingBanner}>
+              <ActivityIndicator color="#fff" size="small" />
+              <Text style={styles.processingBannerText}>
+                {isSelfieSaving
+                  ? 'Saving selfie…'
+                  : isVoiceProcessing
+                    ? 'Processing voice…'
+                    : isStartingVoiceRecording
+                      ? 'Starting voice…'
+                      : isRecording
+                        ? 'Recording…'
+                        : 'Working…'}
+              </Text>
             </View>
           ) : null}
 
@@ -2042,7 +2703,7 @@ export function ReactionSheet({
                   key={mode}
                   style={[styles.modeButton, isActive && styles.modeButtonActive]}
                   onPress={() => handleReactionModeChange(mode)}
-                  disabled={isUploading || isPreviewMode || isVoiceRecording}
+                  disabled={isInteractionBusy || isPreviewMode || isVoiceRecording}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isActive }}
                   accessibilityLabel={`${label} reaction`}
@@ -2069,7 +2730,7 @@ export function ReactionSheet({
               <Pressable
                 style={[styles.retakeButton, isUploading && styles.previewButtonDisabled]}
                 onPress={handleRetake}
-                disabled={isUploading}
+                disabled={isUploading || isInteractionBusy}
                 accessibilityRole="button"
                 accessibilityLabel="Retake reaction"
               >
@@ -2103,8 +2764,9 @@ export function ReactionSheet({
           ) : isSelfieTakeComplete ? (
             <View style={styles.previewActions}>
               <Pressable
-                style={styles.retakeButton}
+                style={[styles.retakeButton, isInteractionBusy && styles.previewButtonDisabled]}
                 onPress={handleRetake}
+                disabled={isInteractionBusy}
                 accessibilityRole="button"
                 accessibilityLabel="Retake reaction"
               >
@@ -2124,8 +2786,9 @@ export function ReactionSheet({
           ) : isVoiceTakeComplete ? (
             <View style={styles.previewActions}>
               <Pressable
-                style={styles.retakeButton}
+                style={[styles.retakeButton, isInteractionBusy && styles.previewButtonDisabled]}
                 onPress={handleRetake}
+                disabled={isInteractionBusy}
                 accessibilityRole="button"
                 accessibilityLabel="Retake reaction"
               >
@@ -2145,8 +2808,9 @@ export function ReactionSheet({
           ) : isTypedTakeComplete ? (
             <View style={styles.previewActions}>
               <Pressable
-                style={styles.retakeButton}
+                style={[styles.retakeButton, isInteractionBusy && styles.previewButtonDisabled]}
                 onPress={handleRetake}
+                disabled={isInteractionBusy}
                 accessibilityRole="button"
                 accessibilityLabel="Retake reaction"
               >
@@ -2167,15 +2831,19 @@ export function ReactionSheet({
             <Pressable
               onPressIn={handlePressIn}
               onPressOut={handlePressOut}
-              disabled={!canRecordSelfie}
+              disabled={!canRecordSelfie || isSelfieSaving}
+              delayPressIn={0}
+              android_disableSound
               style={({ pressed }) => [
                 styles.recordButton,
                 isRecording && styles.recordButtonActive,
                 (pressed || isRecording) && styles.recordButtonPressed,
-                !canRecordSelfie && styles.recordButtonDisabled,
+                (!canRecordSelfie || isSelfieSaving) && styles.recordButtonDisabled,
               ]}
               accessibilityRole="button"
-              accessibilityLabel={isRecording ? 'Recording reaction' : 'Hold to react'}
+              accessibilityLabel={
+                isSelfieSaving ? 'Saving reaction' : isRecording ? 'Recording reaction' : 'Hold to react'
+              }
               accessibilityHint={
                 isImageParent
                   ? 'Press and hold to record your reaction to this photo'
@@ -2184,7 +2852,11 @@ export function ReactionSheet({
             >
               <FontAwesome name="circle" size={14} color="#fff" />
               <Text style={styles.recordButtonText}>
-                {isRecording ? 'Recording…' : 'Hold to React'}
+                {isSelfieSaving
+                  ? 'Saving…'
+                  : isRecording
+                    ? 'Recording…'
+                    : 'Hold to React'}
               </Text>
             </Pressable>
           )}
@@ -2381,6 +3053,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#101820',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.12)',
+    position: 'relative',
+  },
+  modeForeground: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+    backgroundColor: '#101820',
+  },
+  modeForegroundTransparent: {
+    backgroundColor: 'transparent',
+  },
+  cameraStagePersist: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
   },
   parentVideoPane: {
     flex: 2,
@@ -2395,6 +3080,49 @@ const styles = StyleSheet.create({
   },
   splitPaneTyped: {
     gap: 8,
+  },
+  splitPaneAndroidSelfie: {
+    flex: 1,
+  },
+  parentVideoPaneAndroidSelfie: {
+    flex: 0.75,
+    maxHeight: 150,
+  },
+  parentVideoPaneAndroidSelfieVideo: {
+    flex: 2.4,
+    minHeight: 0,
+  },
+  mediaCardAndroidVideoSelfie: {
+    flexDirection: 'column',
+  },
+  parentVideoSurfaceAndroidVideoSelfie: {
+    flex: 1,
+    minHeight: 120,
+    flexShrink: 1,
+  },
+  trimSliderWrapAndroidVideoSelfie: {
+    minHeight: 40,
+    flexShrink: 0,
+  },
+  recordingSyncOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingBottom: 10,
+  },
+  recordingSyncBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  recordingSyncText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   parentVideoSurface: {
     flex: 1,
@@ -2471,23 +3199,36 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 0,
   },
+  cameraPaneAndroidSelfie: {
+    flex: 1.35,
+    minHeight: 280,
+  },
+  cameraPaneAndroidSelfieVideo: {
+    flex: 0.72,
+    maxHeight: 210,
+    minHeight: 0,
+  },
   cameraStageHost: {
     flex: 1,
-    minHeight: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000',
-  },
-  cameraStage: {
+    minHeight: Platform.OS === 'android' ? 240 : 180,
     width: '100%',
-    maxHeight: '100%',
-    aspectRatio: 3 / 4,
-    alignSelf: 'center',
-    overflow: 'hidden',
     backgroundColor: '#000',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  cameraStageHostAndroidVideoSelfie: {
+    flex: 0,
+    minHeight: 0,
+    maxHeight: 200,
+    aspectRatio: 4 / 3,
+    alignSelf: 'center',
+    width: '88%',
+    borderRadius: 14,
   },
   cameraPreview: {
-    ...StyleSheet.absoluteFillObject,
+    flex: 1,
+    width: '100%',
+    height: '100%',
   },
   selfiePreviewVideo: {
     ...StyleSheet.absoluteFillObject,
@@ -2814,6 +3555,38 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 10,
     paddingHorizontal: 20,
+  },
+  takeCompleteOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(16, 24, 32, 0.92)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    gap: 10,
+    zIndex: 2,
+  },
+  cameraRestoringOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    zIndex: 3,
+  },
+  processingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    marginBottom: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  processingBannerText: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 13,
+    fontWeight: '600',
   },
   takeCompleteTitle: {
     color: '#fff',
