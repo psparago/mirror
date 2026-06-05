@@ -39,11 +39,17 @@ export async function configureConnectPlaybackAudioSessionAsync(options?: {
       return;
     } catch (error) {
       lastError = error;
-      console.warn(`[audioSession] playback session attempt ${attempt + 1}/${maxAttempts} failed:`, error);
+      // The first attempt routinely fails with OSStatus 561017449 ("cannot interrupt others")
+      // while the camera capture session is still releasing the audio session — the retry below
+      // succeeds. Only surface a warning if every attempt failed, to avoid alarming noise.
     }
   }
 
   if (lastError) {
+    console.warn(
+      `[audioSession] playback session failed after ${maxAttempts} attempt(s):`,
+      lastError,
+    );
     throw lastError;
   }
 }
@@ -93,12 +99,15 @@ export async function configureConnectVoiceReactionRecordingAsync(): Promise<voi
 }
 
 /**
- * Release mic/audio after expo-camera selfie capture on Android.
- * Camera + expo-av recording mode can block expo-audio; call before voice or camera remount.
+ * Release mic/audio after an expo-camera selfie capture, then reconfigure for playback.
+ *
+ * On both platforms the camera's capture session can keep holding the audio session after a
+ * recording — on iOS this surfaces as OSStatus 561017449 ("cannot interrupt others") when we
+ * try to activate playback, which blocks Video playback in the companion preview; on Android it
+ * leaves playback routed for recording (very quiet). Deactivating first releases the session so
+ * the subsequent playback activation succeeds.
  */
 export async function releaseConnectCaptureAudioAsync(): Promise<void> {
-  if (Platform.OS !== 'android') return;
-
   try {
     await setIsAudioActiveAsync(false);
   } catch (error) {
@@ -108,7 +117,7 @@ export async function releaseConnectCaptureAudioAsync(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 150));
 
   try {
-    await configureConnectPlaybackAudioSessionAsync({ retries: 1 });
+    await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
   } catch (error) {
     console.warn('[audioSession] release capture: playback session failed:', error);
   }
