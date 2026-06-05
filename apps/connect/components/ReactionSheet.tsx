@@ -1,8 +1,6 @@
 import {
   defaultReactionOriginalAudioEnabled,
   formatTypedReactionSpeechText,
-  REACTION_PARENT_PLAYBACK_VOLUME,
-  resolveCompanionPreviewParentVolume,
   resolveReactionRecordingVolume,
   type SelfieRecordingAudioSnapshot,
 } from '@/utils/reactionPlayback';
@@ -318,7 +316,6 @@ export function ReactionSheet({
   // Tracks whether the app is foregrounded. Used to release the Android camera while backgrounded
   // (keeping `active` true across background leaves CameraX unable to re-bind a preview on resume).
   const [isAppForeground, setIsAppForeground] = useState(true);
-  const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
   const [showCompanionPreviewReplay, setShowCompanionPreviewReplay] = useState(false);
@@ -420,24 +417,39 @@ export function ReactionSheet({
     [],
   );
 
+  /** Parent Reflection volume while trim/companion preview is actively playing (not recording). */
+  const getParentPreviewPlaybackVolume = useCallback(
+    () =>
+      resolveReactionRecordingVolume({
+        muted: false,
+        hasHeadphones: hasHeadphonesRef.current,
+      }),
+    [],
+  );
+
   /** Keep expo-av mute flag and volume in sync — setStatusAsync(volume) alone clears isMuted. */
   const syncParentVideoAudioAsync = useCallback(
-    async (target: Video | null | undefined) => {
+    async (
+      target: Video | null | undefined,
+      options?: { previewPlayback?: boolean },
+    ) => {
       if (!target) return;
       const status = await target.getStatusAsync().catch(() => null);
       if (!status?.isLoaded) return;
-      const muted = isParentReflectionMutedRef.current;
-      const volume = getReactionParentVolume();
+      const previewPlayback = options?.previewPlayback === true;
+      const muted = previewPlayback ? false : isParentReflectionMutedRef.current;
+      const volume = previewPlayback ? getParentPreviewPlaybackVolume() : getReactionParentVolume();
       await runVideoCommand(async () => {
         await target.setIsMutedAsync(muted);
         await target.setVolumeAsync(volume);
       }, 'failed to sync parent audio');
     },
-    [getReactionParentVolume],
+    [getParentPreviewPlaybackVolume, getReactionParentVolume],
   );
 
   const applyParentReflectionVolume = useCallback(async () => {
-    await syncParentVideoAudioAsync(videoRef.current);
+    const previewPlayback = isPreviewPlayingRef.current && !isRecordingRef.current;
+    await syncParentVideoAudioAsync(videoRef.current, { previewPlayback });
   }, [syncParentVideoAudioAsync]);
 
   const startParentRecordingPlayback = useCallback(
@@ -459,12 +471,6 @@ export function ReactionSheet({
     },
     [getReactionParentVolume, isVideoParent, syncParentVideoAudioAsync],
   );
-
-  const getCompanionPreviewParentVolume = useCallback(() => {
-    return recordedAudioSnapshot
-      ? resolveCompanionPreviewParentVolume(recordedAudioSnapshot)
-      : REACTION_PARENT_PLAYBACK_VOLUME;
-  }, [recordedAudioSnapshot]);
 
   const getParentPreviewStartMs = useCallback(() => {
     if (reactionMode === 'selfie') {
@@ -533,14 +539,13 @@ export function ReactionSheet({
     await runVideoCommand(() => companionParentRef.current?.pauseAsync(), 'companion preview pause failed');
     const parentPreviewStartMs = getParentPreviewStartMs();
     if (isVideoParent && parentPreviewStartMs != null) {
-      const parentPreviewVolume = getCompanionPreviewParentVolume();
       await runVideoCommand(
         () =>
           companionParentRef.current?.setStatusAsync({
             positionMillis: parentPreviewStartMs,
             shouldPlay: false,
-            isMuted: parentPreviewVolume <= 0,
-            volume: parentPreviewVolume,
+            isMuted: true,
+            volume: 0,
           }),
         'companion preview reset failed',
       );
@@ -549,8 +554,8 @@ export function ReactionSheet({
     setShowCompanionPreviewReplay(true);
   }, [
     companionSelfiePlayer,
-    getCompanionPreviewParentVolume,
     getParentPreviewStartMs,
+    getParentPreviewPlaybackVolume,
     isVideoParent,
     unloadPreviewAudio,
   ]);
@@ -661,7 +666,7 @@ export function ReactionSheet({
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
 
-    const parentPreviewVolume = getCompanionPreviewParentVolume();
+    const parentPreviewPlaybackVolume = getParentPreviewPlaybackVolume();
     const parentPreviewStartMs = getParentPreviewStartMs();
 
     try {
@@ -676,8 +681,8 @@ export function ReactionSheet({
           companionParentRef.current?.setStatusAsync({
             positionMillis: parentPreviewStartMs,
             shouldPlay: true,
-            isMuted: parentPreviewVolume <= 0,
-            volume: parentPreviewVolume,
+            isMuted: false,
+            volume: parentPreviewPlaybackVolume,
           }),
         'failed to start companion preview',
       );
@@ -803,7 +808,7 @@ export function ReactionSheet({
     companionSelfiePlayer,
     currentExplorerId,
     finishCompanionPreview,
-    getCompanionPreviewParentVolume,
+    getParentPreviewPlaybackVolume,
     getParentPreviewStartMs,
     isVideoParent,
     playCompanionPreviewClip,
@@ -886,12 +891,12 @@ export function ReactionSheet({
         return;
       }
       const now = Date.now();
-      const parentPreviewVolume = getCompanionPreviewParentVolume();
-      if (parentPreviewVolume > 0 && now - lastCompanionParentVolumeApplyRef.current >= 200) {
+      const parentPreviewPlaybackVolume = getParentPreviewPlaybackVolume();
+      if (now - lastCompanionParentVolumeApplyRef.current >= 200) {
         lastCompanionParentVolumeApplyRef.current = now;
         void companionParentRef.current
           ?.setIsMutedAsync(false)
-          .then(() => companionParentRef.current?.setVolumeAsync(parentPreviewVolume))
+          .then(() => companionParentRef.current?.setVolumeAsync(parentPreviewPlaybackVolume))
           .catch(() => {});
       }
       if (!status.isPlaying) return;
@@ -913,7 +918,7 @@ export function ReactionSheet({
       companionPreviewOpen,
       companionPreviewPlaying,
       finishCompanionPreview,
-      getCompanionPreviewParentVolume,
+      getParentPreviewPlaybackVolume,
       getParentPreviewStartMs,
       isVideoParent,
       reactionMode,
@@ -1224,7 +1229,6 @@ export function ReactionSheet({
       clearTimeout(selfiePreviewResumeTimerRef.current);
       selfiePreviewResumeTimerRef.current = null;
     }
-    setShowTrimPreviewReplay(false);
     setTrimStartMs(0);
     setTrimEndMs(0);
     trimStartMsRef.current = 0;
@@ -1278,7 +1282,15 @@ export function ReactionSheet({
   useEffect(() => {
     if (!isVideoParent || isRecording || recordedUri != null) return;
     void applyParentReflectionVolume();
-  }, [applyParentReflectionVolume, hasHeadphones, isParentReflectionMuted, isRecording, isVideoParent, recordedUri]);
+  }, [
+    applyParentReflectionVolume,
+    hasHeadphones,
+    isParentReflectionMuted,
+    isPreviewPlaying,
+    isRecording,
+    isVideoParent,
+    recordedUri,
+  ]);
 
   const clampTrimStart = useCallback((startMs: number) => {
     const end = trimEndMsRef.current || durationMillisRef.current;
@@ -1383,7 +1395,6 @@ export function ReactionSheet({
       );
     } finally {
       previewStopPendingRef.current = false;
-      setShowTrimPreviewReplay(true);
     }
   }, [getReactionParentVolume, isVideoParent]);
 
@@ -1474,14 +1485,14 @@ export function ReactionSheet({
     const start = trimStartMsRef.current;
     positionMillisRef.current = start;
     setPositionMillis(start);
-    setShowTrimPreviewReplay(false);
+    const previewVolume = getParentPreviewPlaybackVolume();
     await runVideoCommand(
       () =>
         videoRef.current?.setStatusAsync({
           positionMillis: start,
           shouldPlay: true,
-          isMuted: isParentReflectionMutedRef.current,
-          volume: getReactionParentVolume(),
+          isMuted: false,
+          volume: previewVolume,
         }),
       'toggle playback failed',
     );
@@ -1489,16 +1500,13 @@ export function ReactionSheet({
     isPreviewPlayingRef.current = true;
   }, [
     commitVideoPosition,
+    getParentPreviewPlaybackVolume,
     getReactionParentVolume,
     isRecording,
     isVideoParent,
     pauseParentPreview,
     recordedUri,
   ]);
-
-  const replayTrimPreview = useCallback(() => {
-    void toggleParentPlayback();
-  }, [toggleParentPlayback]);
 
   const toggleParentReflectionMute = useCallback(() => {
     userToggledMuteRef.current = true;
@@ -1799,6 +1807,8 @@ export function ReactionSheet({
     setIsRecording(true);
     isRecordingRef.current = true;
     setIsPreviewPlaying(false);
+    isPreviewPlayingRef.current = false;
+    void pauseParentPreview();
 
     if (!isVideoParent) {
       beginCameraRecording(sessionId);
@@ -1859,6 +1869,7 @@ export function ReactionSheet({
     recordedUri,
     scheduleRecordingParentReasserts,
     startParentRecordingPlayback,
+    pauseParentPreview,
   ]);
 
   const handlePressOut = useCallback(() => {
@@ -2252,8 +2263,6 @@ export function ReactionSheet({
     voiceRecordedUri,
   ]);
 
-  const companionPreviewParentVolume = getCompanionPreviewParentVolume();
-
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
   const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
   const isAndroidVideoSelfie =
@@ -2301,6 +2310,17 @@ export function ReactionSheet({
     muted: isParentReflectionMuted,
     hasHeadphones,
   });
+  const parentTrimPreviewVolume = resolveReactionRecordingVolume({
+    muted: false,
+    hasHeadphones,
+  });
+  const parentVideoMuted = isPreviewPlaying && !isRecording ? false : isParentReflectionMuted;
+  const parentVideoVolume =
+    isPreviewPlaying && !isRecording ? parentTrimPreviewVolume : parentRecordingVolume;
+  const companionPreviewParentMuted = !companionPreviewPlaying;
+  const companionPreviewParentVolumeActive = companionPreviewPlaying
+    ? parentTrimPreviewVolume
+    : 0;
   // A gentle, non-imposing one-liner that only appears when the parent has audio worth hearing.
   const showAudioHint =
     isVideoParent &&
@@ -2446,8 +2466,8 @@ export function ReactionSheet({
                   resizeMode={ResizeMode.CONTAIN}
                   shouldPlay={false}
                   isLooping={false}
-                  isMuted={companionPreviewParentVolume <= 0}
-                  volume={companionPreviewParentVolume}
+                  isMuted={companionPreviewParentMuted}
+                  volume={companionPreviewParentVolumeActive}
                   progressUpdateIntervalMillis={100}
                   onPlaybackStatusUpdate={handleCompanionParentStatusUpdate}
                 />
@@ -2478,19 +2498,6 @@ export function ReactionSheet({
                       typedMessage.trim(),
                     )}
                   </Text>
-                </View>
-              ) : null}
-              {showCompanionPreviewReplay && !companionPreviewPlaying ? (
-                <View style={[styles.replayOverlay, styles.companionPreviewReplayOverlay]}>
-                  <Pressable
-                    style={styles.replayButton}
-                    onPress={replayCompanionPreview}
-                    accessibilityRole="button"
-                    accessibilityLabel="Replay reaction preview"
-                  >
-                    <FontAwesome name="repeat" size={24} color="#fff" />
-                    <Text style={styles.replayText}>Replay</Text>
-                  </Pressable>
                 </View>
               ) : null}
               {typedPreviewLoading ? (
@@ -2567,8 +2574,8 @@ export function ReactionSheet({
                         resizeMode={ResizeMode.CONTAIN}
                         shouldPlay={false}
                         isLooping={false}
-                        isMuted={isParentReflectionMuted}
-                        volume={parentRecordingVolume}
+                        isMuted={parentVideoMuted}
+                        volume={parentVideoVolume}
                         progressUpdateIntervalMillis={100}
                         onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
                       />
@@ -2583,19 +2590,6 @@ export function ReactionSheet({
                             <FontAwesome name="circle" size={10} color="#ff6b6b" />
                             <Text style={styles.recordingSyncText}>Recording with Reflection</Text>
                           </View>
-                        </View>
-                      ) : null}
-                      {showTrimPreviewReplay && showScrubUi ? (
-                        <View style={styles.replayOverlay}>
-                          <Pressable
-                            style={styles.replayButton}
-                            onPress={replayTrimPreview}
-                            accessibilityRole="button"
-                            accessibilityLabel="Replay Reflection preview"
-                          >
-                            <FontAwesome name="repeat" size={24} color="#fff" />
-                            <Text style={styles.replayText}>Replay</Text>
-                          </Pressable>
                         </View>
                       ) : null}
                     </View>
@@ -3955,22 +3949,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 5,
-  },
-  replayButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.4)',
-  },
-  replayText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
   },
   audioHintBlock: {
     paddingHorizontal: 16,
