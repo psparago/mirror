@@ -21,8 +21,8 @@ export const REACTION_PARENT_RECORDING_VOLUME = 0.40;
  *  acoustic echo path, so the Companion can hear the Reflection at full volume while recording. */
 export const REACTION_PARENT_HEADPHONES_VOLUME = 1.0;
 
-/** Parent Reflection volume during timeline reaction replay (viewing experience). */
-export const REACTION_PARENT_PLAYBACK_VOLUME = 0.15;
+/** Parent Reflection volume during reaction preview/playback when the reaction audio is primary. */
+export const REACTION_PARENT_PLAYBACK_VOLUME = 0.08;
 
 /** Spoken + on-screen intro for typed reactions read by AI voice. */
 export function formatTypedReactionSpeechText(

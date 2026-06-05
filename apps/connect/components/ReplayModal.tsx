@@ -1340,6 +1340,41 @@ export function ReplayModal({
     visible,
   ]);
 
+  // Safety net for the PRIMARY reflection video (plain reflections + reaction selfies that don't
+  // use the parent on the main stage). The machine's playVideo action calls videoPlayer.play()
+  // exactly once, but expo-video ignores play() until the source is `readyToPlay` and does NOT
+  // retry — so if play() loses the race against source loading, the video stays parked behind the
+  // poster and never starts. Re-issue play() on statusChange while the machine wants it playing.
+  // The selfie-on-parent and companion-message paths have their own dedicated handlers.
+  useEffect(() => {
+    if (!visible || !displayEvent?.video_url) return;
+    if (selfieUsesParentOnMainStage || companionMessageUsesParentVideoMainStage) return;
+    const wantsVideoPlaying =
+      state.matches({ playingVideo: { playback: 'playing' } }) ||
+      state.matches({ playingVideoInstant: { playback: 'playing' } });
+    if (!wantsVideoPlaying) return;
+
+    const ensurePlaying = () => {
+      try {
+        if (videoPlayer.status === 'readyToPlay' && !videoPlayer.playing) {
+          videoPlayer.play();
+        }
+      } catch {
+        // player may be tearing down
+      }
+    };
+    ensurePlaying();
+    const sub = videoPlayer.addListener('statusChange', ensurePlaying);
+    return () => sub.remove();
+  }, [
+    visible,
+    displayEvent?.video_url,
+    selfieUsesParentOnMainStage,
+    companionMessageUsesParentVideoMainStage,
+    state,
+    videoPlayer,
+  ]);
+
   useEffect(() => {
     if (!visible || !companionMessageUsesParentVideoMainStage || !displayEvent?.event_id) return;
     if (!resolvedParentPip?.url) return;

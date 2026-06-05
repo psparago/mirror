@@ -1,12 +1,8 @@
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, {
-  runOnJS,
-  useAnimatedStyle,
-  useSharedValue,
-} from 'react-native-reanimated';
+import { runOnJS, useSharedValue } from 'react-native-reanimated';
 
 export interface VideoTrimSliderProps {
   durationMs: number;
@@ -48,13 +44,18 @@ export default function VideoTrimSlider({
   onScrubEnd,
   maxRangeMs,
 }: VideoTrimSliderProps) {
+  // `trackWidth` (shared value) drives the UI-thread gesture math during a drag.
+  // `measuredWidth` (React state) drives the static handle/region positions. On Android the
+  // onLayout write to a shared value does not reliably re-run the animated-style worklets, so we
+  // mirror the width into React state: a re-render re-creates the worklets with the real width and
+  // the handles snap to the correct positions instead of collapsing to the left.
   const trackWidth = useSharedValue(0);
+  const [measuredWidth, setMeasuredWidth] = useState(0);
   const durationSv = useSharedValue(durationMs);
   const maxRangeSv = useSharedValue(typeof maxRangeMs === 'number' && maxRangeMs > 0 ? maxRangeMs : 1e15);
 
   const startVal = useSharedValue(startMs);
   const endVal = useSharedValue(endMs);
-  const playheadMs = useSharedValue(currentTimeMs);
 
   const originMs = useSharedValue(0);
   const isZoomedStart = useSharedValue(false);
@@ -84,9 +85,6 @@ export default function VideoTrimSlider({
     endVal.value = endMs;
     prevEndClamped.value = endMs;
   }, [endMs, endVal]);
-  useEffect(() => {
-    playheadMs.value = currentTimeMs;
-  }, [currentTimeMs, playheadMs]);
 
   const emitChange = useCallback(
     (s: number, e: number) => onChange(Math.round(s), Math.round(e)),
@@ -232,42 +230,25 @@ export default function VideoTrimSlider({
 
   const endGesture = Gesture.Simultaneous(endLongPress, endPan);
 
-  const startHandleStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const frac = dur > 0 ? startVal.value / dur : 0;
-    return { left: frac * trackWidth.value - HANDLE_WIDTH / 2 };
-  });
-
-  const endHandleStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const frac = dur > 0 ? endVal.value / dur : 1;
-    return { left: frac * trackWidth.value - HANDLE_WIDTH / 2 };
-  });
-
-  const activeRegionStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const sf = dur > 0 ? startVal.value / dur : 0;
-    const ef = dur > 0 ? endVal.value / dur : 1;
-    return { left: sf * trackWidth.value, width: (ef - sf) * trackWidth.value };
-  });
-
-  const leftInactiveStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const sf = dur > 0 ? startVal.value / dur : 0;
-    return { width: sf * trackWidth.value };
-  });
-
-  const rightInactiveStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const ef = dur > 0 ? endVal.value / dur : 1;
-    return { width: (1 - ef) * trackWidth.value };
-  });
-
-  const playheadStyle = useAnimatedStyle(() => {
-    const dur = durationSv.value;
-    const frac = dur > 0 ? playheadMs.value / dur : 0;
-    return { left: frac * trackWidth.value - StyleSheet.hairlineWidth / 2 };
-  });
+  // Positions are derived as plain numbers from props + the measured width and applied as regular
+  // inline styles (not reanimated animated styles). Reanimated reliably animates layout props like
+  // `left`/`width` on iOS, but on Android those writes can fail to commit — the handles get stuck at
+  // width 0 and the whole selection collapses to the left even though the track measured correctly.
+  // The gesture already round-trips to the JS thread every frame (runOnJS(emitChange) -> parent
+  // state -> re-render), so driving the visuals from React state is both deterministic and in sync
+  // with the drag. The shared values above are kept solely for the UI-thread clamping math.
+  const dur = durationMs > 0 ? durationMs : 1;
+  const clampFrac = (n: number) => Math.min(1, Math.max(0, n));
+  const startFrac = clampFrac(startMs / dur);
+  const endFrac = clampFrac(endMs / dur);
+  const playFrac = clampFrac(currentTimeMs / dur);
+  const w = measuredWidth;
+  const startHandleStyle = { left: startFrac * w - HANDLE_WIDTH / 2 };
+  const endHandleStyle = { left: endFrac * w - HANDLE_WIDTH / 2 };
+  const activeRegionStyle = { left: startFrac * w, width: Math.max(0, (endFrac - startFrac) * w) };
+  const leftInactiveStyle = { width: startFrac * w };
+  const rightInactiveStyle = { width: Math.max(0, (1 - endFrac) * w) };
+  const playheadStyle = { left: playFrac * w - StyleSheet.hairlineWidth / 2 };
 
   const selectedDuration = formatTime(endMs - startMs);
 
@@ -275,35 +256,44 @@ export default function VideoTrimSlider({
     <View style={styles.container}>
       <View
         style={styles.track}
+        // collapsable=false stops Android from flattening this view, which can otherwise suppress
+        // the onLayout callback and leave trackWidth at 0 (handles collapse to the left until a
+        // later re-layout snaps them into place). Ignore 0-width events so a transient measurement
+        // never clobbers a good width.
+        collapsable={false}
         onLayout={(e) => {
-          trackWidth.value = e.nativeEvent.layout.width;
+          const w = e.nativeEvent.layout.width;
+          if (w > 0) {
+            trackWidth.value = w;
+            setMeasuredWidth((prev) => (Math.abs(prev - w) > 0.5 ? w : prev));
+          }
         }}
       >
-        <Animated.View style={[styles.inactive, styles.inactiveLeft, leftInactiveStyle]} />
-        <Animated.View style={[styles.active, activeRegionStyle]}>
+        <View style={[styles.inactive, styles.inactiveLeft, leftInactiveStyle]} />
+        <View style={[styles.active, activeRegionStyle]}>
           <Text style={styles.durationBadge}>{selectedDuration}</Text>
-        </Animated.View>
-        <Animated.View style={[styles.inactive, styles.inactiveRight, rightInactiveStyle]} />
+        </View>
+        <View style={[styles.inactive, styles.inactiveRight, rightInactiveStyle]} />
 
         <GestureDetector gesture={startGesture}>
-          <Animated.View style={[styles.handle, startHandleStyle]}>
+          <View style={[styles.handle, startHandleStyle]}>
             <View style={styles.handleGrip}>
               <View style={styles.gripLine} />
               <View style={styles.gripLine} />
             </View>
-          </Animated.View>
+          </View>
         </GestureDetector>
 
         <GestureDetector gesture={endGesture}>
-          <Animated.View style={[styles.handle, endHandleStyle]}>
+          <View style={[styles.handle, endHandleStyle]}>
             <View style={styles.handleGrip}>
               <View style={styles.gripLine} />
               <View style={styles.gripLine} />
             </View>
-          </Animated.View>
+          </View>
         </GestureDetector>
 
-        <Animated.View style={[styles.playhead, playheadStyle]} pointerEvents="none" />
+        <View style={[styles.playhead, playheadStyle]} pointerEvents="none" />
       </View>
     </View>
   );

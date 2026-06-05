@@ -315,6 +315,9 @@ export function ReactionSheet({
   const [isStartingVoiceRecording, setIsStartingVoiceRecording] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
+  // Tracks whether the app is foregrounded. Used to release the Android camera while backgrounded
+  // (keeping `active` true across background leaves CameraX unable to re-bind a preview on resume).
+  const [isAppForeground, setIsAppForeground] = useState(true);
   const [showTrimPreviewReplay, setShowTrimPreviewReplay] = useState(false);
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
@@ -335,6 +338,7 @@ export function ReactionSheet({
   // restart it once or twice. This is the documented iOS interruption-recovery pattern, not a poll.
   const selfiePreviewExpectPlayingRef = useRef(false);
   const selfiePreviewResumeAttemptsRef = useRef(0);
+  const selfiePreviewLastResumePosRef = useRef(0);
   const selfiePreviewResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live audio output route. Headphones/Bluetooth → the parent Reflection can play out loud during
@@ -457,8 +461,9 @@ export function ReactionSheet({
   );
 
   const getCompanionPreviewParentVolume = useCallback(() => {
-    if (!recordedAudioSnapshot) return REACTION_PARENT_PLAYBACK_VOLUME;
-    return resolveCompanionPreviewParentVolume(recordedAudioSnapshot);
+    return recordedAudioSnapshot
+      ? resolveCompanionPreviewParentVolume(recordedAudioSnapshot)
+      : REACTION_PARENT_PLAYBACK_VOLUME;
   }, [recordedAudioSnapshot]);
 
   const getParentPreviewStartMs = useCallback(() => {
@@ -600,7 +605,16 @@ export function ReactionSheet({
       const pos = typeof currentTime === 'number' ? currentTime : 0;
       const reachedEnd = dur > 0 && pos >= dur - 0.35;
       if (reachedEnd) return;
-      if (selfiePreviewResumeAttemptsRef.current >= 2) {
+
+      // If playback advanced meaningfully since the last interruption, we're making forward progress
+      // (a long clip can take several interruptions while the audio session settles), so reset the
+      // stall counter. We only give up when stuck at roughly the same spot repeatedly.
+      if (pos > selfiePreviewLastResumePosRef.current + 0.4) {
+        selfiePreviewResumeAttemptsRef.current = 0;
+      }
+      selfiePreviewLastResumePosRef.current = pos;
+
+      if (selfiePreviewResumeAttemptsRef.current >= 3) {
         logReactionDebug('selfie-preview:resume-giveup', { pos, dur });
         return;
       }
@@ -617,7 +631,8 @@ export function ReactionSheet({
         selfiePreviewResumeTimerRef.current = null;
         if (!selfiePreviewExpectPlayingRef.current || companionPreviewStopPendingRef.current) return;
         try {
-          companionSelfiePlayer.currentTime = 0;
+          // Resume from where it paused (do NOT seek to 0) so each recovery advances the clip
+          // instead of replaying the first second over and over.
           companionSelfiePlayer.play();
         } catch {
           /* player may be released */
@@ -680,7 +695,15 @@ export function ReactionSheet({
 
         if (isVideoParent) {
           // Video parent: the parent video is also playing, so the selfie must coexist with it.
-          companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
+          try {
+            companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
+          } catch (error) {
+            console.warn('[ReactionSheet] selfie preview player unavailable:', error);
+            selfiePreviewExpectPlayingRef.current = false;
+            setCompanionPreviewPlaying(false);
+            setShowCompanionPreviewReplay(true);
+            return;
+          }
         } else {
           // Image parent: nothing else needs audio, so give expo-video an exclusive, full-volume
           // session instead of mixing/ducking. Release our own expo-audio playback session (just
@@ -692,16 +715,39 @@ export function ReactionSheet({
           }
           // Brief settle so the deactivation lands before expo-video activates its own session.
           await new Promise((resolve) => setTimeout(resolve, 120));
-          companionSelfiePlayer.audioMixingMode = 'auto';
+          try {
+            companionSelfiePlayer.audioMixingMode = 'auto';
+          } catch (error) {
+            console.warn('[ReactionSheet] selfie preview player unavailable:', error);
+            selfiePreviewExpectPlayingRef.current = false;
+            setCompanionPreviewPlaying(false);
+            setShowCompanionPreviewReplay(true);
+            return;
+          }
         }
       }
-      // Arm interruption recovery before starting: the playingChange listener will restart the clip
+      // Arm interruption recovery before starting: the playingChange listener will resume the clip
       // if expo-camera's deferred teardown interrupts playback in the next ~1s.
       selfiePreviewResumeAttemptsRef.current = 0;
+      selfiePreviewLastResumePosRef.current = 0;
       selfiePreviewExpectPlayingRef.current = true;
-      companionSelfiePlayer.currentTime = 0;
-      companionSelfiePlayer.play();
-      logReactionDebug('selfie-preview:start', { isVideoParent });
+      try {
+        companionSelfiePlayer.currentTime = 0;
+        companionSelfiePlayer.play();
+        logReactionDebug('selfie-preview:start', { isVideoParent });
+      } catch (error) {
+        console.warn('[ReactionSheet] selfie preview playback failed:', error);
+        selfiePreviewExpectPlayingRef.current = false;
+        setCompanionPreviewPlaying(false);
+        setShowCompanionPreviewReplay(true);
+        if (isVideoParent) {
+          await runVideoCommand(
+            () => companionParentRef.current?.pauseAsync(),
+            'companion preview pause failed',
+          );
+        }
+        return;
+      }
     }
 
     if (isVoicePreview && voiceRecordedUri) {
@@ -984,9 +1030,9 @@ export function ReactionSheet({
   }, [isPreviewPlaying]);
 
   useEffect(() => {
-    if (durationMillis <= 0) return;
+    if (durationMillis <= MIN_TRIM_GAP_MS) return;
     setTrimEndMs((prev) => {
-      const next = prev <= 0 ? durationMillis : Math.min(prev, durationMillis);
+      const next = prev <= MIN_TRIM_GAP_MS ? durationMillis : Math.min(prev, durationMillis);
       trimEndMsRef.current = next;
       return next;
     });
@@ -1087,16 +1133,25 @@ export function ReactionSheet({
     if (!visible || reactionMode !== 'selfie') return;
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
+        // Re-acquire the camera: flipping `active` back to true (via isAppForeground) re-binds the
+        // CameraX preview cleanly. Show the warmup overlay until onCameraReady clears it.
+        setIsAppForeground(true);
         void ensureCameraPermission();
-        scheduleAndroidCameraRemount();
+        if (Platform.OS === 'android') {
+          setIsCameraRestoring(true);
+        }
         return;
       }
+      // Backgrounded/inactive: drop `active` so CameraX releases the camera cleanly. Keeping it
+      // active across background is what left the Android preview black (and un-remountable) on
+      // resume.
+      setIsAppForeground(false);
       if (isRecordingRef.current) {
         stopSelfieRecordingRef.current?.();
       }
     });
     return () => subscription.remove();
-  }, [visible, reactionMode, ensureCameraPermission, scheduleAndroidCameraRemount]);
+  }, [visible, reactionMode, ensureCameraPermission]);
 
   const handleModalShow = useCallback(() => {
     if (reactionMode !== 'selfie') return;
@@ -1472,7 +1527,11 @@ export function ReactionSheet({
     (nextPositionMillis: number) => {
       positionMillisRef.current = nextPositionMillis;
       setPositionMillis(nextPositionMillis);
-      void queueVideoSeek(nextPositionMillis, { updateUi: false });
+      const now = Date.now();
+      if (now - lastPanSeekAtRef.current >= 120) {
+        lastPanSeekAtRef.current = now;
+        void queueVideoSeek(nextPositionMillis, { updateUi: false });
+      }
     },
     [queueVideoSeek],
   );
@@ -2193,9 +2252,7 @@ export function ReactionSheet({
     voiceRecordedUri,
   ]);
 
-  const companionPreviewParentVolume = recordedAudioSnapshot
-    ? resolveCompanionPreviewParentVolume(recordedAudioSnapshot)
-    : REACTION_PARENT_PLAYBACK_VOLUME;
+  const companionPreviewParentVolume = getCompanionPreviewParentVolume();
 
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
   const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
@@ -2224,7 +2281,9 @@ export function ReactionSheet({
     !isUploading &&
     !companionPreviewOpen &&
     !recordedUri &&
-    !isSelfieSaving;
+    !isSelfieSaving &&
+    // On Android, release the camera while backgrounded so it can re-bind cleanly on resume.
+    (Platform.OS !== 'android' || isAppForeground);
   const isCameraGranted =
     cameraPermission?.granted === true || nativeCameraGranted === true;
   const isCameraDenied =
@@ -2542,7 +2601,7 @@ export function ReactionSheet({
                     </View>
                   </GestureDetector>
 
-                  {showScrubUi && durationMillis > 0 ? (
+                  {showScrubUi && durationMillis > MIN_TRIM_GAP_MS ? (
                     <>
                       <View
                         style={[
@@ -2616,14 +2675,14 @@ export function ReactionSheet({
               {useAndroidPersistentCamera ? (
                 <View
                   style={[
-                    // Image parent: render the camera as a centered portrait (3:4) box so it matches
-                    // the selfie shape — full-bleed cover-fill crops a portrait face into a wide box,
-                    // which looks heavily zoomed. Video parent keeps its own constrained landscape box.
+                    // Both image and video parents render the front camera as a centered portrait
+                    // 3:4 box (matching the selfie's natural shape and iOS). Each style is complete
+                    // and anchored to its pane's fixed height — no absolute-fill / aspectRatio mix,
+                    // which previously let the box collapse to a wide "speakeasy" slot after the app
+                    // returned from the background.
                     isImageParent
                       ? styles.cameraStageHostAndroidImageSelfie
-                      : styles.cameraStageHost,
-                    !isImageParent && styles.cameraStagePersist,
-                    !isImageParent && isVideoParent && styles.cameraStageHostAndroidVideoSelfie,
+                      : styles.cameraStageHostAndroidVideoSelfie,
                     // The Android camera renders as a native SurfaceView that ignores RN z-index and
                     // sibling cover views, so an opaque overlay can't hide it. When we're not in
                     // selfie mode, move the whole camera host off-screen (it stays mounted/warm to
@@ -2657,15 +2716,6 @@ export function ReactionSheet({
                       setIsCameraRestoring(false);
                     }}
                   />
-                  {reactionMode === 'selfie' && isSelfieTakeComplete ? (
-                    <View style={styles.takeCompleteOverlay} pointerEvents="none">
-                      <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                      <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
-                      <Text style={styles.takeCompleteHint}>
-                        Preview how Companions will see it, or retake if you want another try.
-                      </Text>
-                    </View>
-                  ) : null}
                   {reactionMode === 'selfie' && isCameraRestoring ? (
                     <View style={styles.cameraRestoringOverlay} pointerEvents="none">
                       <ActivityIndicator color="#fff" size="large" />
@@ -2681,10 +2731,14 @@ export function ReactionSheet({
                   reactionMode === 'selfie' &&
                     useAndroidPersistentCamera &&
                     !isSelfieSaving &&
+                    !isSelfieTakeComplete &&
                     styles.modeForegroundTransparent,
                 ]}
                 pointerEvents={
-                  reactionMode === 'selfie' && useAndroidPersistentCamera && !isSelfieSaving
+                  reactionMode === 'selfie' &&
+                  useAndroidPersistentCamera &&
+                  !isSelfieSaving &&
+                  !isSelfieTakeComplete
                     ? 'box-none'
                     : 'auto'
                 }
@@ -2790,7 +2844,7 @@ export function ReactionSheet({
                   <Text style={styles.takeCompleteTitle}>Saving reaction…</Text>
                   <Text style={styles.takeCompleteHint}>Hang tight while we finish your recording.</Text>
                 </View>
-              ) : !useAndroidPersistentCamera && reactionMode === 'selfie' && isSelfieTakeComplete ? (
+              ) : reactionMode === 'selfie' && isSelfieTakeComplete ? (
                 <View style={styles.takeCompletePane}>
                   <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
                   <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
@@ -2951,13 +3005,15 @@ export function ReactionSheet({
                   styles.previewPlayButton,
                   (isUploading || companionPreviewPlaying) && styles.previewButtonDisabled,
                 ]}
-                onPress={() => void startCompanionPreview()}
+                onPress={showCompanionPreviewReplay ? replayCompanionPreview : () => void startCompanionPreview()}
                 disabled={isUploading || companionPreviewPlaying}
                 accessibilityRole="button"
-                accessibilityLabel="Preview reaction"
+                accessibilityLabel={showCompanionPreviewReplay ? 'Replay reaction preview' : 'Preview reaction'}
               >
-                <FontAwesome name="play" size={15} color="#fff" />
-                <Text style={styles.previewPlayButtonText}>Preview</Text>
+                <FontAwesome name={showCompanionPreviewReplay ? 'repeat' : 'play'} size={15} color="#fff" />
+                <Text style={styles.previewPlayButtonText}>
+                  {showCompanionPreviewReplay ? 'Replay' : 'Preview'}
+                </Text>
               </Pressable>
               <Pressable
                 style={[styles.sendButton, isUploading && styles.previewButtonDisabled]}
@@ -3282,14 +3338,13 @@ const styles = StyleSheet.create({
     transform: [{ translateX: -100000 }],
   },
   cameraStageHostAndroidImageSelfie: {
-    // Centered portrait-ish box so the front camera shows natural selfie framing instead of a
-    // zoomed-in wide crop. We use a DEFINITE width (not aspectRatio): on Android an aspectRatio box
-    // can resolve to zero width after a background/foreground remount and the camera vanishes. flex
-    // fills the pane height; the explicit narrow width keeps it portrait and centered.
-    flex: 1,
+    // Centered portrait 3:4 box so the front camera shows natural selfie framing instead of a
+    // zoomed-in near-square crop. The aspect ratio is anchored to a DEFINITE height (the camera
+    // pane below has a fixed height, and this host fills it), so width derives deterministically
+    // (height * 3/4) and never collapses to zero on a background/foreground re-layout.
     alignSelf: 'center',
-    width: '46%',
-    maxWidth: 200,
+    height: '100%',
+    aspectRatio: 3 / 4,
     backgroundColor: '#000',
     borderRadius: 14,
     overflow: 'hidden',
@@ -3428,14 +3483,23 @@ const styles = StyleSheet.create({
     minHeight: 0,
   },
   cameraPaneAndroidSelfie: {
-    flex: 0.7,
-    minHeight: 200,
-    maxHeight: 240,
+    // Fixed height (not flex): a flex value here competes with the parent image pane and re-resolves
+    // to a shorter height after the app returns from background, making the camera "shrink to half".
+    // A definite height keeps the camera box stable across re-layout and anchors the host's 3:4 ratio.
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 240,
   },
   cameraPaneAndroidSelfieVideo: {
-    flex: 0.72,
-    maxHeight: 210,
-    minHeight: 0,
+    // Fixed height (selfie mode only): keeps the camera box stable across a background/foreground
+    // re-layout and hands the remaining vertical space to the parent video (which is flex), so the
+    // video no longer gets squeezed by a camera pane that fights it for flex space. Kept modest so
+    // the reflection video (the thing being reacted to) stays clearly the larger of the two panes.
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 120,
   },
   cameraStageHost: {
     flex: 1,
@@ -3458,13 +3522,16 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   cameraStageHostAndroidVideoSelfie: {
-    flex: 0,
-    minHeight: 0,
-    maxHeight: 200,
-    aspectRatio: 4 / 3,
+    // Centered portrait 3:4 box (was a 4:3 landscape box that squished the face). Anchored to the
+    // camera pane's fixed height so the width derives deterministically (height * 3/4) and the box
+    // can't collapse on a background/foreground re-layout. Mirrors the iOS and image-parent boxes.
     alignSelf: 'center',
-    width: '88%',
+    height: '100%',
+    aspectRatio: 3 / 4,
+    backgroundColor: '#000',
     borderRadius: 14,
+    overflow: 'hidden',
+    zIndex: 1,
   },
   cameraPreview: {
     flex: 1,
@@ -3519,7 +3586,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
@@ -3636,7 +3703,7 @@ const styles = StyleSheet.create({
     gap: 8,
     minWidth: 148,
     paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: 'rgba(46, 120, 183, 0.92)',
     borderWidth: 2,
@@ -3670,7 +3737,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.14)',
     borderWidth: 2,
@@ -3854,7 +3921,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.14)',
     borderWidth: 2,
@@ -3871,7 +3938,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: '#2e78b7',
     borderWidth: 2,
@@ -3969,8 +4036,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 8,
-    marginTop: 6,
+    paddingVertical: 6,
+    marginTop: 3,
   },
   infoBtnText: {
     color: '#4a90d9',
