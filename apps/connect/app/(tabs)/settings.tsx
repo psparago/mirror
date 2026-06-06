@@ -11,6 +11,7 @@ import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { Stack, useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { TutorialCarousel } from '../../components/TutorialCarousel';
 import {
@@ -31,6 +32,12 @@ import {
 } from 'react-native';
 
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
+import {
+  getDiagnosticsBufferStats,
+  isDiagnosticsEnabled,
+  sendDiagnosticBatch,
+  setDiagnosticsEnabled,
+} from '../../utils/diagnosticsLog';
 
 const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
 const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
@@ -142,6 +149,13 @@ export default function SettingsScreen() {
 
   // TUTORIAL MODAL
   const [tutorialModalVisible, setTutorialModalVisible] = useState(false);
+
+  // DIAGNOSTIC LOGS
+  const [diagnosticsEnabled, setDiagnosticsEnabledState] = useState(false);
+  const [diagnosticsEntryCount, setDiagnosticsEntryCount] = useState(0);
+  const [diagnosticsApproxBytes, setDiagnosticsApproxBytes] = useState(0);
+  const [diagnosticsNote, setDiagnosticsNote] = useState('');
+  const [diagnosticsSending, setDiagnosticsSending] = useState(false);
 
   const avatarInitial = getAvatarInitial(activeRelationship?.companionName || '');
   const avatarColor = getAvatarColor(user?.uid || '');
@@ -340,6 +354,68 @@ export default function SettingsScreen() {
   useEffect(() => {
     AsyncStorage.getItem('last_ota_label').then(setLastOtaLabel).catch(() => { });
   }, []);
+
+  const refreshDiagnosticsStats = useCallback(async () => {
+    const stats = await getDiagnosticsBufferStats();
+    setDiagnosticsEntryCount(stats.entryCount);
+    setDiagnosticsApproxBytes(stats.approxBytes);
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      const enabled = await isDiagnosticsEnabled();
+      setDiagnosticsEnabledState(enabled);
+      await refreshDiagnosticsStats();
+    })();
+  }, [refreshDiagnosticsStats]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshDiagnosticsStats();
+    }, [refreshDiagnosticsStats]),
+  );
+
+  const handleDiagnosticsToggle = useCallback(
+    async (next: boolean) => {
+      await setDiagnosticsEnabled(next);
+      setDiagnosticsEnabledState(next);
+      await refreshDiagnosticsStats();
+    },
+    [refreshDiagnosticsStats],
+  );
+
+  const handleSendDiagnostics = useCallback(async () => {
+    setDiagnosticsSending(true);
+    try {
+      const result = await sendDiagnosticBatch({
+        identity: {
+          companionName: activeRelationship?.companionName ?? null,
+          explorerName: explorerName ?? null,
+          relationshipId: activeRelationship?.id ?? null,
+        },
+        userNote: diagnosticsNote,
+      });
+      setDiagnosticsNote('');
+      await refreshDiagnosticsStats();
+      Alert.alert(
+        'Diagnostic logs sent',
+        `Batch ID:\n${result.batchId}\n\n${result.accepted} events uploaded. Share the batch ID if we ask for it.`,
+      );
+    } catch (error) {
+      Alert.alert(
+        'Could not send logs',
+        error instanceof Error ? error.message : 'Please try again.',
+      );
+    } finally {
+      setDiagnosticsSending(false);
+    }
+  }, [
+    activeRelationship?.companionName,
+    activeRelationship?.id,
+    diagnosticsNote,
+    explorerName,
+    refreshDiagnosticsStats,
+  ]);
 
   useEffect(() => {
     const loadVoicePrefs = async () => {
@@ -1107,6 +1183,61 @@ export default function SettingsScreen() {
         </View>
       </View>
 
+      {/* Diagnostic logs */}
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: tintColor }]}>Diagnostic Logs</Text>
+        <View style={styles.card}>
+          <View style={[styles.row, { marginBottom: 0 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>Record diagnostic logs</Text>
+              <Text style={styles.description}>
+                Captures technical app events to help fix bugs. Does not include Reflection
+                messages or media. Turn on, use the app, then send below.
+              </Text>
+            </View>
+            <Switch
+              value={diagnosticsEnabled}
+              onValueChange={(val) => void handleDiagnosticsToggle(val)}
+              trackColor={{ false: '#333', true: '#2e78b7' }}
+              thumbColor={Platform.OS === 'ios' ? '#fff' : '#f4f3f4'}
+            />
+          </View>
+
+          <View style={styles.divider} />
+
+          <Text style={styles.description}>
+            Buffered: {diagnosticsEntryCount} events (~{Math.max(1, Math.round(diagnosticsApproxBytes / 1024))} KB)
+          </Text>
+
+          <TextInput
+            style={[styles.input, styles.diagnosticsNoteInput]}
+            placeholder="Optional note (e.g. camera stuck on selfie)"
+            placeholderTextColor="rgba(255,255,255,0.4)"
+            value={diagnosticsNote}
+            onChangeText={setDiagnosticsNote}
+            maxLength={500}
+            multiline
+            editable={!diagnosticsSending}
+          />
+
+          <TouchableOpacity
+            style={[
+              styles.saveButton,
+              (diagnosticsSending || diagnosticsEntryCount === 0) && styles.saveButtonDisabled,
+            ]}
+            onPress={() => void handleSendDiagnostics()}
+            disabled={diagnosticsSending || diagnosticsEntryCount === 0}
+            activeOpacity={0.8}
+          >
+            {diagnosticsSending ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.saveButtonText}>Send diagnostic logs</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </View>
+
       {/* App Information */}
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: tintColor }]}>App Information</Text>
@@ -1548,6 +1679,10 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderWidth: 1,
     borderColor: '#333',
+  },
+  diagnosticsNoteInput: {
+    minHeight: 72,
+    textAlignVertical: 'top',
   },
   saveButton: {
     backgroundColor: '#2e78b7',

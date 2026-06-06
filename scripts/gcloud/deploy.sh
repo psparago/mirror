@@ -27,6 +27,7 @@ ALL_FUNCTIONS=(
   get-voice-sample
   synthesize-speech
   delete-companion-account
+  submit-client-logs
   unsplash-search
   generate-ai-description
   on-reflection-created
@@ -230,6 +231,20 @@ case "$FUNCTION_NAME" in
       --region=${REGION} \
       --source="${SOURCE_DIR}" \
       --entry-point=DeleteCompanionAccount \
+      --trigger-http \
+      --allow-unauthenticated \
+      --set-env-vars ${ENV_VARS} \
+      --quiet
+    ;;
+
+  submit-client-logs)
+    echo -e "${YELLOW}Deploying submit-client-logs...${NC}"
+    gcloud functions deploy submit-client-logs \
+      --gen2 \
+      --runtime=${RUNTIME} \
+      --region=${REGION} \
+      --source="${SOURCE_DIR}" \
+      --entry-point=SubmitClientLogs \
       --trigger-http \
       --allow-unauthenticated \
       --set-env-vars ${ENV_VARS} \

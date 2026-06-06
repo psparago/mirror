@@ -24,6 +24,7 @@ import {
 } from '@/utils/pendingNotificationRoute';
 import { AuthProvider, ExplorerProvider, WaitOverlayProvider, useAuth } from '@projectmirror/shared';
 import { SystemUpdateModal } from '../components/SystemUpdateModel';
+import { bootstrapDiagnostics } from '@/utils/diagnosticsLog';
 
 // Read notification response at module-load time — before any component renders.
 bootstrapColdStartNotification();
@@ -226,6 +227,10 @@ function RootLayout() {
     SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
     ...FontAwesome.font,
   });
+
+  useEffect(() => {
+    void bootstrapDiagnostics();
+  }, []);
 
   useEffect(() => {
     if (error) throw error;

@@ -14,6 +14,7 @@ import {
   configureConnectVoiceReactionRecordingAsync,
   releaseConnectCaptureAudioAsync,
 } from '@/utils/audioSession';
+import { diagnosticsAppLog, type DiagnosticLogLevel } from '@/utils/diagnosticsLog';
 import { FontAwesome } from '@expo/vector-icons';
 import {
   useAuth,
@@ -85,13 +86,25 @@ async function runVideoCommand(
 
 const RECORDING_START_TIMEOUT_MS = 8000;
 
-function logReactionDebug(step: string, detail?: Record<string, unknown>): void {
-  const tag = `[ReactionSheet:${Platform.OS}]`;
+function logReactionDebug(
+  step: string,
+  detail?: Record<string, unknown>,
+  level: DiagnosticLogLevel = 'log',
+): void {
+  const safeDetail: Record<string, string | number | boolean | null | undefined> = {};
   if (detail) {
-    console.log(`${tag} ${step}`, detail);
-  } else {
-    console.log(`${tag} ${step}`);
+    for (const [key, value] of Object.entries(detail)) {
+      if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean' ||
+        value == null
+      ) {
+        safeDetail[key] = value;
+      }
+    }
   }
+  diagnosticsAppLog('ReactionSheet', step, safeDetail, level);
 }
 
 async function withTimeout<T>(
@@ -1166,6 +1179,54 @@ export function ReactionSheet({
     }
     bumpCameraInstance();
   }, [bumpCameraInstance, reactionMode]);
+
+  useEffect(() => {
+    if (!visible || reactionMode !== 'selfie' || Platform.OS !== 'android') return;
+    if (!isCameraRestoring) return;
+
+    const cameraGranted =
+      cameraPermission?.granted === true || nativeCameraGranted === true;
+    const selfieCameraActive =
+      visible &&
+      reactionMode === 'selfie' &&
+      !isUploading &&
+      !companionPreviewOpen &&
+      !recordedUri &&
+      !isSelfieSaving &&
+      isAppForeground;
+
+    logReactionDebug('camera:restoring-start', {
+      cameraInstanceKey,
+      isCameraGranted: cameraGranted,
+    });
+
+    const timer = setTimeout(() => {
+      logReactionDebug(
+        'camera:ready-timeout',
+        {
+          cameraInstanceKey,
+          isCameraGranted: cameraGranted,
+          isSelfieCameraActive: selfieCameraActive,
+          isAppForeground,
+        },
+        'warn',
+      );
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [
+    cameraInstanceKey,
+    cameraPermission?.granted,
+    companionPreviewOpen,
+    isAppForeground,
+    isCameraRestoring,
+    isSelfieSaving,
+    isUploading,
+    nativeCameraGranted,
+    reactionMode,
+    recordedUri,
+    visible,
+  ]);
 
   useEffect(() => {
     if (!visible || reactionMode !== 'selfie' || recordedUri != null) return;

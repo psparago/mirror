@@ -13,4 +13,5 @@ export const API_ENDPOINTS = {
   GET_VOICE_SAMPLE: 'https://us-central1-reflections-1200b.cloudfunctions.net/get-voice-sample',
   SYNTHESIZE_SPEECH: 'https://us-central1-reflections-1200b.cloudfunctions.net/synthesize-speech',
   DELETE_COMPANION_ACCOUNT: 'https://us-central1-reflections-1200b.cloudfunctions.net/delete-companion-account',
+  SUBMIT_CLIENT_LOGS: 'https://us-central1-reflections-1200b.cloudfunctions.net/submit-client-logs',
 } as const;
