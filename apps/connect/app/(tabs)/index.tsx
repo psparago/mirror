@@ -23,6 +23,7 @@ export default function TimelineHomeScreen() {
   const {
     deepLinkReflectionId,
     deepLinkExplorerId,
+    deepLinkOpenReactionComposer,
     timelineRefreshNonce,
     deepLinkOpenCreationModal,
     deepLinkAction,
@@ -72,6 +73,7 @@ export default function TimelineHomeScreen() {
       <SentTimelineScreen
         deepLinkReflectionId={deepLinkReflectionId}
         deepLinkExplorerId={deepLinkExplorerId}
+        deepLinkOpenReactionComposer={deepLinkOpenReactionComposer}
         timelineRefreshNonce={timelineRefreshNonce}
         onDeepLinkHandled={completeDeepLink}
         onEditReflection={(ev) => {

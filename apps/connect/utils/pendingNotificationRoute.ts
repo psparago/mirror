@@ -14,8 +14,22 @@ export type PendingNotificationRoute = {
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
   openCreationModal?: boolean;
+  /** Open ReactionSheet on the parent Reflection instead of ReplayModal. */
+  openReactionComposer?: boolean;
   notificationType?: string;
 };
+
+const REACTION_COMPOSER_NOTIFICATION_TYPES = new Set([
+  'companion_upload_digest',
+  'companion_reaction_digest',
+]);
+
+export function shouldOpenReactionComposerForNotificationType(
+  notificationType?: string
+): boolean {
+  if (!notificationType) return false;
+  return REACTION_COMPOSER_NOTIFICATION_TYPES.has(notificationType);
+}
 
 let pendingRoute: PendingNotificationRoute | null = null;
 const seenIds = new Set<string>();
@@ -68,6 +82,7 @@ function deepLinkFieldsFromRawData(
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
   openCreationModal?: boolean;
+  openReactionComposer?: boolean;
   notificationType?: string;
 } {
   if (!rawData || typeof rawData !== 'object') return {};
@@ -95,12 +110,20 @@ function deepLinkFieldsFromRawData(
   const openCreationModal =
     booleanField(source.openCreationModal ?? source.open_creation_modal ?? rawData.openCreationModal ?? rawData.open_creation_modal) ||
     notificationType === 'posting_reminder';
+  const openReactionComposer =
+    booleanField(
+      source.openReactionComposer ??
+        source.open_reaction_composer ??
+        rawData.openReactionComposer ??
+        rawData.open_reaction_composer
+    ) || shouldOpenReactionComposerForNotificationType(notificationType);
 
   return {
     ...(reflectionId ? { reflectionId } : {}),
     ...(explorerId ? { explorerId } : {}),
     ...(action ? { action } : {}),
     ...(openCreationModal ? { openCreationModal: true } : {}),
+    ...(openReactionComposer ? { openReactionComposer: true } : {}),
     ...(notificationType ? { notificationType } : {}),
   };
 }

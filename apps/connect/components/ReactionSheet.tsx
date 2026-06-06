@@ -360,6 +360,11 @@ export function ReactionSheet({
   const isImageParent = parentMedia?.mediaType === 'image';
   const parentVideoUrl = parentMedia?.mediaType === 'video' ? parentMedia.videoUrl : '';
   const parentImageUrl = parentMedia?.mediaType === 'image' ? parentMedia.imageUrl : '';
+  const suppressAndroidParentVideoSurface =
+    Platform.OS === 'android' &&
+    isVideoParent &&
+    !companionPreviewOpen &&
+    (reactionMode === 'typed' || reactionMode === 'voice');
   const hasValidParentMedia =
     (isVideoParent && !!parentVideoUrl) || (isImageParent && !!parentImageUrl);
   const parentPosterUri = isVideoParent ? parentVideoUrl : parentImageUrl;
@@ -404,6 +409,7 @@ export function ReactionSheet({
   const pendingSeekTargetRef = useRef<number | null>(null);
   const isParentReflectionMutedRef = useRef(false);
   const isPreviewPlayingRef = useRef(false);
+  const parentPreviewToggleBusyRef = useRef(false);
   const lastPanSeekAtRef = useRef(0);
   const lastParentVolumeApplyRef = useRef(0);
   const lastCompanionParentVolumeApplyRef = useRef(0);
@@ -1342,6 +1348,7 @@ export function ReactionSheet({
 
   useEffect(() => {
     if (!isVideoParent || isRecording || recordedUri != null) return;
+    if (isPreviewPlayingRef.current) return;
     void applyParentReflectionVolume();
   }, [
     applyParentReflectionVolume,
@@ -1463,15 +1470,6 @@ export function ReactionSheet({
     (status: AVPlaybackStatus) => {
       if (!status.isLoaded) return;
 
-      // Keep parent mute/volume in sync when expo-av resets isMuted during playback.
-      if (isVideoParent && !isRecordingRef.current) {
-        const now = Date.now();
-        if (now - lastParentVolumeApplyRef.current >= 200) {
-          lastParentVolumeApplyRef.current = now;
-          void applyParentReflectionVolume();
-        }
-      }
-
       const duration = status.durationMillis ?? 0;
       if (duration > 0) {
         setDurationMillis(duration);
@@ -1482,7 +1480,23 @@ export function ReactionSheet({
         return;
       }
 
-      if (isRecording && isVideoParent) {
+      const recordingActive = isRecordingRef.current && isVideoParent;
+      const previewActive =
+        isPreviewPlayingRef.current &&
+        isVideoParent &&
+        !recordingActive &&
+        !recordedUri;
+
+      // Idle/recording volume only — preview audio is set imperatively in toggleParentPlayback.
+      if (isVideoParent && !recordingActive && !previewActive) {
+        const now = Date.now();
+        if (now - lastParentVolumeApplyRef.current >= 200) {
+          lastParentVolumeApplyRef.current = now;
+          void applyParentReflectionVolume();
+        }
+      }
+
+      if (recordingActive) {
         if (!isScrubbingRef.current) {
           positionMillisRef.current = status.positionMillis;
           setPositionMillis(status.positionMillis);
@@ -1492,11 +1506,13 @@ export function ReactionSheet({
 
       if (!isVideoParent) return;
 
-      if (status.isPlaying && !isScrubbingRef.current) {
+      // Track playhead during intentional preview even while Android buffers (isPlaying may lag).
+      if (previewActive && !isScrubbingRef.current) {
         positionMillisRef.current = status.positionMillis;
         setPositionMillis(status.positionMillis);
-        setIsPreviewPlaying(true);
+      }
 
+      if (previewActive && status.isPlaying && !isScrubbingRef.current) {
         const end = trimEndMsRef.current || duration;
         if (
           end > trimStartMsRef.current &&
@@ -1505,19 +1521,16 @@ export function ReactionSheet({
         ) {
           void stopPreviewAtTrimEnd();
         }
-        return;
       }
 
-      if (!isScrubbingRef.current) {
-        setIsPreviewPlaying(false);
-      }
+      // Do not infer "paused" from transient !isPlaying while previewActive — that race was
+      // clearing preview state before playback started and freezing the scrubber on Android.
     },
     [
       applyParentReflectionVolume,
       isVideoParent,
       stopPreviewAtTrimEnd,
       recordedUri,
-      isRecording,
     ],
   );
 
@@ -1528,46 +1541,111 @@ export function ReactionSheet({
     await runVideoCommand(() => videoRef.current?.pauseAsync(), 'pause preview failed');
   }, [isVideoParent]);
 
-  const toggleParentPlayback = useCallback(async () => {
-    if (!isVideoParent || isRecording || recordedUri) return;
-    const status = await videoRef.current?.getStatusAsync();
-    if (!status?.isLoaded) return;
+  const startParentTrimPreview = useCallback(async () => {
+    if (!isVideoParent || isRecordingRef.current || recordedUri) return false;
 
-    if (status.isPlaying) {
-      await pauseParentPreview();
-      const start = trimStartMsRef.current;
-      await commitVideoPosition(start, {
-        shouldPlay: false,
-        volume: getReactionParentVolume(),
-      });
-      return;
+    const status = await videoRef.current?.getStatusAsync().catch(() => null);
+    if (!status?.isLoaded) return false;
+
+    try {
+      await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
+    } catch (error) {
+      console.warn('[ReactionSheet] trim preview audio session failed:', error);
     }
 
     const start = trimStartMsRef.current;
     positionMillisRef.current = start;
     setPositionMillis(start);
     const previewVolume = getParentPreviewPlaybackVolume();
-    await runVideoCommand(
-      () =>
-        videoRef.current?.setStatusAsync({
-          positionMillis: start,
-          shouldPlay: true,
-          isMuted: false,
-          volume: previewVolume,
-        }),
-      'toggle playback failed',
-    );
-    setIsPreviewPlaying(true);
+
     isPreviewPlayingRef.current = true;
+    setIsPreviewPlaying(true);
+
+    try {
+      await videoRef.current?.setStatusAsync({
+        positionMillis: start,
+        shouldPlay: false,
+        isMuted: false,
+        volume: previewVolume,
+      });
+      await videoRef.current?.playAsync();
+    } catch (error) {
+      if (!isSeekInterrupted(error)) {
+        console.warn('[ReactionSheet] start trim preview failed:', error);
+      }
+      isPreviewPlayingRef.current = false;
+      setIsPreviewPlaying(false);
+      return false;
+    }
+
+    return true;
+  }, [getParentPreviewPlaybackVolume, isVideoParent, recordedUri]);
+
+  const toggleParentPlayback = useCallback(async () => {
+    if (!isVideoParent || isRecording || recordedUri) return;
+    if (parentPreviewToggleBusyRef.current) return;
+    parentPreviewToggleBusyRef.current = true;
+
+    try {
+      if (isPreviewPlayingRef.current) {
+        await pauseParentPreview();
+        const start = trimStartMsRef.current;
+        await commitVideoPosition(start, {
+          shouldPlay: false,
+          volume: getReactionParentVolume(),
+        });
+        return;
+      }
+
+      await startParentTrimPreview();
+    } finally {
+      parentPreviewToggleBusyRef.current = false;
+    }
   }, [
     commitVideoPosition,
-    getParentPreviewPlaybackVolume,
     getReactionParentVolume,
     isRecording,
     isVideoParent,
     pauseParentPreview,
     recordedUri,
+    startParentTrimPreview,
   ]);
+
+  // expo-av progress callbacks can stall while the player buffers; poll during preview so the
+  // trim scrubber tracks like ReflectionComposer's expo-video timeUpdate listener.
+  useEffect(() => {
+    if (!isPreviewPlaying || !isVideoParent || isRecording || recordedUri) return;
+
+    let cancelled = false;
+    const pollPlayhead = async () => {
+      if (cancelled || isScrubbingRef.current || !isPreviewPlayingRef.current) return;
+      const status = await videoRef.current?.getStatusAsync().catch(() => null);
+      if (!status?.isLoaded || cancelled || isScrubbingRef.current) return;
+      positionMillisRef.current = status.positionMillis;
+      setPositionMillis(status.positionMillis);
+
+      const duration = status.durationMillis ?? durationMillisRef.current;
+      const end = trimEndMsRef.current || duration;
+      if (
+        status.isPlaying &&
+        end > trimStartMsRef.current &&
+        status.positionMillis >= end - PREVIEW_END_EPSILON_MS &&
+        status.positionMillis > trimStartMsRef.current + PREVIEW_END_EPSILON_MS
+      ) {
+        void stopPreviewAtTrimEnd();
+      }
+    };
+
+    void pollPlayhead();
+    const interval = setInterval(() => {
+      void pollPlayhead();
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isPreviewPlaying, isRecording, isVideoParent, recordedUri, stopPreviewAtTrimEnd]);
 
   const toggleParentReflectionMute = useCallback(() => {
     userToggledMuteRef.current = true;
@@ -2054,7 +2132,10 @@ export function ReactionSheet({
         const recording = await startAndroidExpoAvVoiceRecordingAsync({
           isVideoParent,
           trimStartMs: trimStartMsRef.current,
-          startParentPlayback: isVideoParent ? startParentRecordingPlayback : undefined,
+          startParentPlayback:
+            isVideoParent && !suppressAndroidParentVideoSurface
+              ? startParentRecordingPlayback
+              : undefined,
         });
         voiceExpoAvRecordingRef.current = recording;
         setIsVoiceRecording(true);
@@ -2095,6 +2176,7 @@ export function ReactionSheet({
     isVoiceRecording,
     micReady,
     startParentRecordingPlayback,
+    suppressAndroidParentVideoSurface,
     unloadPreviewAudio,
     voiceRecorder,
   ]);
@@ -2610,7 +2692,14 @@ export function ReactionSheet({
                 isAndroidVideoSelfie && styles.mediaCardAndroidVideoSelfie,
               ]}
             >
-              {isVideoParent ? (
+              {isVideoParent && suppressAndroidParentVideoSurface ? (
+                <View style={[styles.parentVideoSurface, styles.parentVideoSurfacePlaceholder]}>
+                  <FontAwesome name="film" size={22} color="rgba(255,255,255,0.5)" />
+                  <Text style={styles.parentVideoPlaceholderText}>
+                    Reflection video ready
+                  </Text>
+                </View>
+              ) : isVideoParent ? (
                 <>
                   <GestureDetector
                     gesture={
@@ -3404,6 +3493,16 @@ const styles = StyleSheet.create({
     minHeight: 0,
     backgroundColor: '#101820',
     overflow: 'hidden',
+  },
+  parentVideoSurfacePlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  parentVideoPlaceholderText: {
+    color: 'rgba(255,255,255,0.62)',
+    fontSize: 13,
+    fontWeight: '600',
   },
   parentImageSurface: {
     flex: 1,

@@ -228,6 +228,8 @@ type SentTimelineScreenProps = {
   onEditReflection?: (event: Event) => void;
   /** Open ReplayModal for a reflection tapped from a push notification. */
   deepLinkReflectionId?: string | null;
+  /** When true, open ReactionSheet instead of ReplayModal for this deep link. */
+  deepLinkOpenReactionComposer?: boolean;
   /** Explorer the deep link targets; timeline waits until context matches. */
   deepLinkExplorerId?: string | null;
   /** Bumped when a slow-lane digest deep link lands on this timeline. */
@@ -247,6 +249,7 @@ function timestampToISO(ts: any): string {
 export default function SentTimelineScreen({
   onEditReflection,
   deepLinkReflectionId,
+  deepLinkOpenReactionComposer = false,
   deepLinkExplorerId,
   timelineRefreshNonce = 0,
   onDeepLinkHandled,
@@ -1265,6 +1268,44 @@ export default function SentTimelineScreen({
         );
         if (cancelled) return;
         if (eventForReplay) {
+          if (selectedReflectionIdRef.current === reflectionId && !deepLinkOpenReactionComposer) {
+            deepLinkHandledRef.current = reflectionId;
+            if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+              timelineDeepLinkResolvingReflectionId = null;
+            }
+            timelineDeepLinkPresentedReflectionId = reflectionId;
+            return;
+          }
+          if (reactionTarget?.id === reflectionId && deepLinkOpenReactionComposer) {
+            deepLinkHandledRef.current = reflectionId;
+            if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+              timelineDeepLinkResolvingReflectionId = null;
+            }
+            timelineDeepLinkPresentedReflectionId = reflectionId;
+            return;
+          }
+
+          const videoUrl = asOptionalString(eventForReplay.video_url);
+          const imageUrl = asOptionalString(eventForReplay.image_url);
+
+          if (deepLinkOpenReactionComposer && (videoUrl || imageUrl)) {
+            console.log('[DeepLink] timeline opening ReactionSheet');
+            deepLinkHandledRef.current = reflectionId;
+            if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+              timelineDeepLinkResolvingReflectionId = null;
+            }
+            timelineDeepLinkPresentedReflectionId = reflectionId;
+            setSelectedReflection(null);
+            setSelectedReactionSession(null);
+            setReactionTarget({
+              id: reflectionId,
+              media: videoUrl
+                ? { mediaType: 'video', videoUrl }
+                : { mediaType: 'image', imageUrl: imageUrl! },
+            });
+            return;
+          }
+
           if (selectedReflectionIdRef.current === reflectionId) {
             deepLinkHandledRef.current = reflectionId;
             if (timelineDeepLinkResolvingReflectionId === reflectionId) {
@@ -1306,7 +1347,14 @@ export default function SentTimelineScreen({
         timelineDeepLinkResolvingReflectionId = null;
       }
     };
-  }, [currentExplorerId, deepLinkExplorerId, deepLinkReflectionId, explorerLoading]);
+  }, [
+    currentExplorerId,
+    deepLinkExplorerId,
+    deepLinkOpenReactionComposer,
+    deepLinkReflectionId,
+    explorerLoading,
+    reactionTarget?.id,
+  ]);
 
   useEffect(() => {
     if (!deepLinkReflectionId) {
@@ -1924,7 +1972,15 @@ export default function SentTimelineScreen({
         visible={!!reactionTarget}
         parentReflectionId={reactionTarget?.id ?? ''}
         parentMedia={reactionTarget?.media ?? null}
-        onClose={() => setReactionTarget(null)}
+        onClose={() => {
+          const openedViaDeepLink = deepLinkHandledRef.current !== null;
+          setReactionTarget(null);
+          if (openedViaDeepLink) {
+            deepLinkHandledRef.current = null;
+            timelineDeepLinkPresentedReflectionId = null;
+            onDeepLinkHandled?.();
+          }
+        }}
         onUploadSuccess={(parentReflectionId, relationshipId) => {
           setReflections((prev) =>
             prev.map((reflection) =>

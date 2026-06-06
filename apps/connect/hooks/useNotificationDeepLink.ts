@@ -17,6 +17,7 @@ type DeepLinkTarget = {
   explorerId?: string;
   action?: 'camera' | 'gallery' | 'search';
   openCreationModal?: boolean;
+  openReactionComposer?: boolean;
 };
 
 // Module-level state — survives across remounts of the consuming component so
@@ -106,6 +107,7 @@ export function useNotificationDeepLink() {
           notificationId: id,
           reflectionId: pendingRoute.reflectionId,
           explorerId: targetExplorerId || undefined,
+          openReactionComposer: Boolean(pendingRoute.openReactionComposer),
         };
         moduleLastTarget = nextTarget;
         markNotificationPresented(id);
@@ -168,6 +170,7 @@ export function useNotificationDeepLink() {
   return {
     deepLinkReflectionId: target?.reflectionId ?? null,
     deepLinkExplorerId: target?.explorerId ?? null,
+    deepLinkOpenReactionComposer: target?.openReactionComposer ?? false,
     timelineRefreshNonce,
     deepLinkOpenCreationModal,
     deepLinkAction,
