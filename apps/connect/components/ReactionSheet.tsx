@@ -2358,8 +2358,6 @@ export function ReactionSheet({
     cameraPermission?.granted === true || nativeCameraGranted === true;
   const isCameraDenied =
     nativeCameraGranted === false && cameraPermission?.granted !== true;
-  const useAndroidPersistentCamera = Platform.OS === 'android' && isCameraGranted;
-
   const canRecordSelfie =
     reactionMode === 'selfie' &&
     !recordedUri &&
@@ -2727,71 +2725,16 @@ export function ReactionSheet({
             ]}
           >
             <View style={styles.mediaCard}>
-              {useAndroidPersistentCamera ? (
-                <View
-                  style={[
-                    // Both image and video parents render the front camera as a centered portrait
-                    // 3:4 box (matching the selfie's natural shape and iOS). Each style is complete
-                    // and anchored to its pane's fixed height — no absolute-fill / aspectRatio mix,
-                    // which previously let the box collapse to a wide "speakeasy" slot after the app
-                    // returned from the background.
-                    isImageParent
-                      ? styles.cameraStageHostAndroidImageSelfie
-                      : styles.cameraStageHostAndroidVideoSelfie,
-                    // The Android camera renders as a native SurfaceView that ignores RN z-index and
-                    // sibling cover views, so an opaque overlay can't hide it. When we're not in
-                    // selfie mode, move the whole camera host off-screen (it stays mounted/warm to
-                    // avoid a black-box remount) so it can't bleed onto the screen.
-                    reactionMode !== 'selfie' && styles.cameraStageOffscreenAndroid,
-                  ]}
-                  collapsable={false}
-                  pointerEvents={reactionMode === 'selfie' ? 'auto' : 'none'}
-                >
-                  <CameraView
-                    key={cameraInstanceKey}
-                    ref={cameraRef}
-                    style={styles.cameraPreview}
-                    facing="front"
-                    mode="video"
-                    mirror={false}
-                    videoQuality={isVideoParent ? '480p' : '720p'}
-                    active={isSelfieCameraActive}
-                    onCameraReady={() => {
-                      logReactionDebug('camera:ready', { cameraInstanceKey, reactionMode });
-                      setCameraReady(true);
-                      setIsCameraRestoring(false);
-                    }}
-                    onMountError={(event) => {
-                      logReactionDebug('camera:mount-error', {
-                        message: event.message,
-                        cameraInstanceKey,
-                      });
-                      console.warn('[ReactionSheet] camera mount error:', event.message);
-                      setCameraReady(false);
-                      setIsCameraRestoring(false);
-                    }}
-                  />
-                  {reactionMode === 'selfie' && isCameraRestoring ? (
-                    <View style={styles.cameraRestoringOverlay} pointerEvents="none">
-                      <ActivityIndicator color="#fff" size="large" />
-                      <Text style={styles.takeCompleteHint}>Starting camera…</Text>
-                    </View>
-                  ) : null}
-                </View>
-              ) : null}
-
               <View
                 style={[
                   styles.modeForeground,
                   reactionMode === 'selfie' &&
-                    useAndroidPersistentCamera &&
                     !isSelfieSaving &&
                     !isSelfieTakeComplete &&
                     styles.modeForegroundTransparent,
                 ]}
                 pointerEvents={
                   reactionMode === 'selfie' &&
-                  useAndroidPersistentCamera &&
                   !isSelfieSaving &&
                   !isSelfieTakeComplete
                     ? 'box-none'
@@ -2907,11 +2850,14 @@ export function ReactionSheet({
                     Preview how Companions will see it, or retake if you want another try.
                   </Text>
                 </View>
-              ) : !useAndroidPersistentCamera && reactionMode === 'selfie' && isCameraGranted ? (
+              ) : reactionMode === 'selfie' && isCameraGranted ? (
                 <View
                   style={[
                     styles.cameraStageHost,
                     Platform.OS === 'ios' && styles.cameraStageHostIos,
+                    Platform.OS === 'android' &&
+                      isImageParent &&
+                      styles.cameraStageHostAndroidImageSelfie,
                     isAndroidVideoSelfie && styles.cameraStageHostAndroidVideoSelfie,
                   ]}
                   collapsable={false}
@@ -2953,7 +2899,7 @@ export function ReactionSheet({
                     </View>
                   ) : null}
                 </View>
-              ) : reactionMode === 'selfie' && useAndroidPersistentCamera ? null : reactionMode === 'selfie' && isCameraDenied ? (
+              ) : reactionMode === 'selfie' && isCameraDenied ? (
                 <View style={styles.permissionFallback}>
                   <Text style={styles.permissionText}>
                     Camera access is required to record a selfie reaction.
@@ -3383,15 +3329,6 @@ const styles = StyleSheet.create({
   modeForegroundTransparent: {
     backgroundColor: 'transparent',
   },
-  cameraStagePersist: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 1,
-  },
-  cameraStageOffscreenAndroid: {
-    // Push the native camera surface far off-screen while keeping it mounted. SurfaceView ignores
-    // overflow clipping and z-index, so this is the only reliable way to hide it in non-selfie modes.
-    transform: [{ translateX: -100000 }],
-  },
   cameraStageHostAndroidImageSelfie: {
     // Centered portrait 3:4 box so the front camera shows natural selfie framing instead of a
     // zoomed-in near-square crop. The aspect ratio is anchored to a DEFINITE height (the camera
@@ -3558,11 +3495,8 @@ const styles = StyleSheet.create({
   },
   cameraStageHost: {
     flex: 1,
-    // No minHeight here: this host is position:absolute (cameraStagePersist) filling its card, and a
-    // minHeight taller than the card makes the Android camera SurfaceView overflow past the bottom.
-    // Android does not clip the native surface to the parent's overflow:hidden, so it bleeds onto
-    // the screen in voice/typed mode (where the cover is sized to the card). The camera's size is
-    // guaranteed by the camera pane's own minHeight instead.
+    // No minHeight here: the camera pane owns the vertical size. A taller CameraView host can make
+    // Android's native surface overflow its React Native card on some Samsung devices.
     minHeight: 0,
     width: '100%',
     backgroundColor: '#000',
