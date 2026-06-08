@@ -74,6 +74,8 @@ const SELFIE_CAMERA_READY_TIMEOUT_MS = 8000;
 const SELFIE_CAMERA_READY_FALLBACK_MS = Platform.OS === 'ios' ? 1500 : 800;
 /** iOS SDK 52: yield after onCameraReady so native mode=video movie output is wired before recordAsync. */
 const SELFIE_VIDEO_MODE_SETTLE_MS = 250;
+/** Native recordAsync finalize after stopRecording — not counted against hold duration. */
+const SELFIE_RECORD_SAVE_TIMEOUT_MS = 45000;
 /** Give expo-video a beat to unload the selfie preview asset before remounting CameraView. */
 const SELFIE_RETAKE_PLAYER_RELEASE_MS = Platform.OS === 'ios' ? 650 : 200;
 /** Keep the Reflection present but clearly below the selfie reaction audio in preview. */
@@ -465,6 +467,7 @@ export function ReactionSheet({
     player.audioMixingMode = 'mixWithOthers';
   });
   const recordingPromiseRef = useRef<Promise<{ uri: string } | undefined> | null>(null);
+  const recordSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordingStartedAtRef = useRef(0);
   const cameraRecordingStartedRef = useRef(false);
   const parentVideoWidthRef = useRef(0);
@@ -1426,6 +1429,10 @@ export function ReactionSheet({
     setCameraReady(false);
     setIsCameraRestoring(false);
     setIsUploading(false);
+    if (recordSaveTimeoutRef.current) {
+      clearTimeout(recordSaveTimeoutRef.current);
+      recordSaveTimeoutRef.current = null;
+    }
     recordingPromiseRef.current = null;
     recordingAudioReassertCancelRef.current?.();
     recordingAudioReassertCancelRef.current = null;
@@ -1887,10 +1894,19 @@ export function ReactionSheet({
     }
   }, [isVideoParent, syncParentVideoAudioAsync]);
 
-  const beginCameraRecording = useCallback((sessionId: number): Promise<boolean> => {
-    const attachPromise = (recordingPromise: Promise<{ uri: string } | undefined>) => {
-      recordingPromiseRef.current = recordingPromise;
-      const saveTimeout = setTimeout(() => {
+  const clearRecordSaveTimeout = useCallback(() => {
+    if (recordSaveTimeoutRef.current) {
+      clearTimeout(recordSaveTimeoutRef.current);
+      recordSaveTimeoutRef.current = null;
+    }
+  }, []);
+
+  const armRecordSaveTimeout = useCallback(
+    (sessionId: number) => {
+      clearRecordSaveTimeout();
+      const recordingPromise = recordingPromiseRef.current;
+      if (!recordingPromise) return;
+      recordSaveTimeoutRef.current = setTimeout(() => {
         if (recordingPromiseRef.current !== recordingPromise) return;
         recordingPromiseRef.current = null;
         cameraRecordingStartedRef.current = false;
@@ -1902,9 +1918,16 @@ export function ReactionSheet({
           'Save Timed Out',
           'Could not finish saving your selfie reaction. Please try again.',
         );
-      }, 15000);
+      }, SELFIE_RECORD_SAVE_TIMEOUT_MS);
+    },
+    [clearRecordSaveTimeout, restoreAfterSelfieCaptureAsync],
+  );
+
+  const beginCameraRecording = useCallback((sessionId: number): Promise<boolean> => {
+    const attachPromise = (recordingPromise: Promise<{ uri: string } | undefined>) => {
+      recordingPromiseRef.current = recordingPromise;
       const finalizeSave = () => {
-        clearTimeout(saveTimeout);
+        clearRecordSaveTimeout();
         setSelfieCaptureFinalizePending(false);
         setIsSelfieSaving(false);
         void restoreAfterSelfieCaptureAsync();
@@ -2083,7 +2106,7 @@ export function ReactionSheet({
         resolve(false);
       })();
     });
-  }, [restoreAfterSelfieCaptureAsync]);
+  }, [clearRecordSaveTimeout, restoreAfterSelfieCaptureAsync]);
 
   const scheduleRecordingParentReasserts = useCallback(
     (sessionId: number, syncStart: number) => {
@@ -2166,6 +2189,7 @@ export function ReactionSheet({
 
       try {
         cameraRef.current?.stopRecording();
+        armRecordSaveTimeout(sessionId);
         logComposeDiag('selfie:stop-recording', {
           sessionId,
           hasCameraRef: !!cameraRef.current,
@@ -2174,7 +2198,7 @@ export function ReactionSheet({
         console.warn('[ReactionSheet] stopRecording failed:', error);
       }
     })();
-  }, [isVideoParent, restoreAfterSelfieCaptureAsync]);
+  }, [armRecordSaveTimeout, isVideoParent, restoreAfterSelfieCaptureAsync]);
 
   useEffect(() => {
     stopSelfieRecordingRef.current = stopSelfieRecording;
