@@ -81,6 +81,13 @@ const SELFIE_RETAKE_PLAYER_RELEASE_MS = Platform.OS === 'ios' ? 650 : 200;
 /** Keep the Reflection present but clearly below the selfie reaction audio in preview. */
 const SELFIE_PREVIEW_PARENT_DUCK_VOLUME = 0.22;
 const SELFIE_PREVIEW_PLAYER_READY_TIMEOUT_MS = 10000;
+/**
+ * Some Samsung/Android builds emit rapid active↔background AppState transitions when the
+ * front camera opens. Treating each blip as a real background unmounts CameraView, which
+ * re-triggers the camera and creates a mount/unmount flash loop. Wait this long before
+ * acting on background while the selfie sheet is open.
+ */
+const ANDROID_SELFIE_APPSTATE_BACKGROUND_MS = 900;
 
 function waitForCompanionSelfiePlayerReady(
   player: VideoPlayer,
@@ -434,9 +441,11 @@ export function ReactionSheet({
   const [isStartingVoiceRecording, setIsStartingVoiceRecording] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [nativeCameraGranted, setNativeCameraGranted] = useState<boolean | null>(null);
-  // Tracks whether the app is foregrounded. Used to release the Android camera while backgrounded
-  // (keeping `active` true across background leaves CameraX unable to re-bind a preview on resume).
+  // Tracks whether the app is foregrounded for camera session control (`active` prop, ready reset).
+  // On Android while the selfie sheet is open, background/inactive AppState blips are debounced so
+  // a CameraView mount/unmount loop cannot feed back into more AppState events (Samsung S25 class).
   const [isAppForeground, setIsAppForeground] = useState(true);
+  const appStateBackgroundDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
   const [showCompanionPreviewReplay, setShowCompanionPreviewReplay] = useState(false);
@@ -1402,26 +1411,75 @@ export function ReactionSheet({
     );
   }, [requestCameraPermission]);
 
+  const applySelfieAppBackgroundSideEffects = useCallback(() => {
+    if (isRecordingRef.current) {
+      stopSelfieRecordingRef.current?.();
+      return;
+    }
+    if (selfieCaptureArmingRef.current) {
+      selfieCaptureArmingRef.current = false;
+      setIsSelfieCaptureArming(false);
+      setIsCameraRestoring(false);
+      recordingSessionIdRef.current += 1;
+    }
+  }, []);
+
   useEffect(() => {
     if (!visible || reactionMode !== 'selfie') return;
+
+    const clearAppStateBackgroundDebounce = () => {
+      if (appStateBackgroundDebounceRef.current) {
+        clearTimeout(appStateBackgroundDebounceRef.current);
+        appStateBackgroundDebounceRef.current = null;
+      }
+    };
+
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
+        if (appStateBackgroundDebounceRef.current) {
+          clearAppStateBackgroundDebounce();
+          if (Platform.OS === 'android') {
+            logComposeDiag('selfie:app-background-cancelled', {});
+          }
+        }
         setIsAppForeground(true);
         void ensureCameraPermission();
         return;
       }
-      setIsAppForeground(false);
-      if (isRecordingRef.current) {
-        stopSelfieRecordingRef.current?.();
-      } else if (selfieCaptureArmingRef.current) {
-        selfieCaptureArmingRef.current = false;
-        setIsSelfieCaptureArming(false);
-        setIsCameraRestoring(false);
-        recordingSessionIdRef.current += 1;
+
+      if (Platform.OS === 'android') {
+        if (appStateBackgroundDebounceRef.current) return;
+        logComposeDiag('selfie:app-background-debounce', { nextState });
+        appStateBackgroundDebounceRef.current = setTimeout(() => {
+          appStateBackgroundDebounceRef.current = null;
+          logComposeDiag('selfie:app-background-confirmed', { nextState });
+          setIsAppForeground(false);
+          applySelfieAppBackgroundSideEffects();
+        }, ANDROID_SELFIE_APPSTATE_BACKGROUND_MS);
+        return;
       }
+
+      setIsAppForeground(false);
+      applySelfieAppBackgroundSideEffects();
     });
-    return () => subscription.remove();
-  }, [visible, reactionMode, ensureCameraPermission]);
+
+    return () => {
+      subscription.remove();
+      clearAppStateBackgroundDebounce();
+    };
+  }, [visible, reactionMode, ensureCameraPermission, applySelfieAppBackgroundSideEffects]);
+
+  useEffect(() => {
+    if (visible) {
+      setIsAppForeground(true);
+      return;
+    }
+    if (appStateBackgroundDebounceRef.current) {
+      clearTimeout(appStateBackgroundDebounceRef.current);
+      appStateBackgroundDebounceRef.current = null;
+    }
+    setIsAppForeground(true);
+  }, [visible]);
 
   useEffect(() => {
     cameraReadyRef.current = cameraReady;
@@ -1435,10 +1493,16 @@ export function ReactionSheet({
   // selfie mode, or app backgrounded). The recordAsync retry loop absorbs the
   // brief window while the suspended session spins back up.
   useEffect(() => {
-    const cameraMounted = visible && reactionMode === 'selfie' && isAppForeground;
-    if (cameraMounted) return;
-    setCameraReady(false);
-    setIsCameraRestoring(false);
+    const selfieSessionOpen = visible && reactionMode === 'selfie';
+    if (!selfieSessionOpen) {
+      setCameraReady(false);
+      setIsCameraRestoring(false);
+      return;
+    }
+    if (!isAppForeground) {
+      setCameraReady(false);
+      setIsCameraRestoring(false);
+    }
   }, [visible, reactionMode, isAppForeground]);
 
   // Safety net for expo-camera's flaky onCameraReady: once the persistent,
@@ -2873,8 +2937,12 @@ export function ReactionSheet({
   // broke retake. We never unmount it; we only suspend the capture session via
   // the `active` prop while the preview is open, then resume it on retake.
   const isSelfieCameraMounted =
-    visible && reactionMode === 'selfie' && isAppForeground && isCameraGranted;
-  const isSelfieRecordCameraActive = isSelfieCameraMounted && !companionPreviewOpen;
+    visible &&
+    reactionMode === 'selfie' &&
+    isCameraGranted &&
+    (Platform.OS === 'android' || isAppForeground);
+  const isSelfieRecordCameraActive =
+    isSelfieCameraMounted && !companionPreviewOpen && isAppForeground;
   const isCameraDenied =
     nativeCameraGranted === false && cameraPermission?.granted !== true;
   const canRecordSelfie =
