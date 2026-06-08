@@ -28,7 +28,7 @@ import {
 } from '@projectmirror/shared';
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
 import { Camera, CameraView, useCameraPermissions } from 'expo-camera';
-import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
+import { useVideoPlayer, VideoView, type VideoPlayer, type VideoSource } from 'expo-video';
 import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
@@ -80,6 +80,41 @@ const SELFIE_RECORD_SAVE_TIMEOUT_MS = 45000;
 const SELFIE_RETAKE_PLAYER_RELEASE_MS = Platform.OS === 'ios' ? 650 : 200;
 /** Keep the Reflection present but clearly below the selfie reaction audio in preview. */
 const SELFIE_PREVIEW_PARENT_DUCK_VOLUME = 0.22;
+const SELFIE_PREVIEW_PLAYER_READY_TIMEOUT_MS = 10000;
+
+function waitForCompanionSelfiePlayerReady(
+  player: VideoPlayer,
+  timeoutMs = SELFIE_PREVIEW_PLAYER_READY_TIMEOUT_MS,
+): Promise<boolean> {
+  try {
+    if (player.status === 'readyToPlay') return Promise.resolve(true);
+    if (player.status === 'error') return Promise.resolve(false);
+  } catch {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      subscription.remove();
+      clearTimeout(timer);
+      resolve(ready);
+    };
+    const subscription = player.addListener('statusChange', (payload) => {
+      if (payload.status === 'readyToPlay') finish(true);
+      if (payload.status === 'error') finish(false);
+    });
+    const timer = setTimeout(() => {
+      try {
+        finish(player.status === 'readyToPlay');
+      } catch {
+        finish(false);
+      }
+    }, timeoutMs);
+  });
+}
 
 type ReactionComposeMode = ReactionType;
 
@@ -717,14 +752,10 @@ export function ReactionSheet({
         duration,
       });
 
-      // Recover from the expo-camera teardown interruption (iOS only — this targets the iOS
-      // AVCaptureSession deferred teardown; Android's media stack does not have this failure mode
-      // and must not be restarted out from under itself). If the player paused while we still
-      // expect it to be playing, the clip is not finishing (no stop pending), and we are not near
-      // the end, the OS interrupted us — restart from the top. The interruption is a one-time event
-      // per preview, so a single restart almost always lands cleanly; we cap attempts to avoid any
-      // chance of a restart loop.
-      if (Platform.OS !== 'ios') return;
+      // Recover when playback stalls after we asked the player to start. iOS: expo-camera's
+      // deferred AVCaptureSession teardown interrupts mid-clip — resume from current position.
+      // Android: play() is often called before ExoPlayer is ready or while capture audio is still
+      // active — retry from the top after releasing the session.
       if (payload.isPlaying) return;
       if (!selfiePreviewExpectPlayingRef.current) return;
       if (companionPreviewStopPendingRef.current) return;
@@ -734,16 +765,15 @@ export function ReactionSheet({
       const reachedEnd = dur > 0 && pos >= dur - 0.35;
       if (reachedEnd) return;
 
-      // If playback advanced meaningfully since the last interruption, we're making forward progress
-      // (a long clip can take several interruptions while the audio session settles), so reset the
-      // stall counter. We only give up when stuck at roughly the same spot repeatedly.
-      if (pos > selfiePreviewLastResumePosRef.current + 0.4) {
+      if (Platform.OS === 'android') {
+        if (pos > 0.35) return;
+      } else if (pos > selfiePreviewLastResumePosRef.current + 0.4) {
         selfiePreviewResumeAttemptsRef.current = 0;
       }
       selfiePreviewLastResumePosRef.current = pos;
 
       if (selfiePreviewResumeAttemptsRef.current >= 3) {
-        logReactionDebug('selfie-preview:resume-giveup', { pos, dur });
+        logReactionDebug('selfie-preview:resume-giveup', { pos, dur, platform: Platform.OS });
         return;
       }
       selfiePreviewResumeAttemptsRef.current += 1;
@@ -751,6 +781,7 @@ export function ReactionSheet({
         attempt: selfiePreviewResumeAttemptsRef.current,
         pos,
         dur,
+        platform: Platform.OS,
       });
       if (selfiePreviewResumeTimerRef.current) {
         clearTimeout(selfiePreviewResumeTimerRef.current);
@@ -765,14 +796,28 @@ export function ReactionSheet({
         ) {
           return;
         }
-        try {
-          // Resume from where it paused (do NOT seek to 0) so each recovery advances the clip
-          // instead of replaying the first second over and over.
-          companionSelfiePlayer.play();
-        } catch {
-          /* player may be released */
-        }
-      }, 140);
+        void (async () => {
+          if (Platform.OS === 'android') {
+            await releaseConnectCaptureAudioAsync();
+          }
+          if (
+            !selfiePreviewExpectPlayingRef.current ||
+            companionPreviewStopPendingRef.current ||
+            !visibleRef.current ||
+            !companionPreviewOpenRef.current
+          ) {
+            return;
+          }
+          try {
+            if (Platform.OS === 'android') {
+              companionSelfiePlayer.currentTime = 0;
+            }
+            companionSelfiePlayer.play();
+          } catch {
+            /* player may be released */
+          }
+        })();
+      }, Platform.OS === 'android' ? 220 : 140);
     });
     return () => {
       statusSub.remove();
@@ -813,7 +858,14 @@ export function ReactionSheet({
     }
     if (!canRunCompanionPreview()) return;
 
-    if (isVideoParent && parentPreviewStartMs != null) {
+    const deferParentForAndroidSelfie =
+      Platform.OS === 'android' &&
+      isSelfiePreview &&
+      isVideoParent &&
+      parentPreviewStartMs != null;
+
+    const startCompanionPreviewParent = async () => {
+      if (!isVideoParent || parentPreviewStartMs == null) return;
       await runVideoCommand(
         () =>
           companionParentRef.current?.setStatusAsync({
@@ -824,20 +876,21 @@ export function ReactionSheet({
           }),
         'failed to start companion preview',
       );
+    };
+
+    if (!deferParentForAndroidSelfie) {
+      await startCompanionPreviewParent();
     }
     if (!canRunCompanionPreview()) return;
 
     if (isSelfiePreview) {
-      if (Platform.OS === 'ios') {
-        // iOS (old architecture): expo-camera's AVCaptureSession keeps holding the global audio
-        // session after the CameraView unmounts, and its deferred teardown calls
-        // AVAudioSession.setActive(false) ~0.6-1s later, which interrupts whatever is playing.
-        // releaseConnectCaptureAudioAsync waits out OSStatus 561017449 to bring up a clean playback
-        // session here; it reduces, but does not eliminate, that deferred interruption — the
-        // playingChange recovery (selfiePreviewExpectPlayingRef) restarts the clip if it still hits.
-        await releaseConnectCaptureAudioAsync();
-        if (!canRunCompanionPreview()) return;
+      // Camera capture keeps the audio session in recording mode on both platforms until we
+      // explicitly release it. iOS also needs mixing-mode setup; Android often loses audio focus
+      // to expo-av if the parent starts before ExoPlayer is ready (parent start is deferred above).
+      await releaseConnectCaptureAudioAsync();
+      if (!canRunCompanionPreview()) return;
 
+      if (Platform.OS === 'ios') {
         if (isVideoParent) {
           // Video parent: the parent video is also playing, so the selfie must coexist with it.
           try {
@@ -873,16 +926,44 @@ export function ReactionSheet({
             return;
           }
         }
+      } else if (isVideoParent) {
+        try {
+          companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
+        } catch (error) {
+          if (!canRunCompanionPreview()) return;
+          console.warn('[ReactionSheet] selfie preview player unavailable:', error);
+          selfiePreviewExpectPlayingRef.current = false;
+          setCompanionPreviewPlaying(false);
+          setShowCompanionPreviewReplay(true);
+          return;
+        }
       }
-      // Arm interruption recovery before starting: the playingChange listener will resume the clip
-      // if expo-camera's deferred teardown interrupts playback in the next ~1s.
+      // Arm interruption recovery before starting: playingChange will retry if capture teardown or
+      // an early play() race leaves the clip stalled at the start.
       selfiePreviewResumeAttemptsRef.current = 0;
       selfiePreviewLastResumePosRef.current = 0;
+      try {
+        companionSelfiePlayer.pause();
+        companionSelfiePlayer.currentTime = 0;
+      } catch (error) {
+        if (!canRunCompanionPreview()) return;
+        console.warn('[ReactionSheet] selfie preview player reset failed:', error);
+        selfiePreviewExpectPlayingRef.current = false;
+        setCompanionPreviewPlaying(false);
+        setShowCompanionPreviewReplay(true);
+        return;
+      }
+
+      const playerReady = await waitForCompanionSelfiePlayerReady(companionSelfiePlayer);
+      if (!playerReady) {
+        logReactionDebug('selfie-preview:not-ready', { isVideoParent });
+      }
+      if (!canRunCompanionPreview()) return;
+
       selfiePreviewExpectPlayingRef.current = true;
       try {
-        companionSelfiePlayer.currentTime = 0;
         companionSelfiePlayer.play();
-        logReactionDebug('selfie-preview:start', { isVideoParent });
+        logReactionDebug('selfie-preview:start', { isVideoParent, playerReady });
       } catch (error) {
         if (!canRunCompanionPreview()) return;
         console.warn('[ReactionSheet] selfie preview playback failed:', error);
@@ -896,6 +977,10 @@ export function ReactionSheet({
           );
         }
         return;
+      }
+
+      if (deferParentForAndroidSelfie) {
+        await startCompanionPreviewParent();
       }
     }
 
@@ -970,6 +1055,8 @@ export function ReactionSheet({
   const replayCompanionPreview = useCallback(() => {
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
+    companionPreviewPlayingRef.current = false;
+    companionPreviewStartInFlightRef.current = false;
     void startCompanionPreview();
   }, [startCompanionPreview]);
 
@@ -1926,17 +2013,17 @@ export function ReactionSheet({
   const beginCameraRecording = useCallback((sessionId: number): Promise<boolean> => {
     const attachPromise = (recordingPromise: Promise<{ uri: string } | undefined>) => {
       recordingPromiseRef.current = recordingPromise;
-      const finalizeSave = () => {
+      const finalizeSave = async () => {
         clearRecordSaveTimeout();
         setSelfieCaptureFinalizePending(false);
         setIsSelfieSaving(false);
-        void restoreAfterSelfieCaptureAsync();
+        await restoreAfterSelfieCaptureAsync();
       };
       void recordingPromise
-        .then((result) => {
+        .then(async (result) => {
           if (recordingPromiseRef.current !== recordingPromise) return;
           recordingPromiseRef.current = null;
-          finalizeSave();
+          await finalizeSave();
           if (result?.uri) {
             logComposeDiag('selfie:record-saved', { sessionId, hasUri: true });
             setRecordedUri(result.uri);
@@ -1954,13 +2041,13 @@ export function ReactionSheet({
             );
           }
         })
-        .catch((error) => {
+        .catch(async (error) => {
           if (recordingPromiseRef.current !== recordingPromise) return;
           recordingPromiseRef.current = null;
           cameraRecordingStartedRef.current = false;
           isRecordingRef.current = false;
           setIsRecording(false);
-          finalizeSave();
+          await finalizeSave();
           logComposeDiag(
             'selfie:record-failed',
             { sessionId, message: error instanceof Error ? error.message : 'unknown' },
