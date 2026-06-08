@@ -46,6 +46,7 @@ import { ReplayModal } from '@/components/ReplayModal';
 import {
   buildEventForReplay,
   fetchMirrorEventById,
+  fetchReactionEventByIdForPlayback,
   fetchReactionEventForPlayback,
   fetchReactionTypesByRelationship,
   resolveReactionResponderFaces,
@@ -1261,6 +1262,56 @@ export default function SentTimelineScreen({
         if (attempt === 1 || attempt % 5 === 0) {
           console.log('[DeepLink] timeline attempt', attempt, reflectionId, explorerId);
         }
+
+        if (!deepLinkOpenReactionComposer) {
+          const reactionDeepLink = await fetchReactionEventByIdForPlayback(
+            reflectionId,
+            explorerId,
+            eventObjectsMap,
+          );
+          if (cancelled) return;
+          if (reactionDeepLink) {
+            const { reactionEvent, parentReflectionId } = reactionDeepLink;
+            const parentReflection = reflections.find(
+              (reflection) => reflection.event_id === parentReflectionId,
+            );
+            const parentAuthorName =
+              (parentReflection ? reflectionSenderLabel(parentReflection) : null) ||
+              parentReflection?.metadata?.sender ||
+              parentReflection?.sender ||
+              'Companion';
+            const parentFullEvent = await fetchMirrorEventById(
+              parentReflectionId,
+              explorerId,
+              eventObjectsMap,
+            );
+            const parentEvent = buildEventForReplay(parentReflectionId, {
+              metadata: parentReflection?.metadata as EventMetadata | undefined,
+              reflectionImageUrl: parentReflection?.reflectionImageUrl,
+              senderLabel: parentAuthorName,
+              sentTimestamp: parentReflection?.sentTimestamp || parentReflection?.timestamp,
+              description: parentReflection?.description,
+              fullEvent: parentFullEvent,
+            });
+
+            console.log('[DeepLink] timeline opening reaction ReplayModal', reflectionId);
+            deepLinkHandledRef.current = reflectionId;
+            if (timelineDeepLinkResolvingReflectionId === reflectionId) {
+              timelineDeepLinkResolvingReflectionId = null;
+            }
+            timelineDeepLinkPresentedReflectionId = reflectionId;
+            selectedReflectionIdRef.current = reflectionId;
+            setSelectedReactionSession({
+              parentEventId: parentReflectionId,
+              parentAuthorName,
+              parentEvent,
+              respondedRelationshipIds: parentReflection?.respondedRelationshipIds ?? [],
+            });
+            setSelectedReflection(reactionEvent);
+            return;
+          }
+        }
+
         const eventForReplay = await resolveEventForReplayByIdRef.current(
           reflectionId,
           explorerId,
@@ -1353,9 +1404,11 @@ export default function SentTimelineScreen({
     deepLinkExplorerId,
     deepLinkOpenReactionComposer,
     deepLinkReflectionId,
+    eventObjectsMap,
     explorerLoading,
     onDeepLinkHandled,
     reactionTarget?.id,
+    reflections,
     showToast,
   ]);
 

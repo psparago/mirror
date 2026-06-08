@@ -6,6 +6,7 @@ import {
   db,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   limit,
   query,
@@ -345,6 +346,69 @@ export async function fetchReactionEventForPlayback(
     syncStartTimeMillis,
     reactionType,
   });
+}
+
+/** Load a specific Reaction document by id for notification deep links. */
+export async function fetchReactionEventByIdForPlayback(
+  reactionEventId: string,
+  explorerId: string,
+  eventObjectsMap?: Map<string, Event>,
+): Promise<{ reactionEvent: Event; parentReflectionId: string } | null> {
+  let snap;
+  try {
+    snap = await getDoc(doc(db, ExplorerConfig.collections.reflections, reactionEventId));
+  } catch (error) {
+    console.warn('[Reaction] deep link reaction doc load failed:', error);
+    return null;
+  }
+  if (!snap.exists()) return null;
+
+  const data = snap.data();
+  if (data?.isReaction !== true) return null;
+
+  const parentReflectionId = asOptionalString(data?.parentReflectionId);
+  if (!parentReflectionId) return null;
+
+  const metadata = coerceEmbeddedMetadata(data?.metadata, reactionEventId);
+  const sender = metadata?.sender || asOptionalString(data?.sender) || 'Companion';
+  const senderId = asOptionalString(data?.sender_id);
+  const fullEvent = await fetchMirrorEventById(reactionEventId, explorerId, eventObjectsMap);
+  const syncStartTimeMillis =
+    typeof data?.syncStartTimeMillis === 'number'
+      ? data.syncStartTimeMillis
+      : typeof fullEvent?.syncStartTimeMillis === 'number'
+        ? fullEvent.syncStartTimeMillis
+        : undefined;
+  const reactionType = coerceReactionType(
+    data?.reactionType ?? fullEvent?.reactionType,
+    fullEvent,
+    metadata,
+  );
+
+  const reactionEvent = buildEventForReplay(reactionEventId, {
+    metadata: metadata
+      ? {
+          ...metadata,
+          event_id: reactionEventId,
+          sender: metadata.sender || sender,
+          ...(senderId ? { sender_id: senderId } : {}),
+        }
+      : undefined,
+    senderLabel: sender,
+    timestamp: data?.timestamp,
+    description: metadata?.short_caption || metadata?.description,
+    fullEvent,
+    isReaction: true,
+    parentReflectionId,
+    syncStartTimeMillis,
+    reactionType,
+  });
+
+  if (!reactionEvent.video_url && !reactionEvent.audio_url && !reactionEvent.image_url) {
+    return null;
+  }
+
+  return { reactionEvent, parentReflectionId };
 }
 
 function coerceReactionType(raw: unknown, fullEvent: Event | null, metadata?: EventMetadata): ReactionType {

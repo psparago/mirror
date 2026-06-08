@@ -439,13 +439,11 @@ function reactionSlowLanePushData(
     explorerId,
   };
 
-  // Always deep-link to the parent Reflection for the newest reaction in the
-  // batch — even when multiple reactions were digested into one push.
+  // Deep-link to the Reaction document itself (ReplayModal), not the parent.
   const newest = [...eligibleNotifications].sort(
     (left, right) => right.createdAtMillis - left.createdAtMillis
   )[0];
-  const reflectionId =
-    newest?.parentReflectionId?.trim() || newest?.reflectionId?.trim() || '';
+  const reflectionId = newest?.reflectionId?.trim() || '';
   if (reflectionId) {
     data.reflectionId = reflectionId;
   }

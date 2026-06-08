@@ -20,8 +20,8 @@ export type PendingNotificationRoute = {
 };
 
 const REACTION_COMPOSER_NOTIFICATION_TYPES = new Set([
+  // New uploads: deep-link into ReactionSheet to react to the Reflection.
   'companion_upload_digest',
-  'companion_reaction_digest',
 ]);
 
 export function shouldOpenReactionComposerForNotificationType(
