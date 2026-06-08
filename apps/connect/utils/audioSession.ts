@@ -55,21 +55,46 @@ export async function configureConnectPlaybackAudioSessionAsync(options?: {
 }
 
 /** Recording mode for selfie/voice reactions (expo-camera + expo-av parent sync). */
-export async function configureConnectReactionRecordingAudioSessionAsync(): Promise<void> {
-  await setIsAudioActiveAsync(true);
-  await Promise.all([
-    Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      shouldDuckAndroid: true,
-      playThroughEarpieceAndroid: false,
-    }),
-    setExpoAudioModeAsync({
-      allowsRecording: true,
-      playsInSilentMode: true,
-    }),
-  ]);
+export async function configureConnectReactionRecordingAudioSessionAsync(options?: {
+  /** Retry when iOS AVAudioSession is briefly busy after preview/capture teardown. */
+  retries?: number;
+}): Promise<void> {
+  const maxAttempts = (options?.retries ?? 0) + 1;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+
+    try {
+      await setIsAudioActiveAsync(true);
+      await Promise.all([
+        Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        }),
+        setExpoAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+        }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) {
+    console.warn(
+      `[audioSession] recording session failed after ${maxAttempts} attempt(s):`,
+      lastError,
+    );
+    throw lastError;
+  }
 }
 
 /**

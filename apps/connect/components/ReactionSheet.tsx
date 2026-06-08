@@ -62,8 +62,22 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 const PREVIEW_END_EPSILON_MS = 80;
 const MIN_TRIM_GAP_MS = 500;
 const TYPED_MESSAGE_MAX_LENGTH = 120;
-const ANDROID_CAMERA_REMOUNT_MS = 400;
 const RECORDING_PARENT_REASSERT_DELAYS_MS = [250, 600];
+const SELFIE_CAMERA_BIND_MS = 400;
+const SELFIE_CAMERA_READY_TIMEOUT_MS = 8000;
+/**
+ * expo-camera's onCameraReady is unreliable on this iOS old-arch build — it
+ * sometimes never fires for a perfectly functional, mounted+active session.
+ * Once the persistent CameraView has been active this long without reporting
+ * ready, we treat it as ready so recording is never permanently blocked.
+ */
+const SELFIE_CAMERA_READY_FALLBACK_MS = Platform.OS === 'ios' ? 1500 : 800;
+/** iOS SDK 52: yield after onCameraReady so native mode=video movie output is wired before recordAsync. */
+const SELFIE_VIDEO_MODE_SETTLE_MS = 250;
+/** Give expo-video a beat to unload the selfie preview asset before remounting CameraView. */
+const SELFIE_RETAKE_PLAYER_RELEASE_MS = Platform.OS === 'ios' ? 650 : 200;
+/** Keep the Reflection present but clearly below the selfie reaction audio in preview. */
+const SELFIE_PREVIEW_PARENT_DUCK_VOLUME = 0.22;
 
 type ReactionComposeMode = ReactionType;
 
@@ -107,6 +121,40 @@ function logReactionDebug(
   diagnosticsAppLog('ReactionSheet', step, safeDetail, level);
 }
 
+/** Flip to `false` (or delete this block) to silence compose layout/camera traces.
+ *  Logs use [ReactionSheet] prefix. Key steps:
+ *  - layout:snapshot / layout:pane — mode UI phase + pane dimensions
+ *  - mode:* — mode picker changes
+ *  - selfie:* — hold-to-record + PIP camera lifecycle
+ *  - typed:* — keyboard + commit
+ *  - voice:* — record start/stop pipeline
+ */
+const REACTION_COMPOSE_DIAG = true;
+
+function logComposeDiag(
+  step: string,
+  detail?: Record<string, unknown>,
+  level: DiagnosticLogLevel = 'log',
+): void {
+  if (!REACTION_COMPOSE_DIAG) return;
+  logReactionDebug(step, detail, level);
+}
+
+function logComposePaneLayout(
+  pane: 'split' | 'parent' | 'parentSurface' | 'mode',
+  width: number,
+  height: number,
+  mode: ReactionComposeMode,
+): void {
+  if (!REACTION_COMPOSE_DIAG) return;
+  logComposeDiag('layout:pane', {
+    pane,
+    mode,
+    w: Math.round(width),
+    h: Math.round(height),
+  });
+}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
@@ -127,7 +175,23 @@ async function withTimeout<T>(
   }
 }
 
+async function ensureExpoCameraMicPermissionAsync(): Promise<boolean> {
+  try {
+    const existing = await Camera.getMicrophonePermissionsAsync();
+    if (existing.granted) return true;
+    if (!existing.canAskAgain) return false;
+    const requested = await Camera.requestMicrophonePermissionsAsync();
+    return requested.granted;
+  } catch (error) {
+    console.warn('[ReactionSheet] expo-camera mic permission failed:', error);
+    return false;
+  }
+}
+
 async function ensureMicPermissionAsync(): Promise<boolean> {
+  const cameraMicGranted = await ensureExpoCameraMicPermissionAsync();
+  if (!cameraMicGranted) return false;
+
   try {
     const existing = await Audio.getPermissionsAsync();
     if (existing.granted) return true;
@@ -224,26 +288,26 @@ async function startAndroidExpoAvVoiceRecordingAsync(options: {
   trimStartMs: number;
   startParentPlayback?: (startMs: number) => Promise<void>;
 }): Promise<Audio.Recording> {
-  logReactionDebug('voice:release-capture');
+  logComposeDiag('voice:release-capture');
   await releaseConnectCaptureAudioAsync();
   await new Promise((resolve) => setTimeout(resolve, 250));
 
-  logReactionDebug('voice:prepare-session');
+  logComposeDiag('voice:prepare-session');
   await prepareExpoAvRecordingSessionAsync();
 
   if (options.isVideoParent && options.startParentPlayback) {
-    logReactionDebug('voice:parent-playback', { trimStartMs: options.trimStartMs });
+    logComposeDiag('voice:parent-playback', { trimStartMs: options.trimStartMs });
     await options.startParentPlayback(options.trimStartMs);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
   const recording = new Audio.Recording();
-  logReactionDebug('voice:prepare-recording');
+  logComposeDiag('voice:prepare-recording');
   await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-  logReactionDebug('voice:start-recording');
+  logComposeDiag('voice:start-recording');
   await recording.startAsync();
   const status = await recording.getStatusAsync();
-  logReactionDebug('voice:recording-status', {
+  logComposeDiag('voice:recording-status', {
     isRecording: status.isRecording,
     canRecord: status.canRecord,
     durationMillis: status.durationMillis,
@@ -305,9 +369,14 @@ export function ReactionSheet({
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [micReady, setMicReady] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
+  const cameraReadyRef = useRef(false);
   const [isCameraRestoring, setIsCameraRestoring] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isSelfieSaving, setIsSelfieSaving] = useState(false);
+  /** Keeps CameraView mounted through press-out until save promise resolves (guards batched state gaps). */
+  const [selfieCaptureFinalizePending, setSelfieCaptureFinalizePending] = useState(false);
+  const [isSelfieCaptureArming, setIsSelfieCaptureArming] = useState(false);
+  const [isSelfieRetakePreparing, setIsSelfieRetakePreparing] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [positionMillis, setPositionMillis] = useState(0);
   const [durationMillis, setDurationMillis] = useState(0);
@@ -317,7 +386,9 @@ export function ReactionSheet({
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [trimStartMs, setTrimStartMs] = useState(0);
   const [trimEndMs, setTrimEndMs] = useState(0);
-  const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
+  // Stable key — the selfie CameraView is intentionally never remounted.
+  const [cameraInstanceKey] = useState(0);
+  const cameraInstanceKeyRef = useRef(0);
   const [isParentReflectionMuted, setIsParentReflectionMuted] = useState(false);
   const [reactionMode, setReactionMode] = useState<ReactionComposeMode>('selfie');
   const [typedMessage, setTypedMessage] = useState('');
@@ -335,12 +406,18 @@ export function ReactionSheet({
   const [recordedAudioSnapshot, setRecordedAudioSnapshot] =
     useState<SelfieRecordingAudioSnapshot | null>(null);
   const [isInfoOpen, setIsInfoOpen] = useState(false);
+  const retakeReleaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const voiceRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const voiceExpoAvRecordingRef = useRef<Audio.Recording | null>(null);
   const isStartingVoiceRecordingRef = useRef(false);
-  const androidCameraRemountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const companionPreviewStopPendingRef = useRef(false);
+  const companionPreviewAutoStartDoneRef = useRef(false);
+  const companionPreviewStartInFlightRef = useRef(false);
+  const companionPreviewPlayingRef = useRef(false);
+  const selfieCaptureArmingRef = useRef(false);
+  const visibleRef = useRef(visible);
+  const companionPreviewOpenRef = useRef(companionPreviewOpen);
   // Selfie preview interruption recovery. On iOS old-arch, expo-camera's deferred AVCaptureSession
   // teardown calls AVAudioSession.setActive(false) ~0.6-1s after we open the preview, which
   // interrupts (pauses) the expo-video player mid-clip. We can't out-time that teardown from JS, so
@@ -360,11 +437,6 @@ export function ReactionSheet({
   const isImageParent = parentMedia?.mediaType === 'image';
   const parentVideoUrl = parentMedia?.mediaType === 'video' ? parentMedia.videoUrl : '';
   const parentImageUrl = parentMedia?.mediaType === 'image' ? parentMedia.imageUrl : '';
-  const suppressAndroidParentVideoSurface =
-    Platform.OS === 'android' &&
-    isVideoParent &&
-    !companionPreviewOpen &&
-    (reactionMode === 'typed' || reactionMode === 'voice');
   const hasValidParentMedia =
     (isVideoParent && !!parentVideoUrl) || (isImageParent && !!parentImageUrl);
   const parentPosterUri = isVideoParent ? parentVideoUrl : parentImageUrl;
@@ -414,7 +486,7 @@ export function ReactionSheet({
   const lastParentVolumeApplyRef = useRef(0);
   const lastCompanionParentVolumeApplyRef = useRef(0);
   const hasHeadphonesRef = useRef(false);
-  // True once the Companion manually toggles "Original audio", so we stop applying the smart default.
+  // True once the Companion manually toggles mute-while-recording, so we stop applying the smart default.
   const userToggledMuteRef = useRef(false);
   const isRecordingRef = useRef(false);
   const recordingSessionIdRef = useRef(0);
@@ -427,13 +499,18 @@ export function ReactionSheet({
   const [typedPreviewLoading, setTypedPreviewLoading] = useState(false);
   const stopSelfieRecordingRef = useRef<(() => void) | null>(null);
 
+  const isParentMutedForPlayback = useCallback(
+    () => isRecordingRef.current && isParentReflectionMutedRef.current,
+    [],
+  );
+
   const getReactionParentVolume = useCallback(
     () =>
       resolveReactionRecordingVolume({
-        muted: isParentReflectionMutedRef.current,
+        muted: isParentMutedForPlayback(),
         hasHeadphones: hasHeadphonesRef.current,
       }),
-    [],
+    [isParentMutedForPlayback],
   );
 
   /** Parent Reflection volume while trim/companion preview is actively playing (not recording). */
@@ -446,6 +523,13 @@ export function ReactionSheet({
     [],
   );
 
+  const getCompanionPreviewParentVolume = useCallback(() => {
+    const baseVolume = getParentPreviewPlaybackVolume();
+    return reactionMode === 'selfie'
+      ? Math.min(baseVolume, SELFIE_PREVIEW_PARENT_DUCK_VOLUME)
+      : baseVolume;
+  }, [getParentPreviewPlaybackVolume, reactionMode]);
+
   /** Keep expo-av mute flag and volume in sync — setStatusAsync(volume) alone clears isMuted. */
   const syncParentVideoAudioAsync = useCallback(
     async (
@@ -456,14 +540,14 @@ export function ReactionSheet({
       const status = await target.getStatusAsync().catch(() => null);
       if (!status?.isLoaded) return;
       const previewPlayback = options?.previewPlayback === true;
-      const muted = previewPlayback ? false : isParentReflectionMutedRef.current;
+      const muted = previewPlayback ? false : isParentMutedForPlayback();
       const volume = previewPlayback ? getParentPreviewPlaybackVolume() : getReactionParentVolume();
       await runVideoCommand(async () => {
         await target.setIsMutedAsync(muted);
         await target.setVolumeAsync(volume);
       }, 'failed to sync parent audio');
     },
-    [getParentPreviewPlaybackVolume, getReactionParentVolume],
+    [getParentPreviewPlaybackVolume, getReactionParentVolume, isParentMutedForPlayback],
   );
 
   const applyParentReflectionVolume = useCallback(async () => {
@@ -472,15 +556,19 @@ export function ReactionSheet({
   }, [syncParentVideoAudioAsync]);
 
   const startParentRecordingPlayback = useCallback(
-    async (startMs: number) => {
+    async (startMs: number, options?: { seek?: boolean }) => {
       if (!isVideoParent) return;
       const muted = isParentReflectionMutedRef.current;
       const volume = getReactionParentVolume();
+      const seek = options?.seek ?? true;
       await syncParentVideoAudioAsync(videoRef.current);
       await runVideoCommand(
         () =>
           videoRef.current?.setStatusAsync({
-            positionMillis: startMs,
+            // Reasserts (seek:false) only re-confirm play/volume/mute so the audio
+            // session settles — they must NOT yank the playhead back to syncStart,
+            // which made the scrubber "dance" during recording.
+            ...(seek ? { positionMillis: startMs } : {}),
             shouldPlay: true,
             isMuted: muted,
             volume,
@@ -543,11 +631,24 @@ export function ReactionSheet({
     }
   }, []);
 
+  const canRunCompanionPreview = useCallback(() => {
+    return (
+      visibleRef.current &&
+      companionPreviewOpenRef.current &&
+      !companionPreviewStopPendingRef.current
+    );
+  }, []);
+
   const finishCompanionPreview = useCallback(async () => {
     if (companionPreviewStopPendingRef.current) return;
     logReactionDebug('selfie-preview:finish', {});
     selfiePreviewExpectPlayingRef.current = false;
+    if (selfiePreviewResumeTimerRef.current) {
+      clearTimeout(selfiePreviewResumeTimerRef.current);
+      selfiePreviewResumeTimerRef.current = null;
+    }
     companionPreviewStopPendingRef.current = true;
+    companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     try {
       companionSelfiePlayer.pause();
@@ -574,7 +675,6 @@ export function ReactionSheet({
   }, [
     companionSelfiePlayer,
     getParentPreviewStartMs,
-    getParentPreviewPlaybackVolume,
     isVideoParent,
     unloadPreviewAudio,
   ]);
@@ -625,6 +725,7 @@ export function ReactionSheet({
       if (payload.isPlaying) return;
       if (!selfiePreviewExpectPlayingRef.current) return;
       if (companionPreviewStopPendingRef.current) return;
+      if (!companionPreviewPlayingRef.current) return;
       const dur = typeof duration === 'number' ? duration : 0;
       const pos = typeof currentTime === 'number' ? currentTime : 0;
       const reachedEnd = dur > 0 && pos >= dur - 0.35;
@@ -653,7 +754,14 @@ export function ReactionSheet({
       }
       selfiePreviewResumeTimerRef.current = setTimeout(() => {
         selfiePreviewResumeTimerRef.current = null;
-        if (!selfiePreviewExpectPlayingRef.current || companionPreviewStopPendingRef.current) return;
+        if (
+          !selfiePreviewExpectPlayingRef.current ||
+          companionPreviewStopPendingRef.current ||
+          !visibleRef.current ||
+          !companionPreviewOpenRef.current
+        ) {
+          return;
+        }
         try {
           // Resume from where it paused (do NOT seek to 0) so each recovery advances the clip
           // instead of replaying the first second over and over.
@@ -670,22 +778,29 @@ export function ReactionSheet({
   }, [companionSelfiePlayer]);
 
   const startCompanionPreview = useCallback(async () => {
+    if (!canRunCompanionPreview()) return;
+    if (companionPreviewStartInFlightRef.current) return;
+    if (companionPreviewPlayingRef.current && !showCompanionPreviewReplay) return;
+
     const isSelfiePreview = reactionMode === 'selfie' && !!recordedUri;
     const isVoicePreview = reactionMode === 'voice' && !!voiceRecordedUri;
     const isTypedPreview = reactionMode === 'typed' && !!typedMessage.trim();
     if (!isSelfiePreview && !isVoicePreview && !isTypedPreview) return;
 
+    companionPreviewStartInFlightRef.current = true;
+    try {
     logReactionDebug('selfie-preview:enter', {
       isSelfiePreview,
       isVoicePreview,
       isTypedPreview,
     });
 
+    companionPreviewPlayingRef.current = true;
     setCompanionPreviewPlaying(true);
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
 
-    const parentPreviewPlaybackVolume = getParentPreviewPlaybackVolume();
+    const parentPreviewPlaybackVolume = getCompanionPreviewParentVolume();
     const parentPreviewStartMs = getParentPreviewStartMs();
 
     try {
@@ -693,6 +808,7 @@ export function ReactionSheet({
     } catch (error) {
       console.warn('[ReactionSheet] preview audio session failed:', error);
     }
+    if (!canRunCompanionPreview()) return;
 
     if (isVideoParent && parentPreviewStartMs != null) {
       await runVideoCommand(
@@ -706,6 +822,7 @@ export function ReactionSheet({
         'failed to start companion preview',
       );
     }
+    if (!canRunCompanionPreview()) return;
 
     if (isSelfiePreview) {
       if (Platform.OS === 'ios') {
@@ -716,12 +833,14 @@ export function ReactionSheet({
         // session here; it reduces, but does not eliminate, that deferred interruption — the
         // playingChange recovery (selfiePreviewExpectPlayingRef) restarts the clip if it still hits.
         await releaseConnectCaptureAudioAsync();
+        if (!canRunCompanionPreview()) return;
 
         if (isVideoParent) {
           // Video parent: the parent video is also playing, so the selfie must coexist with it.
           try {
             companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
           } catch (error) {
+            if (!canRunCompanionPreview()) return;
             console.warn('[ReactionSheet] selfie preview player unavailable:', error);
             selfiePreviewExpectPlayingRef.current = false;
             setCompanionPreviewPlaying(false);
@@ -739,9 +858,11 @@ export function ReactionSheet({
           }
           // Brief settle so the deactivation lands before expo-video activates its own session.
           await new Promise((resolve) => setTimeout(resolve, 120));
+          if (!canRunCompanionPreview()) return;
           try {
             companionSelfiePlayer.audioMixingMode = 'auto';
           } catch (error) {
+            if (!canRunCompanionPreview()) return;
             console.warn('[ReactionSheet] selfie preview player unavailable:', error);
             selfiePreviewExpectPlayingRef.current = false;
             setCompanionPreviewPlaying(false);
@@ -760,6 +881,7 @@ export function ReactionSheet({
         companionSelfiePlayer.play();
         logReactionDebug('selfie-preview:start', { isVideoParent });
       } catch (error) {
+        if (!canRunCompanionPreview()) return;
         console.warn('[ReactionSheet] selfie preview playback failed:', error);
         selfiePreviewExpectPlayingRef.current = false;
         setCompanionPreviewPlaying(false);
@@ -822,23 +944,29 @@ export function ReactionSheet({
         setTypedPreviewLoading(false);
       }
     }
+    } finally {
+      companionPreviewStartInFlightRef.current = false;
+    }
   }, [
+    canRunCompanionPreview,
     companionAvatar?.companionName,
     companionSelfiePlayer,
     currentExplorerId,
     finishCompanionPreview,
-    getParentPreviewPlaybackVolume,
+    getCompanionPreviewParentVolume,
     getParentPreviewStartMs,
     isVideoParent,
     playCompanionPreviewClip,
     reactionMode,
     recordedUri,
+    showCompanionPreviewReplay,
     typedMessage,
     voiceRecordedUri,
   ]);
 
   const replayCompanionPreview = useCallback(() => {
     setShowCompanionPreviewReplay(false);
+    companionPreviewStopPendingRef.current = false;
     void startCompanionPreview();
   }, [startCompanionPreview]);
 
@@ -851,7 +979,9 @@ export function ReactionSheet({
 
   const closeCompanionPreview = useCallback(() => {
     selfiePreviewExpectPlayingRef.current = false;
+    companionPreviewAutoStartDoneRef.current = false;
     setCompanionPreviewOpen(false);
+    companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
@@ -868,14 +998,36 @@ export function ReactionSheet({
     })();
   }, [companionSelfiePlayer, restoreReactionRecordingAudioSession, unloadPreviewAudio]);
 
+  const startCompanionPreviewRef = useRef(startCompanionPreview);
+  useEffect(() => {
+    startCompanionPreviewRef.current = startCompanionPreview;
+  }, [startCompanionPreview]);
+
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
+
+  useEffect(() => {
+    companionPreviewOpenRef.current = companionPreviewOpen;
+  }, [companionPreviewOpen]);
+
+  useEffect(() => {
+    companionPreviewPlayingRef.current = companionPreviewPlaying;
+  }, [companionPreviewPlaying]);
+
   const handleAbandonReaction = useCallback(() => {
     if (isUploading) return;
     selfiePreviewExpectPlayingRef.current = false;
+    companionPreviewStopPendingRef.current = true;
+    companionPreviewAutoStartDoneRef.current = false;
+    if (selfiePreviewResumeTimerRef.current) {
+      clearTimeout(selfiePreviewResumeTimerRef.current);
+      selfiePreviewResumeTimerRef.current = null;
+    }
     setCompanionPreviewOpen(false);
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
     setTypedPreviewLoading(false);
-    companionPreviewStopPendingRef.current = false;
     typedPreviewAudioUriRef.current = null;
     typedPreviewMessageRef.current = null;
     void unloadPreviewAudio();
@@ -890,19 +1042,34 @@ export function ReactionSheet({
   }, [companionSelfiePlayer, isUploading, onClose, unloadPreviewAudio]);
 
   useEffect(() => {
-    if (!companionPreviewOpen) return;
+    if (!companionPreviewOpen || !visible) {
+      companionPreviewAutoStartDoneRef.current = false;
+      return;
+    }
+    if (companionPreviewAutoStartDoneRef.current || showCompanionPreviewReplay) return;
     if (reactionMode === 'selfie' && recordedUri) {
-      void startCompanionPreview();
+      companionPreviewAutoStartDoneRef.current = true;
+      void startCompanionPreviewRef.current();
       return;
     }
     if (reactionMode === 'voice' && voiceRecordedUri) {
-      void startCompanionPreview();
+      companionPreviewAutoStartDoneRef.current = true;
+      void startCompanionPreviewRef.current();
       return;
     }
     if (reactionMode === 'typed' && typedMessage.trim()) {
-      void startCompanionPreview();
+      companionPreviewAutoStartDoneRef.current = true;
+      void startCompanionPreviewRef.current();
     }
-  }, [companionPreviewOpen, reactionMode, recordedUri, typedMessage, voiceRecordedUri, startCompanionPreview]);
+  }, [
+    companionPreviewOpen,
+    visible,
+    reactionMode,
+    recordedUri,
+    typedMessage,
+    voiceRecordedUri,
+    showCompanionPreviewReplay,
+  ]);
 
   const handleCompanionParentStatusUpdate = useCallback(
     (status: AVPlaybackStatus) => {
@@ -910,7 +1077,7 @@ export function ReactionSheet({
         return;
       }
       const now = Date.now();
-      const parentPreviewPlaybackVolume = getParentPreviewPlaybackVolume();
+      const parentPreviewPlaybackVolume = getCompanionPreviewParentVolume();
       if (now - lastCompanionParentVolumeApplyRef.current >= 200) {
         lastCompanionParentVolumeApplyRef.current = now;
         void companionParentRef.current
@@ -937,7 +1104,7 @@ export function ReactionSheet({
       companionPreviewOpen,
       companionPreviewPlaying,
       finishCompanionPreview,
-      getParentPreviewPlaybackVolume,
+      getCompanionPreviewParentVolume,
       getParentPreviewStartMs,
       isVideoParent,
       reactionMode,
@@ -974,7 +1141,7 @@ export function ReactionSheet({
     hasHeadphonesRef.current = hasHeadphones;
   }, [hasHeadphones]);
 
-  // Default Original audio: on with headphones, off on speaker.
+  // Default mute-while-recording: off with headphones, on on speaker.
   useEffect(() => {
     if (!visible || userToggledMuteRef.current) return;
     const enabled = defaultReactionOriginalAudioEnabled({ hasHeadphones });
@@ -990,6 +1157,7 @@ export function ReactionSheet({
 
   const commitTypedMessage = useCallback(() => {
     if (!typedMessage.trim()) return;
+    logComposeDiag('typed:commit', { length: typedMessage.trim().length });
     setTypedMessageReady(true);
     Keyboard.dismiss();
   }, [typedMessage]);
@@ -1001,14 +1169,13 @@ export function ReactionSheet({
     }
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSub = Keyboard.addListener(showEvent, () => setIsTypedKeyboardVisible(true));
+    const showSub = Keyboard.addListener(showEvent, () => {
+      setIsTypedKeyboardVisible(true);
+      logComposeDiag('typed:keyboard-show', { platform: Platform.OS });
+    });
     const hideSub = Keyboard.addListener(hideEvent, () => {
       setIsTypedKeyboardVisible(false);
-      // Android fires spurious keyboard events when KeyboardAvoidingView resizes;
-      // typedMessageReady is explicit so layout cannot oscillate.
-      if (Platform.OS === 'android' && typedMessage.trim()) {
-        setTypedMessageReady(true);
-      }
+      logComposeDiag('typed:keyboard-hide', { platform: Platform.OS });
     });
     return () => {
       showSub.remove();
@@ -1070,8 +1237,6 @@ export function ReactionSheet({
   useEffect(() => {
     if (!visible) return;
     void (async () => {
-      const micGranted = await ensureMicPermissionAsync();
-      setMicReady(micGranted);
       try {
         if (Platform.OS === 'ios') {
           await configureConnectReactionRecordingAudioSessionAsync();
@@ -1083,8 +1248,14 @@ export function ReactionSheet({
       if (!current.granted && current.canAskAgain) {
         current = await Camera.requestCameraPermissionsAsync();
       }
+      let cameraMic = await Camera.getMicrophonePermissionsAsync();
+      if (!cameraMic.granted && cameraMic.canAskAgain) {
+        cameraMic = await Camera.requestMicrophonePermissionsAsync();
+      }
+      const micGranted = await ensureMicPermissionAsync();
       void requestCameraPermission();
       setNativeCameraGranted(current.granted);
+      setMicReady(micGranted && cameraMic.granted);
     })();
   }, [visible, requestCameraPermission]);
 
@@ -1095,24 +1266,16 @@ export function ReactionSheet({
     });
   }, [visible, isVideoParent, reactionMode]);
 
-  const bumpCameraInstance = useCallback(() => {
-    setCameraReady(false);
-    setCameraInstanceKey((key) => key + 1);
-  }, []);
+  useEffect(() => {
+    cameraInstanceKeyRef.current = cameraInstanceKey;
+  }, [cameraInstanceKey]);
 
-  const scheduleAndroidCameraRemount = useCallback(() => {
-    if (Platform.OS !== 'android') return;
-    if (androidCameraRemountTimerRef.current) {
-      clearTimeout(androidCameraRemountTimerRef.current);
-    }
-    logReactionDebug('camera:schedule-remount');
-    setIsCameraRestoring(true);
-    androidCameraRemountTimerRef.current = setTimeout(() => {
-      androidCameraRemountTimerRef.current = null;
-      logReactionDebug('camera:remount');
-      bumpCameraInstance();
-    }, ANDROID_CAMERA_REMOUNT_MS);
-  }, [bumpCameraInstance]);
+  useEffect(() => {
+    if (!REACTION_COMPOSE_DIAG) return;
+    logComposeDiag(visible ? 'sheet:open' : 'sheet:close', {
+      parentType: isVideoParent ? 'video' : isImageParent ? 'image' : 'unknown',
+    });
+  }, [visible, isVideoParent, isImageParent]);
 
   const ensureCameraPermission = useCallback(async () => {
     let current = await Camera.getCameraPermissionsAsync();
@@ -1129,7 +1292,6 @@ export function ReactionSheet({
     if (current.granted) {
       setNativeCameraGranted(true);
       void requestCameraPermission();
-      scheduleAndroidCameraRemount();
       return;
     }
 
@@ -1137,10 +1299,7 @@ export function ReactionSheet({
       const requested = await Camera.requestCameraPermissionsAsync();
       void requestCameraPermission();
       setNativeCameraGranted(requested.granted);
-      if (requested.granted) {
-        scheduleAndroidCameraRemount();
-        return;
-      }
+      return;
     }
 
     Alert.alert(
@@ -1151,129 +1310,69 @@ export function ReactionSheet({
         { text: 'Cancel', style: 'cancel' },
       ],
     );
-  }, [requestCameraPermission, scheduleAndroidCameraRemount]);
+  }, [requestCameraPermission]);
 
   useEffect(() => {
     if (!visible || reactionMode !== 'selfie') return;
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
-        // Re-acquire the camera: flipping `active` back to true (via isAppForeground) re-binds the
-        // CameraX preview cleanly. Show the warmup overlay until onCameraReady clears it.
         setIsAppForeground(true);
         void ensureCameraPermission();
-        if (Platform.OS === 'android') {
-          setIsCameraRestoring(true);
-        }
         return;
       }
-      // Backgrounded/inactive: drop `active` so CameraX releases the camera cleanly. Keeping it
-      // active across background is what left the Android preview black (and un-remountable) on
-      // resume.
       setIsAppForeground(false);
       if (isRecordingRef.current) {
         stopSelfieRecordingRef.current?.();
+      } else if (selfieCaptureArmingRef.current) {
+        selfieCaptureArmingRef.current = false;
+        setIsSelfieCaptureArming(false);
+        setIsCameraRestoring(false);
+        recordingSessionIdRef.current += 1;
       }
     });
     return () => subscription.remove();
   }, [visible, reactionMode, ensureCameraPermission]);
 
-  const handleModalShow = useCallback(() => {
-    if (reactionMode !== 'selfie') return;
-    if (Platform.OS === 'android') {
-      // Remounting on every modal show often leaves a zero-size SurfaceView (black box).
-      return;
-    }
-    bumpCameraInstance();
-  }, [bumpCameraInstance, reactionMode]);
-
   useEffect(() => {
-    if (!visible || reactionMode !== 'selfie' || Platform.OS !== 'android') return;
-    if (!isCameraRestoring) return;
+    cameraReadyRef.current = cameraReady;
+  }, [cameraReady]);
 
-    const cameraGranted =
-      cameraPermission?.granted === true || nativeCameraGranted === true;
-    const selfieCameraActive =
-      visible &&
-      reactionMode === 'selfie' &&
-      !isUploading &&
-      !companionPreviewOpen &&
-      !recordedUri &&
-      !isSelfieSaving &&
-      isAppForeground;
-
-    logReactionDebug('camera:restoring-start', {
-      cameraInstanceKey,
-      isCameraGranted: cameraGranted,
-    });
-
-    const timer = setTimeout(() => {
-      logReactionDebug(
-        'camera:ready-timeout',
-        {
-          cameraInstanceKey,
-          isCameraGranted: cameraGranted,
-          isSelfieCameraActive: selfieCameraActive,
-          isAppForeground,
-        },
-        'warn',
-      );
-    }, 5000);
-
-    return () => clearTimeout(timer);
-  }, [
-    cameraInstanceKey,
-    cameraPermission?.granted,
-    companionPreviewOpen,
-    isAppForeground,
-    isCameraRestoring,
-    isSelfieSaving,
-    isUploading,
-    nativeCameraGranted,
-    reactionMode,
-    recordedUri,
-    visible,
-  ]);
-
+  // The persistent CameraView keeps its readiness across an `active` suspend
+  // (preview) / resume (retake) cycle. We deliberately do NOT clear cameraReady
+  // when the preview opens — that would make retake depend on onCameraReady
+  // re-firing on resume, which is exactly the fragility that broke retake. We
+  // only clear readiness when the view actually unmounts (sheet closed, left
+  // selfie mode, or app backgrounded). The recordAsync retry loop absorbs the
+  // brief window while the suspended session spins back up.
   useEffect(() => {
-    if (!visible || reactionMode !== 'selfie' || recordedUri != null) return;
-    if (!(cameraPermission?.granted || nativeCameraGranted)) return;
-
-    if (Platform.OS === 'android') {
-      const readyTimer = setTimeout(() => {
-        setCameraReady((ready) => ready || true);
-      }, 400);
-      const fallbackTimer = setTimeout(() => {
-        setCameraReady(true);
-        setIsCameraRestoring(false);
-      }, 2000);
-      return () => {
-        clearTimeout(readyTimer);
-        clearTimeout(fallbackTimer);
-      };
-    }
-
+    const cameraMounted = visible && reactionMode === 'selfie' && isAppForeground;
+    if (cameraMounted) return;
     setCameraReady(false);
-    const readyTimer = setTimeout(() => {
-      setCameraReady(true);
-    }, 500);
-    // Safety: onCameraReady can fail to fire on iOS if the AVAudioSession was still held by
-    // the capture session, which would otherwise leave the "Starting camera…" overlay stuck.
-    const restoreClearTimer = setTimeout(() => {
-      setIsCameraRestoring(false);
-    }, 2200);
+    setIsCameraRestoring(false);
+  }, [visible, reactionMode, isAppForeground]);
 
-    return () => {
-      clearTimeout(readyTimer);
-      clearTimeout(restoreClearTimer);
-    };
-  }, [
-    visible,
-    reactionMode,
-    recordedUri,
-    cameraInstanceKey,
-    cameraPermission?.granted,
-    nativeCameraGranted,
-  ]);
+  // Safety net for expo-camera's flaky onCameraReady: once the persistent,
+  // active CameraView has been up for the warm-up window without reporting
+  // ready, assume it is ready so recording is never permanently blocked.
+  // (isSelfieRecordCameraActive is computed later in render, so inline it here.)
+  const cameraSessionRunning =
+    visible &&
+    reactionMode === 'selfie' &&
+    isAppForeground &&
+    !companionPreviewOpen &&
+    (cameraPermission?.granted === true || nativeCameraGranted === true);
+  useEffect(() => {
+    if (!cameraSessionRunning || cameraReady) return;
+    const timer = setTimeout(() => {
+      if (cameraReadyRef.current) return;
+      logComposeDiag('selfie:camera-ready-fallback', {
+        cameraKey: cameraInstanceKeyRef.current,
+      });
+      setCameraReady(true);
+      setIsCameraRestoring(false);
+    }, SELFIE_CAMERA_READY_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [cameraSessionRunning, cameraReady]);
 
   useEffect(() => {
     if (visible) return;
@@ -1282,12 +1381,17 @@ export function ReactionSheet({
     setDurationMillis(0);
     setRecordedUri(null);
     setIsSelfieSaving(false);
+    setSelfieCaptureFinalizePending(false);
+    setIsSelfieCaptureArming(false);
+    setIsSelfieRetakePreparing(false);
+    selfieCaptureArmingRef.current = false;
     cameraRecordingStartedRef.current = false;
     setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
     setCompanionPreviewOpen(false);
+    companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
@@ -1295,6 +1399,10 @@ export function ReactionSheet({
     if (selfiePreviewResumeTimerRef.current) {
       clearTimeout(selfiePreviewResumeTimerRef.current);
       selfiePreviewResumeTimerRef.current = null;
+    }
+    if (retakeReleaseTimerRef.current) {
+      clearTimeout(retakeReleaseTimerRef.current);
+      retakeReleaseTimerRef.current = null;
     }
     setTrimStartMs(0);
     setTrimEndMs(0);
@@ -1310,12 +1418,7 @@ export function ReactionSheet({
     setIsVoiceRecording(false);
     setIsStartingVoiceRecording(false);
     setIsVoiceProcessing(false);
-    setCameraInstanceKey(0);
     setNativeCameraGranted(null);
-    if (androidCameraRemountTimerRef.current) {
-      clearTimeout(androidCameraRemountTimerRef.current);
-      androidCameraRemountTimerRef.current = null;
-    }
     isVideoDragActiveRef.current = false;
     previewStopPendingRef.current = false;
     pendingSeekTargetRef.current = null;
@@ -1347,8 +1450,8 @@ export function ReactionSheet({
   }, [visible]);
 
   useEffect(() => {
-    if (!isVideoParent || isRecording || recordedUri != null) return;
-    if (isPreviewPlayingRef.current) return;
+    if (!isVideoParent || recordedUri != null) return;
+    if (isPreviewPlayingRef.current && !isRecordingRef.current) return;
     void applyParentReflectionVolume();
   }, [
     applyParentReflectionVolume,
@@ -1421,7 +1524,7 @@ export function ReactionSheet({
       setPositionMillis(target);
 
       if (options?.shouldPlay != null) {
-        const muted = isParentReflectionMutedRef.current;
+        const muted = isParentMutedForPlayback();
         const volume = options.volume ?? getReactionParentVolume();
         await runVideoCommand(
           () =>
@@ -1438,7 +1541,7 @@ export function ReactionSheet({
 
       void queueVideoSeek(target, { updateUi: false });
     },
-    [getReactionParentVolume, queueVideoSeek],
+    [getReactionParentVolume, isParentMutedForPlayback, queueVideoSeek],
   );
 
   const stopPreviewAtTrimEnd = useCallback(async () => {
@@ -1456,8 +1559,11 @@ export function ReactionSheet({
           videoRef.current?.setStatusAsync({
             positionMillis: start,
             shouldPlay: false,
-            isMuted: isParentReflectionMutedRef.current,
-            volume: getReactionParentVolume(),
+            isMuted: false,
+            volume: resolveReactionRecordingVolume({
+              muted: false,
+              hasHeadphones: hasHeadphonesRef.current,
+            }),
           }),
         'preview stop failed',
       );
@@ -1547,12 +1653,6 @@ export function ReactionSheet({
     const status = await videoRef.current?.getStatusAsync().catch(() => null);
     if (!status?.isLoaded) return false;
 
-    try {
-      await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
-    } catch (error) {
-      console.warn('[ReactionSheet] trim preview audio session failed:', error);
-    }
-
     const start = trimStartMsRef.current;
     positionMillisRef.current = start;
     setPositionMillis(start);
@@ -1562,13 +1662,26 @@ export function ReactionSheet({
     setIsPreviewPlaying(true);
 
     try {
-      await videoRef.current?.setStatusAsync({
-        positionMillis: start,
-        shouldPlay: false,
-        isMuted: false,
-        volume: previewVolume,
-      });
-      await videoRef.current?.playAsync();
+      // iOS keeps the reaction recording session while the selfie camera is live — switching to
+      // pure playback mode here prevents parent preview from starting. Android uses playback mode.
+      if (Platform.OS === 'ios') {
+        await configureConnectReactionRecordingAudioSessionAsync();
+        await videoRef.current?.setStatusAsync({
+          positionMillis: start,
+          shouldPlay: true,
+          isMuted: false,
+          volume: previewVolume,
+        });
+      } else {
+        await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
+        await videoRef.current?.setStatusAsync({
+          positionMillis: start,
+          shouldPlay: false,
+          isMuted: false,
+          volume: previewVolume,
+        });
+        await videoRef.current?.playAsync();
+      }
     } catch (error) {
       if (!isSeekInterrupted(error)) {
         console.warn('[ReactionSheet] start trim preview failed:', error);
@@ -1760,21 +1873,58 @@ export function ReactionSheet({
       });
   }, [handleSeekDrag, handleSeekDragEnd, handleSeekDragStart]);
 
-  const beginCameraRecording = useCallback((sessionId: number) => {
+  const restoreAfterSelfieCaptureAsync = useCallback(async () => {
+    try {
+      await releaseConnectCaptureAudioAsync();
+      if (isVideoParent) {
+        const postRestoreStatus = await videoRef.current?.getStatusAsync().catch(() => null);
+        if (postRestoreStatus?.isLoaded) {
+          await syncParentVideoAudioAsync(videoRef.current);
+        }
+      }
+    } catch (error) {
+      console.warn('[ReactionSheet] failed to restore playback audio session:', error);
+    }
+  }, [isVideoParent, syncParentVideoAudioAsync]);
+
+  const beginCameraRecording = useCallback((sessionId: number): Promise<boolean> => {
     const attachPromise = (recordingPromise: Promise<{ uri: string } | undefined>) => {
       recordingPromiseRef.current = recordingPromise;
+      const saveTimeout = setTimeout(() => {
+        if (recordingPromiseRef.current !== recordingPromise) return;
+        recordingPromiseRef.current = null;
+        cameraRecordingStartedRef.current = false;
+        setSelfieCaptureFinalizePending(false);
+        setIsSelfieSaving(false);
+        logComposeDiag('selfie:record-save-timeout', { sessionId }, 'error');
+        void restoreAfterSelfieCaptureAsync();
+        Alert.alert(
+          'Save Timed Out',
+          'Could not finish saving your selfie reaction. Please try again.',
+        );
+      }, 15000);
+      const finalizeSave = () => {
+        clearTimeout(saveTimeout);
+        setSelfieCaptureFinalizePending(false);
+        setIsSelfieSaving(false);
+        void restoreAfterSelfieCaptureAsync();
+      };
       void recordingPromise
         .then((result) => {
           if (recordingPromiseRef.current !== recordingPromise) return;
           recordingPromiseRef.current = null;
-          setIsSelfieSaving(false);
+          finalizeSave();
           if (result?.uri) {
+            logComposeDiag('selfie:record-saved', { sessionId, hasUri: true });
             setRecordedUri(result.uri);
             setRecordedAudioSnapshot({
               originalAudioMuted: isParentReflectionMutedRef.current,
               hasHeadphones: hasHeadphonesRef.current,
             });
+            companionPreviewAutoStartDoneRef.current = false;
+            setCompanionPreviewOpen(true);
           } else {
+            logComposeDiag('selfie:record-too-short', { sessionId }, 'warn');
             Alert.alert(
               'Recording Too Short',
               'Hold the button a little longer so we can capture your reaction.',
@@ -1787,7 +1937,12 @@ export function ReactionSheet({
           cameraRecordingStartedRef.current = false;
           isRecordingRef.current = false;
           setIsRecording(false);
-          setIsSelfieSaving(false);
+          finalizeSave();
+          logComposeDiag(
+            'selfie:record-failed',
+            { sessionId, message: error instanceof Error ? error.message : 'unknown' },
+            'error',
+          );
           console.warn('[ReactionSheet] recordAsync failed:', error);
           Alert.alert(
             'Recording Failed',
@@ -1797,52 +1952,146 @@ export function ReactionSheet({
     };
 
     type TryStartResult = 'started' | 'retry' | 'cancelled';
-    const tryStart = (): TryStartResult => {
+    const tryStart = (attempt = 0): TryStartResult => {
       if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+        logComposeDiag('selfie:record-cancelled', { sessionId, attempt });
         return 'cancelled';
       }
-      const recordingPromise = cameraRef.current?.recordAsync({ maxDuration: 120 });
-      if (!recordingPromise) return 'retry';
+      if (!cameraReadyRef.current) {
+        return 'retry';
+      }
+      let recordingPromise: Promise<{ uri: string } | undefined> | undefined;
+      try {
+        recordingPromise = cameraRef.current?.recordAsync({ maxDuration: 120 });
+      } catch (error) {
+        logComposeDiag(
+          'selfie:record-async-threw',
+          {
+            sessionId,
+            attempt,
+            message: error instanceof Error ? error.message : 'unknown',
+          },
+          'error',
+        );
+        console.warn('[ReactionSheet] recordAsync threw:', error);
+        return 'retry';
+      }
+      if (!recordingPromise) {
+        if (attempt === 0) {
+          logComposeDiag('selfie:record-waiting-for-camera', {
+            sessionId,
+            cameraKey: cameraInstanceKeyRef.current,
+          });
+        }
+        return 'retry';
+      }
       attachPromise(recordingPromise);
       cameraRecordingStartedRef.current = true;
+      logComposeDiag('selfie:record-async-started', {
+        sessionId,
+        attempt,
+        cameraKey: cameraInstanceKeyRef.current,
+      });
       return 'started';
     };
 
-    const first = tryStart();
-    if (first === 'started' || first === 'cancelled') return;
+    return new Promise((resolve) => {
+      void (async () => {
+        const readyDeadline = Date.now() + SELFIE_CAMERA_READY_TIMEOUT_MS;
+        while (Date.now() < readyDeadline) {
+          if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+            logComposeDiag('selfie:record-cancelled', { sessionId, reason: 'before-camera-ready' });
+            resolve(false);
+            return;
+          }
+          if (cameraReadyRef.current && cameraRef.current) break;
+          await new Promise((r) => setTimeout(r, 40));
+        }
 
-    if (Platform.OS !== 'android') {
-      console.warn('[ReactionSheet] recordAsync returned no promise — camera ref missing?');
-      isRecordingRef.current = false;
-      setIsRecording(false);
-      return;
-    }
+        if (!cameraReadyRef.current || !cameraRef.current) {
+          if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+            resolve(false);
+            return;
+          }
+          isRecordingRef.current = false;
+          setIsRecording(false);
+          setIsCameraRestoring(false);
+          recordingSessionIdRef.current += 1;
+          logComposeDiag('selfie:record-camera-timeout', { sessionId }, 'error');
+          void restoreAfterSelfieCaptureAsync();
+          Alert.alert(
+            'Camera Not Ready',
+            'Wait for the camera preview to appear, then hold the button again.',
+          );
+          resolve(false);
+          return;
+        }
 
-    void (async () => {
-      for (let attempt = 0; attempt < 8; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 150 + attempt * 100));
-        const result = tryStart();
-        if (result === 'started' || result === 'cancelled') return;
-      }
-      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
-      isRecordingRef.current = false;
-      setIsRecording(false);
-      console.warn('[ReactionSheet] recordAsync never started — camera ref missing?');
-      cameraRecordingStartedRef.current = false;
-      setIsSelfieSaving(false);
-      Alert.alert(
-        'Camera Not Ready',
-        'Wait for the camera preview to appear, then hold the button again.',
-      );
-    })();
-  }, []);
+        logComposeDiag('selfie:camera-ready-for-record', {
+          sessionId,
+          cameraKey: cameraInstanceKeyRef.current,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, SELFIE_VIDEO_MODE_SETTLE_MS));
+        if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+          resolve(false);
+          return;
+        }
+        logComposeDiag('selfie:video-mode-settled', {
+          sessionId,
+          settleMs: SELFIE_VIDEO_MODE_SETTLE_MS,
+        });
+
+        const first = tryStart(0);
+        if (first === 'started') {
+          resolve(true);
+          return;
+        }
+        if (first === 'cancelled') {
+          resolve(false);
+          return;
+        }
+
+        for (let attempt = 1; attempt <= 10; attempt++) {
+          await new Promise((r) => setTimeout(r, SELFIE_CAMERA_BIND_MS / 2 + attempt * 80));
+          const result = tryStart(attempt);
+          if (result === 'started') {
+            resolve(true);
+            return;
+          }
+          if (result === 'cancelled') {
+            resolve(false);
+            return;
+          }
+          logComposeDiag('selfie:record-retry', { sessionId, attempt }, 'warn');
+        }
+        if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+          resolve(false);
+          return;
+        }
+        isRecordingRef.current = false;
+        setIsRecording(false);
+        console.warn('[ReactionSheet] recordAsync never started — camera ref missing?');
+        cameraRecordingStartedRef.current = false;
+        setIsCameraRestoring(false);
+        logComposeDiag('selfie:record-never-started', { sessionId, cameraKey: cameraInstanceKeyRef.current }, 'error');
+        void restoreAfterSelfieCaptureAsync();
+        Alert.alert(
+          'Camera Not Ready',
+          'Wait for the camera preview to appear, then hold the button again.',
+        );
+        resolve(false);
+      })();
+    });
+  }, [restoreAfterSelfieCaptureAsync]);
 
   const scheduleRecordingParentReasserts = useCallback(
     (sessionId: number, syncStart: number) => {
       const reassertParentPlayback = async () => {
         if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
         try {
-          await startParentRecordingPlayback(syncStart);
+          // seek:false — keep the playhead where it is; only re-confirm playback.
+          await startParentRecordingPlayback(syncStart, { seek: false });
         } catch (error) {
           console.warn('[ReactionSheet] parent playback reassert failed:', error);
         }
@@ -1867,110 +2116,120 @@ export function ReactionSheet({
     if (!isRecordingRef.current) return;
 
     const sessionId = recordingSessionIdRef.current;
+    const shouldFinalize = cameraRecordingStartedRef.current;
+
+    logComposeDiag('selfie:press-out', {
+      cameraStarted: shouldFinalize,
+      cameraKey: cameraInstanceKeyRef.current,
+    });
+
     recordingSessionIdRef.current += 1;
     isRecordingRef.current = false;
     recordingAudioReassertCancelRef.current?.();
     recordingAudioReassertCancelRef.current = null;
+    if (shouldFinalize) {
+      setSelfieCaptureFinalizePending(true);
+      setIsSelfieSaving(true);
+    } else {
+      setSelfieCaptureFinalizePending(false);
+      setIsSelfieSaving(false);
+    }
     setIsRecording(false);
-    setIsSelfieSaving(cameraRecordingStartedRef.current);
 
     void (async () => {
-      const minHoldMs = Platform.OS === 'android' && isVideoParent ? 450 : 0;
-      const elapsed = Date.now() - recordingStartedAtRef.current;
-      if (minHoldMs > 0 && elapsed < minHoldMs) {
-        await new Promise((resolve) => setTimeout(resolve, minHoldMs - elapsed));
-      }
-      if (recordingSessionIdRef.current !== sessionId + 1) {
-        setIsSelfieSaving(false);
-        return;
-      }
-      cameraRef.current?.stopRecording();
-    })();
-
-    void (async () => {
+      // Pause parent expo-av playback before stopRecording so iOS can finalize the camera file.
       if (isVideoParent) {
         const status = await videoRef.current?.getStatusAsync();
         if (status?.isLoaded) {
           setSyncEndTimeMillis(status.positionMillis);
         }
         await videoRef.current?.pauseAsync().catch(() => {});
-        try {
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          await configureConnectPlaybackAudioSessionAsync({ retries: 3 });
-          const postRestoreStatus = await videoRef.current?.getStatusAsync().catch(() => null);
-          if (postRestoreStatus?.isLoaded) {
-            await syncParentVideoAudioAsync(videoRef.current);
-          }
-        } catch (error) {
-          console.warn('[ReactionSheet] failed to restore playback audio session:', error);
-        }
       } else {
         setSyncEndTimeMillis(0);
-        if (Platform.OS === 'android') {
-          // Camera capture leaves Android's audio session routed for recording, which makes
-          // the selfie play back very quietly in preview. Fully release the capture session
-          // and reconfigure for playback so the recording plays at normal volume.
-          void releaseConnectCaptureAudioAsync().catch(() => {});
-        } else {
-          // Restore audio session to playback mode in the background so it is already in the
-          // correct state when the user opens companion preview.
-          void configureConnectPlaybackAudioSessionAsync({ retries: 2 }).catch(() => {});
-        }
+      }
+
+      if (!shouldFinalize) {
+        void restoreAfterSelfieCaptureAsync();
+        return;
+      }
+
+      const minHoldMs = Platform.OS === 'android' && isVideoParent ? 450 : 0;
+      const elapsed = Date.now() - recordingStartedAtRef.current;
+      if (minHoldMs > 0 && elapsed < minHoldMs) {
+        await new Promise((resolve) => setTimeout(resolve, minHoldMs - elapsed));
+      }
+      if (recordingSessionIdRef.current !== sessionId + 1) {
+        setSelfieCaptureFinalizePending(false);
+        setIsSelfieSaving(false);
+        return;
+      }
+
+      try {
+        cameraRef.current?.stopRecording();
+        logComposeDiag('selfie:stop-recording', {
+          sessionId,
+          hasCameraRef: !!cameraRef.current,
+        });
+      } catch (error) {
+        console.warn('[ReactionSheet] stopRecording failed:', error);
       }
     })();
-  }, [isVideoParent, syncParentVideoAudioAsync]);
+  }, [isVideoParent, restoreAfterSelfieCaptureAsync]);
 
   useEffect(() => {
     stopSelfieRecordingRef.current = stopSelfieRecording;
   }, [stopSelfieRecording]);
 
   const handlePressIn = useCallback(() => {
-    if (recordedUri) return;
+    if (recordedUri || isSelfieRetakePreparing) return;
 
     const cameraGranted = cameraPermission?.granted || nativeCameraGranted;
     if (!cameraGranted) {
+      logComposeDiag('selfie:press-in-denied', { reason: 'camera-permission' }, 'warn');
       void ensureCameraPermission();
-      return;
-    }
-    if (Platform.OS !== 'android' && !cameraReady) {
       return;
     }
 
     const syncStart = isVideoParent ? trimStartMsRef.current : 0;
     const sessionId = recordingSessionIdRef.current + 1;
+    logComposeDiag('selfie:press-in', {
+      sessionId,
+      isVideoParent,
+      syncStartMs: syncStart,
+      trimStartMs: trimStartMsRef.current,
+    });
     recordingSessionIdRef.current = sessionId;
     recordingPromiseRef.current = null;
     recordingStartedAtRef.current = Date.now();
     cameraRecordingStartedRef.current = false;
+    // Do NOT reset cameraReady here: the persistent CameraView is already warm
+    // and won't emit a fresh onCameraReady just because state flips. Only show
+    // the warming spinner if the session genuinely hasn't reported ready yet.
+    if (!cameraReadyRef.current) {
+      setIsCameraRestoring(true);
+    }
+    setIsSelfieCaptureArming(true);
+    selfieCaptureArmingRef.current = true;
     setSyncStartTimeMillis(syncStart);
-    setIsRecording(true);
-    isRecordingRef.current = true;
     setIsPreviewPlaying(false);
     isPreviewPlayingRef.current = false;
     void pauseParentPreview();
 
-    if (!isVideoParent) {
-      beginCameraRecording(sessionId);
-    }
+    const cancelArming = () => {
+      if (recordingSessionIdRef.current !== sessionId) return;
+      selfieCaptureArmingRef.current = false;
+      setIsSelfieCaptureArming(false);
+      setIsCameraRestoring(false);
+      recordingSessionIdRef.current += 1;
+    };
 
     void (async () => {
-      if (isVideoParent) {
-        try {
-          await configureConnectReactionRecordingAudioSessionAsync();
-          if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
-          await startParentRecordingPlayback(syncStart);
-        } catch (error) {
-          console.warn('[ReactionSheet] parent playback during selfie failed:', error);
-        }
-      }
-
       const micGranted = micReady || (await ensureMicPermissionAsync());
       setMicReady(micGranted);
       if (!micGranted) {
-        if (recordingSessionIdRef.current === sessionId && isRecordingRef.current) {
-          isRecordingRef.current = false;
-          setIsRecording(false);
-          recordingSessionIdRef.current += 1;
+        if (recordingSessionIdRef.current === sessionId && selfieCaptureArmingRef.current) {
+          logComposeDiag('selfie:press-in-abort', { sessionId, reason: 'mic-permission' }, 'warn');
+          cancelArming();
           await videoRef.current?.pauseAsync().catch(() => {});
           Alert.alert(
             'Microphone Access Needed',
@@ -1980,28 +2239,43 @@ export function ReactionSheet({
         return;
       }
 
-      if (!isVideoParent) return;
+      try {
+        await configureConnectReactionRecordingAudioSessionAsync({ retries: 2 });
+      } catch (error) {
+        console.warn('[ReactionSheet] reaction recording audio session failed:', error);
+      }
+      if (recordingSessionIdRef.current !== sessionId || !selfieCaptureArmingRef.current) return;
 
-      if (Platform.OS === 'android') {
-        await new Promise((resolve) => setTimeout(resolve, 120));
-        if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
+      selfieCaptureArmingRef.current = false;
+      setIsSelfieCaptureArming(false);
+      setIsRecording(true);
+      isRecordingRef.current = true;
+      logComposeDiag('selfie:capture-armed', {
+        sessionId,
+        cameraKey: cameraInstanceKeyRef.current,
+      });
+
+      const cameraStarted = await beginCameraRecording(sessionId);
+      if (!cameraStarted || recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) {
+        return;
       }
 
-      if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
-      beginCameraRecording(sessionId);
+      if (!isVideoParent) return;
 
       try {
+        logComposeDiag('selfie:parent-sync-start', { sessionId, syncStartMs: syncStart });
+        await startParentRecordingPlayback(syncStart);
         if (recordingSessionIdRef.current !== sessionId || !isRecordingRef.current) return;
         scheduleRecordingParentReasserts(sessionId, syncStart);
       } catch (error) {
-        console.warn('[ReactionSheet] parent playback reassert schedule failed:', error);
+        console.warn('[ReactionSheet] parent playback during selfie failed:', error);
       }
     })();
   }, [
     beginCameraRecording,
     cameraPermission?.granted,
-    cameraReady,
     ensureCameraPermission,
+    isSelfieRetakePreparing,
     isVideoParent,
     micReady,
     nativeCameraGranted,
@@ -2012,7 +2286,16 @@ export function ReactionSheet({
   ]);
 
   const handlePressOut = useCallback(() => {
-    stopSelfieRecording();
+    if (isRecordingRef.current) {
+      stopSelfieRecording();
+      return;
+    }
+    if (selfieCaptureArmingRef.current) {
+      selfieCaptureArmingRef.current = false;
+      setIsSelfieCaptureArming(false);
+      setIsCameraRestoring(false);
+      recordingSessionIdRef.current += 1;
+    }
   }, [stopSelfieRecording]);
 
   const resetVoiceRecording = useCallback(() => {
@@ -2046,9 +2329,8 @@ export function ReactionSheet({
     (nextMode: ReactionComposeMode) => {
       if (nextMode === reactionMode || isUploading) return;
 
-      if (nextMode !== 'selfie' && androidCameraRemountTimerRef.current) {
-        clearTimeout(androidCameraRemountTimerRef.current);
-        androidCameraRemountTimerRef.current = null;
+      if (reactionMode === 'typed') {
+        Keyboard.dismiss();
       }
 
       setReactionMode(nextMode);
@@ -2060,22 +2342,19 @@ export function ReactionSheet({
       resetVoiceRecording();
       setTypedMessage('');
       setTypedMessageReady(false);
+      logComposeDiag(`mode:${nextMode}`, { from: reactionMode, platform: Platform.OS });
       if (nextMode === 'selfie') {
-        logReactionDebug('mode:selfie', { from: reactionMode });
         void ensureCameraPermission();
-        if (Platform.OS === 'android') {
-          void configureConnectPlaybackAudioSessionAsync({ retries: 1 }).catch((error) => {
-            console.warn('[ReactionSheet] selfie mode playback session failed:', error);
-          });
-        } else {
-          bumpCameraInstance();
-        }
+        void configureConnectReactionRecordingAudioSessionAsync().catch((error) => {
+          console.warn('[ReactionSheet] selfie mode recording session failed:', error);
+        });
       }
       if (nextMode === 'voice') {
         void (async () => {
-          logReactionDebug('mode:voice', { from: reactionMode });
+          logComposeDiag('voice:mode-enter', { from: reactionMode });
           const micGranted = await ensureMicPermissionAsync();
           setMicReady(micGranted);
+          logComposeDiag('voice:mic-permission', { granted: micGranted });
           if (!micGranted) {
             Alert.alert(
               'Microphone Access Needed',
@@ -2085,20 +2364,13 @@ export function ReactionSheet({
           }
         })();
       }
-      if (nextMode === 'selfie' && Platform.OS === 'ios') {
-        void configureConnectReactionRecordingAudioSessionAsync().catch((error) => {
-          console.warn('[ReactionSheet] selfie mode audio session failed:', error);
-        });
-      }
       void videoRef.current?.pauseAsync().catch(() => {});
     },
     [
-      bumpCameraInstance,
       ensureCameraPermission,
       isUploading,
       reactionMode,
       resetVoiceRecording,
-      scheduleAndroidCameraRemount,
     ],
   );
 
@@ -2111,7 +2383,7 @@ export function ReactionSheet({
     }
     isStartingVoiceRecordingRef.current = true;
     setIsStartingVoiceRecording(true);
-    logReactionDebug('voice:start-tap', { micReady, isVideoParent, isImageParent });
+    logComposeDiag('voice:start-tap', { micReady, isVideoParent, isImageParent });
     try {
       let micGranted = micReady;
       if (!micGranted) {
@@ -2132,13 +2404,11 @@ export function ReactionSheet({
         const recording = await startAndroidExpoAvVoiceRecordingAsync({
           isVideoParent,
           trimStartMs: trimStartMsRef.current,
-          startParentPlayback:
-            isVideoParent && !suppressAndroidParentVideoSurface
-              ? startParentRecordingPlayback
-              : undefined,
+          startParentPlayback: isVideoParent ? startParentRecordingPlayback : undefined,
         });
         voiceExpoAvRecordingRef.current = recording;
         setIsVoiceRecording(true);
+        logComposeDiag('voice:recording-started', { platform: 'android' });
         return;
       }
 
@@ -2155,11 +2425,12 @@ export function ReactionSheet({
         await startExpoAudioVoiceRecordingAsync(voiceRecorder);
       }
       setIsVoiceRecording(true);
+      logComposeDiag('voice:recording-started', { platform: Platform.OS });
     } catch (error) {
       console.warn('[ReactionSheet] voice record start failed:', error);
-      logReactionDebug('voice:start-failed', {
+      logComposeDiag('voice:start-failed', {
         message: error instanceof Error ? error.message : String(error),
-      });
+      }, 'error');
       voiceExpoAvRecordingRef.current = null;
       setIsVoiceRecording(false);
       Alert.alert(
@@ -2176,14 +2447,13 @@ export function ReactionSheet({
     isVoiceRecording,
     micReady,
     startParentRecordingPlayback,
-    suppressAndroidParentVideoSurface,
     unloadPreviewAudio,
     voiceRecorder,
   ]);
   const handleStopVoiceRecording = useCallback(async () => {
     if (!isVoiceRecording || isVoiceProcessing) return;
     setIsVoiceProcessing(true);
-    logReactionDebug('voice:stop-start');
+    logComposeDiag('voice:stop-tap');
     try {
       if (isVideoParent) {
         await runVideoCommand(() => videoRef.current?.pauseAsync(), 'voice reaction pause failed');
@@ -2202,6 +2472,7 @@ export function ReactionSheet({
 
       setIsVoiceRecording(false);
       if (recordingUri) {
+        logComposeDiag('voice:record-saved', { hasUri: true });
         setVoiceRecordedUri(recordingUri);
         setRecordedAudioSnapshot({
           originalAudioMuted: isParentReflectionMutedRef.current,
@@ -2217,27 +2488,20 @@ export function ReactionSheet({
       voiceExpoAvRecordingRef.current = null;
     } finally {
       setIsVoiceProcessing(false);
-      logReactionDebug('voice:stop-done');
+      logComposeDiag('voice:stop-done');
     }
   }, [isVideoParent, isVoiceProcessing, isVoiceRecording, voiceRecorder]);
 
   const handleRetake = useCallback(() => {
     selfiePreviewExpectPlayingRef.current = false;
-    if (reactionMode === 'selfie') {
-      if (Platform.OS === 'android') {
-        // The persistent camera was unmounted while the companion preview stage was shown.
-        // Show the warmup overlay instead of a black box. We deliberately do NOT bump the
-        // camera key — it re-mounts naturally when splitPane returns; an extra key-bump
-        // would cause a second remount and worsen the black-screen window.
-        if (companionPreviewOpen) setIsCameraRestoring(true);
-      } else {
-        // iOS camera is non-persistent. After a record→retake cycle the AVCaptureSession can
-        // come back dark/frozen, so force a fresh CameraView instance and re-assert the
-        // recording audio session to restart the preview cleanly.
-        setIsCameraRestoring(true);
-        bumpCameraInstance();
-        void configureConnectReactionRecordingAudioSessionAsync().catch(() => {});
-      }
+    companionPreviewAutoStartDoneRef.current = false;
+    if (selfiePreviewResumeTimerRef.current) {
+      clearTimeout(selfiePreviewResumeTimerRef.current);
+      selfiePreviewResumeTimerRef.current = null;
+    }
+    if (retakeReleaseTimerRef.current) {
+      clearTimeout(retakeReleaseTimerRef.current);
+      retakeReleaseTimerRef.current = null;
     }
     if (reactionMode === 'voice') {
       setCompanionPreviewOpen(false);
@@ -2290,39 +2554,87 @@ export function ReactionSheet({
       void restoreReactionRecordingAudioSession();
       return;
     }
-    const restartAt = syncStartTimeMillis;
+    const restartAt = syncStartTimeMillis ?? trimStartMsRef.current;
+    companionPreviewStopPendingRef.current = true;
+    recordingSessionIdRef.current += 1;
+    isRecordingRef.current = false;
     recordingPromiseRef.current = null;
     cameraRecordingStartedRef.current = false;
+    recordingAudioReassertCancelRef.current?.();
+    recordingAudioReassertCancelRef.current = null;
+    selfieCaptureArmingRef.current = false;
+    setIsSelfieCaptureArming(false);
+    setIsRecording(false);
     setIsSelfieSaving(false);
+    setSelfieCaptureFinalizePending(false);
     setRecordedUri(null);
     setRecordedAudioSnapshot(null);
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
+    positionMillisRef.current = restartAt;
+    setPositionMillis(restartAt);
     setIsPreviewPlaying(false);
     setCompanionPreviewOpen(false);
+    companionPreviewOpenRef.current = false;
+    companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
-    companionPreviewStopPendingRef.current = false;
+    // IMPORTANT: do NOT clear cameraReady here. The persistent CameraView never
+    // remounts and expo-camera does not re-emit onCameraReady when it resumes
+    // from an `active` suspend, so clearing readiness would strand the record
+    // wait-loop forever (the retake camera-not-ready bug). The session resumes
+    // the moment companionPreviewOpen flips false; readiness carries over.
+    setIsCameraRestoring(false);
+    companionPreviewStartInFlightRef.current = false;
+    setIsSelfieRetakePreparing(true);
+    try {
+      companionSelfiePlayer.pause();
+      companionSelfiePlayer.replace(null);
+    } catch {
+      /* player may be released */
+    }
 
     logReactionDebug('retake:selfie-sync', { isVideoParent });
 
-    if (isVideoParent && restartAt != null) {
-      void commitVideoPosition(restartAt, {
-        shouldPlay: false,
-        volume: getReactionParentVolume(),
-      });
-    }
-    void videoRef.current?.pauseAsync().catch(() => {});
+    // No camera remount: the persistent CameraView simply resumes its capture
+    // session now that companionPreviewOpen is false. We just give expo-video a
+    // beat to release before we re-enable the record button.
+    retakeReleaseTimerRef.current = setTimeout(() => {
+      retakeReleaseTimerRef.current = null;
+      setIsSelfieRetakePreparing(false);
+      companionPreviewStopPendingRef.current = false;
+      logReactionDebug('retake:selfie-ready', {});
+    }, SELFIE_RETAKE_PLAYER_RELEASE_MS);
+
+    void (async () => {
+      try {
+        await Promise.race([
+          Promise.all([
+            companionParentRef.current?.pauseAsync().catch(() => {}),
+            videoRef.current?.pauseAsync().catch(() => {}),
+            unloadPreviewAudio(),
+          ]),
+          new Promise<void>((resolve) => setTimeout(resolve, 750)),
+        ]);
+        if (isVideoParent && restartAt > 0) {
+          void commitVideoPosition(restartAt, {
+            shouldPlay: false,
+            volume: getReactionParentVolume(),
+          });
+        }
+      } catch (error) {
+        console.warn('[ReactionSheet] selfie retake cleanup failed:', error);
+      }
+    })();
   }, [
-    bumpCameraInstance,
     commitVideoPosition,
-    companionPreviewOpen,
+    companionSelfiePlayer,
     getReactionParentVolume,
     isVideoParent,
     reactionMode,
+    syncStartTimeMillis,
     unloadPreviewAudio,
     voiceRecorder,
-    syncStartTimeMillis,
   ]);
 
   const handleSend = useCallback(() => {
@@ -2408,8 +2720,19 @@ export function ReactionSheet({
 
   const isSelfiePreviewMode = reactionMode === 'selfie' && recordedUri != null;
   const isSelfieTakeComplete = isSelfiePreviewMode && !companionPreviewOpen;
-  const isAndroidVideoSelfie =
-    Platform.OS === 'android' && reactionMode === 'selfie' && isVideoParent && !companionPreviewOpen;
+  const isSelfieComposeStage =
+    reactionMode === 'selfie' && !companionPreviewOpen && recordedUri == null;
+  const isAndroidVideoTypedCompose =
+    Platform.OS === 'android' &&
+    isVideoParent &&
+    !companionPreviewOpen &&
+    reactionMode === 'typed';
+  const isAndroidVideoVoiceCompose =
+    Platform.OS === 'android' &&
+    isVideoParent &&
+    !companionPreviewOpen &&
+    reactionMode === 'voice';
+  const isAndroidVideoAltCompose = isAndroidVideoTypedCompose || isAndroidVideoVoiceCompose;
   const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
   const isVoiceTakeComplete = isVoicePreviewMode && !companionPreviewOpen;
   const isTypedPreviewMode =
@@ -2419,6 +2742,8 @@ export function ReactionSheet({
   const isInteractionBusy =
     isUploading ||
     isSelfieSaving ||
+    isSelfieRetakePreparing ||
+    isSelfieCaptureArming ||
     isVoiceProcessing ||
     isStartingVoiceRecording ||
     isRecording;
@@ -2427,26 +2752,123 @@ export function ReactionSheet({
     ((reactionMode === 'selfie' && !!recordedUri) ||
       (reactionMode === 'voice' && !!voiceRecordedUri) ||
       (reactionMode === 'typed' && !!typedMessage.trim()));
-  const isSelfieCameraActive =
-    visible &&
-    reactionMode === 'selfie' &&
-    !isUploading &&
-    !companionPreviewOpen &&
-    !recordedUri &&
-    !isSelfieSaving &&
-    // On Android, release the camera while backgrounded so it can re-bind cleanly on resume.
-    (Platform.OS !== 'android' || isAppForeground);
+  const isSelfieCaptureCameraLive =
+    isRecording || isSelfieSaving || selfieCaptureFinalizePending;
   const isCameraGranted =
     cameraPermission?.granted === true || nativeCameraGranted === true;
+  // Keep a SINGLE CameraView mounted for the entire selfie session (idle →
+  // record → preview → retake). Remounting a CameraView on iOS old-arch
+  // reliably fails to fire onCameraReady the second time, which is exactly what
+  // broke retake. We never unmount it; we only suspend the capture session via
+  // the `active` prop while the preview is open, then resume it on retake.
+  const isSelfieCameraMounted =
+    visible && reactionMode === 'selfie' && isAppForeground && isCameraGranted;
+  const isSelfieRecordCameraActive = isSelfieCameraMounted && !companionPreviewOpen;
   const isCameraDenied =
     nativeCameraGranted === false && cameraPermission?.granted !== true;
   const canRecordSelfie =
     reactionMode === 'selfie' &&
     !recordedUri &&
+    !isSelfieRetakePreparing &&
+    !isSelfieCaptureArming &&
     isCameraGranted &&
-    (Platform.OS === 'android' || (micReady && cameraReady));
+    (Platform.OS === 'android' || micReady);
+
+  useEffect(() => {
+    if (!REACTION_COMPOSE_DIAG || !visible || companionPreviewOpen) return;
+
+    let uiPhase = 'unknown';
+    if (reactionMode === 'selfie') {
+      if (isSelfieSaving) uiPhase = 'saving';
+      else if (isSelfieTakeComplete) uiPhase = 'complete';
+      else if (isCameraDenied) uiPhase = 'permission-denied';
+      else if (isRecording) uiPhase = cameraReady ? 'recording-pip-live' : 'recording-pip-warming';
+      else uiPhase = 'idle-hint';
+    } else if (reactionMode === 'typed') {
+      if (isTypedTakeComplete) uiPhase = 'complete';
+      else if (isTypedKeyboardVisible) uiPhase = 'composing-keyboard-up';
+      else uiPhase = 'composing';
+    } else if (reactionMode === 'voice') {
+      if (isVoiceProcessing) uiPhase = 'processing';
+      else if (isVoiceTakeComplete) uiPhase = 'complete';
+      else if (isVoiceRecording) uiPhase = 'recording';
+      else uiPhase = 'idle';
+    }
+
+    logComposeDiag('layout:snapshot', {
+      mode: reactionMode,
+      uiPhase,
+      platform: Platform.OS,
+      parentVideo: isVideoParent,
+      parentImage: isImageParent,
+      androidTypedLayout: isAndroidVideoTypedCompose,
+      androidVoiceLayout: isAndroidVideoVoiceCompose,
+      selfieComposeStage: isSelfieComposeStage,
+      isRecording,
+      cameraReady,
+      cameraRestoring: isCameraRestoring,
+      cameraKey: cameraInstanceKey,
+      cameraGranted: isCameraGranted,
+      canRecordSelfie,
+      typedLen: typedMessage.length,
+      typedReady: typedMessageReady,
+      typedKeyboardUp: isTypedKeyboardVisible,
+      voiceRecording: isVoiceRecording,
+      durationMs: durationMillis,
+    });
+  }, [
+    visible,
+    companionPreviewOpen,
+    reactionMode,
+    isSelfieSaving,
+    isSelfieTakeComplete,
+    isCameraDenied,
+    isRecording,
+    cameraReady,
+    isCameraRestoring,
+    cameraInstanceKey,
+    isCameraGranted,
+    canRecordSelfie,
+    isTypedTakeComplete,
+    isTypedKeyboardVisible,
+    typedMessage.length,
+    typedMessageReady,
+    isVoiceProcessing,
+    isVoiceTakeComplete,
+    isVoiceRecording,
+    isVideoParent,
+    isImageParent,
+    isAndroidVideoTypedCompose,
+    isAndroidVideoVoiceCompose,
+    isSelfieComposeStage,
+    durationMillis,
+  ]);
+
+  useEffect(() => {
+    if (!REACTION_COMPOSE_DIAG || !isSelfieComposeStage) return;
+    if (isSelfieCameraMounted) {
+      logComposeDiag('selfie:pip-mount', {
+        cameraKey: cameraInstanceKey,
+        active: isSelfieRecordCameraActive,
+        warming: isCameraRestoring || !cameraReady,
+        saving: isSelfieSaving,
+      });
+    } else if (!isRecording && !isSelfieSaving && !isSelfieTakeComplete) {
+      logComposeDiag('selfie:pip-placeholder', {});
+    }
+  }, [
+    isSelfieComposeStage,
+    isSelfieCameraMounted,
+    isSelfieSaving,
+    isSelfieTakeComplete,
+  ]);
+
   const scrubDurationMs = Math.max(durationMillis, 1);
   const scrubEndMs = trimEndMs > 0 ? trimEndMs : scrubDurationMs;
+  const parentIdleVolume = resolveReactionRecordingVolume({
+    muted: false,
+    hasHeadphones,
+  });
   const parentRecordingVolume = resolveReactionRecordingVolume({
     muted: isParentReflectionMuted,
     hasHeadphones,
@@ -2455,9 +2877,12 @@ export function ReactionSheet({
     muted: false,
     hasHeadphones,
   });
-  const parentVideoMuted = isPreviewPlaying && !isRecording ? false : isParentReflectionMuted;
-  const parentVideoVolume =
-    isPreviewPlaying && !isRecording ? parentTrimPreviewVolume : parentRecordingVolume;
+  const parentVideoMuted = isRecording && isParentReflectionMuted;
+  const parentVideoVolume = isRecording
+    ? parentRecordingVolume
+    : isPreviewPlaying
+      ? parentTrimPreviewVolume
+      : parentIdleVolume;
   const companionPreviewParentMuted = !companionPreviewPlaying;
   const companionPreviewParentVolumeActive = companionPreviewPlaying
     ? parentTrimPreviewVolume
@@ -2468,10 +2893,8 @@ export function ReactionSheet({
     !companionPreviewOpen &&
     !isPreviewMode &&
     (reactionMode === 'selfie' || reactionMode === 'voice');
-  const audioHintText =
-    reactionMode === 'voice'
-      ? 'Turn on Original audio to hear the Reflection while you record — use headphones to avoid echo.'
-      : 'Original audio is Off by default (no echo). Turn it on to hear the Reflection while you record — use headphones to avoid echo.';
+  const muteWhileRecordingHint =
+    'Audio will be muted while recording to avoid echo. You can use headphones to hear the audio.';
   const voiceModeHint = isVideoParent
     ? isVoiceRecording
       ? 'The Reflection plays with you. Tap Stop when you’re done.'
@@ -2484,38 +2907,40 @@ export function ReactionSheet({
       style={styles.originalAudioToggle}
       onPress={toggleParentReflectionMute}
       accessibilityRole="switch"
-      accessibilityState={{ checked: !isParentReflectionMuted }}
+      accessibilityState={{ checked: isParentReflectionMuted }}
       accessibilityLabel={
         isParentReflectionMuted
-          ? 'Original audio off. Double tap to turn on.'
-          : 'Original audio on. Double tap to turn off.'
+          ? `Mute video while recording is on. ${muteWhileRecordingHint} Double tap to turn off.`
+          : `Mute video while recording is off. ${muteWhileRecordingHint} Double tap to turn on.`
       }
     >
-      <View style={styles.originalAudioToggleLeading}>
-        <FontAwesome
-          name={isParentReflectionMuted ? 'volume-off' : 'volume-up'}
-          size={18}
-          color={isParentReflectionMuted ? '#ef4444' : '#7dd3a8'}
-        />
-        <Text style={styles.originalAudioToggleLabel}>Original audio</Text>
+      <FontAwesome
+        name={isParentReflectionMuted ? 'volume-off' : 'volume-up'}
+        size={18}
+        color={isParentReflectionMuted ? '#7dd3a8' : '#ef4444'}
+        style={styles.muteToggleIcon}
+      />
+      <View style={styles.muteToggleTextBlock}>
+        <Text style={styles.originalAudioToggleLabel}>Mute video while recording</Text>
+        <Text style={styles.muteToggleHint}>{muteWhileRecordingHint}</Text>
       </View>
       <View
         style={[
           styles.originalAudioTogglePill,
           isParentReflectionMuted
-            ? styles.originalAudioTogglePillOff
-            : styles.originalAudioTogglePillOn,
+            ? styles.originalAudioTogglePillOn
+            : styles.originalAudioTogglePillOff,
         ]}
       >
         <Text
           style={[
             styles.originalAudioToggleState,
             isParentReflectionMuted
-              ? styles.originalAudioToggleStateOff
-              : styles.originalAudioToggleStateOn,
+              ? styles.originalAudioToggleStateOn
+              : styles.originalAudioToggleStateOff,
           ]}
         >
-          {isParentReflectionMuted ? 'Off' : 'On'}
+          {isParentReflectionMuted ? 'On' : 'Off'}
         </Text>
       </View>
     </Pressable>
@@ -2542,13 +2967,83 @@ export function ReactionSheet({
     </View>
   );
 
+  const handleSelfieCameraReady = useCallback(() => {
+    logComposeDiag('selfie:camera-ready', {
+      cameraKey: cameraInstanceKeyRef.current,
+      pip: true,
+    });
+    setCameraReady(true);
+    setIsCameraRestoring(false);
+  }, []);
+
+  const renderSelfiePipOverlay = () => {
+    if (reactionMode !== 'selfie') return null;
+
+    if (isSelfieCameraMounted) {
+      // The live feed is only revealed while actually recording/saving. When the
+      // camera is warm-but-idle (or suspended behind the preview overlay) we keep
+      // the same CameraView mounted underneath a placeholder so iOS never has to
+      // cold-start a second capture session.
+      const showLiveFeed = isSelfieCaptureCameraLive;
+      return (
+        <View
+          style={[styles.companionSelfiePip, styles.reactionPipVideo]}
+          pointerEvents="none"
+          collapsable={false}
+        >
+          <CameraView
+            key={cameraInstanceKey}
+            ref={cameraRef}
+            style={StyleSheet.absoluteFillObject}
+            facing="front"
+            mode="video"
+            mirror={Platform.OS === 'ios'}
+            videoQuality="720p"
+            active={isSelfieRecordCameraActive}
+            onCameraReady={handleSelfieCameraReady}
+            onMountError={(event) => {
+              logComposeDiag(
+                'selfie:camera-mount-error',
+                { message: event.message, cameraKey: cameraInstanceKey },
+                'error',
+              );
+              console.warn('[ReactionSheet] camera mount error:', event.message);
+              setCameraReady(false);
+              setIsCameraRestoring(false);
+            }}
+          />
+          {!showLiveFeed ? (
+            <View
+              style={[StyleSheet.absoluteFillObject, styles.selfiePipPlaceholder]}
+              pointerEvents="none"
+            >
+              <FontAwesome name="video-camera" size={22} color="rgba(255,255,255,0.45)" />
+            </View>
+          ) : (isCameraRestoring || !cameraReady) && !isSelfieSaving ? (
+            <View style={styles.selfiePipWarmupOverlay} pointerEvents="none">
+              <ActivityIndicator color="#fff" size="small" />
+            </View>
+          ) : null}
+        </View>
+      );
+    }
+
+    return (
+      <View
+        style={[styles.companionSelfiePip, styles.reactionPipVideo, styles.selfiePipPlaceholder]}
+        pointerEvents="none"
+      >
+        <FontAwesome name="video-camera" size={22} color="rgba(255,255,255,0.45)" />
+      </View>
+    );
+  };
+
   return (
     <Modal
       visible={visible && hasValidParentMedia}
       animationType="slide"
       presentationStyle="fullScreen"
       onRequestClose={handleAbandonReaction}
-      onShow={handleModalShow}
     >
       <GestureHandlerRootView style={styles.container}>
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
@@ -2596,8 +3091,9 @@ export function ReactionSheet({
           keyboardVerticalOffset={0}
           enabled={Platform.OS === 'ios' && reactionMode === 'typed' && !companionPreviewOpen}
         >
-        {showCompanionPreviewStage ? (
-          <View style={styles.companionPreviewStage}>
+        <View style={styles.reactionStageArea}>
+          {showCompanionPreviewStage ? (
+          <View style={[styles.companionPreviewStage, styles.reactionPreviewOverlay]}>
             <View style={styles.companionPreviewFrame}>
               {isVideoParent ? (
                 <Video
@@ -2660,97 +3156,89 @@ export function ReactionSheet({
                     : 'This is how your Companions will see your reaction on this photo.'}
             </Text>
           </View>
-        ) : (
+          ) : null}
+        {/* Compose subtree stays mounted even during preview so the selfie
+            CameraView is never torn down (preview renders as an overlay above). */}
         <View
           style={[
             styles.splitPane,
             reactionMode === 'typed' && styles.splitPaneTyped,
-            reactionMode === 'selfie' &&
-              Platform.OS === 'android' &&
-              isImageParent &&
-              styles.splitPaneAndroidSelfie,
+            isAndroidVideoAltCompose && styles.splitPaneAndroidAlt,
+            isSelfieComposeStage && styles.splitPaneSelfieCompose,
           ]}
+          onLayout={(event) => {
+            const { width, height } = event.nativeEvent.layout;
+            logComposePaneLayout('split', width, height, reactionMode);
+          }}
         >
           <View
             style={[
               styles.parentVideoPane,
-              reactionMode === 'typed' && styles.parentVideoPaneTyped,
-              reactionMode === 'voice' && isVideoParent && styles.parentVideoPaneVoice,
-              reactionMode === 'selfie' &&
-                Platform.OS === 'android' &&
-                isImageParent &&
-                styles.parentVideoPaneAndroidSelfie,
-              reactionMode === 'selfie' &&
-                Platform.OS === 'android' &&
+              isSelfieComposeStage && styles.parentVideoPaneSelfieCompose,
+              isAndroidVideoTypedCompose && styles.parentVideoPaneAndroidTyped,
+              isAndroidVideoVoiceCompose && styles.parentVideoPaneAndroidAlt,
+              !isAndroidVideoAltCompose && reactionMode === 'typed' && styles.parentVideoPaneTyped,
+              !isAndroidVideoAltCompose &&
+                reactionMode === 'voice' &&
                 isVideoParent &&
-                styles.parentVideoPaneAndroidSelfieVideo,
+                styles.parentVideoPaneVoice,
             ]}
+            onLayout={(event) => {
+              const { width, height } = event.nativeEvent.layout;
+              logComposePaneLayout('parent', width, height, reactionMode);
+            }}
           >
-            <View
-              style={[
-                styles.mediaCard,
-                isAndroidVideoSelfie && styles.mediaCardAndroidVideoSelfie,
-              ]}
-            >
-              {isVideoParent && suppressAndroidParentVideoSurface ? (
-                <View style={[styles.parentVideoSurface, styles.parentVideoSurfacePlaceholder]}>
-                  <FontAwesome name="film" size={22} color="rgba(255,255,255,0.5)" />
-                  <Text style={styles.parentVideoPlaceholderText}>
-                    Reflection video ready
-                  </Text>
-                </View>
-              ) : isVideoParent ? (
+            <View style={styles.mediaCard}>
+              {isVideoParent ? (
                 <>
-                  <GestureDetector
-                    gesture={
-                      showScrubUi && !isRecording ? videoPanGesture : Gesture.Pan().enabled(false)
-                    }
+                  <View
+                    style={styles.parentVideoSurface}
+                    onLayout={(event) => {
+                      const { width, height } = event.nativeEvent.layout;
+                      parentVideoWidthRef.current = width;
+                      logComposePaneLayout('parentSurface', width, height, reactionMode);
+                    }}
                   >
-                    <View
-                      style={[
-                        styles.parentVideoSurface,
-                        isAndroidVideoSelfie && styles.parentVideoSurfaceAndroidVideoSelfie,
-                      ]}
-                      onLayout={(event) => {
-                        parentVideoWidthRef.current = event.nativeEvent.layout.width;
-                      }}
-                    >
-                      <Video
-                        ref={videoRef}
-                        source={{ uri: parentVideoUrl }}
-                        style={styles.parentVideo}
-                        resizeMode={ResizeMode.CONTAIN}
-                        shouldPlay={false}
-                        isLooping={false}
-                        isMuted={parentVideoMuted}
-                        volume={parentVideoVolume}
-                        progressUpdateIntervalMillis={100}
-                        onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-                      />
-                      {showScrubUi && !isRecording ? (
+                    <Video
+                      ref={videoRef}
+                      source={{ uri: parentVideoUrl }}
+                      style={styles.parentVideo}
+                      resizeMode={ResizeMode.CONTAIN}
+                      shouldPlay={false}
+                      isLooping={false}
+                      isMuted={parentVideoMuted}
+                      volume={parentVideoVolume}
+                      progressUpdateIntervalMillis={100}
+                      onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+                    />
+                    {showScrubUi && !isRecording && Platform.OS === 'ios' ? (
+                      <>
                         <View style={styles.dragHintOverlay} pointerEvents="none">
                           <Text style={styles.dragHintText}>Drag to set start</Text>
                         </View>
-                      ) : null}
-                      {isRecording && isVideoParent ? (
-                        <View style={styles.recordingSyncOverlay} pointerEvents="none">
-                          <View style={styles.recordingSyncBadge}>
-                            <FontAwesome name="circle" size={10} color="#ff6b6b" />
-                            <Text style={styles.recordingSyncText}>Recording with Reflection</Text>
-                          </View>
+                        <GestureDetector gesture={videoPanGesture}>
+                          <View style={styles.parentVideoGestureOverlay} />
+                        </GestureDetector>
+                      </>
+                    ) : showScrubUi && !isRecording ? (
+                      <View style={styles.dragHintOverlay} pointerEvents="none">
+                        <Text style={styles.dragHintText}>Drag to set start</Text>
+                      </View>
+                    ) : null}
+                    {isRecording && isVideoParent ? (
+                      <View style={styles.recordingSyncOverlay} pointerEvents="none">
+                        <View style={styles.recordingSyncBadge}>
+                          <FontAwesome name="circle" size={10} color="#ff6b6b" />
+                          <Text style={styles.recordingSyncText}>Recording with Reflection</Text>
                         </View>
-                      ) : null}
-                    </View>
-                  </GestureDetector>
+                      </View>
+                    ) : null}
+                    {renderSelfiePipOverlay()}
+                  </View>
 
                   {showScrubUi && durationMillis > MIN_TRIM_GAP_MS ? (
                     <>
-                      <View
-                        style={[
-                          styles.trimSliderWrap,
-                          isAndroidVideoSelfie && styles.trimSliderWrapAndroidVideoSelfie,
-                        ]}
-                      >
+                      <View style={styles.trimSliderWrap}>
                         <VideoTrimSlider
                           durationMs={scrubDurationMs}
                           startMs={trimStartMs}
@@ -2798,6 +3286,7 @@ export function ReactionSheet({
                     style={styles.parentImage}
                     contentFit="contain"
                   />
+                  {renderSelfiePipOverlay()}
                 </View>
               )}
             </View>
@@ -2805,30 +3294,21 @@ export function ReactionSheet({
 
           <View
             style={[
-              styles.cameraPane,
-              reactionMode === 'selfie' &&
-                Platform.OS === 'android' &&
-                isImageParent &&
-                styles.cameraPaneAndroidSelfie,
-              isAndroidVideoSelfie && styles.cameraPaneAndroidSelfieVideo,
+              styles.modePane,
+              isAndroidVideoAltCompose && styles.cameraPaneAndroidAlt,
+              isSelfieComposeStage && styles.selfieHintPane,
             ]}
+            onLayout={(event) => {
+              const { width, height } = event.nativeEvent.layout;
+              logComposePaneLayout('mode', width, height, reactionMode);
+            }}
           >
             <View style={styles.mediaCard}>
               <View
                 style={[
                   styles.modeForeground,
-                  reactionMode === 'selfie' &&
-                    !isSelfieSaving &&
-                    !isSelfieTakeComplete &&
-                    styles.modeForegroundTransparent,
+                  isAndroidVideoAltCompose && styles.modeForegroundAndroidAlt,
                 ]}
-                pointerEvents={
-                  reactionMode === 'selfie' &&
-                  !isSelfieSaving &&
-                  !isSelfieTakeComplete
-                    ? 'box-none'
-                    : 'auto'
-                }
               >
               {reactionMode === 'typed' && isTypedTakeComplete ? (
                 <View style={styles.takeCompletePane}>
@@ -2839,10 +3319,64 @@ export function ReactionSheet({
                   </Text>
                 </View>
               ) : reactionMode === 'typed' ? (
-                <View style={styles.typedComposePane}>
+                isAndroidVideoTypedCompose ? (
+                  <ScrollView
+                    style={styles.altModePaneScroll}
+                    contentContainerStyle={[
+                      styles.typedComposePane,
+                      styles.typedComposePaneAndroidAlt,
+                    ]}
+                    showsVerticalScrollIndicator={false}
+                    bounces={false}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    <Text style={styles.altModeTitle}>Type your reaction</Text>
+                    <TextInput
+                      style={styles.typedInputExpanded}
+                      placeholder="Say something warm and short…"
+                      placeholderTextColor="rgba(255,255,255,0.4)"
+                      value={typedMessage}
+                      onChangeText={setTypedMessage}
+                      maxLength={TYPED_MESSAGE_MAX_LENGTH}
+                      multiline
+                      textAlignVertical="top"
+                      editable={!isUploading}
+                      returnKeyType="done"
+                      blurOnSubmit
+                      onSubmitEditing={commitTypedMessage}
+                      scrollEnabled
+                    />
+                    <View style={styles.typedComposeMeta}>
+                      <Text style={styles.typedCounter}>
+                        {typedMessage.length}/{TYPED_MESSAGE_MAX_LENGTH}
+                      </Text>
+                      {typedMessage.trim() ? (
+                        <Pressable
+                          style={styles.keyboardDismissButton}
+                          onPress={commitTypedMessage}
+                          accessibilityRole="button"
+                          accessibilityLabel="Done typing"
+                        >
+                          <Text style={styles.keyboardDismissButtonText}>
+                            {isTypedKeyboardVisible ? 'Done typing' : 'Message ready'}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </ScrollView>
+                ) : (
+                <View
+                  style={[
+                    styles.typedComposePane,
+                    isAndroidVideoAltCompose && styles.typedComposePaneAndroidAlt,
+                  ]}
+                >
                   <Text style={styles.altModeTitle}>Type your reaction</Text>
                   <TextInput
-                    style={styles.typedInputExpanded}
+                    style={[
+                      styles.typedInputExpanded,
+                      isAndroidVideoAltCompose && styles.typedInputAndroidAlt,
+                    ]}
                     placeholder="Say something warm and short…"
                     placeholderTextColor="rgba(255,255,255,0.4)"
                     value={typedMessage}
@@ -2874,6 +3408,7 @@ export function ReactionSheet({
                     ) : null}
                   </View>
                 </View>
+                )
               ) : reactionMode === 'voice' && isVoiceProcessing ? (
                 <View style={styles.takeCompletePane}>
                   <ActivityIndicator color="#fff" size="large" />
@@ -2891,7 +3426,10 @@ export function ReactionSheet({
               ) : reactionMode === 'voice' ? (
                 <ScrollView
                   style={styles.altModePaneScroll}
-                  contentContainerStyle={styles.altModePaneContent}
+                  contentContainerStyle={[
+                    styles.altModePaneContent,
+                    isAndroidVideoAltCompose && styles.altModePaneContentAndroidAlt,
+                  ]}
                   showsVerticalScrollIndicator={false}
                   bounces={false}
                   keyboardShouldPersistTaps="handled"
@@ -2939,55 +3477,6 @@ export function ReactionSheet({
                     Preview how Companions will see it, or retake if you want another try.
                   </Text>
                 </View>
-              ) : reactionMode === 'selfie' && isCameraGranted ? (
-                <View
-                  style={[
-                    styles.cameraStageHost,
-                    Platform.OS === 'ios' && styles.cameraStageHostIos,
-                    Platform.OS === 'android' &&
-                      isImageParent &&
-                      styles.cameraStageHostAndroidImageSelfie,
-                    isAndroidVideoSelfie && styles.cameraStageHostAndroidVideoSelfie,
-                  ]}
-                  collapsable={false}
-                >
-                  <CameraView
-                    key={cameraInstanceKey}
-                    ref={cameraRef}
-                    style={styles.cameraPreview}
-                    facing="front"
-                    mode="video"
-                    mirror={Platform.OS === 'ios'}
-                    videoQuality="720p"
-                    active={isSelfieCameraActive}
-                    onCameraReady={() => {
-                      logReactionDebug('camera:ready', { cameraInstanceKey, reactionMode });
-                      setCameraReady(true);
-                      // iOS briefly shows the back camera on a fresh mount before facing="front"
-                      // applies; hold the opaque overlay a beat so the user never sees the flash.
-                      if (Platform.OS === 'ios') {
-                        setTimeout(() => setIsCameraRestoring(false), 350);
-                      } else {
-                        setIsCameraRestoring(false);
-                      }
-                    }}
-                    onMountError={(event) => {
-                      logReactionDebug('camera:mount-error', {
-                        message: event.message,
-                        cameraInstanceKey,
-                      });
-                      console.warn('[ReactionSheet] camera mount error:', event.message);
-                      setCameraReady(false);
-                      setIsCameraRestoring(false);
-                    }}
-                  />
-                  {isCameraRestoring ? (
-                    <View style={styles.cameraRestoringOverlay} pointerEvents="none">
-                      <ActivityIndicator color="#fff" size="large" />
-                      <Text style={styles.takeCompleteHint}>Starting camera…</Text>
-                    </View>
-                  ) : null}
-                </View>
               ) : reactionMode === 'selfie' && isCameraDenied ? (
                 <View style={styles.permissionFallback}>
                   <Text style={styles.permissionText}>
@@ -3004,6 +3493,16 @@ export function ReactionSheet({
                     </Text>
                   </Pressable>
                 </View>
+              ) : reactionMode === 'selfie' ? (
+                <View style={styles.selfieHintContent}>
+                  <FontAwesome name="video-camera" size={28} color="#fff" />
+                  <Text style={styles.altModeTitle}>Hold to react</Text>
+                  <Text style={styles.altModeHint}>
+                    {isImageParent
+                      ? 'While you hold the button, your selfie appears in the corner — just like Companions will see it.'
+                      : 'While you hold the button, the Reflection plays and your selfie appears in the corner.'}
+                  </Text>
+                </View>
               ) : (
                 <View style={styles.permissionFallback}>
                   <ActivityIndicator color="#fff" />
@@ -3014,29 +3513,28 @@ export function ReactionSheet({
             </View>
           </View>
         </View>
-        )}
+        </View>
 
         <View style={[styles.interactionFooter, { paddingBottom: insets.bottom }]}>
-          {showAudioHint ? (
-            <View style={styles.audioHintBlock}>
-              {renderOriginalAudioToggle()}
-              <Text style={styles.audioHintText}>{audioHintText}</Text>
-            </View>
-          ) : null}
+          {showAudioHint ? renderOriginalAudioToggle() : null}
 
           {isInteractionBusy && !companionPreviewOpen ? (
             <View style={styles.processingBanner}>
               <ActivityIndicator color="#fff" size="small" />
               <Text style={styles.processingBannerText}>
-                {isSelfieSaving
-                  ? 'Saving selfie…'
-                  : isVoiceProcessing
-                    ? 'Processing voice…'
-                    : isStartingVoiceRecording
-                      ? 'Starting voice…'
-                      : isRecording
-                        ? 'Recording…'
-                        : 'Working…'}
+                {isSelfieRetakePreparing
+                  ? 'Preparing camera…'
+                  : isSelfieCaptureArming
+                    ? 'Starting camera…'
+                    : isSelfieSaving
+                      ? 'Saving selfie…'
+                      : isVoiceProcessing
+                        ? 'Processing voice…'
+                        : isStartingVoiceRecording
+                          ? 'Starting voice…'
+                          : isRecording
+                            ? 'Recording…'
+                            : 'Working…'}
               </Text>
             </View>
           ) : null}
@@ -3186,17 +3684,30 @@ export function ReactionSheet({
             <Pressable
               onPressIn={handlePressIn}
               onPressOut={handlePressOut}
-              disabled={!canRecordSelfie || isSelfieSaving}
+              disabled={
+                isSelfieRetakePreparing ||
+                isSelfieSaving ||
+                (!canRecordSelfie && !isSelfieCaptureArming && !isRecording)
+              }
               android_disableSound
               style={({ pressed }) => [
                 styles.recordButton,
-                isRecording && styles.recordButtonActive,
-                (pressed || isRecording) && styles.recordButtonPressed,
-                (!canRecordSelfie || isSelfieSaving) && styles.recordButtonDisabled,
+                (isRecording || isSelfieCaptureArming) && styles.recordButtonActive,
+                (pressed || isRecording || isSelfieCaptureArming) && styles.recordButtonPressed,
+                (isSelfieRetakePreparing ||
+                  isSelfieSaving ||
+                  (!canRecordSelfie && !isSelfieCaptureArming && !isRecording)) &&
+                  styles.recordButtonDisabled,
               ]}
               accessibilityRole="button"
               accessibilityLabel={
-                isSelfieSaving ? 'Saving reaction' : isRecording ? 'Recording reaction' : 'Hold to react'
+                isSelfieRetakePreparing
+                  ? 'Preparing camera'
+                  : isSelfieSaving
+                    ? 'Saving reaction'
+                    : isRecording || isSelfieCaptureArming
+                      ? 'Recording reaction'
+                      : 'Hold to react'
               }
               accessibilityHint={
                 isImageParent
@@ -3206,11 +3717,13 @@ export function ReactionSheet({
             >
               <FontAwesome name="circle" size={14} color="#fff" />
               <Text style={styles.recordButtonText}>
-                {isSelfieSaving
-                  ? 'Saving…'
-                  : isRecording
-                    ? 'Recording…'
-                    : 'Hold to React'}
+                {isSelfieRetakePreparing
+                  ? 'Preparing…'
+                  : isSelfieSaving
+                    ? 'Saving…'
+                    : isRecording || isSelfieCaptureArming
+                      ? 'Recording…'
+                      : 'Hold to React'}
               </Text>
             </Pressable>
           )}
@@ -3415,24 +3928,12 @@ const styles = StyleSheet.create({
     zIndex: 2,
     backgroundColor: '#101820',
   },
-  modeForegroundTransparent: {
-    backgroundColor: 'transparent',
-  },
-  cameraStageHostAndroidImageSelfie: {
-    // Centered portrait 3:4 box so the front camera shows natural selfie framing instead of a
-    // zoomed-in near-square crop. The aspect ratio is anchored to a DEFINITE height (the camera
-    // pane below has a fixed height, and this host fills it), so width derives deterministically
-    // (height * 3/4) and never collapses to zero on a background/foreground re-layout.
-    alignSelf: 'center',
-    height: '100%',
-    aspectRatio: 3 / 4,
-    backgroundColor: '#000',
-    borderRadius: 14,
-    overflow: 'hidden',
-    zIndex: 1,
-  },
   parentVideoPane: {
     flex: 1.4,
+    minHeight: 0,
+  },
+  parentVideoPaneSelfieCompose: {
+    flex: 1,
     minHeight: 0,
   },
   parentVideoPaneTyped: {
@@ -3442,31 +3943,44 @@ const styles = StyleSheet.create({
   parentVideoPaneVoice: {
     flex: 1.25,
   },
+  splitPaneAndroidAlt: {
+    gap: 8,
+  },
+  parentVideoPaneAndroidAlt: {
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 320,
+    minHeight: 320,
+    maxHeight: 320,
+    width: '100%',
+  },
+  parentVideoPaneAndroidTyped: {
+    // Match iOS typed layout: keep the parent Reflection small so the text field stays visible
+    // when the keyboard is up on Android (no KeyboardAvoidingView — resize events oscillate).
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 180,
+    minHeight: 180,
+    maxHeight: 180,
+    width: '100%',
+  },
+  cameraPaneAndroidAlt: {
+    flex: 1,
+    minHeight: 180,
+    zIndex: 4,
+    elevation: 8,
+  },
+  modeForegroundAndroidAlt: {
+    zIndex: 5,
+    elevation: 9,
+  },
   splitPaneTyped: {
     gap: 8,
   },
-  splitPaneAndroidSelfie: {
-    flex: 1,
-  },
-  parentVideoPaneAndroidSelfie: {
-    flex: 2.4,
-    minHeight: 0,
-  },
-  parentVideoPaneAndroidSelfieVideo: {
-    flex: 2.4,
-    minHeight: 0,
-  },
-  mediaCardAndroidVideoSelfie: {
-    flexDirection: 'column',
-  },
-  parentVideoSurfaceAndroidVideoSelfie: {
-    flex: 1,
-    minHeight: 120,
-    flexShrink: 1,
-  },
-  trimSliderWrapAndroidVideoSelfie: {
-    minHeight: 40,
-    flexShrink: 0,
+  splitPaneSelfieCompose: {
+    gap: 8,
   },
   recordingSyncOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -3493,21 +4007,18 @@ const styles = StyleSheet.create({
     minHeight: 0,
     backgroundColor: '#101820',
     overflow: 'hidden',
+    position: 'relative',
   },
-  parentVideoSurfacePlaceholder: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  parentVideoPlaceholderText: {
-    color: 'rgba(255,255,255,0.62)',
-    fontSize: 13,
-    fontWeight: '600',
+  parentVideoGestureOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 2,
+    backgroundColor: 'transparent',
   },
   parentImageSurface: {
     flex: 1,
     minHeight: 0,
     backgroundColor: '#101820',
+    position: 'relative',
   },
   parentVideo: {
     flex: 1,
@@ -3569,65 +4080,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
-  cameraPane: {
+  modePane: {
     flex: 1,
     minHeight: 0,
   },
-  cameraPaneAndroidSelfie: {
-    // Fixed height (not flex): a flex value here competes with the parent image pane and re-resolves
-    // to a shorter height after the app returns from background, making the camera "shrink to half".
-    // A definite height keeps the camera box stable across re-layout and anchors the host's 3:4 ratio.
+  selfieHintPane: {
     flex: 0,
     flexGrow: 0,
     flexShrink: 0,
-    height: 240,
+    minHeight: 120,
+    maxHeight: 160,
   },
-  cameraPaneAndroidSelfieVideo: {
-    // Fixed height (selfie mode only): keeps the camera box stable across a background/foreground
-    // re-layout and hands the remaining vertical space to the parent video (which is flex), so the
-    // video no longer gets squeezed by a camera pane that fights it for flex space. Kept modest so
-    // the reflection video (the thing being reacted to) stays clearly the larger of the two panes.
-    flex: 0,
-    flexGrow: 0,
-    flexShrink: 0,
-    height: 120,
-  },
-  cameraStageHost: {
+  selfieHintContent: {
     flex: 1,
-    // No minHeight here: the camera pane owns the vertical size. A taller CameraView host can make
-    // Android's native surface overflow its React Native card on some Samsung devices.
-    minHeight: 0,
-    width: '100%',
-    backgroundColor: '#000',
-    overflow: 'hidden',
-    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    gap: 8,
   },
-  cameraStageHostIos: {
-    flex: 0,
-    alignSelf: 'center',
-    height: '100%',
-    aspectRatio: 3 / 4,
-    borderRadius: 14,
+  selfiePipPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
-  cameraStageHostAndroidVideoSelfie: {
-    // Centered portrait 3:4 box (was a 4:3 landscape box that squished the face). Anchored to the
-    // camera pane's fixed height so the width derives deterministically (height * 3/4) and the box
-    // can't collapse on a background/foreground re-layout. Mirrors the iOS and image-parent boxes.
-    alignSelf: 'center',
-    height: '100%',
-    aspectRatio: 3 / 4,
-    backgroundColor: '#000',
-    borderRadius: 14,
-    overflow: 'hidden',
-    zIndex: 1,
-  },
-  cameraPreview: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-  },
-  selfiePreviewVideo: {
+  selfiePipWarmupOverlay: {
     ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
   },
   permissionFallback: {
     flex: 1,
@@ -3713,6 +4194,10 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     gap: 10,
   },
+  altModePaneContentAndroidAlt: {
+    justifyContent: 'flex-start',
+    paddingTop: 28,
+  },
   altModeTitle: {
     color: '#fff',
     fontSize: 17,
@@ -3733,6 +4218,10 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 10,
   },
+  typedComposePaneAndroidAlt: {
+    justifyContent: 'flex-start',
+    paddingTop: 12,
+  },
   typedInputExpanded: {
     flex: 1,
     minHeight: 0,
@@ -3745,6 +4234,11 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     paddingHorizontal: 14,
     paddingVertical: 12,
+  },
+  typedInputAndroidAlt: {
+    flex: 0,
+    height: 112,
+    maxHeight: 112,
   },
   typedComposeMeta: {
     flexDirection: 'row',
@@ -3839,6 +4333,16 @@ const styles = StyleSheet.create({
   previewPlayButtonFlex: {
     flex: 1,
   },
+  reactionStageArea: {
+    flex: 1,
+    minHeight: 0,
+    position: 'relative',
+  },
+  reactionPreviewOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
+    zIndex: 30,
+  },
   companionPreviewStage: {
     flex: 1,
     minHeight: 0,
@@ -3873,9 +4377,9 @@ const styles = StyleSheet.create({
     zIndex: 5,
   },
   companionSelfiePip: {
-    width: 112,
-    height: 150,
-    borderRadius: 14,
+    width: 90,
+    height: 120,
+    borderRadius: 11,
   },
   companionAvatarPip: {
     overflow: 'hidden',
@@ -4047,30 +4551,37 @@ const styles = StyleSheet.create({
   audioHintBlock: {
     paddingHorizontal: 16,
     paddingBottom: 10,
-    gap: 8,
   },
   originalAudioToggle: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
+    alignItems: 'flex-start',
+    gap: 10,
+    marginHorizontal: 16,
+    marginBottom: 10,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 14,
     borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.14)',
   },
-  originalAudioToggleLeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flexShrink: 1,
+  muteToggleIcon: {
+    marginTop: 2,
+  },
+  muteToggleTextBlock: {
+    flex: 1,
+    gap: 4,
+  },
+  muteToggleHint: {
+    color: 'rgba(243, 156, 18, 0.72)',
+    fontSize: 12,
+    lineHeight: 16,
   },
   originalAudioToggleLabel: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
+    lineHeight: 18,
   },
   originalAudioTogglePill: {
     minWidth: 44,
