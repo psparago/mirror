@@ -113,6 +113,9 @@ export function useNotificationDeepLink() {
         markNotificationPresented(id);
         moduleResolvingId = null;
         setTarget(nextTarget);
+        // Hand off to timeline immediately so peekPendingNotificationRoute() does
+        // not stay populated for the whole modal session (Android tab jank).
+        consumePendingNotificationRoute();
         return;
       }
 

@@ -418,11 +418,7 @@ function slowLanePushData(
     explorerId,
   };
 
-  const senderNames = uniqueSenderNames(eligibleNotifications);
-  if (senderNames.length !== 1) {
-    return data;
-  }
-
+  // Deep-link to the newest upload in the batch (even when multiple senders).
   const newest = [...eligibleNotifications].sort(
     (left, right) => right.createdAtMillis - left.createdAtMillis
   )[0];
@@ -443,13 +439,13 @@ function reactionSlowLanePushData(
     explorerId,
   };
 
-  if (eligibleNotifications.length !== 1) {
-    return data;
-  }
-
-  const notification = eligibleNotifications[0];
+  // Always deep-link to the parent Reflection for the newest reaction in the
+  // batch — even when multiple reactions were digested into one push.
+  const newest = [...eligibleNotifications].sort(
+    (left, right) => right.createdAtMillis - left.createdAtMillis
+  )[0];
   const reflectionId =
-    notification.parentReflectionId?.trim() || notification.reflectionId?.trim() || '';
+    newest?.parentReflectionId?.trim() || newest?.reflectionId?.trim() || '';
   if (reflectionId) {
     data.reflectionId = reflectionId;
   }

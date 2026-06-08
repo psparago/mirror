@@ -12,6 +12,7 @@ import { useDailyReminder } from '../../hooks/useDailyReminder';
 import {
   peekPendingNotificationRoute,
   subscribePendingNotificationRoute,
+  tabsHomeHref,
 } from '@/utils/pendingNotificationRoute';
 
 function TabBarIcon(props: {
@@ -40,7 +41,7 @@ export default function TabLayout() {
       // actually mounts and can process the route.
       if (!peekPendingNotificationRoute()) return;
       if (pathnameRef.current.includes('settings')) {
-        routerRef.current.replace('/(tabs)');
+        routerRef.current.replace(tabsHomeHref());
       }
     };
 

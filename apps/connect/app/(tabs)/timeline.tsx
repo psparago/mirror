@@ -1334,6 +1334,7 @@ export default function SentTimelineScreen({
 
       if (!cancelled) {
         console.warn('[DeepLink] timeline gave up opening reflection', reflectionId);
+        showToast('Could not open that Reflection. Try again from the timeline.');
         if (timelineDeepLinkResolvingReflectionId === reflectionId) {
           timelineDeepLinkResolvingReflectionId = null;
         }
@@ -1353,7 +1354,9 @@ export default function SentTimelineScreen({
     deepLinkOpenReactionComposer,
     deepLinkReflectionId,
     explorerLoading,
+    onDeepLinkHandled,
     reactionTarget?.id,
+    showToast,
   ]);
 
   useEffect(() => {
