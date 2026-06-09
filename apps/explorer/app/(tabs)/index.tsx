@@ -65,6 +65,8 @@ function eventHasEmbeddedMetadata(event: Event): boolean {
 const coerceLikedBy = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
 
+const coerceIsReaction = (value: unknown): boolean => value === true;
+
 /** Coerce Firestore `metadata` field (plain JSON / Timestamp) into EventMetadata. */
 function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): EventMetadata | null {
   try {
@@ -159,6 +161,8 @@ export default function HomeScreen() {
   };
 
   const [events, setEvents] = useState<Event[]>([]);
+  const [reactionEventIds, setReactionEventIds] = useState<Set<string>>(() => new Set());
+  const [firestoreSignalsReady, setFirestoreSignalsReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -249,18 +253,23 @@ export default function HomeScreen() {
     });
   }, [companions, explorerDisplayName, gridLikeFacesLikedBy]);
 
-  const filteredEvents = useMemo(() => {
-    if (!selectedCompanionId) return events;
-    const companion = companions.find(c => c.userId === selectedCompanionId);
-    if (!companion) return events;
+  const nonReactionEvents = useMemo(
+    () => events.filter((e) => !reactionEventIds.has(e.event_id)),
+    [events, reactionEventIds]
+  );
 
-    return events.filter(e => {
+  const filteredEvents = useMemo(() => {
+    if (!selectedCompanionId) return nonReactionEvents;
+    const companion = companions.find(c => c.userId === selectedCompanionId);
+    if (!companion) return nonReactionEvents;
+
+    return nonReactionEvents.filter(e => {
       const meta = eventMetadata[e.event_id];
       if (meta?.sender_id) return meta.sender_id === selectedCompanionId;
       if (meta?.sender) return meta.sender.toLowerCase() === companion.companionName.toLowerCase();
       return false;
     });
-  }, [events, eventMetadata, selectedCompanionId, companions]);
+  }, [nonReactionEvents, eventMetadata, selectedCompanionId, companions]);
 
   // Derive "new" from the live list: reflections that arrived after this session
   // started, are still unread, and aren't currently on the main stage.
@@ -617,11 +626,11 @@ export default function HomeScreen() {
   // When events list changes, ensure selectedEvent is still in the list (e.g. deleted by Companion)
   useEffect(() => {
     if (!selectedEvent) return;
-    const stillInList = events.some((e) => e.event_id === selectedEvent.event_id);
+    const stillInList = nonReactionEvents.some((e) => e.event_id === selectedEvent.event_id);
     if (!stillInList) {
-      setSelectedEvent(events.length > 0 ? events[0] : null);
+      setSelectedEvent(nonReactionEvents.length > 0 ? nonReactionEvents[0] : null);
     }
-  }, [events, selectedEvent?.event_id]);
+  }, [nonReactionEvents, selectedEvent?.event_id]);
 
 
   // Fetch metadata when a reflection is selected
@@ -760,7 +769,9 @@ export default function HomeScreen() {
   // STABLE Firestore Listener
   useEffect(() => {
     debugLog('🔌 Firestore listener attached');
-    
+    setFirestoreSignalsReady(false);
+    setReactionEventIds(new Set());
+
     // Initial fetch
     fetchEventsRef.current();
 
@@ -785,17 +796,23 @@ export default function HomeScreen() {
         // but we still walk docChanges for arrival/delete signals and list-vs-Firestore merge hints.
         const metadataFromFirestore: Record<string, EventMetadata> = {};
         const likesFromFirestore: Record<string, string[]> = {};
+        const reactionIdsFromSnapshot = new Set<string>();
         for (const docSnap of snapshot.docs) {
           const id = docSnap.id;
           const data = docSnap.data();
           const meta = normalizeFirestoreMetadata(data?.metadata, id);
           if (meta) metadataFromFirestore[id] = meta;
           likesFromFirestore[id] = coerceLikedBy(data?.likedBy);
+          if (coerceIsReaction(data?.isReaction)) {
+            reactionIdsFromSnapshot.add(id);
+          }
         }
         if (Object.keys(metadataFromFirestore).length > 0) {
           setEventMetadata((prev) => ({ ...prev, ...metadataFromFirestore }));
         }
         setReflectionLikes((prev) => mergeReflectionLikesWithPending(prev, likesFromFirestore));
+        setReactionEventIds(reactionIdsFromSnapshot);
+        setFirestoreSignalsReady(true);
 
         if (isInitialLoad) {
           isInitialLoad = false;
@@ -837,13 +854,15 @@ export default function HomeScreen() {
           });
           setSelectedEvent((current) => {
             if (!current || !removedReflectionIds.includes(current.event_id)) return current;
-            return remaining.length > 0 ? remaining[0] : null;
+            const remainingVisible = remaining.filter((e) => !reactionIdsFromSnapshot.has(e.event_id));
+            return remainingVisible.length > 0 ? remainingVisible[0] : null;
           });
         }
 
-        if (newReflectionIds.length === 0) return;
+        const newNonReactionIds = newReflectionIds.filter((id) => !reactionIdsFromSnapshot.has(id));
+        if (newNonReactionIds.length === 0) return;
 
-        debugLog(`🔔 Reflections received for: ${newReflectionIds.join(', ')}`);
+        debugLog(`🔔 Reflections received for: ${newNonReactionIds.join(', ')}`);
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
         try {
@@ -855,7 +874,9 @@ export default function HomeScreen() {
 
           // 4. IMMEDIATE INJECTION LOGIC
           const currentIds = new Set(eventsRef.current.map(e => e.event_id));
-          const newItems = freshEvents.filter(e => !currentIds.has(e.event_id));
+          const newItems = freshEvents.filter(
+            (e) => !currentIds.has(e.event_id) && !reactionIdsFromSnapshot.has(e.event_id)
+          );
 
           if (newItems.length > 0) {
             debugLog(`✨ Injecting ${newItems.length} new items immediately`);
@@ -937,19 +958,19 @@ export default function HomeScreen() {
 
   // Predictive Neighbor Refresh: Silently refresh the next 2 events in circular order
   const refreshNeighborUrls = useCallback(async (currentEventId: string) => {
-    if (events.length <= 1) return;
+    if (filteredEvents.length <= 1) return;
 
-    const currentIndex = events.findIndex(e => e.event_id === currentEventId);
+    const currentIndex = filteredEvents.findIndex(e => e.event_id === currentEventId);
     if (currentIndex === -1) return;
 
     // We refresh the next 2 events to stay ahead of the user
     const neighborIndices = [
-      (currentIndex + 1) % events.length,
-      (currentIndex + 2) % events.length
+      (currentIndex + 1) % filteredEvents.length,
+      (currentIndex + 2) % filteredEvents.length
     ].filter(idx => idx !== currentIndex);
 
     for (const idx of neighborIndices) {
-      const neighbor = events[idx];
+      const neighbor = filteredEvents[idx];
       // Only refresh if about to expire (e.g. older than 3 hours)
       const STALE_THRESHOLD = 3 * 60 * 60 * 1000;
       if (!neighbor.refreshedAt || Date.now() - neighbor.refreshedAt > STALE_THRESHOLD) {
@@ -957,7 +978,7 @@ export default function HomeScreen() {
         refreshEventUrls(neighbor.event_id).catch(() => { });
       }
     }
-  }, [events, refreshEventUrls]);
+  }, [filteredEvents, refreshEventUrls]);
 
   // Keep ref to latest refreshEventUrls
   const refreshEventUrlsRef = useRef(refreshEventUrls);
@@ -1040,17 +1061,17 @@ export default function HomeScreen() {
   // Auto-select the first (most recent) event when events load (only once)
   const hasAutoSelectedRef = useRef(false);
   useEffect(() => {
-    if (events.length > 0 && !hasAutoSelectedRef.current) {
-      hasAutoSelectedRef.current = true;
-      if (autoplay) {
-        handleEventPress(events[0]);
-      } else {
-        selectedEventIdRef.current = events[0].event_id;
-        setStartIdleOnInitialSelection(true);
-        setSelectedEvent(events[0]);
-      }
+    if (!firestoreSignalsReady || nonReactionEvents.length === 0 || hasAutoSelectedRef.current) return;
+    hasAutoSelectedRef.current = true;
+    const firstEvent = nonReactionEvents[0];
+    if (autoplay) {
+      handleEventPress(firstEvent);
+    } else {
+      selectedEventIdRef.current = firstEvent.event_id;
+      setStartIdleOnInitialSelection(true);
+      setSelectedEvent(firstEvent);
     }
-  }, [autoplay, events, handleEventPress]);
+  }, [autoplay, firestoreSignalsReady, nonReactionEvents, handleEventPress]);
 
   const renderEvent = ({ item }: { item: Event }) => {
     const metadata = eventMetadata[item.event_id];
@@ -1202,7 +1223,7 @@ export default function HomeScreen() {
     if (!selectedEvent) return;
 
     // Find current index
-    const currentIndex = events.findIndex(e => e.event_id === selectedEvent.event_id);
+    const currentIndex = filteredEvents.findIndex(e => e.event_id === selectedEvent.event_id);
     if (currentIndex === -1) return;
 
     // Determine the target event
@@ -1214,17 +1235,17 @@ export default function HomeScreen() {
         return;
       } else {
         // Go to previous photo (newer)
-        targetEvent = events[currentIndex - 1];
+        targetEvent = filteredEvents[currentIndex - 1];
       }
     } else {
       // direction === 'next'
-      if (currentIndex === events.length - 1) {
+      if (currentIndex === filteredEvents.length - 1) {
         // At last photo - go back to gallery
         closeFullScreen();
         return;
       } else {
         // Go to next photo (older)
-        targetEvent = events[currentIndex + 1];
+        targetEvent = filteredEvents[currentIndex + 1];
       }
     }
 
@@ -1234,7 +1255,7 @@ export default function HomeScreen() {
       // Update selectedEvent - MainStageView will handle the audio transition
       setSelectedEvent(refreshedEvent || targetEvent);
     }
-  }, [selectedEvent, events, refreshEventUrls, closeFullScreen]);
+  }, [selectedEvent, filteredEvents, refreshEventUrls, closeFullScreen]);
 
   // Handle media load errors (e.g., expired S3 URLs) by refreshing URLs
   const handleMediaError = useCallback(async (event: Event) => {
@@ -1487,13 +1508,13 @@ export default function HomeScreen() {
       // 4. Stop any ongoing speech (defensive cleanup)
       Speech.stop();
 
-      // 5. Remove from local state and select next event
+      // 5. Remove from local state and select next visible event
       const remainingEvents = events.filter(e => e.event_id !== event.event_id);
       setEvents(remainingEvents);
 
-      // Select the first remaining event, or null if no events left
-      if (remainingEvents.length > 0) {
-        setSelectedEvent(remainingEvents[0]);
+      const remainingVisible = remainingEvents.filter((e) => !reactionEventIds.has(e.event_id));
+      if (remainingVisible.length > 0) {
+        setSelectedEvent(remainingVisible[0]);
       } else {
         setSelectedEvent(null);
       }
@@ -1561,7 +1582,7 @@ export default function HomeScreen() {
     );
   }
 
-  if (events.length === 0) {
+  if (nonReactionEvents.length === 0) {
     return (
       <View style={styles.container}>
         <ExplorerGradientBackdrop layout="screen" />
