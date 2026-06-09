@@ -1,7 +1,8 @@
+import { waitForStableAndroidAppForeground } from '@/utils/audioSession';
 import { FontAwesome } from '@expo/vector-icons';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useEffect } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 type Props = {
   videoUri: string;
@@ -28,11 +29,16 @@ export function CreationModalConfirmationVideo({ videoUri, ended, onEndedChange 
       /* ignore */
     }
     const raf = requestAnimationFrame(() => {
-      try {
-        videoPlayer.play();
-      } catch {
-        /* ignore */
-      }
+      void (async () => {
+        if (Platform.OS === 'android') {
+          await waitForStableAndroidAppForeground(400, 3000);
+        }
+        try {
+          videoPlayer.play();
+        } catch {
+          /* ignore */
+        }
+      })();
     });
     return () => cancelAnimationFrame(raf);
   }, [videoUri, videoPlayer, onEndedChange]);

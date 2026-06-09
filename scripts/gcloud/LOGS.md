@@ -2,6 +2,8 @@
 
 Read logs for Gen2 Cloud Functions deployed via `./scripts/gcloud/deploy.sh`.
 
+**Companion app diagnostics** (uploaded from Reflections Connect phones, filtered by `jsonPayload.source="connect-diagnostics"`) are documented in [`docs/connect-client-diagnostics.md`](../docs/connect-client-diagnostics.md). Same GCP project (`reflections-1200b`), different query.
+
 ## Quick start
 
 ```bash

@@ -1,6 +1,6 @@
 import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
-import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
+import { configureConnectPlaybackAudioSessionAsync, runConnectAvCommandWithRetry, waitForStableAndroidAppForeground } from '@/utils/audioSession';
 import {
   buildEventForReplay,
   deleteReflectionDocument,
@@ -26,7 +26,7 @@ import { Image } from 'expo-image';
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, ActivityIndicator, Modal, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Alert, ActivityIndicator, Modal, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -442,20 +442,24 @@ export function ReplayModal({
   }, [clearCompanionMessageVideoRetryTimeouts, displayEvent?.event_id, visible]);
 
   const startSelfieImageMainStagePlayback = useCallback(async () => {
-    try {
+    const ok = await runConnectAvCommandWithRetry(async () => {
       await pipVideoRef.current?.setStatusAsync({
         positionMillis: 0,
         shouldPlay: true,
         isMuted: false,
         volume: 1,
       });
-    } catch {
-      // PiP may not be mounted yet; onLoad handler will retry.
+    });
+    if (!ok) {
+      console.warn('[ReplayModal] selfie image main stage playback failed');
     }
   }, []);
 
   const startSelfieVideoMainStagePlayback = useCallback(async () => {
     const syncMs = eventRef.current?.syncStartTimeMillis ?? 0;
+    if (Platform.OS === 'android') {
+      await waitForStableAndroidAppForeground(400, 3000);
+    }
     try {
       seekVideoToSeconds(videoPlayer, syncMs / 1000);
       videoPlayer.muted = false;
@@ -464,7 +468,12 @@ export function ReplayModal({
       await pipVideoRef.current?.setPositionAsync(0);
       await pipVideoRef.current?.setIsMutedAsync(false);
       await pipVideoRef.current?.setVolumeAsync(1);
-      await pipVideoRef.current?.playAsync();
+      const pipStarted = await runConnectAvCommandWithRetry(async () => {
+        await pipVideoRef.current?.playAsync();
+      }, { waitStableBeforeFirstAttempt: false });
+      if (!pipStarted) {
+        console.warn('[ReplayModal] selfie PiP playback failed');
+      }
     } catch {
       // PiP may not be mounted yet; onLoad handler will retry.
     }

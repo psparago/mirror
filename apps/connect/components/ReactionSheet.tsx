@@ -13,6 +13,8 @@ import {
   configureConnectReactionRecordingAudioSessionAsync,
   configureConnectVoiceReactionRecordingAsync,
   releaseConnectCaptureAudioAsync,
+  runConnectAvCommandWithRetry,
+  waitForStableAndroidAppForeground,
 } from '@/utils/audioSession';
 import { diagnosticsAppLog, type DiagnosticLogLevel } from '@/utils/diagnosticsLog';
 import { FontAwesome } from '@expo/vector-icons';
@@ -88,6 +90,48 @@ const SELFIE_PREVIEW_PLAYER_READY_TIMEOUT_MS = 10000;
  * acting on background while the selfie sheet is open.
  */
 const ANDROID_SELFIE_APPSTATE_BACKGROUND_MS = 900;
+/** Continuous active before preview audio on Samsung (camera debounce is longer). */
+const ANDROID_PREVIEW_APPSTATE_STABLE_MS = 600;
+const ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS = 5000;
+const ANDROID_PREVIEW_AUDIO_FOCUS_MAX_ATTEMPTS = 4;
+const ANDROID_SELFIE_PREVIEW_RESUME_MAX_ATTEMPTS = 5;
+
+async function runPreviewVideoCommandWithRetry(
+  command: () => Promise<unknown> | undefined,
+  logLabel: string,
+): Promise<boolean> {
+  if (Platform.OS !== 'android') {
+    try {
+      await command();
+      return true;
+    } catch (error) {
+      if (isSeekInterrupted(error)) return true;
+      console.warn(`[ReactionSheet] ${logLabel}:`, error);
+      return false;
+    }
+  }
+
+  const ok = await runConnectAvCommandWithRetry(
+    async () => {
+      await command();
+    },
+    {
+      maxAttempts: ANDROID_PREVIEW_AUDIO_FOCUS_MAX_ATTEMPTS,
+      stableMs: ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+      stableTimeoutMs: ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+      onRetry: (attempt) => {
+        logReactionDebug('selfie-preview:audio-focus-retry', {
+          attempt,
+          logLabel,
+        });
+      },
+    },
+  );
+  if (!ok) {
+    console.warn(`[ReactionSheet] ${logLabel}: audio focus retries exhausted`);
+  }
+  return ok;
+}
 
 function waitForCompanionSelfiePlayerReady(
   player: VideoPlayer,
@@ -449,6 +493,7 @@ export function ReactionSheet({
   const [companionPreviewOpen, setCompanionPreviewOpen] = useState(false);
   const [companionPreviewPlaying, setCompanionPreviewPlaying] = useState(false);
   const [showCompanionPreviewReplay, setShowCompanionPreviewReplay] = useState(false);
+  const [companionPreviewSendHint, setCompanionPreviewSendHint] = useState(false);
   const [recordedAudioSnapshot, setRecordedAudioSnapshot] =
     useState<SelfieRecordingAudioSnapshot | null>(null);
   const [isInfoOpen, setIsInfoOpen] = useState(false);
@@ -609,19 +654,31 @@ export function ReactionSheet({
       const volume = getReactionParentVolume();
       const seek = options?.seek ?? true;
       await syncParentVideoAudioAsync(videoRef.current);
-      await runVideoCommand(
-        () =>
-          videoRef.current?.setStatusAsync({
-            // Reasserts (seek:false) only re-confirm play/volume/mute so the audio
-            // session settles — they must NOT yank the playhead back to syncStart,
-            // which made the scrubber "dance" during recording.
-            ...(seek ? { positionMillis: startMs } : {}),
-            shouldPlay: true,
-            isMuted: muted,
-            volume,
-          }),
-        'reaction playback failed',
-      );
+      const playCommand = async () => {
+        await videoRef.current?.setStatusAsync({
+          // Reasserts (seek:false) only re-confirm play/volume/mute so the audio
+          // session settles — they must NOT yank the playhead back to syncStart,
+          // which made the scrubber "dance" during recording.
+          ...(seek ? { positionMillis: startMs } : {}),
+          shouldPlay: true,
+          isMuted: muted,
+          volume,
+        });
+      };
+      if (Platform.OS === 'android') {
+        const ok = await runConnectAvCommandWithRetry(playCommand, {
+          stableMs: ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+          stableTimeoutMs: ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+          onRetry: (attempt) => {
+            logComposeDiag('selfie:parent-sync-retry', { attempt });
+          },
+        });
+        if (!ok) {
+          console.warn('[ReactionSheet] reaction playback failed: audio focus retries exhausted');
+        }
+        return;
+      }
+      await runVideoCommand(playCommand, 'reaction playback failed');
     },
     [getReactionParentVolume, isVideoParent, syncParentVideoAudioAsync],
   );
@@ -653,19 +710,32 @@ export function ReactionSheet({
     async (uri: string, onFinished: () => void) => {
       await unloadPreviewAudio();
       await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: ensureFileUri(uri) },
-        { shouldPlay: true, volume: 1.0 },
-      );
-      voicePreviewPlayerRef.current = sound;
-      sound.setOnPlaybackStatusUpdate((status) => {
-        if (!status.isLoaded || !status.didJustFinish) return;
-        if (voicePreviewPlayerRef.current === sound) {
-          voicePreviewPlayerRef.current = null;
+      const loadAndPlay = async () => {
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: ensureFileUri(uri) },
+          { shouldPlay: true, volume: 1.0 },
+        );
+        voicePreviewPlayerRef.current = sound;
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (!status.isLoaded || !status.didJustFinish) return;
+          if (voicePreviewPlayerRef.current === sound) {
+            voicePreviewPlayerRef.current = null;
+          }
+          void sound.unloadAsync().catch(() => {});
+          onFinished();
+        });
+      };
+      if (Platform.OS === 'android') {
+        const ok = await runConnectAvCommandWithRetry(loadAndPlay, {
+          stableMs: ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+          stableTimeoutMs: ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+        });
+        if (!ok) {
+          throw new Error('Preview audio could not start');
         }
-        void sound.unloadAsync().catch(() => {});
-        onFinished();
-      });
+        return;
+      }
+      await loadAndPlay();
     },
     [unloadPreviewAudio],
   );
@@ -686,9 +756,11 @@ export function ReactionSheet({
     );
   }, []);
 
-  const finishCompanionPreview = useCallback(async () => {
+  const finishCompanionPreview = useCallback(async (options?: { playbackFailed?: boolean }) => {
     if (companionPreviewStopPendingRef.current) return;
-    logReactionDebug('selfie-preview:finish', {});
+    logReactionDebug('selfie-preview:finish', {
+      playbackFailed: options?.playbackFailed ?? false,
+    });
     selfiePreviewExpectPlayingRef.current = false;
     if (selfiePreviewResumeTimerRef.current) {
       clearTimeout(selfiePreviewResumeTimerRef.current);
@@ -718,6 +790,9 @@ export function ReactionSheet({
       );
     }
     companionPreviewStopPendingRef.current = false;
+    if (options?.playbackFailed) {
+      setCompanionPreviewSendHint(true);
+    }
     setShowCompanionPreviewReplay(true);
   }, [
     companionSelfiePlayer,
@@ -734,6 +809,11 @@ export function ReactionSheet({
     });
     return () => subscription.remove();
   }, [companionSelfiePlayer, finishCompanionPreview]);
+
+  const finishCompanionPreviewRef = useRef(finishCompanionPreview);
+  useEffect(() => {
+    finishCompanionPreviewRef.current = finishCompanionPreview;
+  }, [finishCompanionPreview]);
 
   // Diagnostic instrumentation for the selfie preview player. expo-video emits these only on
   // transitions, so they are low-noise. statusChange surfaces readyToPlay/error; playingChange
@@ -781,8 +861,14 @@ export function ReactionSheet({
       }
       selfiePreviewLastResumePosRef.current = pos;
 
-      if (selfiePreviewResumeAttemptsRef.current >= 3) {
+      const maxResumeAttempts =
+        Platform.OS === 'android'
+          ? ANDROID_SELFIE_PREVIEW_RESUME_MAX_ATTEMPTS
+          : 3;
+
+      if (selfiePreviewResumeAttemptsRef.current >= maxResumeAttempts) {
         logReactionDebug('selfie-preview:resume-giveup', { pos, dur, platform: Platform.OS });
+        void finishCompanionPreviewRef.current({ playbackFailed: true });
         return;
       }
       selfiePreviewResumeAttemptsRef.current += 1;
@@ -807,6 +893,10 @@ export function ReactionSheet({
         }
         void (async () => {
           if (Platform.OS === 'android') {
+            await waitForStableAndroidAppForeground(
+              ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+              ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+            );
             await releaseConnectCaptureAudioAsync();
           }
           if (
@@ -826,7 +916,7 @@ export function ReactionSheet({
             /* player may be released */
           }
         })();
-      }, Platform.OS === 'android' ? 220 : 140);
+      }, Platform.OS === 'android' ? 280 : 140);
     });
     return () => {
       statusSub.remove();
@@ -845,12 +935,21 @@ export function ReactionSheet({
     if (!isSelfiePreview && !isVoicePreview && !isTypedPreview) return;
 
     companionPreviewStartInFlightRef.current = true;
+    setCompanionPreviewSendHint(false);
     try {
     logReactionDebug('selfie-preview:enter', {
       isSelfiePreview,
       isVoicePreview,
       isTypedPreview,
     });
+
+    if (Platform.OS === 'android') {
+      const stable = await waitForStableAndroidAppForeground(
+        ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+        ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+      );
+      logReactionDebug('selfie-preview:appstate-wait', { stable, platform: 'android' });
+    }
 
     companionPreviewPlayingRef.current = true;
     setCompanionPreviewPlaying(true);
@@ -873,9 +972,9 @@ export function ReactionSheet({
       isVideoParent &&
       parentPreviewStartMs != null;
 
-    const startCompanionPreviewParent = async () => {
-      if (!isVideoParent || parentPreviewStartMs == null) return;
-      await runVideoCommand(
+    const startCompanionPreviewParent = async (): Promise<boolean> => {
+      if (!isVideoParent || parentPreviewStartMs == null) return true;
+      return runPreviewVideoCommandWithRetry(
         () =>
           companionParentRef.current?.setStatusAsync({
             positionMillis: parentPreviewStartMs,
@@ -888,7 +987,10 @@ export function ReactionSheet({
     };
 
     if (!deferParentForAndroidSelfie) {
-      await startCompanionPreviewParent();
+      const parentStarted = await startCompanionPreviewParent();
+      if (!parentStarted && Platform.OS === 'android' && isSelfiePreview) {
+        logReactionDebug('selfie-preview:parent-start-failed', { isVideoParent }, 'warn');
+      }
     }
     if (!canRunCompanionPreview()) return;
 
@@ -971,6 +1073,9 @@ export function ReactionSheet({
 
       selfiePreviewExpectPlayingRef.current = true;
       try {
+        if (Platform.OS === 'android') {
+          await waitForStableAndroidAppForeground(400, 2500);
+        }
         companionSelfiePlayer.play();
         logReactionDebug('selfie-preview:start', { isVideoParent, playerReady });
       } catch (error) {
@@ -978,6 +1083,7 @@ export function ReactionSheet({
         console.warn('[ReactionSheet] selfie preview playback failed:', error);
         selfiePreviewExpectPlayingRef.current = false;
         setCompanionPreviewPlaying(false);
+        setCompanionPreviewSendHint(true);
         setShowCompanionPreviewReplay(true);
         if (isVideoParent) {
           await runVideoCommand(
@@ -989,7 +1095,10 @@ export function ReactionSheet({
       }
 
       if (deferParentForAndroidSelfie) {
-        await startCompanionPreviewParent();
+        const parentStarted = await startCompanionPreviewParent();
+        if (!parentStarted) {
+          logReactionDebug('selfie-preview:parent-start-failed', { isVideoParent }, 'warn');
+        }
       }
     }
 
@@ -1083,6 +1192,7 @@ export function ReactionSheet({
     companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
+    setCompanionPreviewSendHint(false);
     companionPreviewStopPendingRef.current = false;
     setTypedPreviewLoading(false);
     try {
@@ -1126,6 +1236,7 @@ export function ReactionSheet({
     setCompanionPreviewOpen(false);
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
+    setCompanionPreviewSendHint(false);
     setTypedPreviewLoading(false);
     typedPreviewAudioUriRef.current = null;
     typedPreviewMessageRef.current = null;
@@ -1832,13 +1943,24 @@ export function ReactionSheet({
         });
       } else {
         await configureConnectPlaybackAudioSessionAsync({ retries: 2 });
-        await videoRef.current?.setStatusAsync({
-          positionMillis: start,
-          shouldPlay: false,
-          isMuted: false,
-          volume: previewVolume,
-        });
-        await videoRef.current?.playAsync();
+        const started = await runConnectAvCommandWithRetry(
+          async () => {
+            await videoRef.current?.setStatusAsync({
+              positionMillis: start,
+              shouldPlay: false,
+              isMuted: false,
+              volume: previewVolume,
+            });
+            await videoRef.current?.playAsync();
+          },
+          {
+            stableMs: ANDROID_PREVIEW_APPSTATE_STABLE_MS,
+            stableTimeoutMs: ANDROID_PREVIEW_APPSTATE_WAIT_TIMEOUT_MS,
+          },
+        );
+        if (!started) {
+          throw new Error('Trim preview could not start');
+        }
       }
     } catch (error) {
       if (!isSeekInterrupted(error)) {
@@ -2670,6 +2792,7 @@ export function ReactionSheet({
   const handleRetake = useCallback(() => {
     selfiePreviewExpectPlayingRef.current = false;
     companionPreviewAutoStartDoneRef.current = false;
+    setCompanionPreviewSendHint(false);
     if (selfiePreviewResumeTimerRef.current) {
       clearTimeout(selfiePreviewResumeTimerRef.current);
       selfiePreviewResumeTimerRef.current = null;
@@ -3323,16 +3446,24 @@ export function ReactionSheet({
                 </View>
               ) : null}
             </View>
-            <Text style={styles.companionPreviewHint}>
-              {reactionMode === 'voice'
-                ? isVideoParent
-                  ? 'Your voice and the Reflection play together and stop when your message ends.'
-                  : 'This is how your reaction will look. Your voice plays while the Reflection runs softly in the background.'
-                : reactionMode === 'typed'
-                  ? 'This is how your reaction will look. Your message is read in your AI voice while the Reflection plays softly in the background.'
-                  : reactionMode === 'selfie' && (isVideoParent || isImageParent)
-                    ? 'This is how your Companions will see your reaction. The Reflection fills the screen; your selfie plays in the corner.'
-                    : 'This is how your Companions will see your reaction on this photo.'}
+            <Text
+              style={
+                companionPreviewSendHint
+                  ? styles.companionPreviewSendHint
+                  : styles.companionPreviewHint
+              }
+            >
+              {companionPreviewSendHint
+                ? 'Preview could not play, but your recording is saved. Tap Send to share it, or Replay to try again.'
+                : reactionMode === 'voice'
+                  ? isVideoParent
+                    ? 'Your voice and the Reflection play together and stop when your message ends.'
+                    : 'This is how your reaction will look. Your voice plays while the Reflection runs softly in the background.'
+                  : reactionMode === 'typed'
+                    ? 'This is how your reaction will look. Your message is read in your AI voice while the Reflection plays softly in the background.'
+                    : reactionMode === 'selfie' && (isVideoParent || isImageParent)
+                      ? 'This is how your Companions will see your reaction. The Reflection fills the screen; your selfie plays in the corner.'
+                      : 'This is how your Companions will see your reaction on this photo.'}
             </Text>
           </View>
           ) : null}
@@ -4604,6 +4735,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 12,
     paddingTop: 10,
+  },
+  companionPreviewSendHint: {
+    color: 'rgba(255, 214, 120, 0.95)',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    lineHeight: 18,
+    fontWeight: '500',
   },
   companionPreviewCaptionBar: {
     position: 'absolute',
