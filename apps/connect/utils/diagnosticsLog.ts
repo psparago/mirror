@@ -64,6 +64,20 @@ function shouldDropMessage(message: string): boolean {
   if (/https?:\/\/[^\s]*[?][^\s]*/i.test(message)) return true;
   if (/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(message)) return true;
   if (/eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+/.test(message)) return true;
+  // Samsung selfie sessions emit hundreds of these; they evict useful rows from the 500-entry buffer.
+  if (/selfie:app-background-debounce/.test(message)) return true;
+  if (/selfie:app-background-cancelled/.test(message)) return true;
+  return false;
+}
+
+let lastConnectAppStateLogMs = 0;
+
+/** Sample global AppState lines so a Samsung flicker loop cannot fill the diagnostic buffer. */
+function shouldSampleMessage(message: string): boolean {
+  if (!/📱 \[Connect\] AppState:/.test(message)) return false;
+  const now = Date.now();
+  if (now - lastConnectAppStateLogMs < 3000) return true;
+  lastConnectAppStateLogMs = now;
   return false;
 }
 
@@ -140,7 +154,7 @@ async function loadBufferFromStorage(): Promise<void> {
 function appendEntry(level: DiagnosticLogLevel, message: string): void {
   if (!enabled) return;
   const normalized = truncate(message.trim(), MAX_LINE_CHARS);
-  if (!normalized || shouldDropMessage(normalized)) return;
+  if (!normalized || shouldDropMessage(normalized) || shouldSampleMessage(normalized)) return;
 
   const entry: DiagnosticLogEntry = {
     ts: new Date().toISOString(),

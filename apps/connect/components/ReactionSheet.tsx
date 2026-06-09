@@ -509,6 +509,7 @@ export function ReactionSheet({
   const selfieCaptureArmingRef = useRef(false);
   const visibleRef = useRef(visible);
   const companionPreviewOpenRef = useRef(companionPreviewOpen);
+  const isUploadingRef = useRef(false);
   // Selfie preview interruption recovery. On iOS old-arch, expo-camera's deferred AVCaptureSession
   // teardown calls AVAudioSession.setActive(false) ~0.6-1s after we open the preview, which
   // interrupts (pauses) the expo-video player mid-clip. We can't out-time that teardown from JS, so
@@ -590,6 +591,7 @@ export function ReactionSheet({
   const [typedMessageReady, setTypedMessageReady] = useState(false);
   const [typedPreviewLoading, setTypedPreviewLoading] = useState(false);
   const stopSelfieRecordingRef = useRef<(() => void) | null>(null);
+  const layoutUiPhaseRef = useRef<string | null>(null);
 
   const isParentMutedForPlayback = useCallback(
     () => isRecordingRef.current && isParentReflectionMutedRef.current,
@@ -800,6 +802,53 @@ export function ReactionSheet({
     isVideoParent,
     unloadPreviewAudio,
   ]);
+
+  /** Stop preview/camera before upload so Android is not decoding thumbnails while capture is live. */
+  const prepareReactionForUpload = useCallback(async (mode: ReactionComposeMode) => {
+    logComposeDiag('reaction:send-prepare-start', { mode, platform: Platform.OS });
+
+    selfiePreviewExpectPlayingRef.current = false;
+    companionPreviewStopPendingRef.current = true;
+    companionPreviewStartInFlightRef.current = false;
+    companionPreviewAutoStartDoneRef.current = false;
+    if (selfiePreviewResumeTimerRef.current) {
+      clearTimeout(selfiePreviewResumeTimerRef.current);
+      selfiePreviewResumeTimerRef.current = null;
+    }
+
+    setCompanionPreviewPlaying(false);
+    companionPreviewPlayingRef.current = false;
+    setShowCompanionPreviewReplay(false);
+    setCompanionPreviewSendHint(false);
+    setCompanionPreviewOpen(false);
+    companionPreviewOpenRef.current = false;
+
+    try {
+      companionSelfiePlayer.pause();
+    } catch {
+      /* player may be released */
+    }
+    await unloadPreviewAudio();
+    await runVideoCommand(() => companionParentRef.current?.pauseAsync(), 'send prepare parent pause');
+    await runVideoCommand(() => videoRef.current?.pauseAsync(), 'send prepare video pause');
+
+    if (mode === 'selfie') {
+      try {
+        cameraRef.current?.stopRecording();
+      } catch {
+        /* not recording */
+      }
+      await releaseConnectCaptureAudioAsync();
+      if (Platform.OS === 'android') {
+        await waitForStableAndroidAppForeground(400, 3000);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    } else if (Platform.OS === 'android') {
+      await waitForStableAndroidAppForeground(400, 2000);
+    }
+
+    logComposeDiag('reaction:send-prepare-done', { mode, platform: Platform.OS });
+  }, [companionSelfiePlayer, unloadPreviewAudio]);
 
   // Selfie preview finishes when expo-video reports it played to the end. The stop-pending guard
   // inside finishCompanionPreview de-dupes with the parent-driven finish for video parents.
@@ -1549,9 +1598,6 @@ export function ReactionSheet({
       if (nextState === 'active') {
         if (appStateBackgroundDebounceRef.current) {
           clearAppStateBackgroundDebounce();
-          if (Platform.OS === 'android') {
-            logComposeDiag('selfie:app-background-cancelled', {});
-          }
         }
         setIsAppForeground(true);
         void ensureCameraPermission();
@@ -1560,7 +1606,6 @@ export function ReactionSheet({
 
       if (Platform.OS === 'android') {
         if (appStateBackgroundDebounceRef.current) return;
-        logComposeDiag('selfie:app-background-debounce', { nextState });
         appStateBackgroundDebounceRef.current = setTimeout(() => {
           appStateBackgroundDebounceRef.current = null;
           logComposeDiag('selfie:app-background-confirmed', { nextState });
@@ -1641,6 +1686,7 @@ export function ReactionSheet({
 
   useEffect(() => {
     if (visible) return;
+    layoutUiPhaseRef.current = null;
     setIsRecording(false);
     setPositionMillis(0);
     setDurationMillis(0);
@@ -2966,9 +3012,12 @@ export function ReactionSheet({
     }
 
     void (async () => {
+      isUploadingRef.current = true;
       setIsUploading(true);
       try {
-        await uploadReaction({
+        logComposeDiag('reaction:send-start', { mode: reactionMode, platform: Platform.OS });
+        await prepareReactionForUpload(reactionMode);
+        const eventId = await uploadReaction({
           reactionType: reactionMode,
           explorerId: currentExplorerId,
           parentReflectionId,
@@ -2986,16 +3035,19 @@ export function ReactionSheet({
           recordedAudioUri: reactionMode === 'voice' ? voiceRecordedUri ?? undefined : undefined,
           parentPosterUri,
         });
+        logComposeDiag('reaction:send-success', { mode: reactionMode, eventId, platform: Platform.OS });
         onUploadSuccess?.(parentReflectionId, activeRelationship.id);
         onClose();
       } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to send reaction';
+        logComposeDiag('reaction:send-failed', { mode: reactionMode, message, platform: Platform.OS }, 'error');
         console.error('[ReactionSheet] upload failed:', error);
-        Alert.alert(
-          'Send Failed',
-          error instanceof Error ? error.message : 'Failed to send reaction',
-        );
+        Alert.alert('Send Failed', message);
       } finally {
-        setIsUploading(false);
+        isUploadingRef.current = false;
+        if (visibleRef.current) {
+          setIsUploading(false);
+        }
       }
     })();
   }, [
@@ -3007,6 +3059,7 @@ export function ReactionSheet({
     onUploadSuccess,
     parentPosterUri,
     parentReflectionId,
+    prepareReactionForUpload,
     reactionMode,
     recordedUri,
     syncStartTimeMillis,
@@ -3065,7 +3118,7 @@ export function ReactionSheet({
     isCameraGranted &&
     (Platform.OS === 'android' || isAppForeground);
   const isSelfieRecordCameraActive =
-    isSelfieCameraMounted && !companionPreviewOpen && isAppForeground;
+    isSelfieCameraMounted && !companionPreviewOpen && isAppForeground && !isUploading;
   const isCameraDenied =
     nativeCameraGranted === false && cameraPermission?.granted !== true;
   const canRecordSelfie =
@@ -3096,6 +3149,10 @@ export function ReactionSheet({
       else if (isVoiceRecording) uiPhase = 'recording';
       else uiPhase = 'idle';
     }
+
+    const phaseKey = `${reactionMode}:${uiPhase}`;
+    if (layoutUiPhaseRef.current === phaseKey) return;
+    layoutUiPhaseRef.current = phaseKey;
 
     logComposeDiag('layout:snapshot', {
       mode: reactionMode,

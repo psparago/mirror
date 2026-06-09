@@ -91,7 +91,9 @@ export default function TabLayout() {
   // Global AppState listener for Firestore network
   useEffect(() => {
     const subscription = AppState.addEventListener('change', async (nextAppState: AppStateStatus) => {
-      console.log(`📱 [Connect] AppState: ${nextAppState}`);
+      if (__DEV__) {
+        console.log(`📱 [Connect] AppState: ${nextAppState}`);
+      }
       if (nextAppState === 'active') {
         // try {
         //   await enableNetwork(db);

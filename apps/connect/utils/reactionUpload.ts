@@ -1,6 +1,7 @@
 import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
 import { formatTypedReactionSpeechText } from '@/utils/reactionPlayback';
 import { loadVoicePreferences } from '@/utils/ttsVoices';
+import { diagnosticsAppLog } from '@/utils/diagnosticsLog';
 import { API_ENDPOINTS, EventMetadata, ExplorerConfig, type ReactionType } from '@projectmirror/shared';
 import {
   arrayUnion,
@@ -173,6 +174,11 @@ export async function uploadReaction({
     throw new Error('Voice reaction requires a recorded audio clip');
   }
 
+  diagnosticsAppLog('reactionUpload', 'upload:start', {
+    reactionType,
+    platform: 'connect',
+  });
+
   const eventID = Date.now().toString();
   const filesToSign =
     reactionType === 'selfie' ? ['image.jpg', 'video.mp4'] : ['image.jpg', 'audio.m4a'];
@@ -207,6 +213,7 @@ export async function uploadReaction({
     recordedVideoUri,
     parentPosterUri,
   });
+  diagnosticsAppLog('reactionUpload', 'upload:poster-ready', { reactionType });
 
   const uploadPromises: Promise<void>[] = [safeUploadToS3(posterUri, imageUploadUrl)];
 
@@ -248,6 +255,7 @@ export async function uploadReaction({
   }
 
   await Promise.all(uploadPromises);
+  diagnosticsAppLog('reactionUpload', 'upload:s3-done', { reactionType, eventId: eventID });
 
   const timestamp = new Date().toISOString();
   const trimmedMessage = messageText?.trim() ?? '';
@@ -291,6 +299,8 @@ export async function uploadReaction({
   await updateDoc(parentRef, {
     respondedRelationshipIds: arrayUnion(activeRelationshipId),
   });
+
+  diagnosticsAppLog('reactionUpload', 'upload:firestore-done', { reactionType, eventId: eventID });
 
   return eventID;
 }
