@@ -486,6 +486,25 @@ export default function SentTimelineScreen({
     [currentExplorerId, eventObjectsMap, openingReactionId, showToast],
   );
 
+  const handleReactFromPlayer = useCallback(
+    (parentEventId: string) => {
+      const item = reflections.find((reflection) => reflection.event_id === parentEventId);
+      if (!item) {
+        showToast('Could not open reaction composer');
+        return;
+      }
+      // Close the player first and let the Modal dismissal settle before
+      // presenting the ReactionSheet — iOS drops the second Modal if the
+      // first is still animating out.
+      setSelectedReflection(null);
+      setSelectedReactionSession(null);
+      setTimeout(() => {
+        void openReactionComposer(item);
+      }, 400);
+    },
+    [openReactionComposer, reflections, showToast],
+  );
+
   const selectedReflectionLikedBy = useMemo(() => (
     selectedReflection
       ? reflections.find((reflection) => reflection.event_id === selectedReflection.event_id)?.likedBy ?? []
@@ -2012,6 +2031,7 @@ export default function SentTimelineScreen({
         explorerName={explorerName}
         companions={companions}
         onToggleLike={handleReplayToggleLike}
+        onRequestReact={handleReactFromPlayer}
         onClose={() => {
           const openedViaDeepLink = deepLinkHandledRef.current !== null;
           setSelectedReflection(null);

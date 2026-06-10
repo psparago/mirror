@@ -301,6 +301,8 @@ export async function fetchReactionEventForPlayback(
   const snap = await getDocs(reactionsQuery);
   const matchDoc = snap.docs.find((reactionDoc) => {
     const data = reactionDoc.data();
+    // Narrations are the author's content layer, not a response.
+    if (data?.isNarration === true) return false;
     if (data?.responderRelationshipId === face.key) return true;
     return data?.sender_id === face.userId;
   });
@@ -436,6 +438,8 @@ export async function fetchReactionTypesByRelationship(
   const map = new Map<string, ReactionType>();
   for (const reactionDoc of snap.docs) {
     const data = reactionDoc.data();
+    // Narrations are the author's content layer, not a response.
+    if (data?.isNarration === true) continue;
     const metadata = coerceEmbeddedMetadata(data?.metadata, reactionDoc.id);
     const relationshipId = asOptionalString(data?.responderRelationshipId);
     if (!relationshipId) continue;

@@ -60,6 +60,8 @@ interface ReplayModalProps {
   /** Active Companion `relationships/{id}` for arrayRemove on parent when deleting own reaction. */
   activeRelationshipId?: string | null;
   explorerId?: string;
+  /** React while watching: closes the player and opens the reaction composer for this parent. */
+  onRequestReact?: (parentEventId: string) => void;
 }
 
 async function unloadAvSoundSafely(sound: Audio.Sound | null | undefined): Promise<void> {
@@ -103,6 +105,7 @@ export function ReplayModal({
   onReactionSessionUpdate,
   activeRelationshipId = null,
   explorerId,
+  onRequestReact,
 }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -644,6 +647,21 @@ export function ReplayModal({
     reactionSessionForUi &&
     displayEvent &&
     displayEvent.event_id !== reactionSessionForUi.parentEventId
+  );
+
+  // React-while-watching: only on a parent reflection (never on a child reaction
+  // or composer preview), mirroring the timeline card's Reacted state.
+  const hasReactedToParent = !!(
+    activeRelationshipId &&
+    reactionSessionForUi?.respondedRelationshipIds?.includes(activeRelationshipId)
+  );
+  const showReactButton = !!(
+    onRequestReact &&
+    reactionSessionForUi &&
+    displayEvent &&
+    !isReactionPlayback &&
+    !isViewingChildReaction &&
+    !onSend
   );
 
   const activeReactionFaceKey = useMemo(() => {
@@ -2022,6 +2040,39 @@ export function ReplayModal({
                 )}
               </View>
 
+              {showReactButton ? (
+                <TouchableOpacity
+                  style={[styles.reactButton, hasReactedToParent && styles.reactButtonDisabled]}
+                  onPress={() => {
+                    if (!reactionSessionForUi) return;
+                    onRequestReact?.(reactionSessionForUi.parentEventId);
+                  }}
+                  disabled={hasReactedToParent}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    hasReactedToParent
+                      ? 'You already reacted to this Reflection'
+                      : 'React to this Reflection'
+                  }
+                  accessibilityState={{ disabled: hasReactedToParent }}
+                >
+                  <FontAwesome
+                    name={hasReactedToParent ? 'check' : 'video-camera'}
+                    size={15}
+                    color={hasReactedToParent ? 'rgba(125,211,168,0.9)' : 'rgba(255,255,255,0.9)'}
+                  />
+                  <Text
+                    style={[
+                      styles.reactButtonText,
+                      hasReactedToParent && styles.reactButtonTextDisabled,
+                    ]}
+                  >
+                    {hasReactedToParent ? 'Reacted' : 'React'}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
+
               {!isReactionPlayback ? (
               <TouchableOpacity
                 style={[styles.likeButton, likedByMe && styles.likeButtonActive]}
@@ -2302,6 +2353,31 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: '600',
+  },
+  reactButton: {
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(46, 120, 183, 0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 14,
+    marginLeft: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  reactButtonDisabled: {
+    backgroundColor: 'rgba(255, 255, 255, 0.10)',
+    borderColor: 'rgba(125, 211, 168, 0.35)',
+  },
+  reactButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  reactButtonTextDisabled: {
+    color: 'rgba(125, 211, 168, 0.9)',
   },
   likeButton: {
     minWidth: 44,

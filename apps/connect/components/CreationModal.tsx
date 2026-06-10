@@ -18,6 +18,7 @@ import {
   type VideoProcessProgress,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
+import { uploadReaction } from '@/utils/reactionUpload';
 import {
   DEFAULT_TTS_VOICE,
   loadVoicePreferences,
@@ -1189,6 +1190,8 @@ export default function CreationModal({
     deepDive?: string | null;
     videoMeta?: ComposerVideoMeta | null;
     filteredPhotoUri?: string | null;
+    /** Selfie narration video for image reflections; uploaded as a flagged child reaction. */
+    narrationUri?: string | null;
   }) => {
     const currentPhotoUri = asOptionalString(photo?.uri);
     if (!currentExplorerId) {
@@ -1834,6 +1837,31 @@ export default function CreationModal({
         });
       }
       reactionUploadParentIdRef.current = null;
+
+      // 10b. Upload the selfie narration as a flagged child reaction. The
+      // reflection is already live — a narration failure must not fail the send.
+      const narrationUriForUpload = overrides?.narrationUri ?? null;
+      if (narrationUriForUpload && !isReactionForUpload && user?.uid && activeRelationshipId) {
+        try {
+          await uploadReaction({
+            reactionType: 'selfie',
+            explorerId: currentExplorerId,
+            parentReflectionId: eventID,
+            syncStartTimeMillis: 0,
+            senderName: companionName || 'Companion',
+            senderId: user.uid,
+            activeRelationshipId,
+            recordedVideoUri: narrationUriForUpload,
+            isNarration: true,
+          });
+        } catch (narrationError) {
+          console.warn(
+            '[uploadEventBundle] narration upload failed (reflection already sent):',
+            narrationError,
+          );
+          showToast('Reflection sent, but the narration could not be added');
+        }
+      }
 
       // 11. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
@@ -2583,6 +2611,7 @@ export default function CreationModal({
                     deepDive: data.deepDive,
                     videoMeta: data.videoMeta,
                     filteredPhotoUri: data.filteredPhotoUri,
+                    narrationUri: data.narrationUri,
                   });
                 }}
                 audioRecorder={audioRecorder}
@@ -2599,6 +2628,7 @@ export default function CreationModal({
                 onStageChange={setComposerStage}
                 replaceMediaBackLabel={composerReplaceBackLabel}
                 composerHeaderTitle={isReaction ? 'Recording Reaction' : undefined}
+                allowNarration={!isReaction && !isEditingExistingReflection}
                 captionVoice={captionVoice}
                 deepDiveVoice={deepDiveVoice}
                 onCaptionVoiceChange={setCaptionVoice}

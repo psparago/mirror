@@ -149,6 +149,11 @@ export type UploadReactionParams = {
   messageText?: string;
   recordedAudioUri?: string;
   parentPosterUri?: string;
+  /**
+   * Author's narration of their own image Reflection. Stored as a flagged child
+   * reaction; does not mark the parent as responded-to.
+   */
+  isNarration?: boolean;
 };
 
 export async function uploadReaction({
@@ -163,6 +168,7 @@ export async function uploadReaction({
   messageText,
   recordedAudioUri,
   parentPosterUri,
+  isNarration = false,
 }: UploadReactionParams): Promise<string> {
   if (reactionType === 'selfie' && !recordedVideoUri) {
     throw new Error('Selfie reaction requires a recorded video');
@@ -290,17 +296,26 @@ export async function uploadReaction({
     reactionType,
     syncStartTimeMillis,
     responderRelationshipId: activeRelationshipId,
+    ...(isNarration ? { isNarration: true } : {}),
   };
 
   const eventDocRef = doc(collection(db, ExplorerConfig.collections.reflections), eventID);
   await setDoc(eventDocRef, firestorePayload, { merge: true });
 
-  const parentRef = doc(db, ExplorerConfig.collections.reflections, parentReflectionId);
-  await updateDoc(parentRef, {
-    respondedRelationshipIds: arrayUnion(activeRelationshipId),
-  });
+  // Narration is the author's own layer on their Reflection, not a response —
+  // leave the parent's respondedRelationshipIds untouched.
+  if (!isNarration) {
+    const parentRef = doc(db, ExplorerConfig.collections.reflections, parentReflectionId);
+    await updateDoc(parentRef, {
+      respondedRelationshipIds: arrayUnion(activeRelationshipId),
+    });
+  }
 
-  diagnosticsAppLog('reactionUpload', 'upload:firestore-done', { reactionType, eventId: eventID });
+  diagnosticsAppLog('reactionUpload', 'upload:firestore-done', {
+    reactionType,
+    eventId: eventID,
+    ...(isNarration ? { isNarration: true } : {}),
+  });
 
   return eventID;
 }

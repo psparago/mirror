@@ -81,6 +81,8 @@ export interface Event {
   syncStartTimeMillis?: number;
   /** Companion reaction capture mode. */
   reactionType?: ReactionType;
+  /** True when this reaction is the author's narration of an image Reflection (not a response). */
+  isNarration?: boolean;
 }
 
 /** Merged Firestore signal doc (`mirror_event` + engagement overlays); rich content lives in `metadata`. */
@@ -104,6 +106,8 @@ export interface ReflectionDocument {
   responderRelationshipId?: string;
   /** Companion reaction capture mode (e.g. live-sync selfie). */
   reactionType?: ReactionType;
+  /** True when this reaction is the author's narration of an image Reflection (not a response). */
+  isNarration?: boolean;
   /** Parent Reflection playhead (ms) when the reaction recording started. */
   syncStartTimeMillis?: number;
   /**

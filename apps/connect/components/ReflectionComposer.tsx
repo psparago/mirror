@@ -45,6 +45,7 @@ import {
   REFLECTION_MAX_VIDEO_MS,
   REFLECTION_MAX_VIDEO_SECONDS,
 } from '@/utils/mediaProcessor';
+import { ReactionSheet } from './ReactionSheet';
 import { ReplayModal } from './ReplayModal';
 import { VoicePickerModal } from './VoicePickerModal';
 import {
@@ -85,6 +86,8 @@ export type ComposerSendPayload = {
   videoMeta?: ComposerVideoMeta | null;
   /** Final square photo export (framing baked) to upload instead of the raw source photo. */
   filteredPhotoUri?: string | null;
+  /** Local selfie narration video for image reflections (uploaded as a flagged child reaction). */
+  narrationUri?: string | null;
 };
 
 export type ComposerStage = 'workbench' | 'ai' | 'send';
@@ -138,6 +141,8 @@ interface ReflectionComposerProps {
   replaceMediaBackLabel?: string;
   /** Overrides send-stage center title (e.g. Companion reaction flow). */
   composerHeaderTitle?: string;
+  /** Offer selfie narration for image reflections (new, non-reaction sends only). */
+  allowNarration?: boolean;
 }
 
 const MIN_PHOTO_SCALE = 0.35;
@@ -249,11 +254,15 @@ function ReflectionComposerInner({
   onStageChange,
   replaceMediaBackLabel = 'Library',
   composerHeaderTitle,
+  allowNarration = false,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
   const [isInfoOpen, setIsInfoOpen] = useState(false);
   const [caption, setCaption] = useState(initialCaption);
+  const [isNarrationSheetOpen, setIsNarrationSheetOpen] = useState(false);
+  const [narrationUri, setNarrationUri] = useState<string | null>(null);
+  const canNarrate = allowNarration && mediaType === 'photo';
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isCaptionFocused, setIsCaptionFocused] = useState(false);
   const [isContextFocused, setIsContextFocused] = useState(false);
@@ -1159,6 +1168,7 @@ function ReflectionComposerInner({
       caption,
       audioUri: audioUri || null,
       deepDive: aiArtifacts?.deepDive || null,
+      narrationUri,
     };
     if (mediaType === 'video' && videoRangeMs && videoRangeMs.end > videoRangeMs.start) {
       return {
@@ -1172,7 +1182,7 @@ function ReflectionComposerInner({
       };
     }
     return { ...base, videoMeta: null };
-  }, [caption, audioUri, aiArtifacts?.deepDive, mediaType, videoRangeMs, thumbnailTimeMs, posterCustomUri]);
+  }, [caption, audioUri, aiArtifacts?.deepDive, narrationUri, mediaType, videoRangeMs, thumbnailTimeMs, posterCustomUri]);
 
   const currentPlaybackWindowSeconds = useMemo(() => {
     if (mediaType !== 'video' || !videoRangeMs) return 0;
@@ -2174,6 +2184,44 @@ function ReflectionComposerInner({
       </View>
       </View>
 
+        {/* SECTION: Bring It to Life — selfie narration, image reflections only */}
+        {canNarrate ? (
+          <View style={styles.aiCard}>
+            <View style={styles.aiCardHeader}>
+              <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+              <Text style={styles.aiCardTitle}>Bring It to Life (Optional)</Text>
+            </View>
+            <Text style={styles.aiCardDesc}>
+              Record a selfie video narrating this photo. It plays in the corner while the photo
+              stays full screen.
+            </Text>
+            <View style={styles.aiVoiceCentered}>
+              <TouchableOpacity
+                style={styles.aiRecordBtn}
+                onPress={() => setIsNarrationSheetOpen(true)}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  narrationUri ? 'Redo selfie narration' : 'Record selfie narration'
+                }
+              >
+                <FontAwesome name="video-camera" size={18} color="#fff" />
+              </TouchableOpacity>
+              {narrationUri ? (
+                <View style={styles.aiVoiceDoneCol}>
+                  <View style={styles.aiVoiceBadgeRow}>
+                    <FontAwesome name="check-circle" size={14} color="#27ae60" />
+                    <Text style={styles.aiVoiceDoneText}>Recorded</Text>
+                  </View>
+                  <Text style={styles.aiVoiceHint}>Tap to redo</Text>
+                </View>
+              ) : (
+                <Text style={styles.aiVoicePrompt}>Tap to Record</Text>
+              )}
+            </View>
+          </View>
+        ) : null}
+
         {/* SECTION: AI Voice */}
         <View style={styles.aiCard}>
           <View style={styles.aiCardHeader}>
@@ -2610,6 +2658,23 @@ function ReflectionComposerInner({
                     </View>
                   </View>
 
+                  {canNarrate ? (
+                    <View style={styles.infoRow}>
+                      <View style={styles.infoIconWrap}>
+                        <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+                      </View>
+                      <View style={styles.infoTextWrap}>
+                        <Text style={styles.infoLabel}>Bring It to Life</Text>
+                        <Text style={styles.infoDesc}>
+                          Optional, photos only. Record a selfie video narrating the photo — it
+                          plays in the corner while the photo stays full screen, like you’re right
+                          there telling the story. If you also recorded a Voice Intro, the intro
+                          plays first, then the narration — they never overlap.
+                        </Text>
+                      </View>
+                    </View>
+                  ) : null}
+
                   <View style={styles.infoRow}>
                     <View style={styles.infoIconWrap}>
                       <FontAwesome name="pencil" size={14} color="#8e44ad" />
@@ -2744,6 +2809,18 @@ function ReflectionComposerInner({
         onSelect={handleVoicePick}
         onClose={() => setVoicePickerTarget(null)}
       />
+
+      {/* SELFIE NARRATION (image reflections) — capture only; upload happens with the reflection send */}
+      {canNarrate ? (
+        <ReactionSheet
+          visible={isNarrationSheetOpen}
+          mode="narration"
+          parentReflectionId=""
+          parentMedia={{ mediaType: 'image', imageUrl: mediaUri }}
+          onNarrationComplete={(videoUri) => setNarrationUri(videoUri)}
+          onClose={() => setIsNarrationSheetOpen(false)}
+        />
+      ) : null}
 
     </GestureHandlerRootView>
   );

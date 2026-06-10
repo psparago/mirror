@@ -422,6 +422,14 @@ export interface ReactionSheetProps {
   parentReflectionId: string;
   parentMedia: ReactionParentMedia | null;
   onUploadSuccess?: (parentReflectionId: string, relationshipId: string) => void;
+  /**
+   * 'narration' locks the sheet to selfie capture for bringing an image
+   * Reflection to life; the take is handed back via onNarrationComplete
+   * instead of being uploaded.
+   */
+  mode?: 'reaction' | 'narration';
+  /** Narration mode: receives the recorded selfie video URI. No upload occurs. */
+  onNarrationComplete?: (videoUri: string) => void;
 }
 
 export function ReactionSheet({
@@ -430,7 +438,10 @@ export function ReactionSheet({
   parentReflectionId,
   parentMedia,
   onUploadSuccess,
+  mode = 'reaction',
+  onNarrationComplete,
 }: ReactionSheetProps) {
+  const isNarrationMode = mode === 'narration';
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { currentExplorerId, activeRelationship } = useExplorer();
@@ -3073,6 +3084,18 @@ export function ReactionSheet({
 
   const handleSend = useCallback(() => {
     if (isUploading) return;
+
+    if (isNarrationMode) {
+      if (!recordedUri) {
+        Alert.alert('Record a Narration', 'Hold the button to record your selfie narration first.');
+        return;
+      }
+      logComposeDiag('narration:complete', { platform: Platform.OS });
+      onNarrationComplete?.(recordedUri);
+      onClose();
+      return;
+    }
+
     if (!currentExplorerId) {
       Alert.alert('Explorer Not Ready', 'Please wait for the Explorer profile to load before sending.');
       return;
@@ -3143,9 +3166,11 @@ export function ReactionSheet({
   }, [
     activeRelationship,
     currentExplorerId,
+    isNarrationMode,
     isUploading,
     isVideoParent,
     onClose,
+    onNarrationComplete,
     onUploadSuccess,
     parentPosterUri,
     parentReflectionId,
@@ -3498,7 +3523,9 @@ export function ReactionSheet({
             </>
           ) : (
             <>
-              <Text style={styles.headerTitle}>Live Sync Reaction</Text>
+              <Text style={styles.headerTitle}>
+                {isNarrationMode ? 'Bring It to Life' : 'Live Sync Reaction'}
+              </Text>
               <Pressable
                 style={styles.closeButton}
                 onPress={handleAbandonReaction}
@@ -3743,7 +3770,7 @@ export function ReactionSheet({
             </View>
           ) : null}
 
-          {!companionPreviewOpen ? (
+          {!companionPreviewOpen && !isNarrationMode ? (
           <View style={styles.modePicker}>
             {(
               [
@@ -3812,10 +3839,12 @@ export function ReactionSheet({
                 onPress={handleSend}
                 disabled={isUploading}
                 accessibilityRole="button"
-                accessibilityLabel="Send reaction"
+                accessibilityLabel={
+                  isNarrationMode ? 'Add narration to your Reflection' : 'Send reaction'
+                }
               >
-                <FontAwesome name="paper-plane" size={15} color="#fff" />
-                <Text style={styles.sendButtonText}>Send</Text>
+                <FontAwesome name={isNarrationMode ? 'check' : 'paper-plane'} size={15} color="#fff" />
+                <Text style={styles.sendButtonText}>{isNarrationMode ? 'Add' : 'Send'}</Text>
               </Pressable>
             </View>
           ) : isSelfieTakeComplete ? (
@@ -3911,12 +3940,16 @@ export function ReactionSheet({
                     ? 'Saving reaction'
                     : isRecording || isSelfieCaptureArming
                       ? 'Recording reaction'
-                      : 'Hold to react'
+                      : isNarrationMode
+                        ? 'Hold to record narration'
+                        : 'Hold to react'
               }
               accessibilityHint={
-                isImageParent
-                  ? 'Press and hold to record your reaction to this photo'
-                  : 'Press and hold to record your reaction while the Reflection plays'
+                isNarrationMode
+                  ? 'Press and hold to record yourself bringing this photo to life'
+                  : isImageParent
+                    ? 'Press and hold to record your reaction to this photo'
+                    : 'Press and hold to record your reaction while the Reflection plays'
               }
             >
               <FontAwesome name="circle" size={14} color="#fff" />
@@ -3927,7 +3960,9 @@ export function ReactionSheet({
                     ? 'Saving…'
                     : isRecording || isSelfieCaptureArming
                       ? 'Recording…'
-                      : 'Hold to React'}
+                      : isNarrationMode
+                        ? 'Hold to Record'
+                        : 'Hold to React'}
               </Text>
             </Pressable>
           )}
@@ -3973,10 +4008,44 @@ export function ReactionSheet({
                 contentContainerStyle={styles.infoSheetScroll}
                 showsVerticalScrollIndicator
               >
+                {isNarrationMode ? (
+                <>
+                <Text style={styles.infoTitle}>Bringing Your Image to Life</Text>
+                <Text style={styles.infoSubtitle}>
+                  A narration adds your face and voice to a photo. The Explorer sees the photo full
+                  screen while your selfie video plays in the corner — like you’re right there
+                  telling the story.
+                </Text>
+
+                <View style={styles.infoRow}>
+                  <View style={styles.infoIconWrap}>
+                    <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+                  </View>
+                  <View style={styles.infoTextWrap}>
+                    <Text style={styles.infoLabel}>Selfie narration</Text>
+                    <Text style={styles.infoDesc}>
+                      Hold the button and talk about the photo — who’s in it, what was happening,
+                      why it matters. When you’re done, tap Preview to see exactly what the Explorer
+                      will see, then Add to attach it to your Reflection.
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.infoDivider} />
+
+                <Text style={styles.infoProTip}>
+                  Use the ✕ to close without adding a narration, or Retake if you want another try.
+                  Your Reflection is still ready to send either way.
+                </Text>
+                </>
+                ) : (
+                <>
                 <Text style={styles.infoTitle}>Reacting to a Reflection</Text>
                 <Text style={styles.infoSubtitle}>
                   A reaction lets you respond in the moment — point something out, share a memory, or
-                  just smile back. Pick whichever feels easiest; there’s no wrong way.
+                  just smile back. You can react from the timeline, or tap React while watching a
+                  Reflection the moment it moves you. Pick whichever feels easiest; there’s no wrong
+                  way.
                 </Text>
 
                 <View style={styles.infoRow}>
@@ -4059,6 +4128,8 @@ export function ReactionSheet({
                   On speaker, leave Original audio off while you record — the video still plays for
                   sync without bleeding into your reaction.
                 </Text>
+                </>
+                )}
               </ScrollView>
             </View>
           </View>
