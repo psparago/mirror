@@ -113,6 +113,8 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
     else if (description) meta.short_caption = description;
     else if (deepDive.trim()) meta.short_caption = captionSeed;
     if (typeof o.deep_dive === 'string') meta.deep_dive = o.deep_dive;
+    if (o.has_narration === true) meta.has_narration = true;
+    if (typeof o.narration_event_id === 'string') meta.narration_event_id = o.narration_event_id;
 
     if (hasVideoTrim && trimPair !== null) {
       meta.video_start_ms = trimPair.startMs;
@@ -1696,6 +1698,7 @@ export default function HomeScreen() {
             likedBy={reflectionLikes[selectedEvent.event_id] ?? []}
             reflectionLikes={reflectionLikes}
             currentUserId={currentExplorerId ?? null}
+            explorerId={currentExplorerId ?? null}
             companions={companions}
             onToggleLike={handleToggleReflectionLike}
             onClose={closeFullScreen}

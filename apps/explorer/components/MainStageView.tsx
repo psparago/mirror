@@ -3,6 +3,7 @@ import {
   buildLikeFeedbackPhrase,
   coerceThumbnailTimeMs,
   CompanionAvatar,
+  API_ENDPOINTS,
   Event,
   EventMetadata,
   getCloudMasterTrimWindow,
@@ -281,6 +282,8 @@ interface MainStageProps {
   filterBar?: React.ReactNode;
   /** Shown in the header as "{name}'s Reflections" when multiple items exist. */
   explorerDisplayName?: string | null;
+  /** Needed to resolve fresh media URLs for Bring-It-to-Life narration bundles. */
+  explorerId?: string | null;
 }
 
 export default function MainStageView({
@@ -312,6 +315,7 @@ export default function MainStageView({
   config,
   filterBar,
   explorerDisplayName,
+  explorerId,
 }: MainStageProps) {
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
@@ -619,6 +623,13 @@ export default function MainStageView({
   const performSelfieCaptureRef = useRef<((delay?: number) => Promise<void>) | null>(null);
   const clearHeavyMediaRefsRef = useRef<() => void>(() => { });
 
+  // Bring It to Life — resolved narration take for the selected photo, the
+  // corner PIP player, and the bridge used by the speakCaption machine action.
+  const narrationPlaybackRef = useRef<{ parentEventId: string; videoUrl: string } | null>(null);
+  const narrationPlayerRef = useRef<any>(null);
+  const narrationEndSubRef = useRef<{ remove: () => void } | null>(null);
+  const playNarrationPipRef = useRef<(session: number) => Promise<boolean>>(async () => false);
+
   // --- THE XSTATE MACHINE ---
   const machine = useMemo(() => playerMachine.provide({
     actions: {
@@ -682,6 +693,19 @@ export default function MainStageView({
             console.warn('Silent failure stopping player:', err);
           }
         }
+
+        // Stop Bring-It-to-Life narration PIP
+        if (narrationEndSubRef.current) {
+          narrationEndSubRef.current.remove();
+          narrationEndSubRef.current = null;
+        }
+        if (narrationPlayerRef.current) {
+          try {
+            narrationPlayerRef.current.pause();
+          } catch {
+            /* player may be tearing down */
+          }
+        }
         controlsOpacity.value = withTiming(0, { duration: 300 });
 
         // Clear caption/sparkle playing state
@@ -701,6 +725,22 @@ export default function MainStageView({
         debugLog(`🎙️ speakCaption [Session: ${thisSession}]`);
 
         controlsOpacity.value = withTiming(0, { duration: 300 });
+
+        // Bring It to Life: when a photo carries a selfie narration, the
+        // narration IS the spoken caption — play the PIP video instead of
+        // caption audio/TTS. Falls through to the normal path if the
+        // narration can't be loaded.
+        const expectsNarration =
+          !selectedEventRef.current?.video_url &&
+          (selectedMetadataRef.current?.has_narration === true ||
+            !!selectedMetadataRef.current?.narration_event_id ||
+            selectedEventRef.current?.has_narration === true ||
+            !!selectedEventRef.current?.narration_event_id);
+        if (expectsNarration) {
+          const played = await playNarrationPipRef.current(thisSession);
+          if (played || captionSessionRef.current !== thisSession) return;
+          debugLog('⚠️ Narration unavailable — falling back to caption audio');
+        }
 
         if (audioUrl) {
           const playAudioWithRetry = async (retryCount = 0): Promise<void> => {
@@ -1722,6 +1762,148 @@ export default function MainStageView({
     playerRef.current = player;
   }, [player]);
 
+  // --- BRING IT TO LIFE (selfie narration PIP for photos) ---
+  // The parent doc points at a child narration event; resolve its video URL
+  // from the already-fetched feed when possible, else fetch a fresh bundle.
+  const narrationEventId = useMemo(() => {
+    if (!selectedEvent || selectedEvent.video_url) return null;
+    return selectedMetadata?.narration_event_id ?? selectedEvent.narration_event_id ?? null;
+  }, [selectedEvent, selectedMetadata?.narration_event_id]);
+
+  const [narrationPlayback, setNarrationPlayback] = useState<{
+    parentEventId: string;
+    videoUrl: string;
+  } | null>(null);
+
+  useEffect(() => {
+    narrationPlaybackRef.current = null;
+    setNarrationPlayback(null);
+    if (!narrationEventId || !selectedEvent?.event_id) return;
+
+    const parentEventId = selectedEvent.event_id;
+    let cancelled = false;
+    const apply = (videoUrl: string) => {
+      if (cancelled) return;
+      const next = { parentEventId, videoUrl };
+      // Ref is set immediately so the speakCaption action's wait loop sees it.
+      narrationPlaybackRef.current = next;
+      setNarrationPlayback(next);
+    };
+
+    // Narration child events are filtered out of the feed prop (they're
+    // reaction docs), so always resolve fresh URLs via the bundle endpoint.
+    if (!explorerId) return;
+    (async () => {
+      try {
+        const response = await fetch(
+          `${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${narrationEventId}&explorer_id=${explorerId}`,
+        );
+        if (!response.ok) return;
+        const bundle = (await response.json()) as Event;
+        if (bundle?.video_url) apply(bundle.video_url);
+      } catch (error) {
+        console.warn('[MainStage] narration bundle fetch failed:', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [narrationEventId, selectedEvent?.event_id, explorerId]);
+
+  // Dedicated PIP player — the main player stays bound to the parent media.
+  const narrationPlayer = useVideoPlayer('', (p) => {
+    p.loop = false;
+  });
+
+  useEffect(() => {
+    narrationPlayerRef.current = narrationPlayer;
+  }, [narrationPlayer]);
+
+  useEffect(() => {
+    if (!narrationPlayer) return;
+    if (narrationPlayback?.videoUrl) {
+      try {
+        narrationPlayer.replace(narrationPlayback.videoUrl);
+      } catch {
+        /* teardown / invalid URI */
+      }
+    } else {
+      try {
+        narrationPlayer.pause();
+        narrationPlayer.replace('');
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [narrationPlayer, narrationPlayback?.videoUrl]);
+
+  // Machine bridge: invoked by speakCaption in place of caption audio/TTS.
+  // Waits briefly for the narration bundle (resolution may still be in
+  // flight on first open), then plays the PIP and reports NARRATION_FINISHED.
+  const playNarrationPip = useCallback(
+    async (session: number): Promise<boolean> => {
+      const deadline = Date.now() + 5000;
+      const matchesSelected = () =>
+        !!narrationPlaybackRef.current &&
+        narrationPlaybackRef.current.parentEventId === selectedEventRef.current?.event_id;
+
+      while (!matchesSelected() && Date.now() < deadline && captionSessionRef.current === session) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      if (captionSessionRef.current !== session) return true; // superseded — no fallback
+      if (!matchesSelected()) return false;
+
+      const pipPlayer = narrationPlayerRef.current;
+      if (!pipPlayer) return false;
+
+      narrationEndSubRef.current?.remove();
+      narrationEndSubRef.current = null;
+      try {
+        seekVideoToSeconds(pipPlayer, 0);
+        pipPlayer.play();
+      } catch {
+        return false;
+      }
+
+      // The narration replaces the caption cycle — never chain into auto deep dive.
+      hasAutoPlayedDeepDiveRef.current = true;
+
+      narrationEndSubRef.current = pipPlayer.addListener('playToEnd', () => {
+        narrationEndSubRef.current?.remove();
+        narrationEndSubRef.current = null;
+        if (safetyTimeoutRef.current) {
+          clearTimeout(safetyTimeoutRef.current);
+          safetyTimeoutRef.current = null;
+        }
+        if (captionSessionRef.current === session) {
+          debugLog(`✅ Narration PIP finished [Session: ${session}]`);
+          sendRef.current({ type: 'NARRATION_FINISHED' });
+        }
+      });
+
+      const durationSec =
+        Number.isFinite(pipPlayer.duration) && pipPlayer.duration > 0 ? pipPlayer.duration : 60;
+      safetyTimeoutRef.current = setTimeout(() => {
+        if (captionSessionRef.current === session) {
+          console.warn(`⚠️ Narration PIP safety fallback triggered [Session: ${session}]`);
+          safetyTimeoutRef.current = null;
+          sendRef.current({ type: 'NARRATION_FINISHED' });
+        }
+      }, durationSec * 1000 + 4000);
+
+      return true;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  useEffect(() => {
+    playNarrationPipRef.current = playNarrationPip;
+  }, [playNarrationPip]);
+
+  const narrationPipVisible =
+    !!narrationPlayback && narrationPlayback.parentEventId === selectedEvent?.event_id;
+
   const clearHeavyMediaRefs = useCallback(() => {
     setStageImageSource(undefined);
     setVideoReady(false);
@@ -1736,6 +1918,13 @@ export default function MainStageView({
         player.replace('');
       } catch {
         /* Player may already be released during teardown. */
+      }
+    }
+    if (narrationPlayerRef.current) {
+      try {
+        narrationPlayerRef.current.pause();
+      } catch {
+        /* ignore */
       }
     }
   }, [player]);
@@ -2871,6 +3060,19 @@ export default function MainStageView({
                         priority="high"
                       />
                     )}
+
+                    {/* Bring It to Life: selfie narration PIP over the full-screen photo */}
+                    {narrationPipVisible ? (
+                      <View style={styles.narrationPipFrame} pointerEvents="none">
+                        <VideoView
+                          player={narrationPlayer}
+                          style={styles.narrationPipVideo}
+                          contentFit="cover"
+                          nativeControls={false}
+                          allowsFullscreen={false}
+                        />
+                      </View>
+                    ) : null}
                     {/*
                       VideoView must not be a child of RNGH GestureDetector on Android — the native
                       surface often never paints. Keep VideoView under a plain View; gestures on overlay.
@@ -3388,6 +3590,24 @@ const styles = StyleSheet.create({
     elevation: 45,
   },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
+  narrationPipFrame: {
+    position: 'absolute',
+    top: 18,
+    right: 18,
+    width: 132,
+    height: 176,
+    borderRadius: 14,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.45)',
+    backgroundColor: '#000',
+    zIndex: 40,
+    elevation: 40,
+  },
+  narrationPipVideo: {
+    width: '100%',
+    height: '100%',
+  },
   playOverlay: {
     position: 'absolute',
     top: 0,

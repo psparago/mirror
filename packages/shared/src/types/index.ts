@@ -53,6 +53,10 @@ export interface EventMetadata {
   last_edited_at?: string;
   /** Typed reaction message (display only; spoken via audio_url). */
   reaction_message?: string;
+  /** True when this image Reflection has a Bring-It-to-Life selfie narration child doc. */
+  has_narration?: boolean;
+  /** Event id of the Bring-It-to-Life narration child doc. */
+  narration_event_id?: string;
   /** Playback trim: inclusive start time in milliseconds (video). */
   video_start_ms?: number;
   /** Playback trim: exclusive or inclusive end boundary in milliseconds (video); pair with `video_start_ms`. */
@@ -83,6 +87,10 @@ export interface Event {
   reactionType?: ReactionType;
   /** True when this reaction is the author's narration of an image Reflection (not a response). */
   isNarration?: boolean;
+  /** True when this image Reflection has a Bring-It-to-Life selfie narration child doc. */
+  has_narration?: boolean;
+  /** Event id of the Bring-It-to-Life narration child doc. */
+  narration_event_id?: string;
 }
 
 /** Merged Firestore signal doc (`mirror_event` + engagement overlays); rich content lives in `metadata`. */
@@ -108,6 +116,10 @@ export interface ReflectionDocument {
   reactionType?: ReactionType;
   /** True when this reaction is the author's narration of an image Reflection (not a response). */
   isNarration?: boolean;
+  /** True when this image Reflection has a Bring-It-to-Life selfie narration child doc. */
+  has_narration?: boolean;
+  /** Event id of the Bring-It-to-Life narration child doc. */
+  narration_event_id?: string;
   /** Parent Reflection playhead (ms) when the reaction recording started. */
   syncStartTimeMillis?: number;
   /**

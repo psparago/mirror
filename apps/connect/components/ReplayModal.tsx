@@ -5,6 +5,7 @@ import {
   buildEventForReplay,
   deleteReflectionDocument,
   fetchMirrorEventById,
+  fetchNarrationEventForPlayback,
   fetchReactionEventForPlayback,
   removeResponderFromParentReflection,
   resolveReactionParentPipMedia,
@@ -133,6 +134,8 @@ export function ReplayModal({
   const reactionSessionRef = useRef<ReactionPlaybackSession | null>(null);
   const activeReactionResponderKeyRef = useRef<string | null>(null);
   const suppressInstantPlayEventIdRef = useRef<string | null>(null);
+  /** Parent event id whose Bring-It-to-Life narration already auto-played this open. */
+  const narrationAutoPlayedForParentRef = useRef<string | null>(null);
   const [showManualReplayOverlay, setShowManualReplayOverlay] = useState(false);
   const [isDeletingReaction, setIsDeletingReaction] = useState(false);
   const [fetchedParentPip, setFetchedParentPip] = useState<
@@ -239,10 +242,14 @@ export function ReplayModal({
     }
     if (reactionPlaybackType === 'selfie') {
       const sender = displayEvent?.metadata?.sender;
+      if (displayEvent?.isNarration) {
+        return sender ? `${sender} is bringing this photo to life` : 'Narration';
+      }
       return sender ? `${sender}'s selfie` : 'Selfie reaction';
     }
     return null;
   }, [
+    displayEvent?.isNarration,
     displayEvent?.metadata?.description,
     displayEvent?.metadata?.reaction_message,
     displayEvent?.metadata?.sender,
@@ -285,6 +292,7 @@ export function ReplayModal({
       setFetchingReactionFaceKey(null);
       setShowManualReplayOverlay(false);
       suppressInstantPlayEventIdRef.current = null;
+      narrationAutoPlayedForParentRef.current = null;
       return;
     }
     if (!event) return;
@@ -781,6 +789,9 @@ export function ReplayModal({
 
   const canDeleteReaction = !!(
     isViewingChildReaction &&
+    // Narrations are managed from the composer, not deletable as reactions
+    // (deleting one would leave the parent's has_narration flag stale).
+    displayEvent?.isNarration !== true &&
     currentUserId &&
     displayEvent?.metadata?.sender_id === currentUserId &&
     activeRelationshipId &&
@@ -1464,16 +1475,87 @@ export function ReplayModal({
             setShowManualReplayOverlay(true);
             return;
           }
-          setShowManualReplayOverlay(false);
-          const playbackType = resolveReactionPlaybackType(displayEvent);
-          const useInstantVideo =
-            !displayEvent.isReaction || playbackType === 'selfie';
-          sendRef.current({
-            type: useInstantVideo ? 'SELECT_EVENT_INSTANT' : 'SELECT_EVENT',
-            event: displayEvent,
-            metadata: displayEvent.metadata || ({} as EventMetadata),
-            takeSelfie: false,
-          });
+
+          const startEventPlayback = () => {
+            setShowManualReplayOverlay(false);
+            const playbackType = resolveReactionPlaybackType(displayEvent);
+            const useInstantVideo =
+              !displayEvent.isReaction || playbackType === 'selfie';
+            sendRef.current({
+              type: useInstantVideo ? 'SELECT_EVENT_INSTANT' : 'SELECT_EVENT',
+              event: displayEvent,
+              metadata: displayEvent.metadata || ({} as EventMetadata),
+              takeSelfie: false,
+            });
+          };
+
+          // Bring It to Life: a brought-to-life image opens straight into its
+          // narration (photo full screen, selfie PIP) instead of the caption
+          // intro. Once per modal open; Back-to-Reflection returns to the
+          // normal parent view.
+          const narrationEventId =
+            displayEvent.narration_event_id ??
+            displayEvent.metadata?.narration_event_id ??
+            null;
+          const parentHasNarration =
+            !displayEvent.isReaction &&
+            (displayEvent.has_narration === true ||
+              displayEvent.metadata?.has_narration === true ||
+              !!narrationEventId);
+          const shouldAutoPlayNarration =
+            parentHasNarration &&
+            !!reactionSessionRef.current &&
+            !!explorerId &&
+            narrationAutoPlayedForParentRef.current !== displayEvent.event_id;
+
+          if (!displayEvent.isReaction) {
+            console.log('[ReplayModal] narration check', {
+              eventId: displayEvent.event_id,
+              topLevelFlag: displayEvent.has_narration === true,
+              metadataFlag: displayEvent.metadata?.has_narration === true,
+              narrationEventId,
+              hasSession: !!reactionSessionRef.current,
+              hasExplorerId: !!explorerId,
+              alreadyAutoPlayed:
+                narrationAutoPlayedForParentRef.current === displayEvent.event_id,
+              willAutoPlay: shouldAutoPlayNarration,
+            });
+          }
+
+          if (shouldAutoPlayNarration) {
+            narrationAutoPlayedForParentRef.current = displayEvent.event_id;
+            void (async () => {
+              try {
+                const narrationEvent = await fetchNarrationEventForPlayback(
+                  displayEvent.event_id,
+                  narrationEventId,
+                  explorerId,
+                );
+                if (cancelled) {
+                  console.log('[ReplayModal] narration auto-play superseded (effect re-ran)');
+                  return;
+                }
+                if (narrationEvent) {
+                  console.log('[ReplayModal] narration auto-play starting', {
+                    narrationId: narrationEvent.event_id,
+                    hasVideo: !!narrationEvent.video_url,
+                  });
+                  setPlaybackEvent(narrationEvent);
+                  return;
+                }
+                console.warn(
+                  '[ReplayModal] narration unresolved — falling back to plain playback',
+                  { parentId: displayEvent.event_id, narrationEventId },
+                );
+              } catch (error) {
+                console.warn('[ReplayModal] narration auto-play load failed:', error);
+              }
+              if (!cancelled) startEventPlayback();
+            })();
+            return;
+          }
+
+          startEventPlayback();
         });
     } else {
       sendRef.current({ type: 'CLOSE' });
@@ -1482,7 +1564,7 @@ export function ReplayModal({
       cancelled = true;
       sendRef.current({ type: 'CLOSE' });
     };
-  }, [visible, displayEvent?.event_id, reactionParentPipReady, send]);
+  }, [visible, displayEvent?.event_id, reactionParentPipReady, send, explorerId]);
 
   useEffect(() => {
     if (!showManualReplayOverlay || !displayEvent?.video_url) return;

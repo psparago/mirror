@@ -144,6 +144,10 @@ function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): EventMet
   }
   if (shortCaption) meta.short_caption = shortCaption;
   if (typeof o.deep_dive === 'string' && o.deep_dive) meta.deep_dive = o.deep_dive;
+  if (o.has_narration === true) meta.has_narration = true;
+  if (typeof o.narration_event_id === 'string' && o.narration_event_id) {
+    meta.narration_event_id = o.narration_event_id;
+  }
   if (typeof o.companion_in_reflection === 'boolean') meta.companion_in_reflection = o.companion_in_reflection;
   if (typeof o.explorer_in_reflection === 'boolean') meta.explorer_in_reflection = o.explorer_in_reflection;
   if (typeof o.is_companion_present === 'boolean') meta.is_companion_present = o.is_companion_present;

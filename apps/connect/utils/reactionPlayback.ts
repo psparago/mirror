@@ -158,6 +158,10 @@ export function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): E
   }
   if (shortCaption) meta.short_caption = shortCaption;
   if (typeof o.deep_dive === 'string' && o.deep_dive) meta.deep_dive = o.deep_dive;
+  if (o.has_narration === true) meta.has_narration = true;
+  if (typeof o.narration_event_id === 'string' && o.narration_event_id) {
+    meta.narration_event_id = o.narration_event_id;
+  }
   return meta;
 }
 
@@ -232,6 +236,7 @@ export function buildEventForReplay(
     description?: string;
     fullEvent?: Event | null;
     isReaction?: boolean;
+    isNarration?: boolean;
     parentReflectionId?: string | null;
     syncStartTimeMillis?: number;
     reactionType?: ReactionType;
@@ -242,6 +247,11 @@ export function buildEventForReplay(
   const description = isReaction
     ? metadata?.reaction_message || metadata?.description || ''
     : options.description || metadata?.description || metadata?.short_caption || 'Reflection';
+  const hasNarration =
+    options.fullEvent?.has_narration === true || metadata?.has_narration === true;
+  const narrationEventId =
+    asOptionalString(options.fullEvent?.narration_event_id) ??
+    asOptionalString(metadata?.narration_event_id);
   return {
     event_id: eventId,
     image_url:
@@ -252,6 +262,9 @@ export function buildEventForReplay(
     video_url: options.fullEvent?.video_url,
     deep_dive_audio_url: options.fullEvent?.deep_dive_audio_url,
     ...(isReaction ? { isReaction: true } : {}),
+    ...(options.isNarration ? { isNarration: true } : {}),
+    ...(hasNarration && !isReaction ? { has_narration: true } : {}),
+    ...(narrationEventId && !isReaction ? { narration_event_id: narrationEventId } : {}),
     ...(options.parentReflectionId ? { parentReflectionId: options.parentReflectionId } : {}),
     ...(typeof options.syncStartTimeMillis === 'number'
       ? { syncStartTimeMillis: options.syncStartTimeMillis }
@@ -401,16 +414,77 @@ export async function fetchReactionEventByIdForPlayback(
     description: metadata?.short_caption || metadata?.description,
     fullEvent,
     isReaction: true,
+    isNarration: data?.isNarration === true,
     parentReflectionId,
     syncStartTimeMillis,
     reactionType,
   });
 
   if (!reactionEvent.video_url && !reactionEvent.audio_url && !reactionEvent.image_url) {
+    console.warn('[Reaction] doc resolved but bundle has no media (list API missing event?)', {
+      reactionEventId,
+      hadFullEvent: !!fullEvent,
+    });
     return null;
   }
 
   return { reactionEvent, parentReflectionId };
+}
+
+/**
+ * Load a parent Reflection's Bring-It-to-Life narration for playback.
+ * Prefers the parent's `narration_event_id` pointer; falls back to scanning
+ * the child reaction docs for the `isNarration` flag.
+ */
+export async function fetchNarrationEventForPlayback(
+  parentEventId: string,
+  narrationEventId: string | null | undefined,
+  explorerId: string,
+  eventObjectsMap?: Map<string, Event>,
+): Promise<Event | null> {
+  if (narrationEventId) {
+    const byId = await fetchReactionEventByIdForPlayback(
+      narrationEventId,
+      explorerId,
+      eventObjectsMap,
+    );
+    if (byId?.reactionEvent.isNarration) {
+      return byId.reactionEvent;
+    }
+    console.warn('[narrationPlayback] lookup by narration_event_id failed', {
+      narrationEventId,
+      docResolved: !!byId,
+      isNarration: byId?.reactionEvent.isNarration ?? null,
+    });
+  }
+
+  const childrenQuery = query(
+    collection(db, ExplorerConfig.collections.reflections),
+    where('parentReflectionId', '==', parentEventId),
+    where('isReaction', '==', true),
+    limit(20),
+  );
+  const snap = await getDocs(childrenQuery);
+  const narrationDoc = snap.docs.find((child) => child.data()?.isNarration === true);
+  if (!narrationDoc) {
+    console.warn('[narrationPlayback] child scan found no narration doc', {
+      parentEventId,
+      childCount: snap.docs.length,
+    });
+    return null;
+  }
+
+  const byScan = await fetchReactionEventByIdForPlayback(
+    asOptionalString(narrationDoc.data()?.event_id) ?? narrationDoc.id,
+    explorerId,
+    eventObjectsMap,
+  );
+  if (!byScan?.reactionEvent.isNarration) {
+    console.warn('[narrationPlayback] scanned narration doc could not be resolved for playback', {
+      narrationDocId: narrationDoc.id,
+    });
+  }
+  return byScan?.reactionEvent.isNarration ? byScan.reactionEvent : null;
 }
 
 function coerceReactionType(raw: unknown, fullEvent: Event | null, metadata?: EventMetadata): ReactionType {

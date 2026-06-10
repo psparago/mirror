@@ -277,17 +277,29 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
+	// Synthesizes speech with one retry; TTS failures here must never be silent —
+	// a missing audio URL forces the apps onto the robotic device-TTS fallback.
+	synthesizeSpeechWithRetry := func(label, text, voiceName string) []byte {
+		speechData, ttsErr := GenerateSpeechWithOptions(text, SpeechOptions{VoiceName: voiceName})
+		if ttsErr != nil || len(speechData) == 0 {
+			log.Printf("TTS ERROR (%s, attempt 1/2): err=%v, bytes=%d — retrying", label, ttsErr, len(speechData))
+			speechData, ttsErr = GenerateSpeechWithOptions(text, SpeechOptions{VoiceName: voiceName})
+		}
+		if ttsErr != nil || len(speechData) == 0 {
+			log.Printf("TTS ERROR (%s, attempt 2/2): err=%v, bytes=%d — returning without audio", label, ttsErr, len(speechData))
+			return nil
+		}
+		return speechData
+	}
+
 	// 6. Generate speech using Google Cloud TTS (Journey voice)
 	if result.ShortCaption != "" {
 		log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
-		speechData, err := GenerateSpeechWithOptions(result.ShortCaption, SpeechOptions{
-			VoiceName: captionVoice,
-		})
-		if err == nil && len(speechData) > 0 {
+		speechData := synthesizeSpeechWithRetry("caption", result.ShortCaption, captionVoice)
+		if speechData != nil {
 			audioKey := fmt.Sprintf("staging/%s/tts/%d.mp3", explorerID, time.Now().UnixNano())
 
-			err = UploadToS3(ctx, audioKey, speechData, "audio/mpeg")
-			if err == nil {
+			if err := UploadToS3(ctx, audioKey, speechData, "audio/mpeg"); err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 					Bucket: aws.String("reflections-1200b-storage"),
 					Key:    aws.String(audioKey),
@@ -295,6 +307,8 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 				result.AudioURL = presignedRes.URL
 				result.AudioS3Key = audioKey
 				log.Printf("Generated TTS for caption at: %s", audioKey)
+			} else {
+				log.Printf("TTS ERROR (caption): S3 upload failed: %v", err)
 			}
 		}
 	}
@@ -302,14 +316,11 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	// 8. Generate Speech for Deep Dive
 	if result.DeepDive != "" {
 		log.Printf("TTS: Generating speech for deep dive: %s", result.DeepDive)
-		deepDiveSpeechData, err := GenerateSpeechWithOptions(result.DeepDive, SpeechOptions{
-			VoiceName: deepDiveVoice,
-		})
-		if err == nil && len(deepDiveSpeechData) > 0 {
+		deepDiveSpeechData := synthesizeSpeechWithRetry("deep_dive", result.DeepDive, deepDiveVoice)
+		if deepDiveSpeechData != nil {
 			deepDiveAudioKey := fmt.Sprintf("staging/%s/tts/deepdive_%d.mp3", explorerID, time.Now().UnixNano())
 
-			err = UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg")
-			if err == nil {
+			if err := UploadToS3(ctx, deepDiveAudioKey, deepDiveSpeechData, "audio/mpeg"); err == nil {
 				presignedRes, _ := presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
 					Bucket: aws.String("reflections-1200b-storage"),
 					Key:    aws.String(deepDiveAudioKey),
@@ -317,6 +328,8 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 				result.DeepDiveAudioURL = presignedRes.URL
 				result.DeepDiveAudioS3Key = deepDiveAudioKey
 				log.Printf("Generated Deep Dive TTS at: %s", deepDiveAudioKey)
+			} else {
+				log.Printf("TTS ERROR (deep_dive): S3 upload failed: %v", err)
 			}
 		}
 	}

@@ -45,6 +45,7 @@ import {
   REFLECTION_MAX_VIDEO_MS,
   REFLECTION_MAX_VIDEO_SECONDS,
 } from '@/utils/mediaProcessor';
+import { NarrationPreviewModal } from './reaction/NarrationPreviewModal';
 import { ReactionSheet } from './ReactionSheet';
 import { ReplayModal } from './ReplayModal';
 import { VoicePickerModal } from './VoicePickerModal';
@@ -261,6 +262,7 @@ function ReflectionComposerInner({
   const [isInfoOpen, setIsInfoOpen] = useState(false);
   const [caption, setCaption] = useState(initialCaption);
   const [isNarrationSheetOpen, setIsNarrationSheetOpen] = useState(false);
+  const [isNarrationPreviewOpen, setIsNarrationPreviewOpen] = useState(false);
   const [narrationUri, setNarrationUri] = useState<string | null>(null);
   const canNarrate = allowNarration && mediaType === 'photo';
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -373,11 +375,41 @@ function ReflectionComposerInner({
   const stopAiPreviewRef = useRef<(() => Promise<void>) | null>(null);
   const wantsAutoPlayRef = useRef(false);
   const autoAdvanceRef = useRef(false);
+  /** One-shot guard: a Sparkle run that returned text without TTS audio gets a single repair re-run. */
+  const ttsRepairAttemptedRef = useRef(false);
 
   useEffect(() => {
     const wasThinking = prevAiThinkingRef.current;
     prevAiThinkingRef.current = isAiThinking;
     if (wasThinking && !isAiThinking && !isAiCancelled) {
+      // TTS repair: the backend can return caption/deep dive text whose speech
+      // synthesis failed. Without audio the post-Sparkle preview silently skips
+      // the deep dive and the send would fall back to device TTS. Re-run once in
+      // TTS-only mode for the exact texts this run produced; pending
+      // auto-advance/auto-play intent is preserved and resumes after the re-run.
+      const aiCaptionText = aiArtifacts?.caption?.trim() ?? '';
+      const aiDeepDiveText = aiArtifacts?.deepDive?.trim() ?? '';
+      const missingDeepDiveTts = !!aiDeepDiveText && !aiArtifacts?.deepDiveAudioUrl;
+      const missingCaptionTts = !audioUri && !!aiCaptionText && !aiArtifacts?.audioUrl;
+      if ((missingDeepDiveTts || missingCaptionTts) && !ttsRepairAttemptedRef.current) {
+        ttsRepairAttemptedRef.current = true;
+        console.warn(
+          `[ReflectionComposer] Sparkle returned text without TTS (caption=${missingCaptionTts}, deepDive=${missingDeepDiveTts}) — retrying TTS once`,
+        );
+        onTriggerMagic({
+          targetCaption: aiCaptionText || caption.trim() || undefined,
+          targetDeepDive: aiDeepDiveText || undefined,
+          preserveStaging: true,
+          captionVoice,
+          deepDiveVoice,
+        }).catch(() => {
+          autoAdvanceRef.current = false;
+          wantsAutoPlayRef.current = false;
+        });
+        return;
+      }
+      ttsRepairAttemptedRef.current = false;
+
       // Baseline must match the caption that will actually be displayed, not the
       // raw AI text. The caption-sync effect only adopts the AI caption when the
       // current caption is empty or still equals the previous AI output; otherwise
@@ -424,7 +456,12 @@ function ReflectionComposerInner({
     captionVoice,
     deepDiveVoice,
     onStageChange,
+    onTriggerMagic,
+    audioUri,
     aiArtifacts?.caption,
+    aiArtifacts?.deepDive,
+    aiArtifacts?.audioUrl,
+    aiArtifacts?.deepDiveAudioUrl,
   ]);
 
   // Classifies what changed since the last successful Sparkle run:
@@ -1166,7 +1203,10 @@ function ReflectionComposerInner({
   const buildSendPayload = useCallback(() => {
     const base = {
       caption,
-      audioUri: audioUri || null,
+      // A Bring-It-to-Life narration replaces the spoken caption, so any voice
+      // intro recorded before it is dropped (caption TTS still uploads for
+      // manual playback).
+      audioUri: narrationUri ? null : audioUri || null,
       deepDive: aiArtifacts?.deepDive || null,
       narrationUri,
     };
@@ -1239,6 +1279,13 @@ function ReflectionComposerInner({
 
 
   const doPreviewNow = useCallback(async () => {
+    // A Bring-It-to-Life narration replaces the spoken caption, so the faithful
+    // preview is the narration player (photo full screen, selfie PIP) — not the
+    // mock caption playback.
+    if (narrationUri && mediaType === 'photo') {
+      setIsNarrationPreviewOpen(true);
+      return;
+    }
     setPreviewBuilding(true);
     try {
     const previewId = 'preview-temp';
@@ -1269,7 +1316,7 @@ function ReflectionComposerInner({
     } finally {
       setPreviewBuilding(false);
     }
-  }, [mediaUri, mediaType, audioUri, aiArtifacts, caption, exportCurrentPhoto]);
+  }, [narrationUri, mediaUri, mediaType, audioUri, aiArtifacts, caption, exportCurrentPhoto]);
 
   const handlePreview = useCallback(() => {
     if (!ensureAiCurrent()) return;
@@ -2147,7 +2194,55 @@ function ReflectionComposerInner({
           ) : null}
         </View>
 
-        {/* SECTION: Voice Intro */}
+        {/* SECTION: Voice Intro — replaced by the Brought-to-Life card when a
+            narration exists (the selfie narration IS the spoken caption then). */}
+        {canNarrate && narrationUri ? (
+          <View style={styles.aiCard}>
+            <View style={styles.aiCardHeader}>
+              <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+              <Text style={styles.aiCardTitle}>Brought to Life</Text>
+            </View>
+            <Text style={styles.aiCardDesc}>
+              Your selfie narration speaks for this photo — the Explorer sees it full screen while
+              you tell the story. The caption below stays as text the Explorer can still play by
+              hand.
+            </Text>
+            <View style={styles.bitlActionsRow}>
+              <TouchableOpacity
+                style={styles.bitlActionBtn}
+                onPress={() => setIsNarrationPreviewOpen(true)}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel="Preview narration"
+              >
+                <FontAwesome name="play" size={13} color="#fff" />
+                <Text style={styles.bitlActionBtnText}>Preview</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.bitlActionBtn}
+                onPress={() => setIsNarrationSheetOpen(true)}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel="Redo narration"
+              >
+                <FontAwesome name="refresh" size={13} color="#fff" />
+                <Text style={styles.bitlActionBtnText}>Redo</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.bitlActionBtn, styles.bitlActionBtnDestructive]}
+                onPress={() => setNarrationUri(null)}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel="Remove narration"
+              >
+                <FontAwesome name="trash-o" size={13} color="#ff8a80" />
+                <Text style={[styles.bitlActionBtnText, styles.bitlActionBtnTextDestructive]}>
+                  Remove
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
         <View style={styles.aiCard}>
           <View style={styles.aiCardHeader}>
             <FontAwesome name="microphone" size={14} color="#2e78b7" />
@@ -2183,44 +2278,7 @@ function ReflectionComposerInner({
             )}
       </View>
       </View>
-
-        {/* SECTION: Bring It to Life — selfie narration, image reflections only */}
-        {canNarrate ? (
-          <View style={styles.aiCard}>
-            <View style={styles.aiCardHeader}>
-              <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
-              <Text style={styles.aiCardTitle}>Bring It to Life (Optional)</Text>
-            </View>
-            <Text style={styles.aiCardDesc}>
-              Record a selfie video narrating this photo. It plays in the corner while the photo
-              stays full screen.
-            </Text>
-            <View style={styles.aiVoiceCentered}>
-              <TouchableOpacity
-                style={styles.aiRecordBtn}
-                onPress={() => setIsNarrationSheetOpen(true)}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  narrationUri ? 'Redo selfie narration' : 'Record selfie narration'
-                }
-              >
-                <FontAwesome name="video-camera" size={18} color="#fff" />
-              </TouchableOpacity>
-              {narrationUri ? (
-                <View style={styles.aiVoiceDoneCol}>
-                  <View style={styles.aiVoiceBadgeRow}>
-                    <FontAwesome name="check-circle" size={14} color="#27ae60" />
-                    <Text style={styles.aiVoiceDoneText}>Recorded</Text>
-                  </View>
-                  <Text style={styles.aiVoiceHint}>Tap to redo</Text>
-                </View>
-              ) : (
-                <Text style={styles.aiVoicePrompt}>Tap to Record</Text>
-              )}
-            </View>
-          </View>
-        ) : null}
+        )}
 
         {/* SECTION: AI Voice */}
         <View style={styles.aiCard}>
@@ -2520,6 +2578,50 @@ function ReflectionComposerInner({
               <FontAwesome name="refresh" size={20} color="#fff" />
               <Text style={styles.photoToolBtnText}>Reset</Text>
             </TouchableOpacity>
+            {canNarrate ? (
+              <TouchableOpacity
+                style={[styles.photoToolBtn, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
+                onPress={() => {
+                  if (!narrationUri) {
+                    setIsNarrationSheetOpen(true);
+                    return;
+                  }
+                  Alert.alert(
+                    'Brought to Life',
+                    'This photo has a selfie narration.',
+                    [
+                      { text: 'Preview', onPress: () => setIsNarrationPreviewOpen(true) },
+                      { text: 'Redo', onPress: () => setIsNarrationSheetOpen(true) },
+                      {
+                        text: 'Remove',
+                        style: 'destructive',
+                        onPress: () => setNarrationUri(null),
+                      },
+                      { text: 'Cancel', style: 'cancel' },
+                    ],
+                  );
+                }}
+                disabled={isSending || isBlockedByAi || photoExportBusy}
+                activeOpacity={0.75}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  narrationUri
+                    ? 'Narration recorded — preview, redo, or remove'
+                    : 'Bring this photo to life with a selfie narration'
+                }
+              >
+                <FontAwesome
+                  name="video-camera"
+                  size={20}
+                  color={narrationUri ? '#4ade80' : '#fff'}
+                />
+                <Text
+                  style={[styles.photoToolBtnText, narrationUri && styles.photoToolBtnTextActive]}
+                >
+                  Narrate
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
       )}
@@ -2596,6 +2698,7 @@ function ReflectionComposerInner({
                       </View>
                     </>
                   ) : (
+                    <>
                     <View style={styles.infoRow}>
                       <View style={styles.infoIconWrap}>
                         <FontAwesome name="crop" size={14} color="#f39c12" />
@@ -2607,6 +2710,23 @@ function ReflectionComposerInner({
                         </Text>
                       </View>
                     </View>
+                    {canNarrate ? (
+                      <View style={styles.infoRow}>
+                        <View style={styles.infoIconWrap}>
+                          <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+                        </View>
+                        <View style={styles.infoTextWrap}>
+                          <Text style={styles.infoLabel}>Narrate — Bring It to Life</Text>
+                          <Text style={styles.infoDesc}>
+                            Optional. Tap Narrate to record a selfie video that brings the photo to
+                            life — the photo stays full screen while your selfie plays in the
+                            corner. Preview and retake until it feels right. Once recorded, your
+                            narration speaks for the photo instead of the caption audio.
+                          </Text>
+                        </View>
+                      </View>
+                    ) : null}
+                    </>
                   )}
 
                   <View style={styles.infoDivider} />
@@ -2664,12 +2784,13 @@ function ReflectionComposerInner({
                         <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
                       </View>
                       <View style={styles.infoTextWrap}>
-                        <Text style={styles.infoLabel}>Bring It to Life</Text>
+                        <Text style={styles.infoLabel}>Brought to Life</Text>
                         <Text style={styles.infoDesc}>
-                          Optional, photos only. Record a selfie video narrating the photo — it
-                          plays in the corner while the photo stays full screen, like you’re right
-                          there telling the story. If you also recorded a Voice Intro, the intro
-                          plays first, then the narration — they never overlap.
+                          If you recorded a selfie narration (the Narrate button in the Workbench),
+                          it replaces the spoken caption: the Explorer sees the photo full screen
+                          while your selfie tells the story. The Voice Intro section makes way for
+                          a Brought-to-Life card where you can preview, redo, or remove it. The
+                          caption text stays, and Rich Narration still works as usual.
                         </Text>
                       </View>
                     </View>
@@ -2819,6 +2940,15 @@ function ReflectionComposerInner({
           parentMedia={{ mediaType: 'image', imageUrl: mediaUri }}
           onNarrationComplete={(videoUri) => setNarrationUri(videoUri)}
           onClose={() => setIsNarrationSheetOpen(false)}
+        />
+      ) : null}
+
+      {canNarrate && narrationUri ? (
+        <NarrationPreviewModal
+          visible={isNarrationPreviewOpen}
+          imageUri={mediaUri}
+          narrationUri={narrationUri}
+          onClose={() => setIsNarrationPreviewOpen(false)}
         />
       ) : null}
 
@@ -3033,6 +3163,38 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     letterSpacing: 0.2,
+  },
+  photoToolBtnTextActive: {
+    color: '#4ade80',
+  },
+  bitlActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  bitlActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 38,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  bitlActionBtnDestructive: {
+    backgroundColor: 'rgba(255,82,82,0.10)',
+    borderColor: 'rgba(255,138,128,0.35)',
+  },
+  bitlActionBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  bitlActionBtnTextDestructive: {
+    color: '#ff8a80',
   },
   photoUtilityRow: {
     flex: 1,

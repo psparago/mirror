@@ -1423,10 +1423,13 @@ export default function CreationModal({
 
       const needsDeepDive = !finalDeepDive;
       const needsCaptionAudio = !activeAudioUri && (!finalCaptionAudio || finalCaption !== (shortCaption || ""));
+      // A transient TTS failure can return deep dive text without audio; repair
+      // it here, otherwise every player falls back to the robotic device voice.
+      const needsDeepDiveAudio = !!finalDeepDive && !finalDeepDiveAudio;
 
-      debugLog(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
+      debugLog(`🔍 Enhancement Check: needsDeepDive=${needsDeepDive}, needsCaptionAudio=${needsCaptionAudio}, needsDeepDiveAudio=${needsDeepDiveAudio}, existingDeepDive="${finalDeepDive?.substring(0, 20)}..."`);
 
-      if (needsDeepDive || needsCaptionAudio) {
+      if (needsDeepDive || needsCaptionAudio || needsDeepDiveAudio) {
         debugLog("🛠️ Reflection needs enhancement (Deep Dive or TTS), calling AI backend...");
 
         // Use our robust background generator which handles staging uploads and thumbnails correctly
@@ -1449,8 +1452,13 @@ export default function CreationModal({
           }
 
           finalDeepDive = aiResult?.deep_dive ?? finalDeepDive ?? '';
-          finalCaptionAudio = activeAudioUri || aiResult?.audio_url || null; // Keep human audio as absolute priority
-          finalDeepDiveAudio = aiResult?.deep_dive_audio_url || null;
+          // Keep human audio as absolute priority. When the caption itself didn't
+          // change (we re-ran only to repair deep dive TTS), the existing caption
+          // audio is still valid — never discard it for a failed re-run.
+          finalCaptionAudio =
+            activeAudioUri || aiResult?.audio_url || (!needsCaptionAudio ? finalCaptionAudio : null);
+          // Keep pre-existing audio if the repair run's TTS failed again.
+          finalDeepDiveAudio = aiResult?.deep_dive_audio_url || finalDeepDiveAudio || null;
           if (aiResult?.audio_s3_key) stagingTtsKeysToDelete.push(aiResult.audio_s3_key);
           if (aiResult?.deep_dive_audio_s3_key) stagingTtsKeysToDelete.push(aiResult.deep_dive_audio_s3_key);
           debugLog(`✨ Final Enhancement State: AudioURL=${finalCaptionAudio ? 'YES' : 'NO'}, DeepDiveAudioURL=${finalDeepDiveAudio ? 'YES' : 'NO'}`);
@@ -1802,6 +1810,37 @@ export default function CreationModal({
         await stopRecording();
       }
 
+      // 10a. Upload the selfie narration BEFORE the parent signal doc exists, so
+      // the parent is written with its narration flags from birth. Flagging the
+      // parent afterwards created a race: tapping the fresh timeline row (or the
+      // Explorer opening it) saw a doc version without flags and played the
+      // photo without the narration PIP. A narration failure must not fail the send.
+      const activeRelationshipId = activeRelationship?.id ?? null;
+      const narrationUriForUpload = overrides?.narrationUri ?? null;
+      let narrationEventId: string | null = null;
+      if (narrationUriForUpload && !isReactionForUpload && user?.uid && activeRelationshipId) {
+        try {
+          narrationEventId = await uploadReaction({
+            reactionType: 'selfie',
+            explorerId: currentExplorerId,
+            parentReflectionId: eventID,
+            syncStartTimeMillis: 0,
+            senderName: companionName || 'Companion',
+            senderId: user.uid,
+            activeRelationshipId,
+            recordedVideoUri: narrationUriForUpload,
+            isNarration: true,
+          });
+        } catch (narrationError) {
+          console.warn('[uploadEventBundle] narration upload failed:', narrationError);
+          showToast('Reflection sent, but the narration could not be added');
+        }
+      }
+      if (narrationEventId) {
+        eventMetadata.has_narration = true;
+        eventMetadata.narration_event_id = narrationEventId;
+      }
+
       // 10. Write signal to Firestore before closing the modal (onClose clears reaction parent refs).
       const firestorePayload: Record<string, unknown> = {
         explorerId: currentExplorerId,
@@ -1813,6 +1852,10 @@ export default function CreationModal({
         type: 'mirror_event',
         metadata: eventMetadata,
       };
+      if (narrationEventId) {
+        firestorePayload.has_narration = true;
+        firestorePayload.narration_event_id = narrationEventId;
+      }
       if (!startedAsEditBundle) {
         firestorePayload.engagement_count = 0;
         firestorePayload.likedBy = [];
@@ -1829,7 +1872,6 @@ export default function CreationModal({
       await setDoc(eventDocRef, firestorePayload, {
         merge: true,
       });
-      const activeRelationshipId = activeRelationship?.id ?? null;
       if (isReactionForUpload && reactionParentIdForUpload && activeRelationshipId) {
         const parentRef = doc(db, ExplorerConfig.collections.reflections, reactionParentIdForUpload);
         await updateDoc(parentRef, {
@@ -1837,31 +1879,6 @@ export default function CreationModal({
         });
       }
       reactionUploadParentIdRef.current = null;
-
-      // 10b. Upload the selfie narration as a flagged child reaction. The
-      // reflection is already live — a narration failure must not fail the send.
-      const narrationUriForUpload = overrides?.narrationUri ?? null;
-      if (narrationUriForUpload && !isReactionForUpload && user?.uid && activeRelationshipId) {
-        try {
-          await uploadReaction({
-            reactionType: 'selfie',
-            explorerId: currentExplorerId,
-            parentReflectionId: eventID,
-            syncStartTimeMillis: 0,
-            senderName: companionName || 'Companion',
-            senderId: user.uid,
-            activeRelationshipId,
-            recordedVideoUri: narrationUriForUpload,
-            isNarration: true,
-          });
-        } catch (narrationError) {
-          console.warn(
-            '[uploadEventBundle] narration upload failed (reflection already sent):',
-            narrationError,
-          );
-          showToast('Reflection sent, but the narration could not be added');
-        }
-      }
 
       // 11. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
