@@ -28,6 +28,23 @@ export type PlayerEvent =
     | { type: 'SWIPE_PREV' }
     | { type: 'CLOSE' };
 
+/**
+ * Bring It to Life: a narrated photo must route to viewingPhoto (speakCaption),
+ * never playingAudio — the parent carries caption audio_url, but the selfie
+ * narration PIP replaces the caption and is only started by speakCaption.
+ */
+const hasPhotoNarration = (context: PlayerContext): boolean => {
+    const ev = context.event as any;
+    const meta = context.metadata as any;
+    if (ev?.video_url) return false;
+    return !!(
+        ev?.has_narration ||
+        ev?.narration_event_id ||
+        meta?.has_narration ||
+        meta?.narration_event_id
+    );
+};
+
 // 3. THE MACHINE
 export const playerMachine = setup({
     types: {
@@ -106,7 +123,7 @@ export const playerMachine = setup({
                     guard: ({ context }) => {
                         const hasAudio = !!(context.event as any)?.audio_url;
                         const hasVideo = !!(context.event as any)?.video_url;
-                        return hasAudio && !hasVideo;
+                        return hasAudio && !hasVideo && !hasPhotoNarration(context);
                     },
                     target: 'playingAudio'
                 },
@@ -125,7 +142,7 @@ export const playerMachine = setup({
                     guard: ({ context }) => {
                         const hasAudio = !!(context.event as any)?.audio_url;
                         const hasVideo = !!(context.event as any)?.video_url;
-                        return hasAudio && !hasVideo;
+                        return hasAudio && !hasVideo && !hasPhotoNarration(context);
                     },
                     target: 'playingAudio'
                 },
@@ -422,7 +439,7 @@ export const playerMachine = setup({
                         guard: ({ context }: { context: PlayerContext }) => {
                             const hasAudio = !!(context.event as any)?.audio_url;
                             const hasVideo = !!(context.event as any)?.video_url;
-                            return hasAudio && !hasVideo;
+                            return hasAudio && !hasVideo && !hasPhotoNarration(context);
                         },
                         target: 'playingAudio',
                         actions: ['stopAllMedia', assign({ videoFinished: false, selfieTaken: false, hasSpoken: false })]

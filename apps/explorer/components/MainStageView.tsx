@@ -1865,8 +1865,9 @@ export default function MainStageView({
         return false;
       }
 
-      // The narration replaces the caption cycle — never chain into auto deep dive.
-      hasAutoPlayedDeepDiveRef.current = true;
+      // The narration replaces the caption; when it ends, NARRATION_FINISHED moves
+      // the machine to viewingPhoto.viewing and the normal auto deep dive chain
+      // (breath → TELL_ME_MORE) takes over, so do NOT mark deep dive as played here.
 
       narrationEndSubRef.current = pipPlayer.addListener('playToEnd', () => {
         narrationEndSubRef.current?.remove();
