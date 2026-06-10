@@ -183,6 +183,12 @@ Client lines look like `[ReactionSheet] selfie:press-in {...}`. The helper scrip
 | `selfie:record-cancelled` | Record aborted (incl. `before-camera-ready`) |
 | `selfie:press-in` / `selfie:press-out` | Hold-to-record gesture |
 | `selfie-preview:` | Preview playback (expo-video) |
+| `selfie-preview:schedule` | Preview overlay opened (`record-complete`, `preview-button`) |
+| `selfie-preview:start-skipped` | Preview never started — check `reason` (`preview-overlay-closed`, `start-in-flight`, …) |
+| `selfie-preview:aborted` | Preview started then cancelled mid-pipeline — check `phase` + `reason` |
+| `selfie-preview:effect-retry` | Fallback auto-start after schedule race |
+| `layout:collapse-detected` | Compose stage (`splitPane`) laid out under 200px — regression guard for the scrunched-stage bug |
+| `mode:keyboard-settled` | Mode switch away from typed deferred until the keyboard finished hiding |
 | `sheet:open` / `sheet:close` | Reaction sheet lifecycle |
 | `AppState:` | Global Connect foreground/background (from `_layout.tsx`) |
 | `voice:` | Voice reaction pipeline |

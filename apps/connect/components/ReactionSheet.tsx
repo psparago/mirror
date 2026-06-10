@@ -30,7 +30,7 @@ import {
 } from '@projectmirror/shared';
 import { Audio, ResizeMode, Video, type AVPlaybackStatus } from 'expo-av';
 import { Camera, CameraView, useCameraPermissions } from 'expo-camera';
-import { useVideoPlayer, VideoView, type VideoPlayer, type VideoSource } from 'expo-video';
+import { useVideoPlayer, type VideoPlayer, type VideoSource } from 'expo-video';
 import {
   RecordingPresets,
   requestRecordingPermissionsAsync,
@@ -53,7 +53,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -61,9 +60,14 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-g
 import { runOnJS } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { CompanionPreviewOverlay } from './reaction/CompanionPreviewOverlay';
+import { reactionPipStyles } from './reaction/reactionPipStyles';
+import { SelfieComposePane } from './reaction/SelfieComposePane';
+import { TypedComposePane } from './reaction/TypedComposePane';
+import { VoiceComposePane } from './reaction/VoiceComposePane';
+
 const PREVIEW_END_EPSILON_MS = 80;
 const MIN_TRIM_GAP_MS = 500;
-const TYPED_MESSAGE_MAX_LENGTH = 120;
 const RECORDING_PARENT_REASSERT_DELAYS_MS = [250, 600];
 const SELFIE_CAMERA_BIND_MS = 400;
 const SELFIE_CAMERA_READY_TIMEOUT_MS = 8000;
@@ -750,13 +754,27 @@ export function ReactionSheet({
     }
   }, []);
 
-  const canRunCompanionPreview = useCallback(() => {
-    return (
-      visibleRef.current &&
-      companionPreviewOpenRef.current &&
-      !companionPreviewStopPendingRef.current
-    );
+  const getCompanionPreviewBlockedReason = useCallback((): string | null => {
+    if (!visibleRef.current) return 'sheet-not-visible';
+    if (!companionPreviewOpenRef.current) return 'preview-overlay-closed';
+    if (companionPreviewStopPendingRef.current) return 'stop-pending';
+    return null;
   }, []);
+
+  const canRunCompanionPreview = useCallback(() => {
+    return getCompanionPreviewBlockedReason() == null;
+  }, [getCompanionPreviewBlockedReason]);
+
+  const logPreviewStartSkipped = useCallback(
+    (reason: string, detail?: Record<string, string | number | boolean | null | undefined>) => {
+      logReactionDebug(
+        'selfie-preview:start-skipped',
+        { reason, platform: Platform.OS, ...detail },
+        'warn',
+      );
+    },
+    [],
+  );
 
   const finishCompanionPreview = useCallback(async (options?: { playbackFailed?: boolean }) => {
     if (companionPreviewStopPendingRef.current) return;
@@ -974,23 +992,50 @@ export function ReactionSheet({
   }, [companionSelfiePlayer]);
 
   const startCompanionPreview = useCallback(async () => {
-    if (!canRunCompanionPreview()) return;
-    if (companionPreviewStartInFlightRef.current) return;
-    if (companionPreviewPlayingRef.current && !showCompanionPreviewReplay) return;
+    const blockedReason = getCompanionPreviewBlockedReason();
+    if (blockedReason) {
+      logPreviewStartSkipped(blockedReason);
+      return;
+    }
+    if (companionPreviewStartInFlightRef.current) {
+      logPreviewStartSkipped('start-in-flight');
+      return;
+    }
+    if (companionPreviewPlayingRef.current && !showCompanionPreviewReplay) {
+      logPreviewStartSkipped('already-playing');
+      return;
+    }
 
     const isSelfiePreview = reactionMode === 'selfie' && !!recordedUri;
     const isVoicePreview = reactionMode === 'voice' && !!voiceRecordedUri;
     const isTypedPreview = reactionMode === 'typed' && !!typedMessage.trim();
-    if (!isSelfiePreview && !isVoicePreview && !isTypedPreview) return;
+    if (!isSelfiePreview && !isVoicePreview && !isTypedPreview) {
+      logPreviewStartSkipped('no-previewable-content', { reactionMode });
+      return;
+    }
 
     companionPreviewStartInFlightRef.current = true;
     setCompanionPreviewSendHint(false);
+    const abortIfPreviewBlocked = (phase: string): boolean => {
+      const reason = getCompanionPreviewBlockedReason();
+      if (!reason) return false;
+      logReactionDebug(
+        'selfie-preview:aborted',
+        { phase, reason, platform: Platform.OS },
+        'warn',
+      );
+      companionPreviewPlayingRef.current = false;
+      setCompanionPreviewPlaying(false);
+      companionPreviewAutoStartDoneRef.current = false;
+      return true;
+    };
     try {
-    logReactionDebug('selfie-preview:enter', {
-      isSelfiePreview,
-      isVoicePreview,
-      isTypedPreview,
-    });
+      logReactionDebug('selfie-preview:enter', {
+        isSelfiePreview,
+        isVoicePreview,
+        isTypedPreview,
+      });
+      companionPreviewAutoStartDoneRef.current = true;
 
     if (Platform.OS === 'android') {
       const stable = await waitForStableAndroidAppForeground(
@@ -1013,7 +1058,7 @@ export function ReactionSheet({
     } catch (error) {
       console.warn('[ReactionSheet] preview audio session failed:', error);
     }
-    if (!canRunCompanionPreview()) return;
+    if (abortIfPreviewBlocked('after-audio-session')) return;
 
     const deferParentForAndroidSelfie =
       Platform.OS === 'android' &&
@@ -1041,14 +1086,14 @@ export function ReactionSheet({
         logReactionDebug('selfie-preview:parent-start-failed', { isVideoParent }, 'warn');
       }
     }
-    if (!canRunCompanionPreview()) return;
+    if (abortIfPreviewBlocked('before-selfie-pipeline')) return;
 
     if (isSelfiePreview) {
       // Camera capture keeps the audio session in recording mode on both platforms until we
       // explicitly release it. iOS also needs mixing-mode setup; Android often loses audio focus
       // to expo-av if the parent starts before ExoPlayer is ready (parent start is deferred above).
       await releaseConnectCaptureAudioAsync();
-      if (!canRunCompanionPreview()) return;
+      if (abortIfPreviewBlocked('after-release-capture-audio')) return;
 
       if (Platform.OS === 'ios') {
         if (isVideoParent) {
@@ -1056,7 +1101,7 @@ export function ReactionSheet({
           try {
             companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
           } catch (error) {
-            if (!canRunCompanionPreview()) return;
+            if (abortIfPreviewBlocked('ios-video-mixing-mode')) return;
             console.warn('[ReactionSheet] selfie preview player unavailable:', error);
             selfiePreviewExpectPlayingRef.current = false;
             setCompanionPreviewPlaying(false);
@@ -1074,11 +1119,11 @@ export function ReactionSheet({
           }
           // Brief settle so the deactivation lands before expo-video activates its own session.
           await new Promise((resolve) => setTimeout(resolve, 120));
-          if (!canRunCompanionPreview()) return;
+          if (abortIfPreviewBlocked('ios-image-audio-settle')) return;
           try {
             companionSelfiePlayer.audioMixingMode = 'auto';
           } catch (error) {
-            if (!canRunCompanionPreview()) return;
+            if (abortIfPreviewBlocked('ios-image-mixing-mode')) return;
             console.warn('[ReactionSheet] selfie preview player unavailable:', error);
             selfiePreviewExpectPlayingRef.current = false;
             setCompanionPreviewPlaying(false);
@@ -1090,7 +1135,7 @@ export function ReactionSheet({
         try {
           companionSelfiePlayer.audioMixingMode = 'mixWithOthers';
         } catch (error) {
-          if (!canRunCompanionPreview()) return;
+          if (abortIfPreviewBlocked('android-video-mixing-mode')) return;
           console.warn('[ReactionSheet] selfie preview player unavailable:', error);
           selfiePreviewExpectPlayingRef.current = false;
           setCompanionPreviewPlaying(false);
@@ -1106,7 +1151,7 @@ export function ReactionSheet({
         companionSelfiePlayer.pause();
         companionSelfiePlayer.currentTime = 0;
       } catch (error) {
-        if (!canRunCompanionPreview()) return;
+        if (abortIfPreviewBlocked('player-reset')) return;
         console.warn('[ReactionSheet] selfie preview player reset failed:', error);
         selfiePreviewExpectPlayingRef.current = false;
         setCompanionPreviewPlaying(false);
@@ -1118,7 +1163,7 @@ export function ReactionSheet({
       if (!playerReady) {
         logReactionDebug('selfie-preview:not-ready', { isVideoParent });
       }
-      if (!canRunCompanionPreview()) return;
+      if (abortIfPreviewBlocked('before-play')) return;
 
       selfiePreviewExpectPlayingRef.current = true;
       try {
@@ -1128,7 +1173,7 @@ export function ReactionSheet({
         companionSelfiePlayer.play();
         logReactionDebug('selfie-preview:start', { isVideoParent, playerReady });
       } catch (error) {
-        if (!canRunCompanionPreview()) return;
+        if (abortIfPreviewBlocked('play-threw')) return;
         console.warn('[ReactionSheet] selfie preview playback failed:', error);
         selfiePreviewExpectPlayingRef.current = false;
         setCompanionPreviewPlaying(false);
@@ -1203,14 +1248,15 @@ export function ReactionSheet({
       companionPreviewStartInFlightRef.current = false;
     }
   }, [
-    canRunCompanionPreview,
     companionAvatar?.companionName,
     companionSelfiePlayer,
     currentExplorerId,
     finishCompanionPreview,
+    getCompanionPreviewBlockedReason,
     getCompanionPreviewParentVolume,
     getParentPreviewStartMs,
     isVideoParent,
+    logPreviewStartSkipped,
     playCompanionPreviewClip,
     reactionMode,
     recordedUri,
@@ -1219,11 +1265,26 @@ export function ReactionSheet({
     voiceRecordedUri,
   ]);
 
+  const kickCompanionPreviewStart = useCallback(
+    (source: 'record-complete' | 'preview-button' | 'effect-retry') => {
+      companionPreviewAutoStartDoneRef.current = false;
+      companionPreviewStopPendingRef.current = false;
+      companionPreviewOpenRef.current = true;
+      logComposeDiag('selfie-preview:schedule', { source, platform: Platform.OS });
+      setCompanionPreviewOpen(true);
+      queueMicrotask(() => {
+        void startCompanionPreview();
+      });
+    },
+    [startCompanionPreview],
+  );
+
   const replayCompanionPreview = useCallback(() => {
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
     companionPreviewPlayingRef.current = false;
     companionPreviewStartInFlightRef.current = false;
+    companionPreviewAutoStartDoneRef.current = false;
     void startCompanionPreview();
   }, [startCompanionPreview]);
 
@@ -1231,12 +1292,13 @@ export function ReactionSheet({
   const closeHowItWorks = useCallback(() => setIsInfoOpen(false), []);
 
   const openCompanionPreview = useCallback(() => {
-    setCompanionPreviewOpen(true);
-  }, []);
+    kickCompanionPreviewStart('preview-button');
+  }, [kickCompanionPreviewStart]);
 
   const closeCompanionPreview = useCallback(() => {
     selfiePreviewExpectPlayingRef.current = false;
     companionPreviewAutoStartDoneRef.current = false;
+    companionPreviewOpenRef.current = false;
     setCompanionPreviewOpen(false);
     companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
@@ -1257,9 +1319,11 @@ export function ReactionSheet({
   }, [companionSelfiePlayer, restoreReactionRecordingAudioSession, unloadPreviewAudio]);
 
   const startCompanionPreviewRef = useRef(startCompanionPreview);
+  const kickCompanionPreviewStartRef = useRef(kickCompanionPreviewStart);
   useEffect(() => {
     startCompanionPreviewRef.current = startCompanionPreview;
-  }, [startCompanionPreview]);
+    kickCompanionPreviewStartRef.current = kickCompanionPreviewStart;
+  }, [kickCompanionPreviewStart, startCompanionPreview]);
 
   useEffect(() => {
     visibleRef.current = visible;
@@ -1282,6 +1346,7 @@ export function ReactionSheet({
       clearTimeout(selfiePreviewResumeTimerRef.current);
       selfiePreviewResumeTimerRef.current = null;
     }
+    companionPreviewOpenRef.current = false;
     setCompanionPreviewOpen(false);
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
@@ -1303,23 +1368,24 @@ export function ReactionSheet({
   useEffect(() => {
     if (!companionPreviewOpen || !visible) {
       companionPreviewAutoStartDoneRef.current = false;
+      if (!companionPreviewOpen) {
+        companionPreviewOpenRef.current = false;
+      }
       return;
     }
     if (companionPreviewAutoStartDoneRef.current || showCompanionPreviewReplay) return;
-    if (reactionMode === 'selfie' && recordedUri) {
-      companionPreviewAutoStartDoneRef.current = true;
+    if (companionPreviewPlayingRef.current || companionPreviewStartInFlightRef.current) return;
+
+    const hasPreviewableContent =
+      (reactionMode === 'selfie' && !!recordedUri) ||
+      (reactionMode === 'voice' && !!voiceRecordedUri) ||
+      (reactionMode === 'typed' && !!typedMessage.trim());
+    if (!hasPreviewableContent) return;
+
+    logComposeDiag('selfie-preview:effect-retry', { platform: Platform.OS });
+    queueMicrotask(() => {
       void startCompanionPreviewRef.current();
-      return;
-    }
-    if (reactionMode === 'voice' && voiceRecordedUri) {
-      companionPreviewAutoStartDoneRef.current = true;
-      void startCompanionPreviewRef.current();
-      return;
-    }
-    if (reactionMode === 'typed' && typedMessage.trim()) {
-      companionPreviewAutoStartDoneRef.current = true;
-      void startCompanionPreviewRef.current();
-    }
+    });
   }, [
     companionPreviewOpen,
     visible,
@@ -1701,11 +1767,13 @@ export function ReactionSheet({
     setSyncStartTimeMillis(null);
     setSyncEndTimeMillis(null);
     setIsPreviewPlaying(false);
+    companionPreviewOpenRef.current = false;
     setCompanionPreviewOpen(false);
     companionPreviewPlayingRef.current = false;
     setCompanionPreviewPlaying(false);
     setShowCompanionPreviewReplay(false);
     companionPreviewStopPendingRef.current = false;
+    companionPreviewAutoStartDoneRef.current = false;
     selfiePreviewExpectPlayingRef.current = false;
     if (selfiePreviewResumeTimerRef.current) {
       clearTimeout(selfiePreviewResumeTimerRef.current);
@@ -2263,8 +2331,7 @@ export function ReactionSheet({
               originalAudioMuted: isParentReflectionMutedRef.current,
               hasHeadphones: hasHeadphonesRef.current,
             });
-            companionPreviewAutoStartDoneRef.current = false;
-            setCompanionPreviewOpen(true);
+            kickCompanionPreviewStartRef.current('record-complete');
           } else {
             logComposeDiag('selfie:record-too-short', { sessionId }, 'warn');
             Alert.alert(
@@ -2668,14 +2735,8 @@ export function ReactionSheet({
     })();
   }, [unloadPreviewAudio, voiceRecorder]);
 
-  const handleReactionModeChange = useCallback(
+  const applyReactionModeChange = useCallback(
     (nextMode: ReactionComposeMode) => {
-      if (nextMode === reactionMode || isUploading) return;
-
-      if (reactionMode === 'typed') {
-        Keyboard.dismiss();
-      }
-
       setReactionMode(nextMode);
       setRecordedUri(null);
       setSyncStartTimeMillis(null);
@@ -2711,10 +2772,39 @@ export function ReactionSheet({
     },
     [
       ensureCameraPermission,
-      isUploading,
       reactionMode,
       resetVoiceRecording,
     ],
+  );
+
+  const handleReactionModeChange = useCallback(
+    (nextMode: ReactionComposeMode) => {
+      if (nextMode === reactionMode || isUploading) return;
+
+      if (reactionMode === 'typed' && isTypedKeyboardVisible) {
+        // Switching away from typed while the keyboard is up: the window/KAV resize is
+        // still in flight, and re-laying-out the stage mid-resize is what scrunches the
+        // selfie stage to the top. Dismiss first, then apply the switch once settled.
+        Keyboard.dismiss();
+        let settled = false;
+        const proceed = () => {
+          if (settled) return;
+          settled = true;
+          subscription.remove();
+          logComposeDiag('mode:keyboard-settled', { nextMode, platform: Platform.OS });
+          applyReactionModeChange(nextMode);
+        };
+        const subscription = Keyboard.addListener('keyboardDidHide', proceed);
+        setTimeout(proceed, 350);
+        return;
+      }
+
+      if (reactionMode === 'typed') {
+        Keyboard.dismiss();
+      }
+      applyReactionModeChange(nextMode);
+    },
+    [applyReactionModeChange, isTypedKeyboardVisible, isUploading, reactionMode],
   );
 
   const handleStartVoiceRecording = useCallback(async () => {
@@ -3083,7 +3173,6 @@ export function ReactionSheet({
     isVideoParent &&
     !companionPreviewOpen &&
     reactionMode === 'voice';
-  const isAndroidVideoAltCompose = isAndroidVideoTypedCompose || isAndroidVideoVoiceCompose;
   const isVoicePreviewMode = reactionMode === 'voice' && voiceRecordedUri != null;
   const isVoiceTakeComplete = isVoicePreviewMode && !companionPreviewOpen;
   const isTypedPreviewMode =
@@ -3305,27 +3394,6 @@ export function ReactionSheet({
     </Pressable>
   );
 
-  const renderCompanionAvatarPip = () => (
-    <View style={[styles.companionSelfiePip, styles.reactionPipVideo, styles.companionAvatarPip]}>
-      {companionAvatar?.avatarUrl ? (
-        <Image
-          source={{ uri: companionAvatar.avatarUrl }}
-          style={styles.companionAvatarImage}
-          contentFit="cover"
-        />
-      ) : (
-        <View
-          style={[
-            styles.companionAvatarFallback,
-            { backgroundColor: companionAvatar?.color ?? '#4FC3F7' },
-          ]}
-        >
-          <Text style={styles.companionAvatarInitial}>{companionAvatar?.initial ?? '?'}</Text>
-        </View>
-      )}
-    </View>
-  );
-
   const handleSelfieCameraReady = useCallback(() => {
     logComposeDiag('selfie:camera-ready', {
       cameraKey: cameraInstanceKeyRef.current,
@@ -3346,7 +3414,7 @@ export function ReactionSheet({
       const showLiveFeed = isSelfieCaptureCameraLive;
       return (
         <View
-          style={[styles.companionSelfiePip, styles.reactionPipVideo]}
+          style={reactionPipStyles.pipFrame}
           pointerEvents="none"
           collapsable={false}
         >
@@ -3389,7 +3457,7 @@ export function ReactionSheet({
 
     return (
       <View
-        style={[styles.companionSelfiePip, styles.reactionPipVideo, styles.selfiePipPlaceholder]}
+        style={[reactionPipStyles.pipFrame, styles.selfiePipPlaceholder]}
         pointerEvents="none"
       >
         <FontAwesome name="video-camera" size={22} color="rgba(255,255,255,0.45)" />
@@ -3452,103 +3520,49 @@ export function ReactionSheet({
         >
         <View style={styles.reactionStageArea}>
           {showCompanionPreviewStage ? (
-          <View style={[styles.companionPreviewStage, styles.reactionPreviewOverlay]}>
-            <View style={styles.companionPreviewFrame}>
-              {isVideoParent ? (
-                <Video
-                  ref={companionParentRef}
-                  source={{ uri: parentVideoUrl }}
-                  style={styles.companionPreviewMainVideo}
-                  resizeMode={ResizeMode.CONTAIN}
-                  shouldPlay={false}
-                  isLooping={false}
-                  isMuted={companionPreviewParentMuted}
-                  volume={companionPreviewParentVolumeActive}
-                  progressUpdateIntervalMillis={100}
-                  onPlaybackStatusUpdate={handleCompanionParentStatusUpdate}
-                />
-              ) : (
-                <Image
-                  source={{ uri: parentImageUrl }}
-                  style={styles.companionPreviewMainVideo}
-                  contentFit="contain"
-                />
-              )}
-              {reactionMode === 'selfie' && recordedUri ? (
-                <VideoView
-                  player={companionSelfiePlayer}
-                  style={[styles.companionSelfiePip, styles.reactionPipVideo]}
-                  contentFit="cover"
-                  nativeControls={false}
-                  allowsFullscreen={false}
-                  pointerEvents="none"
-                />
-              ) : (
-                renderCompanionAvatarPip()
-              )}
-              {reactionMode === 'typed' && typedMessage.trim() ? (
-                <View style={styles.companionPreviewCaptionBar}>
-                  <Text style={styles.companionPreviewCaptionText} numberOfLines={4}>
-                    {formatTypedReactionSpeechText(
-                      companionAvatar?.companionName || 'Companion',
-                      typedMessage.trim(),
-                    )}
-                  </Text>
-                </View>
-              ) : null}
-              {typedPreviewLoading ? (
-                <View style={[styles.replayOverlay, styles.companionPreviewReplayOverlay]}>
-                  <ActivityIndicator color="#fff" size="large" />
-                  <Text style={styles.typedPreviewLoadingText}>Generating AI voice…</Text>
-                </View>
-              ) : null}
-            </View>
-            <Text
-              style={
-                companionPreviewSendHint
-                  ? styles.companionPreviewSendHint
-                  : styles.companionPreviewHint
-              }
-            >
-              {companionPreviewSendHint
-                ? 'Preview could not play, but your recording is saved. Tap Send to share it, or Replay to try again.'
-                : reactionMode === 'voice'
-                  ? isVideoParent
-                    ? 'Your voice and the Reflection play together and stop when your message ends.'
-                    : 'This is how your reaction will look. Your voice plays while the Reflection runs softly in the background.'
-                  : reactionMode === 'typed'
-                    ? 'This is how your reaction will look. Your message is read in your AI voice while the Reflection plays softly in the background.'
-                    : reactionMode === 'selfie' && (isVideoParent || isImageParent)
-                      ? 'This is how your Companions will see your reaction. The Reflection fills the screen; your selfie plays in the corner.'
-                      : 'This is how your Companions will see your reaction on this photo.'}
-            </Text>
-          </View>
+            <CompanionPreviewOverlay
+              reactionMode={reactionMode}
+              isVideoParent={isVideoParent}
+              isImageParent={isImageParent}
+              parentVideoUrl={parentVideoUrl}
+              parentImageUrl={parentImageUrl}
+              parentRef={companionParentRef}
+              parentMuted={companionPreviewParentMuted}
+              parentVolume={companionPreviewParentVolumeActive}
+              onParentStatusUpdate={handleCompanionParentStatusUpdate}
+              recordedUri={recordedUri}
+              selfiePlayer={companionSelfiePlayer}
+              companionAvatar={companionAvatar}
+              typedMessage={typedMessage}
+              typedPreviewLoading={typedPreviewLoading}
+              sendHint={companionPreviewSendHint}
+            />
           ) : null}
         {/* Compose subtree stays mounted even during preview so the selfie
             CameraView is never torn down (preview renders as an overlay above). */}
         <View
-          style={[
-            styles.splitPane,
-            reactionMode === 'typed' && styles.splitPaneTyped,
-            isAndroidVideoAltCompose && styles.splitPaneAndroidAlt,
-            isSelfieComposeStage && styles.splitPaneSelfieCompose,
-          ]}
+          style={styles.splitPane}
           onLayout={(event) => {
             const { width, height } = event.nativeEvent.layout;
             logComposePaneLayout('split', width, height, reactionMode);
+            if (height > 0 && height < 200) {
+              logReactionDebug(
+                'layout:collapse-detected',
+                { pane: 'split', h: Math.round(height), mode: reactionMode },
+                'warn',
+              );
+            }
           }}
         >
           <View
             style={[
               styles.parentVideoPane,
-              isSelfieComposeStage && styles.parentVideoPaneSelfieCompose,
-              isAndroidVideoTypedCompose && styles.parentVideoPaneAndroidTyped,
-              isAndroidVideoVoiceCompose && styles.parentVideoPaneAndroidAlt,
-              !isAndroidVideoAltCompose && reactionMode === 'typed' && styles.parentVideoPaneTyped,
-              !isAndroidVideoAltCompose &&
-                reactionMode === 'voice' &&
-                isVideoParent &&
-                styles.parentVideoPaneVoice,
+              reactionMode === 'selfie' && styles.parentPaneSelfie,
+              reactionMode === 'typed' && styles.parentPaneTyped,
+              reactionMode === 'voice' &&
+                (isAndroidVideoVoiceCompose
+                  ? styles.parentPaneVoiceAndroidVideo
+                  : styles.parentPaneVoice),
             ]}
             onLayout={(event) => {
               const { width, height } = event.nativeEvent.layout;
@@ -3661,223 +3675,46 @@ export function ReactionSheet({
 
           <View
             style={[
-              styles.modePane,
-              isAndroidVideoAltCompose && styles.cameraPaneAndroidAlt,
-              isSelfieComposeStage && styles.selfieHintPane,
+              styles.modeRow,
+              reactionMode === 'selfie' && styles.modeRowSelfie,
+              reactionMode === 'typed' && styles.modeRowTyped,
+              reactionMode === 'voice' && styles.modeRowVoice,
             ]}
             onLayout={(event) => {
               const { width, height } = event.nativeEvent.layout;
               logComposePaneLayout('mode', width, height, reactionMode);
             }}
           >
-            <View style={styles.mediaCard}>
-              <View
-                style={[
-                  styles.modeForeground,
-                  isAndroidVideoAltCompose && styles.modeForegroundAndroidAlt,
-                ]}
-              >
-              {reactionMode === 'typed' && isTypedTakeComplete ? (
-                <View style={styles.takeCompletePane}>
-                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                  <Text style={styles.takeCompleteTitle}>Message ready</Text>
-                  <Text style={styles.takeCompleteHint}>
-                    Tap Preview below to see how Companions will view your reaction.
-                  </Text>
-                </View>
-              ) : reactionMode === 'typed' ? (
-                isAndroidVideoTypedCompose ? (
-                  <ScrollView
-                    style={styles.altModePaneScroll}
-                    contentContainerStyle={[
-                      styles.typedComposePane,
-                      styles.typedComposePaneAndroidAlt,
-                    ]}
-                    showsVerticalScrollIndicator={false}
-                    bounces={false}
-                    keyboardShouldPersistTaps="handled"
-                  >
-                    <Text style={styles.altModeTitle}>Type your reaction</Text>
-                    <TextInput
-                      style={styles.typedInputExpanded}
-                      placeholder="Say something warm and short…"
-                      placeholderTextColor="rgba(255,255,255,0.4)"
-                      value={typedMessage}
-                      onChangeText={setTypedMessage}
-                      maxLength={TYPED_MESSAGE_MAX_LENGTH}
-                      multiline
-                      textAlignVertical="top"
-                      editable={!isUploading}
-                      returnKeyType="done"
-                      blurOnSubmit
-                      onSubmitEditing={commitTypedMessage}
-                      scrollEnabled
-                    />
-                    <View style={styles.typedComposeMeta}>
-                      <Text style={styles.typedCounter}>
-                        {typedMessage.length}/{TYPED_MESSAGE_MAX_LENGTH}
-                      </Text>
-                      {typedMessage.trim() ? (
-                        <Pressable
-                          style={styles.keyboardDismissButton}
-                          onPress={commitTypedMessage}
-                          accessibilityRole="button"
-                          accessibilityLabel="Done typing"
-                        >
-                          <Text style={styles.keyboardDismissButtonText}>
-                            {isTypedKeyboardVisible ? 'Done typing' : 'Message ready'}
-                          </Text>
-                        </Pressable>
-                      ) : null}
-                    </View>
-                  </ScrollView>
-                ) : (
-                <View
-                  style={[
-                    styles.typedComposePane,
-                    isAndroidVideoAltCompose && styles.typedComposePaneAndroidAlt,
-                  ]}
-                >
-                  <Text style={styles.altModeTitle}>Type your reaction</Text>
-                  <TextInput
-                    style={[
-                      styles.typedInputExpanded,
-                      isAndroidVideoAltCompose && styles.typedInputAndroidAlt,
-                    ]}
-                    placeholder="Say something warm and short…"
-                    placeholderTextColor="rgba(255,255,255,0.4)"
-                    value={typedMessage}
-                    onChangeText={setTypedMessage}
-                    maxLength={TYPED_MESSAGE_MAX_LENGTH}
-                    multiline
-                    textAlignVertical="top"
-                    editable={!isUploading}
-                    returnKeyType="done"
-                    blurOnSubmit
-                    onSubmitEditing={commitTypedMessage}
-                    scrollEnabled
-                  />
-                  <View style={styles.typedComposeMeta}>
-                    <Text style={styles.typedCounter}>
-                      {typedMessage.length}/{TYPED_MESSAGE_MAX_LENGTH}
-                    </Text>
-                    {typedMessage.trim() ? (
-                      <Pressable
-                        style={styles.keyboardDismissButton}
-                        onPress={commitTypedMessage}
-                        accessibilityRole="button"
-                        accessibilityLabel="Done typing"
-                      >
-                        <Text style={styles.keyboardDismissButtonText}>
-                          {isTypedKeyboardVisible ? 'Done typing' : 'Message ready'}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-                </View>
-                )
-              ) : reactionMode === 'voice' && isVoiceProcessing ? (
-                <View style={styles.takeCompletePane}>
-                  <ActivityIndicator color="#fff" size="large" />
-                  <Text style={styles.takeCompleteTitle}>Saving voice message…</Text>
-                  <Text style={styles.takeCompleteHint}>Processing your recording.</Text>
-                </View>
-              ) : reactionMode === 'voice' && isVoiceTakeComplete ? (
-                <View style={styles.takeCompletePane}>
-                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                  <Text style={styles.takeCompleteTitle}>Voice message ready</Text>
-                  <Text style={styles.takeCompleteHint}>
-                    Tap Preview below to see how Companions will view your reaction.
-                  </Text>
-                </View>
-              ) : reactionMode === 'voice' ? (
-                <ScrollView
-                  style={styles.altModePaneScroll}
-                  contentContainerStyle={[
-                    styles.altModePaneContent,
-                    isAndroidVideoAltCompose && styles.altModePaneContentAndroidAlt,
-                  ]}
-                  showsVerticalScrollIndicator={false}
-                  bounces={false}
-                  keyboardShouldPersistTaps="handled"
-                >
-                  <FontAwesome name="microphone" size={28} color="#fff" />
-                  <Text style={styles.altModeTitle}>
-                    {isVoiceRecording ? 'Recording…' : 'Record a voice message'}
-                  </Text>
-                  <Text style={styles.altModeHint}>{voiceModeHint}</Text>
-                  <Pressable
-                    style={[
-                      styles.voiceRecordButton,
-                      isVoiceRecording && styles.voiceRecordButtonActive,
-                    ]}
-                    onPress={() => {
-                      if (isVoiceRecording) {
-                        void handleStopVoiceRecording();
-                      } else {
-                        void handleStartVoiceRecording();
-                      }
-                    }}
-                    disabled={isUploading || isStartingVoiceRecording || isVoiceProcessing}
-                  >
-                    <FontAwesome name={isVoiceRecording ? 'stop' : 'microphone'} size={16} color="#fff" />
-                    <Text style={styles.voiceRecordButtonText}>
-                      {isStartingVoiceRecording
-                        ? 'Starting…'
-                        : isVoiceRecording
-                          ? 'Stop recording'
-                          : 'Start recording'}
-                    </Text>
-                  </Pressable>
-                </ScrollView>
-              ) : reactionMode === 'selfie' && isSelfieSaving ? (
-                <View style={styles.takeCompletePane}>
-                  <ActivityIndicator color="#fff" size="large" />
-                  <Text style={styles.takeCompleteTitle}>Saving reaction…</Text>
-                  <Text style={styles.takeCompleteHint}>Hang tight while we finish your recording.</Text>
-                </View>
-              ) : reactionMode === 'selfie' && isSelfieTakeComplete ? (
-                <View style={styles.takeCompletePane}>
-                  <FontAwesome name="check-circle" size={42} color="#7dd3a8" />
-                  <Text style={styles.takeCompleteTitle}>Reaction recorded</Text>
-                  <Text style={styles.takeCompleteHint}>
-                    Preview how Companions will see it, or retake if you want another try.
-                  </Text>
-                </View>
-              ) : reactionMode === 'selfie' && isCameraDenied ? (
-                <View style={styles.permissionFallback}>
-                  <Text style={styles.permissionText}>
-                    Camera access is required to record a selfie reaction.
-                  </Text>
-                  <Pressable
-                    style={styles.permissionButton}
-                    onPress={() => void handleGrantCameraAccess()}
-                  >
-                    <Text style={styles.permissionButtonText}>
-                      {cameraPermission?.canAskAgain === false
-                        ? 'Open Settings'
-                        : 'Grant Camera Access'}
-                    </Text>
-                  </Pressable>
-                </View>
-              ) : reactionMode === 'selfie' ? (
-                <View style={styles.selfieHintContent}>
-                  <FontAwesome name="video-camera" size={28} color="#fff" />
-                  <Text style={styles.altModeTitle}>Hold to react</Text>
-                  <Text style={styles.altModeHint}>
-                    {isImageParent
-                      ? 'While you hold the button, your selfie appears in the corner — just like Companions will see it.'
-                      : 'While you hold the button, the Reflection plays and your selfie appears in the corner.'}
-                  </Text>
-                </View>
-              ) : (
-                <View style={styles.permissionFallback}>
-                  <ActivityIndicator color="#fff" />
-                  <Text style={styles.permissionText}>Checking camera access…</Text>
-                </View>
-              )}
-              </View>
-            </View>
+            {reactionMode === 'typed' ? (
+              <TypedComposePane
+                typedMessage={typedMessage}
+                onChangeTypedMessage={setTypedMessage}
+                onCommit={commitTypedMessage}
+                isUploading={isUploading}
+                isTakeComplete={isTypedTakeComplete}
+                isKeyboardVisible={isTypedKeyboardVisible}
+              />
+            ) : reactionMode === 'voice' ? (
+              <VoiceComposePane
+                isProcessing={isVoiceProcessing}
+                isTakeComplete={isVoiceTakeComplete}
+                isRecording={isVoiceRecording}
+                isStarting={isStartingVoiceRecording}
+                isUploading={isUploading}
+                hint={voiceModeHint}
+                onStartRecording={() => void handleStartVoiceRecording()}
+                onStopRecording={() => void handleStopVoiceRecording()}
+              />
+            ) : (
+              <SelfieComposePane
+                isSaving={isSelfieSaving}
+                isTakeComplete={isSelfieTakeComplete}
+                isCameraDenied={isCameraDenied}
+                canAskAgain={cameraPermission?.canAskAgain}
+                isImageParent={isImageParent}
+                onGrantCameraAccess={() => void handleGrantCameraAccess()}
+              />
+            )}
           </View>
         </View>
         </View>
@@ -4290,64 +4127,61 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.12)',
     position: 'relative',
   },
-  modeForeground: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 2,
-    backgroundColor: '#101820',
-  },
+  // Row 1: the parent Reflection pane. One explicit sizing rule per mode — no shared
+  // cross-mode flags. The pane element itself is never swapped, so the Video/CameraView
+  // inside stay mounted across mode changes.
   parentVideoPane: {
-    flex: 1.4,
     minHeight: 0,
-  },
-  parentVideoPaneSelfieCompose: {
-    flex: 1,
-    minHeight: 0,
-  },
-  parentVideoPaneTyped: {
-    flex: 0.55,
-    maxHeight: 180,
-  },
-  parentVideoPaneVoice: {
-    flex: 1.25,
-  },
-  splitPaneAndroidAlt: {
-    gap: 8,
-  },
-  parentVideoPaneAndroidAlt: {
-    flex: 0,
-    flexGrow: 0,
-    flexShrink: 0,
-    height: 320,
-    minHeight: 320,
-    maxHeight: 320,
     width: '100%',
   },
-  parentVideoPaneAndroidTyped: {
-    // Match iOS typed layout: keep the parent Reflection small so the text field stays visible
-    // when the keyboard is up on Android (no KeyboardAvoidingView — resize events oscillate).
-    flex: 0,
+  parentPaneSelfie: {
+    // Fills the stage; the floor keeps the camera PIP from flashing in from a
+    // 0-height first layout pass (Samsung).
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minHeight: 168,
+  },
+  parentPaneTyped: {
+    // Fixed strip so the text field below stays visible with the keyboard up
+    // (both platforms — Android resize events oscillate with flexible heights).
     flexGrow: 0,
     flexShrink: 0,
     height: 180,
-    minHeight: 180,
-    maxHeight: 180,
+  },
+  parentPaneVoice: {
+    flexGrow: 1.25,
+    flexShrink: 1,
+    flexBasis: 0,
+    minHeight: 160,
+  },
+  parentPaneVoiceAndroidVideo: {
+    // Android with a video parent: fixed height avoids resize oscillation while recording.
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 320,
+  },
+  // Row 2: the per-mode compose pane. Content layout lives inside each pane component;
+  // these only size the row. minHeight floors mean no mode can ever collapse to 0.
+  modeRow: {
+    minHeight: 0,
     width: '100%',
   },
-  cameraPaneAndroidAlt: {
-    flex: 1,
+  modeRowSelfie: {
+    flexGrow: 0,
+    flexShrink: 0,
+    minHeight: 120,
+    maxHeight: 160,
+  },
+  modeRowTyped: {
+    flexGrow: 1,
+    flexShrink: 1,
     minHeight: 180,
-    zIndex: 4,
-    elevation: 8,
   },
-  modeForegroundAndroidAlt: {
-    zIndex: 5,
-    elevation: 9,
-  },
-  splitPaneTyped: {
-    gap: 8,
-  },
-  splitPaneSelfieCompose: {
-    gap: 8,
+  modeRowVoice: {
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 200,
   },
   recordingSyncOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -4447,25 +4281,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
-  modePane: {
-    flex: 1,
-    minHeight: 0,
-  },
-  selfieHintPane: {
-    flex: 0,
-    flexGrow: 0,
-    flexShrink: 0,
-    minHeight: 120,
-    maxHeight: 160,
-  },
-  selfieHintContent: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    gap: 8,
-  },
   selfiePipPlaceholder: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -4476,32 +4291,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  permissionFallback: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-    gap: 16,
-  },
-  permissionText: {
-    color: '#fff',
-    fontSize: 15,
-    textAlign: 'center',
-  },
-  permissionSpinner: {
-    marginTop: 8,
-  },
-  permissionButton: {
-    backgroundColor: '#2e78b7',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 24,
-  },
-  permissionButtonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
   },
   interactionFooter: {
     justifyContent: 'center',
@@ -4539,105 +4328,6 @@ const styles = StyleSheet.create({
   },
   modeButtonTextActive: {
     color: '#fff',
-  },
-  altModePane: {
-    flex: 1,
-    minHeight: 0,
-    padding: 20,
-    justifyContent: 'center',
-    gap: 12,
-    backgroundColor: '#101820',
-  },
-  altModePaneScroll: {
-    flex: 1,
-    minHeight: 0,
-    backgroundColor: '#101820',
-  },
-  altModePaneContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    gap: 10,
-  },
-  altModePaneContentAndroidAlt: {
-    justifyContent: 'flex-start',
-    paddingTop: 28,
-  },
-  altModeTitle: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  altModeHint: {
-    color: 'rgba(255,255,255,0.65)',
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-    paddingHorizontal: 4,
-    maxWidth: '100%',
-  },
-  typedComposePane: {
-    flex: 1,
-    minHeight: 0,
-    padding: 16,
-    gap: 10,
-  },
-  typedComposePaneAndroidAlt: {
-    justifyContent: 'flex-start',
-    paddingTop: 12,
-  },
-  typedInputExpanded: {
-    flex: 1,
-    minHeight: 0,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    color: '#fff',
-    fontSize: 16,
-    lineHeight: 22,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  typedInputAndroidAlt: {
-    flex: 0,
-    height: 112,
-    maxHeight: 112,
-  },
-  typedComposeMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  typedCounter: {
-    alignSelf: 'flex-end',
-    color: 'rgba(255,255,255,0.45)',
-    fontSize: 12,
-  },
-  voiceRecordButton: {
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderRadius: 999,
-    backgroundColor: 'rgba(46, 120, 183, 0.92)',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.22)',
-  },
-  voiceRecordButtonActive: {
-    backgroundColor: 'rgba(176, 32, 32, 0.95)',
-    borderColor: 'rgba(255, 120, 120, 0.65)',
-  },
-  voiceRecordButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
   },
   sendButtonStandalone: {
     alignSelf: 'stretch',
@@ -4705,132 +4395,9 @@ const styles = StyleSheet.create({
     minHeight: 0,
     position: 'relative',
   },
-  reactionPreviewOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#000',
-    zIndex: 30,
-  },
-  companionPreviewStage: {
-    flex: 1,
-    minHeight: 0,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-  },
-  companionPreviewFrame: {
-    flex: 1,
-    minHeight: 0,
-    borderRadius: 24,
-    overflow: 'hidden',
-    backgroundColor: '#1a3a44',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
-  },
-  companionPreviewReplayOverlay: {
-    zIndex: 10,
-  },
-  companionPreviewMainVideo: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#101820',
-  },
-  reactionPipVideo: {
-    position: 'absolute',
-    top: 14,
-    right: 14,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.4)',
-    backgroundColor: '#000',
-    zIndex: 5,
-  },
-  companionSelfiePip: {
-    width: 90,
-    height: 120,
-    borderRadius: 11,
-  },
-  companionAvatarPip: {
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  companionAvatarImage: {
-    width: '100%',
-    height: '100%',
-  },
-  companionAvatarFallback: {
-    flex: 1,
-    width: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  companionAvatarInitial: {
-    color: '#fff',
-    fontSize: 36,
-    fontWeight: '700',
-  },
   sheetBodyKeyboardAvoid: {
     flex: 1,
     minHeight: 0,
-  },
-  keyboardDismissButton: {
-    alignSelf: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  keyboardDismissButtonText: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  companionPreviewHint: {
-    color: 'rgba(255,255,255,0.55)',
-    fontSize: 12,
-    textAlign: 'center',
-    paddingHorizontal: 12,
-    paddingTop: 10,
-  },
-  companionPreviewSendHint: {
-    color: 'rgba(255, 214, 120, 0.95)',
-    fontSize: 13,
-    textAlign: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    lineHeight: 18,
-    fontWeight: '500',
-  },
-  companionPreviewCaptionBar: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: 'rgba(0,0,0,0.62)',
-    borderBottomLeftRadius: 16,
-    borderBottomRightRadius: 16,
-  },
-  companionPreviewCaptionText: {
-    color: '#fff',
-    fontSize: 15,
-    lineHeight: 21,
-    textAlign: 'center',
-  },
-  typedPreviewLoadingText: {
-    color: 'rgba(255,255,255,0.85)',
-    fontSize: 14,
-    fontWeight: '600',
-    marginTop: 10,
-  },
-  takeCompletePane: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingHorizontal: 20,
   },
   takeCompleteOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -4865,17 +4432,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.85)',
     fontSize: 13,
     fontWeight: '600',
-  },
-  takeCompleteTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  takeCompleteHint: {
-    color: 'rgba(255,255,255,0.55)',
-    fontSize: 13,
-    textAlign: 'center',
-    lineHeight: 18,
   },
   uploadingSpinner: {
     marginRight: 4,
@@ -4916,13 +4472,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontWeight: '800',
-  },
-  replayOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
   },
   audioHintBlock: {
     paddingHorizontal: 16,
