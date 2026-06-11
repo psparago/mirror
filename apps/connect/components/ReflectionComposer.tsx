@@ -1232,6 +1232,8 @@ function ReflectionComposerInner({
   const showSoftVideoWarning =
     mediaType === 'video' && currentPlaybackWindowSeconds > SOFT_VIDEO_RECOMMENDED_SECONDS;
 
+  const showNarrationGuidance = canNarrate && !narrationUri;
+
   const exportCurrentPhoto = useCallback(async (): Promise<string | null> => {
     if (mediaType !== 'photo') return null;
     const target = photoExportStageRef.current;
@@ -1997,6 +1999,14 @@ function ReflectionComposerInner({
           <FontAwesome name="clock-o" size={14} color="#f5c842" />
           <Text style={styles.videoGuidanceText}>
             Best under 60s for the Explorer. Current: {currentPlaybackWindowSeconds}s.
+          </Text>
+        </View>
+      ) : null}
+      {showNarrationGuidance ? (
+        <View style={styles.videoGuidanceBanner}>
+          <FontAwesome name="video-camera" size={14} color="#f5c842" />
+          <Text style={styles.videoGuidanceText}>
+            Bring your photo to life — tap Narrate and tell {explorerName || 'Explorer'} about this Reflection in your own voice.
           </Text>
         </View>
       ) : null}
