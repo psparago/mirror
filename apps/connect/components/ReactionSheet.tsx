@@ -4024,9 +4024,10 @@ export function ReactionSheet({
                   <View style={styles.infoTextWrap}>
                     <Text style={styles.infoLabel}>Selfie narration</Text>
                     <Text style={styles.infoDesc}>
-                      Hold the button and talk about the photo — who’s in it, what was happening,
-                      why it matters. When you’re done, tap Preview to see exactly what the Explorer
-                      will see, then Add to attach it to your Reflection.
+                      Hold the button and tell the Explorer about this Reflection — who’s in the
+                      photo, what was happening, why it matters. When you’re done, tap Preview to see
+                      exactly what they will see, then Add to attach it. Your narration replaces the
+                      spoken caption; the caption text and Rich Narration still work as usual.
                     </Text>
                   </View>
                 </View>

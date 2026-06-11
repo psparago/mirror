@@ -2003,11 +2003,14 @@ function ReflectionComposerInner({
         </View>
       ) : null}
       {showNarrationGuidance ? (
-        <View style={styles.videoGuidanceBanner}>
-          <FontAwesome name="video-camera" size={14} color="#f5c842" />
-          <Text style={styles.videoGuidanceText}>
-            Bring your photo to life — tap Narrate and tell {explorerName || 'Explorer'} about this Reflection in your own voice.
-          </Text>
+        <View style={[styles.videoGuidanceBanner, styles.narrationGuidanceBanner]}>
+          <FontAwesome name="video-camera" size={14} color="#f5c842" style={styles.narrationGuidanceIcon} />
+          <View style={styles.narrationGuidanceTextCol}>
+            <Text style={styles.narrationGuidanceHeadline}>Bring your photo to life!</Text>
+            <Text style={styles.narrationGuidanceSubtext}>
+              Tap Narrate and tell {explorerName || 'Explorer'} about this Reflection.
+            </Text>
+          </View>
         </View>
       ) : null}
       <TouchableOpacity
@@ -2678,7 +2681,9 @@ function ReflectionComposerInner({
                   <Text style={styles.infoSubtitle}>
                     {mediaType === 'video'
                       ? `Trim, set a poster, and tap the video to pause or resume. Sparkle is the next stage. X closes to the timeline. Reflections play best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
-                      : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
+                      : canNarrate
+                        ? `Frame the photo, then tap Narrate to bring it to life — tell ${explorerName || 'Explorer'} about this Reflection in your own voice. Sparkle is the next stage. X closes to the timeline.`
+                        : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
                   </Text>
 
                   {mediaType === 'video' ? (
@@ -2728,10 +2733,12 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Narrate — Bring It to Life</Text>
                           <Text style={styles.infoDesc}>
-                            Optional. Tap Narrate to record a selfie video that brings the photo to
-                            life — the photo stays full screen while your selfie plays in the
-                            corner. Preview and retake until it feels right. Once recorded, your
-                            narration speaks for the photo instead of the caption audio.
+                            Optional but powerful. Tap Narrate to open the recorder — hold the
+                            button and tell {explorerName || 'Explorer'} about this Reflection. The
+                            photo stays full screen while your selfie plays in the corner. Preview,
+                            redo, or remove from the Narrate button when you are done. A narration
+                            replaces the spoken caption (voice intro and AI audio); the caption text
+                            and Rich Narration still work as usual.
                           </Text>
                         </View>
                       </View>
@@ -2751,7 +2758,9 @@ function ReflectionComposerInner({
                   <Text style={styles.infoProTip}>
                     {mediaType === 'video'
                       ? 'Video pauses when you leave Workbench for Sparkle.'
-                      : 'Reset snaps back to the original framing.'}
+                      : canNarrate
+                        ? 'Reset snaps back to the original framing. Missed Narrate? You can return from Sparkle with the top-left arrow and add one before you send.'
+                        : 'Reset snaps back to the original framing.'}
                   </Text>
                   <Text style={styles.infoProTip}>
                     On Android, the system back key steps between Workbench, Sparkle, and Preview & Send; from Workbench it closes like X.
@@ -2761,7 +2770,12 @@ function ReflectionComposerInner({
                 <>
                   <Text style={styles.infoTitle}>The Sparkle Stage</Text>
                   <Text style={styles.infoSubtitle}>
-                    Tell AI who and what is in your reflection, optionally record your voice, pick AI voices, and let Sparkle draft a caption and intro you can preview before sending.
+                    Tell AI who and what is in your reflection, pick AI voices, and let Sparkle draft a caption you can preview before sending.
+                    {canNarrate && narrationUri
+                      ? ' Your Workbench narration is attached — preview it from the Brought to Life card.'
+                      : canNarrate
+                        ? ' Optional: go back to Workbench and tap Narrate to bring the photo to life first.'
+                        : ' Optionally record your voice, then preview before sending.'}
                   </Text>
 
                   <View style={styles.infoRow}>
@@ -2776,19 +2790,7 @@ function ReflectionComposerInner({
                     </View>
                   </View>
 
-                  <View style={styles.infoRow}>
-                    <View style={styles.infoIconWrap}>
-                      <FontAwesome name="microphone" size={14} color="#2e78b7" />
-                    </View>
-                    <View style={styles.infoTextWrap}>
-                      <Text style={styles.infoLabel}>Voice Intro</Text>
-                      <Text style={styles.infoDesc}>
-                        Optional. Record a short intro in your own voice. For videos, the Explorer watches first, then hears your voice as the caption after playback ends. For photos, they hear it while viewing the image. Your recording always wins over AI voice.
-                      </Text>
-                    </View>
-                  </View>
-
-                  {canNarrate ? (
+                  {canNarrate && narrationUri ? (
                     <View style={styles.infoRow}>
                       <View style={styles.infoIconWrap}>
                         <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
@@ -2796,11 +2798,46 @@ function ReflectionComposerInner({
                       <View style={styles.infoTextWrap}>
                         <Text style={styles.infoLabel}>Brought to Life</Text>
                         <Text style={styles.infoDesc}>
-                          If you recorded a selfie narration (the Narrate button in the Workbench),
-                          it replaces the spoken caption: the Explorer sees the photo full screen
-                          while your selfie tells the story. The Voice Intro section makes way for
-                          a Brought-to-Life card where you can preview, redo, or remove it. The
-                          caption text stays, and Rich Narration still works as usual.
+                          Your Workbench narration is attached. It replaces the spoken caption:{' '}
+                          {explorerName || 'Explorer'} sees the photo full screen while your selfie
+                          tells the story. Use the card below to preview, redo, or remove it. The
+                          caption text stays on screen, and Rich Narration still works when they tap
+                          Tell Me More.
+                        </Text>
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={styles.infoRow}>
+                      <View style={styles.infoIconWrap}>
+                        <FontAwesome name="microphone" size={14} color="#2e78b7" />
+                      </View>
+                      <View style={styles.infoTextWrap}>
+                        <Text style={styles.infoLabel}>Voice Intro</Text>
+                        <Text style={styles.infoDesc}>
+                          Optional. Record a short intro in your own voice.
+                          {canNarrate
+                            ? ' For photos, you can also go back to Workbench and tap Narrate for a selfie video instead.'
+                            : ''}{' '}
+                          For videos, the Explorer watches first, then hears your voice as the caption
+                          after playback ends. For photos, they hear it while viewing the image. Your
+                          recording always wins over AI voice.
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+
+                  {canNarrate && !narrationUri ? (
+                    <View style={styles.infoRow}>
+                      <View style={styles.infoIconWrap}>
+                        <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
+                      </View>
+                      <View style={styles.infoTextWrap}>
+                        <Text style={styles.infoLabel}>Narrate — Bring It to Life</Text>
+                        <Text style={styles.infoDesc}>
+                          Optional. Tap the top-left arrow to return to Workbench, then tap Narrate
+                          to record yourself telling {explorerName || 'Explorer'} about this
+                          Reflection. The photo stays full screen while your selfie plays in the
+                          corner — a great alternative to a voice intro.
                         </Text>
                       </View>
                     </View>
@@ -2813,7 +2850,10 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Caption</Text>
                       <Text style={styles.infoDesc}>
-                        Sparkle drafts a caption from your hints and media. You can edit or replace it. If you didn’t record a voice intro, Sparkle speaks this text as the caption after the video (or while viewing a photo).
+                        Sparkle drafts a caption from your hints and media. You can edit or replace
+                        it. Without a narration or voice intro, Sparkle speaks this text after the
+                        video (or while viewing a photo). With a narration, the caption stays as
+                        on-screen text {explorerName || 'Explorer'} can still play by hand.
                       </Text>
                     </View>
                   </View>
@@ -2852,10 +2892,11 @@ function ReflectionComposerInner({
                     While editing the caption, drag the page to dismiss the keyboard or tap the Done editing button under the caption field.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    Changing hints, caption, or AI voice stops any narration that is playing. Voice changes refresh the audio and play the new version when ready.
+                    Changing hints, caption, or AI voice stops any Sparkle preview that is playing. Voice changes refresh the audio and play the new version when ready.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    A recorded voice intro always takes priority over AI voice.
+                    A recorded voice intro always takes priority over AI voice — unless you added a
+                    Bring-It-to-Life narration in Workbench, which replaces the spoken caption.
                   </Text>
                   <Text style={styles.infoProTip}>
                     Likes are social warmth: tap a heart on the timeline or preview. The Explorer double-taps the video to like back — you get a notification. Long-press a heart anytime to see who liked.
@@ -2877,7 +2918,11 @@ function ReflectionComposerInner({
                       <Text style={styles.infoDesc}>
                         {mediaType === 'video'
                           ? 'Plays the same order the Explorer experiences: poster frame, trimmed video, back to the poster, then your voice or AI caption, then Rich Narration if present. Tap the heart to try likes — nothing sends until you tap Send.'
-                          : 'Shows your cropped photo, then plays your voice or AI caption. You can like from the heart control, but nothing is sent until you tap Send.'}
+                          : canNarrate && narrationUri
+                            ? `Plays the Bring-It-to-Life experience ${explorerName || 'Explorer'} will see: your cropped photo full screen, your selfie narration in the corner. Rich Narration still works if they tap Tell Me More. Tap the heart to try likes — nothing sends until Send.`
+                            : canNarrate
+                              ? `Shows your cropped photo, then plays your voice or AI caption — or go back to Workbench and tap Narrate first. Tap the heart to try likes; nothing sends until Send.`
+                              : 'Shows your cropped photo, then plays your voice or AI caption. You can like from the heart control, but nothing is sent until you tap Send.'}
                       </Text>
                     </View>
                   </View>
@@ -2889,7 +2934,11 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Send</Text>
                       <Text style={styles.infoDesc}>
-                        Uploads your media and audio and adds the Reflection to the timeline. Send is disabled until you have either a caption or a recorded voice intro. Stay on Wi-Fi for large videos.
+                        Uploads your media and audio and adds the Reflection to the timeline. Send is
+                        disabled until you have either a caption or a recorded voice intro — a
+                        narration alone is not enough; Sparkle still needs caption text for{' '}
+                        {explorerName || 'Explorer'}. A Workbench narration uploads with the
+                        Reflection. Stay on Wi-Fi for large videos.
                       </Text>
                     </View>
                   </View>
@@ -2898,10 +2947,19 @@ function ReflectionComposerInner({
 
                   <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
                   <Text style={styles.infoProTip}>
-                    Top-left arrow goes back to Sparkle to tweak hints, caption, or voice. X closes to the timeline without sending.
+                    Top-left arrow goes back to Sparkle to tweak hints, caption, or voice — or to
+                    Workbench from Sparkle if you still need to frame the photo or add a narration. X
+                    closes to the timeline without sending.
                   </Text>
+                  {canNarrate && narrationUri ? (
+                    <Text style={styles.infoProTip}>
+                      With a narration attached, Preview opens the Bring-It-to-Life player instead of
+                      caption playback.
+                    </Text>
+                  ) : null}
                   <Text style={styles.infoProTip}>
-                    A recorded voice intro always takes priority over the AI voice.
+                    A recorded voice intro always takes priority over the AI voice — unless a
+                    Bring-It-to-Life narration is attached.
                   </Text>
                   <Text style={styles.infoProTip}>
                     On sent Reflections, tap the heart to like and long-press it to see who liked. The Explorer can double-tap their screen to like back.
@@ -3106,6 +3164,29 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.86)',
     fontSize: 12,
     lineHeight: 17,
+    fontWeight: '600',
+  },
+  narrationGuidanceBanner: {
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+  },
+  narrationGuidanceIcon: {
+    marginTop: 2,
+  },
+  narrationGuidanceTextCol: {
+    flex: 1,
+    gap: 3,
+  },
+  narrationGuidanceHeadline: {
+    color: 'rgba(255,255,255,0.94)',
+    fontSize: 15,
+    lineHeight: 19,
+    fontWeight: '700',
+  },
+  narrationGuidanceSubtext: {
+    color: 'rgba(255,255,255,0.76)',
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: '600',
   },
   gradientOverlay: {
