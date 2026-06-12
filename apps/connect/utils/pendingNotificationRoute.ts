@@ -19,10 +19,10 @@ export type PendingNotificationRoute = {
   notificationType?: string;
 };
 
-const REACTION_COMPOSER_NOTIFICATION_TYPES = new Set([
-  // New uploads: deep-link into ReactionSheet to react to the Reflection.
-  'companion_upload_digest',
-]);
+// Notification types that open ReactionSheet instead of ReplayModal.
+// Upload digests should open the player so Companions can watch first; they can
+// tap React from ReplayModal when ready.
+const REACTION_COMPOSER_NOTIFICATION_TYPES = new Set<string>();
 
 export function shouldOpenReactionComposerForNotificationType(
   notificationType?: string

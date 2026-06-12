@@ -110,9 +110,13 @@ export function useNotificationDeepLink() {
           openReactionComposer: Boolean(pendingRoute.openReactionComposer),
         };
         moduleLastTarget = nextTarget;
+        moduleOpenCreationModal = false;
+        moduleCreationAction = null;
         markNotificationPresented(id);
         moduleResolvingId = null;
         setTarget(nextTarget);
+        setDeepLinkOpenCreationModal(false);
+        setDeepLinkAction(null);
         // Hand off to timeline immediately so peekPendingNotificationRoute() does
         // not stay populated for the whole modal session (Android tab jank).
         consumePendingNotificationRoute();
