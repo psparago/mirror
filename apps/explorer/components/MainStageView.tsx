@@ -17,6 +17,12 @@ import {
 } from '@projectmirror/shared';
 import { LikeHeartBurstOverlay, useLikeHeartBursts } from '@/components/LikeHeartBurst';
 import { playLikeFeedbackAudio, stopLikeFeedbackAudio } from '@/utils/playLikeFeedbackAudio';
+import { TellMeMoreButton } from '@/components/stage/TellMeMoreButton';
+import { ActivityRow } from '@/components/stage/ActivityRow';
+import { SubtitleRibbon } from '@/components/stage/SubtitleRibbon';
+import { StageLikeRow } from '@/components/stage/StageLikeRow';
+import { StageCrossFadeMedia } from '@/components/stage/StageCrossFadeMedia';
+import { useDocumentarySequence } from '@/hooks/useDocumentarySequence';
 
 import { useMachine } from '@xstate/react';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
@@ -284,6 +290,8 @@ interface MainStageProps {
   explorerDisplayName?: string | null;
   /** Needed to resolve fresh media URLs for Bring-It-to-Life narration bundles. */
   explorerId?: string | null;
+  /** Reaction Events keyed by parent event_id; used to build documentary chapters. */
+  reactionsByParentId?: Map<string, Event[]>;
 }
 
 export default function MainStageView({
@@ -316,6 +324,7 @@ export default function MainStageView({
   filterBar,
   explorerDisplayName,
   explorerId,
+  reactionsByParentId,
 }: MainStageProps) {
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
@@ -1069,6 +1078,42 @@ export default function MainStageView({
   // Initialize the Hook
   const [state, send] = useMachine(machine);
 
+  // --- DOCUMENTARY SEQUENCE ---
+  const [docState, docActions] = useDocumentarySequence(
+    selectedEvent,
+    reactionsByParentId,
+    eventMetadata,
+    companions,
+  );
+
+  const docActionsRef = useRef(docActions);
+  useEffect(() => { docActionsRef.current = docActions; }, [docActions]);
+
+  // Stable send helpers for sequence transitions (avoid capturing stale closures)
+  const sendSelectEventInstant = useCallback(
+    (ev: Event, meta: EventMetadata, takeSelfie: boolean) => {
+      sendRef.current?.({
+        type: 'SELECT_EVENT_INSTANT',
+        event: ev,
+        metadata: meta,
+        takeSelfie,
+      });
+    },
+    [],
+  );
+
+  const sendSelectEventForIndexing = useCallback(
+    (ev: Event, meta: EventMetadata, takeSelfie: boolean) => {
+      sendRef.current?.({
+        type: 'SELECT_EVENT_INSTANT',
+        event: ev,
+        metadata: meta,
+        takeSelfie,
+      });
+    },
+    [],
+  );
+
   // Update all bridge refs
   useEffect(() => {
     sendRef.current = send;
@@ -1245,7 +1290,7 @@ export default function MainStageView({
 
     const snapshot = likePauseSnapshotRef.current;
     likeVideoDuckActiveRef.current = false;
-    if (snapshot?.videoVolumeBeforeDuck !== null && playerRef.current) {
+    if (snapshot?.videoVolumeBeforeDuck !== null && playerRef.current && snapshot) {
       try {
         playerRef.current.volume = normalizeRestoredVideoVolume(snapshot.videoVolumeBeforeDuck);
         playerRef.current.muted = false;
@@ -1469,6 +1514,7 @@ export default function MainStageView({
 
     if (currentState?.matches('idle') && selectedEventRef.current && selectedMetadataRef.current) {
       debugLog('▶️ Tapped to start playback from idle');
+      docActionsRef.current.markPlaying();
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
       if (useInstantPlayback) {
         send({
@@ -1693,8 +1739,10 @@ export default function MainStageView({
   };
 
   // --- AUDIO/VIDEO REFS ---
-  const videoSource = selectedEvent?.video_url || null;
-  const selectedImageUrl = selectedEvent?.image_url || null;
+  // Use the active documentary chapter's media (falls back to base Reflection)
+  const activeMediaEvent = docState.activeEvent ?? selectedEvent;
+  const videoSource = activeMediaEvent?.video_url || null;
+  const selectedImageUrl = activeMediaEvent?.image_url || null;
   const stageImageDimensions = useMemo(() => {
     const stagePaneWidth = isLandscape ? width * 0.7 : width;
     const stagePaneHeight = isLandscape ? height : height * 0.6;
@@ -2258,10 +2306,18 @@ export default function MainStageView({
   useEffect(() => {
     const isFinished = !!state && state.matches('finished');
     if (isFinished && !wasFinishedRef.current) {
-      onPlaybackIdleRef.current?.();
+      // Try to advance the documentary sequence first
+      if (docState.chapters.length > 1 && docState.phase === 'playing') {
+        docActions.onChapterFinished({
+          sendSelectEventInstant,
+          takeSelfie: config?.takeSelfie !== false,
+        });
+      } else {
+        onPlaybackIdleRef.current?.();
+      }
     }
     wasFinishedRef.current = isFinished;
-  }, [state?.value]);
+  }, [state?.value]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- CO-HOST: Auto-Play Deep Dive ---
 
@@ -2289,6 +2345,8 @@ export default function MainStageView({
     if (!captionCycleDone || !selectedEvent) return;
     if (config?.autoPlayDeepDive === false) return;
     if (hasAutoPlayedDeepDiveRef.current) return;
+    // Deep Dive is bypassed when this Reflection has Companion reactions
+    if (docState.bypassDeepDive) return;
 
     const hasDeepDive = !!selectedMetadata?.deep_dive || !!selectedEvent?.deep_dive_audio_url;
     if (!hasDeepDive) return;
@@ -2507,6 +2565,8 @@ export default function MainStageView({
   const handleReplayImpl = useCallback(() => {
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
+    docActionsRef.current.reset();
+    docActionsRef.current.markPlaying();
 
     Speech.stop();
     if (soundRef.current) {
@@ -2922,10 +2982,12 @@ export default function MainStageView({
 
   // Replay overlay: visible when media isn't actively playing.
   // Hidden during the co-host breath (isDeepDivePending) and direct deep dive playback.
+  // Also hidden between documentary chapters (sequence is still playing, just advancing).
   const showReplayOverlay =
     !isCaptionOrSparklePlaying &&
     !isDeepDivePending &&
-    (isInFinishedState || isCaptionDoneForPhoto || isAudioPlaybackDone);
+    (isInFinishedState || isCaptionDoneForPhoto || isAudioPlaybackDone) &&
+    (docState.chapters.length <= 1 || docState.phase === 'complete' || docState.phase === 'idle');
   const showPlayOverlay = state.matches('idle');
 
   // Animated style for root container (swipe-to-minimize)
@@ -2955,6 +3017,7 @@ export default function MainStageView({
   const audioIndicatorAnimatedStyle = useAnimatedStyle(() => ({
     opacity: audioIndicatorAnim.value,
   }));
+  void audioIndicatorAnimatedStyle; // Retained for VU meter future use
 
   const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: tellMeMorePulse.value }],
@@ -3023,13 +3086,6 @@ export default function MainStageView({
 
               </View>
 
-              {/* Avatar Filter Bar */}
-              {filterBar && (
-                <View style={[styles.stageFilterBar, { top: insets.top + 38 }]}>
-                  {filterBar}
-                </View>
-              )}
-
               {/* Media Container */}
               <View style={styles.mediaContainer}>
                 <Animated.View
@@ -3041,6 +3097,7 @@ export default function MainStageView({
                     };
                   }}
                 >
+                    <StageCrossFadeMedia activeEventId={docState.activeEvent?.event_id}>
                     {/* Layer 1: stage video player, rendered only after a Reflection has a valid source. */}
                     {videoSource && player ? (
                       <StableStageVideoView
@@ -3056,7 +3113,7 @@ export default function MainStageView({
                         source={stageImageSource}
                         style={[styles.mediaImage, { position: 'absolute', zIndex: 10 }]}
                         contentFit="contain"
-                        recyclingKey={selectedEvent.event_id}
+                        recyclingKey={activeMediaEvent?.event_id ?? selectedEvent.event_id}
                         cachePolicy="memory-disk"
                         priority="high"
                       />
@@ -3074,6 +3131,7 @@ export default function MainStageView({
                         />
                       </View>
                     ) : null}
+                    </StageCrossFadeMedia>
                     {/*
                       VideoView must not be a child of RNGH GestureDetector on Android — the native
                       surface often never paints. Keep VideoView under a plain View; gestures on overlay.
@@ -3083,6 +3141,29 @@ export default function MainStageView({
                     </GestureDetector>
 
                     <LikeHeartBurstOverlay bursts={likeHeartBursts} onBurstComplete={removeBurst} />
+
+                    {/* Tell Me More button — top-left of media area */}
+                    {selectedMetadata?.deep_dive && state && (() => {
+                      const isFinished = state.matches('finished');
+                      const isViewingPhoto = state.matches('viewingPhoto');
+                      const isNarrating = state.matches({ viewingPhoto: 'narrating' });
+                      const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
+                      const canShow = isFinished || isAudioDoneButStuck || (isViewingPhoto && !isNarrating);
+                      const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
+                      const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
+                      if (!canShow) return null;
+                      return (
+                        <TellMeMoreButton
+                          key="tellMeMore"
+                          onPress={throttledTellMeMorePress}
+                          disabled={isSparkleDisabled}
+                          isNarrating={isCaptionOrSparklePlaying}
+                          bypassed={docState.bypassDeepDive}
+                          containerStyle={tellMeMoreAnimatedStyle}
+                          blurOpacityStyle={tellMeMoreBlurOpacityAnimatedStyle}
+                        />
+                      );
+                    })()}
 
                     {(showPlayOverlay || showReplayOverlay) ? (
                       <Animated.View
@@ -3110,190 +3191,34 @@ export default function MainStageView({
                 {/* Loading Indicator removed - was blocking video */}
               </View>
 
-              {/* Caption & Metadata */}
-              <View style={[styles.metadataContainer, { paddingBottom: insets.bottom + 16 }]}>
-                <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-                  {/* VU Meter for audio playback */}
-                  {isAnyAudioPlaying && (
-                    <Animated.View style={[audioIndicatorAnimatedStyle, { marginRight: 12, marginTop: 2 }]}>
-                      <FontAwesome name="volume-up" size={20} color="rgba(255, 255, 255, 0.9)" />
-                    </Animated.View>
-                  )}
+              {/* Activity Row + Subtitle Ribbon + Like Row */}
+              <ActivityRow
+                chapters={docState.chapters}
+                activeIndex={docState.currentIndex}
+                isPlayingSequence={docState.isPlayingSequence}
+                onAvatarPress={(index: number) => {
+                  docActions.gotoIndex({
+                    index,
+                    sendSelectEvent: sendSelectEventForIndexing,
+                    takeSelfie: config?.takeSelfie !== false,
+                  });
+                }}
+              />
 
-                  <View style={{ flex: 1 }}>
-                    {/* Caption/Description - FIRST */}
-                    <Text style={styles.descriptionText} numberOfLines={2}>
-                      {displayCaptionFrom(selectedMetadata, selectedEvent)}
-                    </Text>
+              <SubtitleRibbon text={docState.activeSubtitle} />
 
-                    {/* From + Date line - SECOND */}
-                    {selectedMetadata?.sender && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6 }}>
-                        <Text style={styles.senderText}>
-                          From {selectedMetadata.sender}
-                        </Text>
-                        {selectedEvent?.event_id && (
-                          <Text style={styles.dateText}>
-                            {' • '}{formatEventDateFromId(selectedEvent.event_id)}
-                          </Text>
-                        )}
-                      </View>
-                    )}
-
-                    {selectedEvent?.event_id ? (
-                      <View style={styles.stageLikeRow}>
-                        <Animated.View style={heartAnimatedStyle}>
-                          <TouchableOpacity
-                            style={[styles.stageLikeButton, likedByCurrentUser && styles.stageLikeButtonActive]}
-                            onPress={handleLikePress}
-                            onLongPress={() => {
-                              if (likeCount > 0) {
-                                setLikeFacesLikedBy(null);
-                                setShowLikeFaces(true);
-                              }
-                            }}
-                            activeOpacity={0.72}
-                            accessibilityLabel={likedByCurrentUser ? 'Unlike this Reflection' : 'Like this Reflection'}
-                          >
-                            <FontAwesome
-                              name={likeCount > 0 || likedByCurrentUser ? 'heart' : 'heart-o'}
-                              size={16}
-                              color={
-                                likedByCurrentUser
-                                  ? '#FF3040'
-                                  : likeCount > 0
-                                    ? 'rgba(255, 255, 255, 0.78)'
-                                    : 'rgba(255, 255, 255, 0.82)'
-                              }
-                            />
-                          </TouchableOpacity>
-                        </Animated.View>
-                        {likeCount > 0 ? (
-                          <Pressable
-                            onPress={() => {
-                              setLikeFacesLikedBy(null);
-                              setShowLikeFaces(true);
-                            }}
-                            onLongPress={() => {
-                              setLikeFacesLikedBy(null);
-                              setShowLikeFaces(true);
-                            }}
-                            hitSlop={12}
-                            style={({ pressed }) => [styles.stageLikeCountButton, pressed && styles.stageLikeCountButtonPressed]}
-                            accessibilityRole="button"
-                            accessibilityLabel="Show who liked this Reflection"
-                          >
-                            <Text style={styles.stageLikeCount}>{likeCount}</Text>
-                          </Pressable>
-                        ) : null}
-                        <Text style={styles.stageLikeHint}>Double tap to like</Text>
-                      </View>
-                    ) : null}
-
-                    {selectedEvent?.event_id ? (
-                      <Pressable
-                        onPress={async () => {
-                          try {
-                            await Clipboard.setStringAsync(selectedEvent.event_id);
-                            showToast('Copied reflection ID');
-                          } catch {
-                            showToast('Could not copy');
-                          }
-                        }}
-                        style={({ pressed }) => [styles.eventIdPressable, pressed && styles.eventIdPressablePressed]}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Reflection ID ${selectedEvent.event_id}`}
-                        accessibilityHint="Copies the reflection ID to the clipboard"
-                      >
-                        <Text style={styles.eventIdLabel}>Reflection ID: </Text>
-                        <Text style={styles.eventIdText}>{selectedEvent.event_id}</Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-
-                  {/* Play Caption Button - for videos and photos */}
-                  {(() => {
-                    const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
-                    const isDisabled = isMediaPlaying || isCaptionOrSparklePlaying;
-
-                    return (
-                      selectedEvent?.audio_url ||
-                      trimMeta(selectedMetadata?.short_caption) ||
-                      trimMeta(selectedMetadata?.description)
-                    ) && (
-                      <TouchableOpacity
-                        style={[
-                          styles.playCaptionButton,
-                          isDisabled && styles.playCaptionButtonDisabled,
-                          isCaptionOrSparklePlaying && styles.playCaptionButtonWhileNarration,
-                        ]}
-                        onPress={throttledPlayCaptionPress}
-                        activeOpacity={isDisabled ? 1 : 0.7}
-                        disabled={isDisabled}
-                      >
-                        <FontAwesome
-                          name="volume-up"
-                          size={18}
-                          color={
-                            isCaptionOrSparklePlaying
-                              ? 'rgba(255, 255, 255, 0.22)'
-                              : isDisabled
-                                ? 'rgba(255, 255, 255, 0.3)'
-                                : 'rgba(255, 255, 255, 0.8)'
-                          }
-                        />
-                      </TouchableOpacity>
-                    );
-                  })()}
-                </View>
-
-                {/* Tell Me More FAB */}
-                {selectedMetadata?.deep_dive && state && (() => {
-                  const isFinished = state.matches('finished');
-                  const isViewingPhoto = state.matches('viewingPhoto');
-                  const isNarrating = state.matches({ viewingPhoto: 'narrating' });
-                  // Check if audio is done but stuck waiting for selfie (for images with audio_url)
-                  const isAudioDoneButStuck = state.matches({ playingAudio: { playback: 'done' } });
-                  const canShow = isFinished || isAudioDoneButStuck || (isViewingPhoto && !isNarrating);
-                  const isMediaPlaying = state.hasTag('playing') || state.hasTag('speaking');
-                  const isSparkleDisabled = isCaptionOrSparklePlaying || isMediaPlaying;
-                  if (!canShow) return null;
-                  return (
-                    <Animated.View
-                      key="tellMeMore"
-                      style={[
-                        styles.tellMeMoreFAB,
-                        tellMeMoreAnimatedStyle,
-                        isCaptionOrSparklePlaying && styles.tellMeMoreFABNarration,
-                      ]}
-                    >
-                      <TouchableOpacity
-                        onPress={throttledTellMeMorePress}
-                        style={{
-                          flex: 1,
-                          justifyContent: 'center',
-                          alignItems: 'center',
-                          opacity: isSparkleDisabled ? 0.32 : 1,
-                        }}
-                        disabled={isSparkleDisabled}
-                        activeOpacity={isSparkleDisabled ? 1 : 0.7}
-                      >
-                        <Animated.View style={[styles.tellMeMoreBlurOpacity, tellMeMoreBlurOpacityAnimatedStyle]}>
-                          <BlurView
-                            intensity={STATIC_BLUR_INTENSITY}
-                            style={[
-                              styles.tellMeMoreBlur,
-                              isCaptionOrSparklePlaying && styles.tellMeMoreBlurDimmed,
-                            ]}
-                          >
-                            <Text style={{ fontSize: 32, opacity: isCaptionOrSparklePlaying ? 0.5 : 1 }}>✨</Text>
-                          </BlurView>
-                        </Animated.View>
-                      </TouchableOpacity>
-                    </Animated.View>
-                  );
-                })()}
-              </View>
+              {selectedEvent?.event_id ? (
+                <StageLikeRow
+                  likedByCurrentUser={likedByCurrentUser}
+                  likeCount={likeCount}
+                  heartAnimatedStyle={heartAnimatedStyle}
+                  onLike={handleLikePress}
+                  onShowLikedBy={() => {
+                    setLikeFacesLikedBy(null);
+                    setShowLikeFaces(true);
+                  }}
+                />
+              ) : null}
 
             </View>
 
@@ -3566,7 +3491,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    paddingTop: 170,
+    paddingTop: 80,
     paddingBottom: 120,
   },
   mediaFrame: {

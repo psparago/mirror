@@ -1,10 +1,10 @@
 import MainStageView, { ensureExplorerAudioSessionOnce, refreshExplorerAudioSessionForVideo } from '@/components/MainStageView';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
+import { GridBrowseChrome } from '@/components/GridBrowseChrome';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import {
   API_ENDPOINTS,
-  AvatarFilterBar,
   coerceThumbnailTimeMs,
   Event,
   EventMetadata,
@@ -16,6 +16,7 @@ import {
   useCompanionAvatars,
   useThrottledCallback,
   useWaitOverlay,
+  type ReactionSignal,
 } from '@projectmirror/shared';
 import {
   auth,
@@ -164,6 +165,8 @@ export default function HomeScreen() {
 
   const [events, setEvents] = useState<Event[]>([]);
   const [reactionEventIds, setReactionEventIds] = useState<Set<string>>(() => new Set());
+  // Per-reaction signals from Firestore for building documentary chapters
+  const [reactionSignals, setReactionSignals] = useState<ReactionSignal[]>([]);
   const [firestoreSignalsReady, setFirestoreSignalsReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -272,6 +275,31 @@ export default function HomeScreen() {
       return false;
     });
   }, [nonReactionEvents, eventMetadata, selectedCompanionId, companions]);
+
+  // Map parent event_id -> reaction Events sorted chronologically for documentary sequence
+  const reactionsByParentId = useMemo<Map<string, Event[]>>(() => {
+    const map = new Map<string, Event[]>();
+    if (reactionSignals.length === 0) return map;
+    const eventsById = new Map(events.map((e) => [e.event_id, e]));
+    for (const signal of reactionSignals) {
+      const reactionEvent = eventsById.get(signal.eventId);
+      if (!reactionEvent) continue;
+      const existing = map.get(signal.parentReflectionId) ?? [];
+      existing.push({ ...reactionEvent, isReaction: true });
+      map.set(signal.parentReflectionId, existing);
+    }
+    // Sort each list chronologically
+    for (const [key, list] of map) {
+      list.sort((a, b) => {
+        const ta = parseInt(a.event_id, 10);
+        const tb = parseInt(b.event_id, 10);
+        if (!isNaN(ta) && !isNaN(tb)) return ta - tb;
+        return a.event_id.localeCompare(b.event_id);
+      });
+      map.set(key, list);
+    }
+    return map;
+  }, [reactionSignals, events]);
 
   // Derive "new" from the live list: reflections that arrived after this session
   // started, are still unread, and aren't currently on the main stage.
@@ -773,6 +801,7 @@ export default function HomeScreen() {
     debugLog('🔌 Firestore listener attached');
     setFirestoreSignalsReady(false);
     setReactionEventIds(new Set());
+    setReactionSignals([]);
 
     // Initial fetch
     fetchEventsRef.current();
@@ -799,6 +828,7 @@ export default function HomeScreen() {
         const metadataFromFirestore: Record<string, EventMetadata> = {};
         const likesFromFirestore: Record<string, string[]> = {};
         const reactionIdsFromSnapshot = new Set<string>();
+        const reactionSignalsFromSnapshot: ReactionSignal[] = [];
         for (const docSnap of snapshot.docs) {
           const id = docSnap.id;
           const data = docSnap.data();
@@ -807,6 +837,26 @@ export default function HomeScreen() {
           likesFromFirestore[id] = coerceLikedBy(data?.likedBy);
           if (coerceIsReaction(data?.isReaction)) {
             reactionIdsFromSnapshot.add(id);
+            const parentId = typeof data?.parentReflectionId === 'string' ? data.parentReflectionId : null;
+            if (parentId && data?.isNarration !== true) {
+              const tsRaw = data?.timestamp;
+              let timestampMs = 0;
+              if (typeof tsRaw === 'number') {
+                timestampMs = tsRaw;
+              } else if (tsRaw && typeof tsRaw === 'object' && typeof (tsRaw as { seconds?: number }).seconds === 'number') {
+                timestampMs = (tsRaw as { seconds: number }).seconds * 1000;
+              } else {
+                const parsed = parseInt(id, 10);
+                timestampMs = isNaN(parsed) ? 0 : parsed;
+              }
+              reactionSignalsFromSnapshot.push({
+                eventId: id,
+                parentReflectionId: parentId,
+                timestampMs,
+                isNarration: false,
+                responderRelationshipId: typeof data?.responderRelationshipId === 'string' ? data.responderRelationshipId : undefined,
+              });
+            }
           }
         }
         if (Object.keys(metadataFromFirestore).length > 0) {
@@ -814,6 +864,7 @@ export default function HomeScreen() {
         }
         setReflectionLikes((prev) => mergeReflectionLikesWithPending(prev, likesFromFirestore));
         setReactionEventIds(reactionIdsFromSnapshot);
+        setReactionSignals(reactionSignalsFromSnapshot);
         setFirestoreSignalsReady(true);
 
         if (isInitialLoad) {
@@ -1608,53 +1659,23 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <ExplorerGradientBackdrop layout="overlay" />
-      {/* Header Bar */}
-      <View style={[styles.gridHeader, { paddingTop: insets.top + 12 }]}>
-        <View style={styles.gridHeaderLeft}>
-          {newArrivalIds.length > 0 ? (
-            <TouchableOpacity
-              onPress={() => {
-                const newestArrival = filteredEvents.find((event) => newArrivalIds.includes(event.event_id));
-                if (newestArrival) {
-                  throttledHandleEventPress(newestArrival);
-                }
-              }}
-              style={styles.newArrivalPill}
-              activeOpacity={0.7}
-            >
-              <BlurView intensity={STATIC_BLUR_INTENSITY} style={styles.newArrivalPillBlur}>
-                <Text style={styles.newArrivalPillText}>
-                  ✨ {newArrivalIds.length} New Reflection{newArrivalIds.length > 1 ? 's' : ''}
-                </Text>
-              </BlurView>
-            </TouchableOpacity>
-          ) : (
-            <Text style={styles.gridHeaderTitle}>Reflections</Text>
-          )}
-        </View>
-        <View style={styles.gridHeaderActions}>
-          {isRefreshing && (
-            <ActivityIndicator size="small" color="rgba(255, 255, 255, 0.6)" />
-          )}
-          <TouchableOpacity
-            onPress={() => router.push('/settings')}
-            style={styles.gridHeaderButton}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <FontAwesome name="info-circle" size={20} color="rgba(255, 255, 255, 0.6)" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Companion Filter Bar */}
-      {companions.length > 0 && (
-        <AvatarFilterBar
-          companions={companions}
-          selectedId={selectedCompanionId}
-          onSelect={setSelectedCompanionId}
-          loading={companionsLoading}
-        />
-      )}
+      {/* Header + large filter avatars */}
+      <GridBrowseChrome
+        insets={insets}
+        newArrivalIds={newArrivalIds}
+        isRefreshing={isRefreshing}
+        onSettingsPress={() => router.push('/settings')}
+        onNewArrivalPress={() => {
+          const newestArrival = filteredEvents.find((event) => newArrivalIds.includes(event.event_id));
+          if (newestArrival) {
+            throttledHandleEventPress(newestArrival);
+          }
+        }}
+        companions={companions}
+        selectedCompanionId={selectedCompanionId}
+        onSelectCompanion={setSelectedCompanionId}
+        companionsLoading={companionsLoading}
+      />
 
       {/* Layer 1 (Bottom): Always-rendered Grid of Reflections */}
       <FlatList
@@ -1684,16 +1705,6 @@ export default function HomeScreen() {
             visible={true}
             selectedEvent={selectedEvent}
             events={filteredEvents}
-            filterBar={
-              companions.length > 0 ? (
-                <AvatarFilterBar
-                  companions={companions}
-                  selectedId={selectedCompanionId}
-                  onSelect={setSelectedCompanionId}
-                  loading={companionsLoading}
-                />
-              ) : undefined
-            }
             eventMetadata={eventMetadata}
             likedBy={reflectionLikes[selectedEvent.event_id] ?? []}
             reflectionLikes={reflectionLikes}
@@ -1719,6 +1730,7 @@ export default function HomeScreen() {
             config={EXPLORER_CONFIG}
             startIdleOnInitialSelection={startIdleOnInitialSelection}
             explorerDisplayName={explorerDisplayName}
+            reactionsByParentId={reactionsByParentId}
           />
         </View>
       )}
