@@ -88,6 +88,7 @@ interface SentReflection {
 
 type TimelineReactionResponder = {
   eventId: string;
+  timestampMs: number;
   relationshipId: string | null;
   userId: string | null;
   companionName: string | null;
@@ -102,6 +103,30 @@ const asOptionalString = (value: unknown): string | null =>
 
 const coerceTimelineReactionType = (value: unknown): ReactionType | undefined =>
   value === 'selfie' || value === 'typed' || value === 'voice' ? value : undefined;
+
+const coerceTimestampMs = (ts: unknown, fallbackEventId?: string): number => {
+  if (!ts) {
+    const parsed = fallbackEventId ? parseInt(fallbackEventId, 10) : NaN;
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts);
+    if (!Number.isNaN(parsed)) return parsed;
+    const fromId = fallbackEventId ? parseInt(fallbackEventId, 10) : NaN;
+    return Number.isNaN(fromId) ? 0 : fromId;
+  }
+  if (ts instanceof Date) return ts.getTime();
+  if (typeof ts === 'object') {
+    const maybeTimestamp = ts as { toMillis?: () => number; seconds?: number; nanoseconds?: number };
+    if (typeof maybeTimestamp.toMillis === 'function') return maybeTimestamp.toMillis();
+    if (typeof maybeTimestamp.seconds === 'number') {
+      return maybeTimestamp.seconds * 1000 + (maybeTimestamp.nanoseconds ?? 0) / 1_000_000;
+    }
+  }
+  const parsed = fallbackEventId ? parseInt(fallbackEventId, 10) : NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
 
 const coerceLikedBy = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
@@ -897,6 +922,7 @@ export default function SentTimelineScreen({
             const metadata = coerceEmbeddedMetadata(data?.metadata, actualEventId);
             const responder: TimelineReactionResponder = {
               eventId: actualEventId,
+              timestampMs: coerceTimestampMs(data?.timestamp, actualEventId),
               relationshipId: asOptionalString(data?.responderRelationshipId),
               userId: asOptionalString(data?.sender_id) ?? metadata?.sender_id ?? null,
               companionName:
@@ -1127,8 +1153,19 @@ export default function SentTimelineScreen({
           return bTime - aTime; // Most recent first
         });
 
+        const sortedReactionResponderMap = new Map<string, TimelineReactionResponder[]>();
+        reactionResponderMap.forEach((responders, parentId) => {
+          sortedReactionResponderMap.set(
+            parentId,
+            [...responders].sort((a, b) => {
+              const timeDiff = a.timestampMs - b.timestampMs;
+              return timeDiff !== 0 ? timeDiff : a.eventId.localeCompare(b.eventId);
+            }),
+          );
+        });
+
         setReflections(reflectionsList);
-        setReactionRespondersByParentId(reactionResponderMap);
+        setReactionRespondersByParentId(sortedReactionResponderMap);
         setLoading(false);
         scheduleReflectionCountRefresh();
       },
@@ -1870,6 +1907,7 @@ export default function SentTimelineScreen({
                     parentEvent,
                     respondedRelationshipIds: sessionRespondedRelationshipIds,
                     reactionFaces: reactionResponderFaces,
+                    suppressAutoPlayNarration: true,
                   });
                   void openReplayForEventId(item.event_id, {
                     metadata: item.metadata as EventMetadata | undefined,

@@ -1516,6 +1516,7 @@ export function ReplayModal({
           const shouldAutoPlayNarration =
             parentHasNarration &&
             !!reactionSessionRef.current &&
+            reactionSessionRef.current.suppressAutoPlayNarration !== true &&
             !!explorerId &&
             narrationAutoPlayedForParentRef.current !== displayEvent.event_id;
 
@@ -1526,6 +1527,8 @@ export function ReplayModal({
               metadataFlag: displayEvent.metadata?.has_narration === true,
               narrationEventId,
               hasSession: !!reactionSessionRef.current,
+              suppressAutoPlayNarration:
+                reactionSessionRef.current?.suppressAutoPlayNarration === true,
               hasExplorerId: !!explorerId,
               alreadyAutoPlayed:
                 narrationAutoPlayedForParentRef.current === displayEvent.event_id,
