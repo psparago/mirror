@@ -164,11 +164,10 @@ function trimToSubtitle(value: string | null | undefined): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true when the documentary has reactions — in this case the Deep Dive
- * feature should be bypassed entirely (human social context takes priority).
+ * Deep Dive applies to the base Reflection (chapter 0) only — not reaction chapters.
  */
-export function shouldBypassDeepDive(chapters: DocumentaryChapter[]): boolean {
-  return chapters.length > 1;
+export function shouldBypassDeepDive(chapterIndex: number): boolean {
+  return chapterIndex > 0;
 }
 
 // ---------------------------------------------------------------------------

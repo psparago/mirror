@@ -1,7 +1,7 @@
 import MainStageView, { ensureExplorerAudioSessionOnce, refreshExplorerAudioSessionForVideo } from '@/components/MainStageView';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { GridBrowseChrome } from '@/components/GridBrowseChrome';
-import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK, DEFAULT_TAKE_SELFIE } from '@/constants/Defaults';
+import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
 import { FontAwesome } from '@expo/vector-icons';
 import {
   API_ENDPOINTS,
@@ -33,17 +33,13 @@ import {
   serverTimestamp,
   setDoc,
   where,
-  writeBatch
 } from '@projectmirror/shared/firebase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system';
 import { Image } from 'expo-image';
 import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
-import * as ImageManipulator from 'expo-image-manipulator';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
@@ -177,13 +173,6 @@ export default function HomeScreen() {
   const reflectionLikesRef = useRef(reflectionLikes);
   reflectionLikesRef.current = reflectionLikes;
   const [gridLikeFacesLikedBy, setGridLikeFacesLikedBy] = useState<string[] | null>(null);
-  const [isCapturingSelfie, setIsCapturingSelfie] = useState(false);
-  const [isSelfieCameraReady, setIsSelfieCameraReady] = useState(false);
-  const selfieUploadInFlightRef = useRef(false);
-
-  const SELFIE_QUEUE_KEY = 'selfie_upload_queue';
-  const cameraRef = useRef<CameraView>(null);
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const insets = useSafeAreaInsets();
@@ -215,17 +204,10 @@ export default function HomeScreen() {
     };
   }, [numColumns, width]);
 
-  useEffect(() => {
-    if (!selectedEvent || !cameraPermission?.granted) {
-      setIsSelfieCameraReady(false);
-    }
-  }, [selectedEvent, cameraPermission?.granted]);
-
   // Explorer config with state for toggleable settings
   const [autoplay, setAutoplay] = useState(DEFAULT_AUTOPLAY);
   const [enableInfiniteScroll, setEnableInfiniteScroll] = useState(true);
   const [instantVideoPlayback, setInstantVideoPlayback] = useState(DEFAULT_INSTANT_VIDEO_PLAYBACK);
-  const [takeSelfie, setTakeSelfie] = useState(DEFAULT_TAKE_SELFIE);
   const [readVideoCaptions, setReadVideoCaptions] = useState(false);
   const [startIdleOnInitialSelection, setStartIdleOnInitialSelection] = useState(false);
   const [copyToastMessage, setCopyToastMessage] = useState<string | null>(null);
@@ -362,12 +344,6 @@ export default function HomeScreen() {
       }
     }).catch(err => console.warn('Failed to load instant video setting:', err));
 
-    AsyncStorage.getItem('takeSelfie').then(value => {
-      if (value !== null) {
-        setTakeSelfie(value === 'true');
-      }
-    }).catch(err => console.warn('Failed to load take selfie setting:', err));
-
     AsyncStorage.getItem('readVideoCaptions').then(value => {
       if (value !== null) {
         setReadVideoCaptions(value === 'true');
@@ -400,8 +376,7 @@ export default function HomeScreen() {
     enableInfiniteScroll,
     instantVideoPlayback,
     readVideoCaptions,
-    takeSelfie,
-  }), [autoplay, enableInfiniteScroll, instantVideoPlayback, readVideoCaptions, takeSelfie]);
+  }), [autoplay, enableInfiniteScroll, instantVideoPlayback, readVideoCaptions]);
 
 
 
@@ -429,125 +404,7 @@ export default function HomeScreen() {
     }
   };
 
-  // Fetch events and listen for Firestore updates
   // Fetch events and listen for Firestore updates - Moved below to fix closure staleness
-
-  // Process selfie upload queue (defined before useEffects that use it)
-  const processSelfieQueue = useCallback(async () => {
-    if (selfieUploadInFlightRef.current) return;
-    selfieUploadInFlightRef.current = true;
-    try {
-      debugLog('[Queue] Phase: Process start');
-      while (true) {
-        const raw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
-        const queue = raw ? JSON.parse(raw) : [];
-        if (!queue.length) {
-          debugLog('[Queue] Phase: Process complete (queue empty)');
-          break;
-        }
-
-        const job = queue[0];
-        const jobStartTime = Date.now();
-        debugLog(`[Queue] Processing job for event ${job.originalEventId}`);
-        try {
-          const fileInfo = await FileSystem.getInfoAsync(job.localUri);
-          if (!fileInfo.exists) {
-            console.warn('Selfie upload file missing, dropping job:', job.localUri);
-            queue.shift();
-            await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
-            continue;
-          }
-
-          // Phase: Upload
-          const uploadStartTime = Date.now();
-          debugLog('[Queue] Phase: Upload to S3 (starting)');
-          
-          // Get presigned URL for upload
-          const presignedUrlStartTime = Date.now();
-          const fetchWithRetry = async (retryCount = 0): Promise<Response> => {
-            try {
-              const res = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=from&event_id=${job.responseEventId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
-              if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-              return res;
-            } catch (e: any) {
-              if (retryCount < 1) {
-                await new Promise(r => setTimeout(r, 1500));
-                return fetchWithRetry(retryCount + 1);
-              }
-              throw e;
-            }
-          };
-
-          const imageResponse = await fetchWithRetry();
-          const imageData = await imageResponse.json();
-          const imageUrl = imageData.url;
-          const presignedUrlTime = Date.now() - presignedUrlStartTime;
-          debugLog(`[Queue] Presigned URL obtained in ${presignedUrlTime}ms`);
-
-          const s3UploadStartTime = Date.now();
-          // Yield once; do NOT wait for "no interactions" (that can delay uploads while swiping/scrolling).
-          await new Promise(resolve => setTimeout(resolve, 0));
-          
-          const uploadResult = await FileSystem.uploadAsync(imageUrl, job.localUri, {
-            httpMethod: 'PUT',
-            headers: { 'Content-Type': 'image/jpeg' },
-          });
-          const s3UploadTime = Date.now() - s3UploadStartTime;
-          debugLog(`[Queue] S3 upload completed in ${s3UploadTime}ms`);
-
-          if (uploadResult.status !== 200) {
-            throw new Error(`Selfie upload failed: ${uploadResult.status}`);
-          }
-          
-          const totalUploadTime = Date.now() - uploadStartTime;
-          debugLog(`[Queue] Total upload phase: ${totalUploadTime}ms`);
-
-          // Phase: Firestore commit
-          debugLog('[Queue] Phase: Firestore commit (atomic batch)');
-          // db from shared
-          const batch = writeBatch(db);
-          const responseRef = doc(db, ExplorerConfig.collections.responses, job.originalEventId);
-          const reflectionRef = doc(db, ExplorerConfig.collections.reflections, job.originalEventId);
-
-          batch.set(responseRef, {
-            explorerId: job.senderExplorerId,
-            viewerExplorerId: job.viewerExplorerId,
-            event_id: job.originalEventId,
-            response_event_id: job.responseEventId,
-            timestamp: serverTimestamp(),
-            type: 'selfie_response',
-          });
-
-          batch.set(reflectionRef, {
-            status: 'responded',
-            responded_at: serverTimestamp(),
-          }, { merge: true });
-
-          await batch.commit();
-
-          // Cleanup local file (after commit to preserve file for retry if commit fails)
-          try {
-            await FileSystem.deleteAsync(job.localUri, { idempotent: true });
-          } catch (cleanupError) {
-            console.warn("Failed to delete selfie upload file:", cleanupError);
-          } finally {
-            debugLog(`[Queue] Selfie upload file deleted for event ${job.originalEventId}`);
-          }
-          
-          const totalJobTime = Date.now() - jobStartTime;
-          debugLog(`[Queue] Job complete for event ${job.originalEventId} (total: ${totalJobTime}ms)`);
-
-          queue.shift();
-          await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(queue));
-        } catch (uploadError) {
-          console.error('Selfie upload failed (will retry later):', uploadError);
-          break;
-        }
-      }
-    } finally {
-      selfieUploadInFlightRef.current = false;
-    }
-  }, []);
 
   // Auto-refresh events when app comes back to foreground (handles expired URLs and reconnection)
   useEffect(() => {
@@ -556,9 +413,8 @@ export default function HomeScreen() {
 
       if (nextAppState === 'active') {
         debugLog('🔄 App came to foreground - resuming network and refreshing data');
-        processSelfieQueue();
 
-        // Commented out. Firebase should automatically resume network.
+        // Refresh the overall list
         // try {
         //   // 1. Resume Firestore
         //   await enableNetwork(db);
@@ -609,23 +465,14 @@ export default function HomeScreen() {
     return () => {
       subscription.remove();
     };
-  }, [processSelfieQueue]);
+  }, []);
 
   // Request permissions and configure audio once per app session (not per Reflection selection)
   useEffect(() => {
-    debugLog('📸 Triggering permission check and audio setup on startup...');
+    debugLog('Triggering audio setup on startup...');
 
     ensureExplorerAudioSessionOnce();
     void refreshExplorerAudioSessionForVideo();
-
-    // Camera Permission
-    requestCameraPermission().then(result => {
-      if (result.granted) {
-        debugLog('✅ Camera permission granted');
-      } else {
-        debugLog('❌ Camera permission denied');
-      }
-    }).catch(err => console.warn('Camera permission request failed:', err));
   }, []);
 
 
@@ -1371,158 +1218,6 @@ export default function HomeScreen() {
     }
   };
 
-  const enqueueSelfieUpload = useCallback(async (job: {
-    originalEventId: string;
-    responseEventId: string;
-    localUri: string; // Persistent, processed selfie file (documentDirectory)
-    senderExplorerId: string | null;
-    viewerExplorerId: string | null;
-    createdAt: number;
-  }) => {
-    try {
-      debugLog(`[Queue] Enqueue job for event ${job.originalEventId}`);
-      const existingRaw = await AsyncStorage.getItem(SELFIE_QUEUE_KEY);
-      const existingQueue = existingRaw ? JSON.parse(existingRaw) : [];
-      // Replace any existing job for same reflection - only latest selfie matters (overwrites in S3)
-      const replaced = existingQueue.find((j: any) => j?.originalEventId === job.originalEventId);
-      if (replaced?.localUri && replaced.localUri !== job.localUri) {
-        FileSystem.deleteAsync(replaced.localUri, { idempotent: true }).catch(() => {});
-      }
-      const filtered = existingQueue.filter((j: any) => j?.originalEventId !== job.originalEventId);
-      filtered.push(job);
-      await AsyncStorage.setItem(SELFIE_QUEUE_KEY, JSON.stringify(filtered));
-      // NOTE: We intentionally do NOT process immediately.
-      // We trigger queue processing when MainStage playback ends (or on dismiss),
-      // and also whenever the app becomes active.
-    } catch (error) {
-      console.error('Failed to enqueue selfie upload:', error);
-    }
-  }, [processSelfieQueue]);
-
-  // Capture and upload selfie response
-  const captureSelfieResponse = useCallback(async (silent: boolean = false) => {
-    if (!selectedEvent || !cameraRef.current || isCapturingSelfie) {
-      return;
-    }
-
-    // Check camera permissions
-    if (!cameraPermission?.granted) {
-      const result = await requestCameraPermission();
-      if (!result.granted) {
-        Alert.alert("Camera Permission", "Camera permission is required to take a selfie response.");
-        return;
-      }
-    }
-
-    if (!isSelfieCameraReady) {
-      debugLog('[Selfie] Skipping capture - camera is not ready');
-      return;
-    }
-
-    setIsCapturingSelfie(true);
-
-    try {
-      // Phase: Capture
-      debugLog('[Selfie] Phase: Capture');
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.3,
-        base64: false,
-      });
-
-      if (!photo) {
-        throw new Error("Failed to capture photo");
-      }
-
-      // Use reflection's event_id as the response key - selfie overwrites previous one at same path
-      const originalEventId = selectedEvent.event_id;
-      const localUniqueId = Date.now().toString(); // For unique local filename only
-
-      // Phase: Process (resize/compress) + persist to documentDirectory
-      // NOTE: We do this here because doing ImageManipulator work inside the queue
-      // was intermittently taking tens of seconds and freezing the UI.
-      debugLog('[Selfie] Phase: Process (resize/compress)');
-      const processedPhoto = await ImageManipulator.manipulateAsync(
-        photo.uri,
-        [{ resize: { width: 1080 } }],
-        { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG }
-      );
-
-      const persistentDir = FileSystem.documentDirectory;
-      const persistentPath = `${persistentDir}selfie_${originalEventId}_${localUniqueId}.jpg`;
-      await FileSystem.copyAsync({ from: processedPhoto.uri, to: persistentPath });
-
-      // Cleanup temp files (best-effort). Keep only the persistentPath for queue.
-      try {
-        if (photo.uri && photo.uri !== persistentPath && photo.uri !== processedPhoto.uri) {
-          await FileSystem.deleteAsync(photo.uri, { idempotent: true });
-        }
-        if (processedPhoto.uri && processedPhoto.uri !== persistentPath) {
-          await FileSystem.deleteAsync(processedPhoto.uri, { idempotent: true });
-        }
-      } catch (cleanupError) {
-        console.warn('Failed cleaning up selfie temp files:', cleanupError);
-      }
-
-      // Phase: Enqueue (processed file is now persistent)
-      debugLog('[Selfie] Phase: Enqueue');
-      await enqueueSelfieUpload({
-        originalEventId,
-        responseEventId: originalEventId, // Same as reflection - overwrites previous selfie in S3
-        localUri: persistentPath,
-        senderExplorerId: currentExplorerId,
-        viewerExplorerId: currentExplorerId,
-        createdAt: Date.now(),
-      });
-
-      // For non-videos (photos/images/audio-only), flush the queue immediately after selfie.
-      // For videos, we still prefer flushing on "idle" (finish/dismiss/next) to avoid mid-playback updates.
-      const isVideo =
-        !!selectedEvent.video_url || eventMetadata[selectedEvent.event_id]?.content_type === 'video';
-      if (!isVideo) {
-        debugLog('[Queue] Flushing after selfie (non-video)');
-        processSelfieQueue();
-      }
-
-      // Speak confirmation message (only if not silent)
-      // DISABLED for now - can be distracting during video playback
-      // if (!silent) {
-      //   const metadata = selectedEvent ? eventMetadata[selectedEvent.event_id] : null;
-      //   const companionName = metadata?.sender || 'your companion';
-      //   Speech.speak(`I sent a selfie to ${companionName}`, {
-      //     pitch: 1.0,
-      //     rate: 1.0,
-      //     language: 'en-US',
-      //   });
-      // }
-
-      // Upload + Firestore updates now happen in the deferred queue
-
-    } catch (error: any) {
-      console.error("❌ Error capturing selfie:", error);
-      // Detailed logging for tricky network/platform errors
-      if (error && typeof error === 'object') {
-        console.error("❌ Detailed Error Info:", {
-          message: error.message,
-          code: error.code,
-          domain: error.domain,
-          userInfo: error.userInfo
-        });
-      }
-
-      let errorMessage = "Failed to capture selfie. Please try again.";
-      if (error?.code === 'permission-denied' || error?.message?.includes('permission')) {
-        errorMessage = `Permission error. Please check Firestore security rules for '${ExplorerConfig.collections.responses}' collection.`;
-      }
-
-      if (!silent) {
-        Alert.alert("Error", `${errorMessage}\n\nTechnical info: ${error.message || 'Unknown error'}`);
-      }
-    } finally {
-      setIsCapturingSelfie(false);
-    }
-  }, [selectedEvent, cameraPermission, isCapturingSelfie, isSelfieCameraReady, requestCameraPermission, eventMetadata]);
-
-
   const deleteEvent = async (event: Event) => {
     try {
       // 1. Delete S3 objects
@@ -1578,12 +1273,6 @@ export default function HomeScreen() {
       Alert.alert("Delete Failed", error.message || "Failed to delete Reflection");
     }
   };
-
-  const handleMainStagePlaybackIdle = useCallback(() => {
-    // When playback finishes (video/audio/narration) or the user dismisses MainStage,
-    // run any pending selfie upload work.
-    processSelfieQueue();
-  }, [processSelfieQueue]);
 
   useEffect(() => {
     if (loading) {
@@ -1715,15 +1404,7 @@ export default function HomeScreen() {
             onClose={closeFullScreen}
             onEventSelect={throttledHandleEventPress}
             onDelete={deleteEvent}
-            onCaptureSelfie={captureSelfieResponse}
-            onPlaybackIdle={handleMainStagePlaybackIdle}
             onMediaError={handleMediaError}
-            cameraRef={cameraRef}
-            cameraPermission={cameraPermission}
-            requestCameraPermission={requestCameraPermission}
-            isCapturingSelfie={isCapturingSelfie}
-            isSelfieCameraReady={isSelfieCameraReady}
-            onSelfieCameraReadyChange={setIsSelfieCameraReady}
             newArrivalIds={newArrivalIds}
             readEventIds={readEventIds}
             onReplay={(event) => sendReplaySignal(event.event_id)}
@@ -2102,87 +1783,6 @@ const styles = StyleSheet.create({
     fontSize: 24,
     fontWeight: '600',
     lineHeight: 32,
-  },
-  selfieMirrorContainer: {
-    position: 'absolute',
-    right: 20,
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    overflow: 'visible',
-    borderWidth: 4,
-    borderColor: '#fff',
-    backgroundColor: '#000', // Required for efficient shadow rendering
-    zIndex: 10,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#2E78B7',
-        shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 0.2,
-        shadowRadius: 20,
-      },
-      android: {
-        elevation: 8,
-      },
-      default: {
-        shadowColor: '#2E78B7',
-        shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 0.2,
-        shadowRadius: 20,
-      },
-    }),
-  },
-  selfieMirrorWrapper: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 60,
-    overflow: 'hidden',
-  },
-  selfieMirror: {
-    width: '100%',
-    height: '100%',
-  },
-  cameraShutterButton: {
-    position: 'absolute',
-    bottom: -15,
-    alignSelf: 'center',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#fff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 20,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.3,
-        shadowRadius: 4,
-      },
-      android: {
-        elevation: 4,
-      },
-      default: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.3,
-        shadowRadius: 4,
-      },
-    }),
-  },
-  selfieMirrorPermissionButton: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    width: '100%',
-    height: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    borderRadius: 60,
   },
   // --- YouTube-Style Grid Card Styles ---
   gridCard: {

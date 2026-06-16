@@ -71,7 +71,7 @@ export function ActivityAvatar({ chapter, isActive, isPlaying, onPress }: Activi
         </View>
       </Animated.View>
       <Text style={[styles.name, isActive && styles.nameActive]} numberOfLines={1}>
-        {chapter.isReaction ? chapter.speakerName : 'Author'}
+        {chapter.speakerName}
       </Text>
     </TouchableOpacity>
   );

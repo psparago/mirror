@@ -12,15 +12,19 @@ import {
   isLikeFeedbackInCooldown,
   getValidVideoTrimMs,
   playerMachine,
+  REACTION_PARENT_PLAYBACK_VOLUME,
+  resolveReactionParentPipMedia,
+  resolveReactionPlaybackType,
   seekVideoToSeconds,
+  shouldUseCompanionAvatarReactionPip,
   useThrottledCallback,
 } from '@projectmirror/shared';
 import { LikeHeartBurstOverlay, useLikeHeartBursts } from '@/components/LikeHeartBurst';
 import { playLikeFeedbackAudio, stopLikeFeedbackAudio } from '@/utils/playLikeFeedbackAudio';
 import { TellMeMoreButton } from '@/components/stage/TellMeMoreButton';
 import { ActivityRow } from '@/components/stage/ActivityRow';
-import { SubtitleRibbon } from '@/components/stage/SubtitleRibbon';
-import { StageLikeRow } from '@/components/stage/StageLikeRow';
+import { DocumentaryReactionPip } from '@/components/stage/DocumentaryReactionPip';
+import { StageCaptionBar } from '@/components/stage/StageCaptionBar';
 import { StageCrossFadeMedia } from '@/components/stage/StageCrossFadeMedia';
 import { useDocumentarySequence } from '@/hooks/useDocumentarySequence';
 
@@ -28,7 +32,6 @@ import { useMachine } from '@xstate/react';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
-import { CameraView, PermissionResponse } from 'expo-camera';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { useRouter } from 'expo-router';
 
@@ -259,17 +262,7 @@ interface MainStageProps {
   onClose: () => void;
   onEventSelect: (event: Event) => void;
   onDelete: (event: Event) => void;
-  onCaptureSelfie: () => Promise<void>;
-  // Called when MainStage becomes "idle" (playback finished or user dismissed).
-  // Used by the parent to flush pending work (e.g. selfie upload queue).
-  onPlaybackIdle?: () => void;
   onMediaError?: (event: Event) => void;
-  cameraRef: React.RefObject<CameraView>;
-  cameraPermission: PermissionResponse | null;
-  requestCameraPermission: () => Promise<PermissionResponse>;
-  isCapturingSelfie: boolean;
-  isSelfieCameraReady: boolean;
-  onSelfieCameraReadyChange: (ready: boolean) => void;
   readEventIds: string[];
   newArrivalIds: string[]; // Unread reflections visible in the list (derived, not session state)
   onReplay?: (event: Event) => void;
@@ -282,8 +275,6 @@ interface MainStageProps {
     instantVideoPlayback?: boolean;
     readVideoCaptions?: boolean;
     autoPlayDeepDive?: boolean;
-    /** When false, skips automatic selfie capture after reflections (default: on). */
-    takeSelfie?: boolean;
   };
   filterBar?: React.ReactNode;
   /** Shown in the header as "{name}'s Reflections" when multiple items exist. */
@@ -308,15 +299,7 @@ export default function MainStageView({
   onClose,
   onEventSelect,
   onDelete,
-  onCaptureSelfie,
-  onPlaybackIdle,
   onMediaError,
-  cameraRef,
-  cameraPermission,
-  requestCameraPermission,
-  isCapturingSelfie,
-  isSelfieCameraReady,
-  onSelfieCameraReadyChange,
   readEventIds,
   newArrivalIds,
   onReplay,
@@ -345,9 +328,7 @@ export default function MainStageView({
 
   // --- LOCAL STATE (Visuals Only) ---
   // Reanimated shared values
-  const flashOpacity = useSharedValue(0);
   const controlsOpacity = useSharedValue(0); // 0 = Hidden
-  const selfieMirrorOpacity = useSharedValue(0);
   const audioIndicatorAnim = useSharedValue(0.7);
   const tellMeMorePulse = useSharedValue(1);
   const tellMeMoreBlurOpacity = useSharedValue(1);
@@ -359,17 +340,6 @@ export default function MainStageView({
   const opacity = useSharedValue(1);
 
   const flatListRef = useRef<FlatList>(null);
-  const isSelfieCameraReadyRef = useRef(isSelfieCameraReady);
-
-  useEffect(() => {
-    isSelfieCameraReadyRef.current = isSelfieCameraReady;
-  }, [isSelfieCameraReady]);
-
-  useEffect(() => {
-    if (!visible || !cameraPermission?.granted) {
-      onSelfieCameraReadyChange(false);
-    }
-  }, [visible, cameraPermission?.granted, onSelfieCameraReadyChange]);
 
   // Track if the video has actually buffered and started rendering
   const [videoReady, setVideoReady] = useState(false);
@@ -614,10 +584,8 @@ export default function MainStageView({
   const stateRef = useRef<any>(null);
   const onEventSelectRef = useRef(onEventSelect);
   const onDeleteRef = useRef(onDelete);
-  const onCaptureSelfieRef = useRef(onCaptureSelfie);
   const onReplayRef = useRef(onReplay);
   const selectedMetadataRef = useRef(selectedMetadata);
-  const onPlaybackIdleRef = useRef(onPlaybackIdle);
   const configRef = useRef(config);
   configRef.current = config;
 
@@ -629,7 +597,6 @@ export default function MainStageView({
     async () => {}
   );
   const captionSoundRefForActions = useRef<Audio.Sound | null>(null);
-  const performSelfieCaptureRef = useRef<((delay?: number) => Promise<void>) | null>(null);
   const clearHeavyMediaRefsRef = useRef<() => void>(() => { });
 
   // Bring It to Life — resolved narration take for the selected photo, the
@@ -638,6 +605,26 @@ export default function MainStageView({
   const narrationPlayerRef = useRef<any>(null);
   const narrationEndSubRef = useRef<{ remove: () => void } | null>(null);
   const playNarrationPipRef = useRef<(session: number) => Promise<boolean>>(async () => false);
+
+  // Documentary reaction PiP — parent stays on main stage; reaction plays in the corner.
+  const reactionPipPlayerRef = useRef<any>(null);
+  const reactionPipEndSubRef = useRef<{ remove: () => void } | null>(null);
+  const documentarySelfieStartedForEventRef = useRef<string | null>(null);
+  const companionMessageVideoStartedForEventRef = useRef<string | null>(null);
+  const playbackEventRef = useRef<Event | null>(null);
+  const playbackMetadataRef = useRef<EventMetadata | null>(null);
+  const startDocumentarySelfiePlaybackRef = useRef<() => Promise<void>>(async () => {});
+  const startCompanionMessageParentVideoRef = useRef<() => Promise<void>>(async () => {});
+  const documentaryReactionRef = useRef({
+    active: false,
+    reactionType: null as ReturnType<typeof resolveReactionPlaybackType> | null,
+    usesCompanionAvatarPip: false,
+    selfieUsesParentVideo: false,
+    selfieUsesParentImage: false,
+    companionMessageUsesParentVideo: false,
+    reactionEvent: null as Event | null,
+    parentEvent: null as Event | null,
+  });
 
   // --- THE XSTATE MACHINE ---
   const machine = useMemo(() => playerMachine.provide({
@@ -715,6 +702,21 @@ export default function MainStageView({
             /* player may be tearing down */
           }
         }
+
+        if (reactionPipEndSubRef.current) {
+          reactionPipEndSubRef.current.remove();
+          reactionPipEndSubRef.current = null;
+        }
+        if (reactionPipPlayerRef.current) {
+          try {
+            reactionPipPlayerRef.current.pause();
+            reactionPipPlayerRef.current.replace('');
+          } catch {
+            /* player may be tearing down */
+          }
+        }
+        documentarySelfieStartedForEventRef.current = null;
+        companionMessageVideoStartedForEventRef.current = null;
         controlsOpacity.value = withTiming(0, { duration: 300 });
 
         // Clear caption/sparkle playing state
@@ -725,9 +727,16 @@ export default function MainStageView({
       },
 
       speakCaption: async () => {
-        const meta = selectedMetadataRef.current;
+        // Documentary reaction chapters: no spoken caption — advance immediately.
+        if (documentaryReactionRef.current.active) {
+          debugLog('🎙️ speakCaption skipped — documentary reaction chapter');
+          sendRef.current({ type: 'NARRATION_FINISHED' });
+          return;
+        }
+
+        const meta = playbackMetadataRef.current ?? selectedMetadataRef.current;
         const text = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
-        const audioUrl = selectedEventRef.current?.audio_url;
+        const audioUrl = playbackEventRef.current?.audio_url ?? selectedEventRef.current?.audio_url;
 
         // Use current session (already incremented by stopAllMedia or initial)
         const thisSession = captionSessionRef.current;
@@ -740,7 +749,8 @@ export default function MainStageView({
         // caption audio/TTS. Falls through to the normal path if the
         // narration can't be loaded.
         const expectsNarration =
-          !selectedEventRef.current?.video_url &&
+          !documentaryReactionRef.current.active &&
+          !playbackEventRef.current?.video_url &&
           (selectedMetadataRef.current?.has_narration === true ||
             !!selectedMetadataRef.current?.narration_event_id ||
             selectedEventRef.current?.has_narration === true ||
@@ -860,22 +870,21 @@ export default function MainStageView({
       },
 
       playVideo: async () => {
-        // Preparation logic for video
         if (!playerRef.current) return;
 
         videoFinishHandledForEventRef.current = null;
+
+        const docReaction = documentaryReactionRef.current;
+        if (docReaction.active && docReaction.reactionEvent?.video_url) {
+          debugLog('🎬 playVideo: documentary reaction selfie — parent main + reaction PiP');
+          void startDocumentarySelfiePlaybackRef.current();
+          return;
+        }
 
         debugLog(`🎬 playVideo called: status=${playerRef.current.status}`);
 
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         seekVideoToSeconds(playerRef.current, trim.active ? trim.startSec : 0);
-
-        // Trigger bubble animation (only when automatic selfie is enabled)
-        if (configRef.current?.takeSelfie !== false) {
-          selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
-        }
-
-        // The actual .play() call is now managed by the Hardware Sync useEffect for maximum reliability
       },
 
       playAudio: async () => {
@@ -883,14 +892,19 @@ export default function MainStageView({
           try {
             if (soundRef.current) await soundRef.current.unloadAsync();
 
-            if (!selectedEventRef.current?.audio_url) {
+            const audioEvent = playbackEventRef.current ?? selectedEventRef.current;
+            if (!audioEvent?.audio_url) {
               sendRef.current({ type: 'AUDIO_FINISHED' });
               return;
             }
 
-            debugLog(`🎧 Playing audio: ${selectedEventRef.current.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
+            if (documentaryReactionRef.current.companionMessageUsesParentVideo) {
+              void startCompanionMessageParentVideoRef.current();
+            }
+
+            debugLog(`🎧 Playing audio: ${audioEvent.audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
             const { sound: newSound } = await Audio.Sound.createAsync(
-              { uri: selectedEventRef.current.audio_url as string },
+              { uri: audioEvent.audio_url as string },
               {
                 shouldPlay: true,
                 progressUpdateIntervalMillis: EXPO_AV_PROGRESS_INTERVAL_MS,
@@ -899,6 +913,13 @@ export default function MainStageView({
 
             newSound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
+                if (documentaryReactionRef.current.companionMessageUsesParentVideo && playerRef.current) {
+                  try {
+                    playerRef.current.pause();
+                  } catch {
+                    /* player may be tearing down */
+                  }
+                }
                 sendRef.current({ type: 'AUDIO_FINISHED' });
               }
             });
@@ -1039,20 +1060,19 @@ export default function MainStageView({
         playDeepDiveWithRetry();
       },
 
-      showSelfieBubble: () => {
-        if (configRef.current?.takeSelfie === false) return;
-        selfieMirrorOpacity.value = 1;
-      },
-
-      triggerSelfie: async () => {
-        if (performSelfieCaptureRef.current) {
-          await performSelfieCaptureRef.current(0);
-        }
-      },
+      showSelfieBubble: () => {},
+      triggerSelfie: async () => {},
 
       pauseMedia: async () => {
         if (playerRef.current && stateRef.current?.hasTag('video_mode')) {
           playerRef.current.pause();
+        }
+        if (reactionPipPlayerRef.current) {
+          try {
+            reactionPipPlayerRef.current.pause();
+          } catch {
+            /* ignore */
+          }
         }
         if (soundRef.current) await soundRef.current.pauseAsync();
         if (captionSoundRefForActions.current) await captionSoundRefForActions.current.pauseAsync();
@@ -1086,29 +1106,77 @@ export default function MainStageView({
     companions,
   );
 
+  const parentMediaEvent = docState.chapters[0]?.event ?? selectedEvent;
+  const documentaryActiveChapter = docState.chapters[docState.currentIndex] ?? null;
+  const isDocumentaryReactionChapter = !!documentaryActiveChapter?.isReaction;
+  const documentaryReactionType = documentaryActiveChapter?.reactionType ?? null;
+  const parentPipMedia = resolveReactionParentPipMedia(parentMediaEvent);
+  const documentaryUsesCompanionAvatarPip =
+    isDocumentaryReactionChapter &&
+    documentaryReactionType != null &&
+    shouldUseCompanionAvatarReactionPip(documentaryReactionType);
+  const documentarySelfieUsesParentVideo =
+    isDocumentaryReactionChapter &&
+    documentaryReactionType === 'selfie' &&
+    parentPipMedia?.mediaType === 'video' &&
+    !!documentaryActiveChapter?.event.video_url;
+  const documentarySelfieUsesParentImage =
+    isDocumentaryReactionChapter &&
+    documentaryReactionType === 'selfie' &&
+    parentPipMedia?.mediaType === 'image' &&
+    !!documentaryActiveChapter?.event.video_url;
+  const documentaryCompanionMessageUsesParentVideo =
+    documentaryUsesCompanionAvatarPip && parentPipMedia?.mediaType === 'video';
+
+  useEffect(() => {
+    documentaryReactionRef.current = {
+      active: isDocumentaryReactionChapter,
+      reactionType: documentaryReactionType,
+      usesCompanionAvatarPip: documentaryUsesCompanionAvatarPip,
+      selfieUsesParentVideo: documentarySelfieUsesParentVideo,
+      selfieUsesParentImage: documentarySelfieUsesParentImage,
+      companionMessageUsesParentVideo: documentaryCompanionMessageUsesParentVideo,
+      reactionEvent: isDocumentaryReactionChapter ? documentaryActiveChapter!.event : null,
+      parentEvent: parentMediaEvent,
+    };
+  }, [
+    documentaryActiveChapter,
+    documentaryCompanionMessageUsesParentVideo,
+    documentaryReactionType,
+    documentarySelfieUsesParentImage,
+    documentarySelfieUsesParentVideo,
+    documentaryUsesCompanionAvatarPip,
+    isDocumentaryReactionChapter,
+    parentMediaEvent,
+  ]);
+
   const docActionsRef = useRef(docActions);
+  const docCurrentIndexRef = useRef(docState.currentIndex);
+  useEffect(() => {
+    docCurrentIndexRef.current = docState.currentIndex;
+  }, [docState.currentIndex]);
   useEffect(() => { docActionsRef.current = docActions; }, [docActions]);
 
   // Stable send helpers for sequence transitions (avoid capturing stale closures)
   const sendSelectEventInstant = useCallback(
-    (ev: Event, meta: EventMetadata, takeSelfie: boolean) => {
+    (ev: Event, meta: EventMetadata) => {
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
         event: ev,
         metadata: meta,
-        takeSelfie,
+        takeSelfie: false,
       });
     },
     [],
   );
 
   const sendSelectEventForIndexing = useCallback(
-    (ev: Event, meta: EventMetadata, takeSelfie: boolean) => {
+    (ev: Event, meta: EventMetadata) => {
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
         event: ev,
         metadata: meta,
-        takeSelfie,
+        takeSelfie: false,
       });
     },
     [],
@@ -1360,7 +1428,7 @@ export default function MainStageView({
       currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
     if (!isInPlayingState) return;
 
-    const eventId = selectedEventRef.current?.event_id;
+    const eventId = playbackEventRef.current?.event_id ?? selectedEventRef.current?.event_id;
     if (!eventId) return;
     if (videoFinishHandledForEventRef.current === eventId) return;
     videoFinishHandledForEventRef.current = eventId;
@@ -1371,7 +1439,6 @@ export default function MainStageView({
 
     if (lastVideoFinishedEventIdRef.current !== eventId) {
       lastVideoFinishedEventIdRef.current = eventId;
-      onPlaybackIdleRef.current?.();
     }
   }, [parkVideoForCaption]);
 
@@ -1503,7 +1570,6 @@ export default function MainStageView({
 
     // 5. Pre-clear native media before the overlay unmounts.
     clearHeavyMediaRefsRef.current();
-    onPlaybackIdleRef.current?.();
     requestAnimationFrame(onClose);
   }, [sound, captionSound, onClose]);
 
@@ -1521,14 +1587,14 @@ export default function MainStageView({
           type: 'SELECT_EVENT_INSTANT',
           event: selectedEventRef.current,
           metadata: selectedMetadataRef.current,
-          takeSelfie: configRef.current?.takeSelfie !== false,
+          takeSelfie: false,
         });
       } else {
         send({
           type: 'SELECT_EVENT',
           event: selectedEventRef.current,
           metadata: selectedMetadataRef.current,
-          takeSelfie: configRef.current?.takeSelfie !== false,
+          takeSelfie: false,
         });
       }
       return;
@@ -1550,7 +1616,7 @@ export default function MainStageView({
             type: 'SELECT_EVENT_INSTANT',
             event: selectedEventRef.current,
             metadata: selectedMetadataRef.current,
-            takeSelfie: configRef.current?.takeSelfie !== false,
+            takeSelfie: false,
           });
         } else {
           // Standard replay (respects narration for videos)
@@ -1588,7 +1654,7 @@ export default function MainStageView({
           type: 'SELECT_EVENT',
           event: selectedEventRef.current,
           metadata: selectedMetadataRef.current,
-          takeSelfie: configRef.current?.takeSelfie !== false,
+          takeSelfie: false,
         });
       } else {
         send({ type: 'REPLAY' });
@@ -1690,22 +1756,12 @@ export default function MainStageView({
   // Toast opacity shared value
   const toastOpacityShared = useSharedValue(0);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const selfieCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const selfieFadeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) {
         clearTimeout(toastTimeoutRef.current);
         toastTimeoutRef.current = null;
-      }
-      if (selfieCaptureTimeoutRef.current) {
-        clearTimeout(selfieCaptureTimeoutRef.current);
-        selfieCaptureTimeoutRef.current = null;
-      }
-      if (selfieFadeTimeoutRef.current) {
-        clearTimeout(selfieFadeTimeoutRef.current);
-        selfieFadeTimeoutRef.current = null;
       }
       if (deepDiveBreathTimeoutRef.current) {
         clearTimeout(deepDiveBreathTimeoutRef.current);
@@ -1740,9 +1796,10 @@ export default function MainStageView({
 
   // --- AUDIO/VIDEO REFS ---
   // Use the active documentary chapter's media (falls back to base Reflection)
-  const activeMediaEvent = docState.activeEvent ?? selectedEvent;
-  const videoSource = activeMediaEvent?.video_url || null;
-  const selectedImageUrl = activeMediaEvent?.image_url || null;
+  // Parent Reflection media stays on the main stage during documentary reactions.
+  const activeMediaEvent = parentMediaEvent;
+  const videoSource = parentMediaEvent?.video_url || null;
+  const selectedImageUrl = parentMediaEvent?.image_url || null;
   const stageImageDimensions = useMemo(() => {
     const stagePaneWidth = isLandscape ? width * 0.7 : width;
     const stagePaneHeight = isLandscape ? height : height * 0.6;
@@ -1950,6 +2007,146 @@ export default function MainStageView({
     playNarrationPipRef.current = playNarrationPip;
   }, [playNarrationPip]);
 
+  const reactionPipPlayer = useVideoPlayer('', (p) => {
+    p.loop = false;
+  });
+
+  useEffect(() => {
+    reactionPipPlayerRef.current = reactionPipPlayer;
+  }, [reactionPipPlayer]);
+
+  const reactionPipVideoUrl =
+    isDocumentaryReactionChapter &&
+    documentaryReactionType === 'selfie' &&
+    documentaryActiveChapter?.event.video_url
+      ? documentaryActiveChapter.event.video_url
+      : '';
+
+  useEffect(() => {
+    if (!reactionPipPlayer) return;
+    if (reactionPipVideoUrl) {
+      try {
+        reactionPipPlayer.replace(reactionPipVideoUrl);
+      } catch {
+        /* teardown / invalid URI */
+      }
+    } else {
+      try {
+        reactionPipPlayer.pause();
+        reactionPipPlayer.replace('');
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [reactionPipPlayer, reactionPipVideoUrl]);
+
+  const startCompanionMessageParentVideo = useCallback(async () => {
+    const player = playerRef.current;
+    const reactionEvent = playbackEventRef.current;
+    if (!player || !reactionEvent) return;
+    const eventId = reactionEvent.event_id;
+    if (companionMessageVideoStartedForEventRef.current === eventId) return;
+
+    const syncMs = reactionEvent.syncStartTimeMillis ?? 0;
+    try {
+      seekVideoToSeconds(player, syncMs / 1000);
+      player.muted = false;
+      player.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+      await ensureStageVideoAudibleRef.current(player);
+      player.play();
+      companionMessageVideoStartedForEventRef.current = eventId;
+    } catch {
+      // Parent video may not be ready yet.
+    }
+  }, []);
+
+  const startDocumentarySelfiePlayback = useCallback(async () => {
+    const docReaction = documentaryReactionRef.current;
+    const reactionEvent = docReaction.reactionEvent;
+    const pipPlayer = reactionPipPlayerRef.current;
+    const mainPlayer = playerRef.current;
+    if (!docReaction.active || !reactionEvent?.video_url || !pipPlayer) return;
+
+    const eventId = reactionEvent.event_id;
+    if (documentarySelfieStartedForEventRef.current === eventId) return;
+
+    const syncMs = reactionEvent.syncStartTimeMillis ?? 0;
+
+    reactionPipEndSubRef.current?.remove();
+    reactionPipEndSubRef.current = null;
+
+    try {
+      if (docReaction.selfieUsesParentVideo && mainPlayer) {
+        seekVideoToSeconds(mainPlayer, syncMs / 1000);
+        mainPlayer.muted = false;
+        mainPlayer.volume = REACTION_PARENT_PLAYBACK_VOLUME;
+        await ensureStageVideoAudibleRef.current(mainPlayer);
+        mainPlayer.play();
+      }
+
+      seekVideoToSeconds(pipPlayer, 0);
+      pipPlayer.muted = false;
+      pipPlayer.volume = 1;
+      pipPlayer.play();
+
+      reactionPipEndSubRef.current = pipPlayer.addListener('playToEnd', () => {
+        reactionPipEndSubRef.current?.remove();
+        reactionPipEndSubRef.current = null;
+        if (docReaction.selfieUsesParentVideo && mainPlayer) {
+          try {
+            mainPlayer.pause();
+          } catch {
+            /* player may be tearing down */
+          }
+        }
+        try {
+          pipPlayer.pause();
+        } catch {
+          /* ignore */
+        }
+        signalVideoFinishedRef.current();
+      });
+
+      documentarySelfieStartedForEventRef.current = eventId;
+    } catch (error) {
+      console.warn('[MainStage] documentary selfie PiP playback failed:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    startDocumentarySelfiePlaybackRef.current = startDocumentarySelfiePlayback;
+  }, [startDocumentarySelfiePlayback]);
+
+  useEffect(() => {
+    startCompanionMessageParentVideoRef.current = startCompanionMessageParentVideo;
+  }, [startCompanionMessageParentVideo]);
+
+  useEffect(() => {
+    documentarySelfieStartedForEventRef.current = null;
+    companionMessageVideoStartedForEventRef.current = null;
+  }, [documentaryActiveChapter?.event.event_id]);
+
+  useEffect(() => {
+    if (!isDocumentaryReactionChapter || !reactionPipVideoUrl) return;
+    const isMachinePlaying =
+      state.matches({ playingVideoInstant: { playback: 'playing' } }) ||
+      state.matches({ playingVideo: { playback: 'playing' } });
+    if (!isMachinePlaying) return;
+    if (!documentaryActiveChapter?.event.event_id) return;
+    if (documentarySelfieStartedForEventRef.current === documentaryActiveChapter.event.event_id) return;
+    void startDocumentarySelfiePlayback();
+  }, [
+    documentaryActiveChapter?.event.event_id,
+    isDocumentaryReactionChapter,
+    reactionPipVideoUrl,
+    startDocumentarySelfiePlayback,
+    state.value,
+  ]);
+
+  const documentaryReactionPipVisible =
+    isDocumentaryReactionChapter &&
+    (documentaryUsesCompanionAvatarPip || !!reactionPipVideoUrl);
+
   const narrationPipVisible =
     !!narrationPlayback && narrationPlayback.parentEventId === selectedEvent?.event_id;
 
@@ -1972,6 +2169,14 @@ export default function MainStageView({
     if (narrationPlayerRef.current) {
       try {
         narrationPlayerRef.current.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (reactionPipPlayerRef.current) {
+      try {
+        reactionPipPlayerRef.current.pause();
+        reactionPipPlayerRef.current.replace('');
       } catch {
         /* ignore */
       }
@@ -2035,6 +2240,9 @@ export default function MainStageView({
         const currentState = stateRef.current;
         const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
+        if (documentaryReactionRef.current.selfieUsesParentVideo) {
+          return;
+        }
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         if (isInPlayingState && player.duration > 0) {
           if (trim.active) {
@@ -2096,83 +2304,6 @@ export default function MainStageView({
   }, []);
 
   // --- ACTIONS IMPLEMENTATION ---
-
-  const waitForSelfieCameraReady = useCallback(async (timeoutMs = 2500) => {
-    if (isSelfieCameraReadyRef.current) {
-      return true;
-    }
-
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      if (isSelfieCameraReadyRef.current) {
-        return true;
-      }
-    }
-
-    return false;
-  }, []);
-
-  // Helper for reused selfie logic
-  const performSelfieCapture = useCallback(async (delay = 0) => {
-    if (configRef.current?.takeSelfie === false) {
-      debugLog('📸 Helper: Skipping selfie — disabled in settings');
-      return;
-    }
-    // Ensure permission before starting ANY UI transitions (mirror, flash, etc)
-    if (!cameraPermission?.granted) {
-      try {
-        const result = await requestCameraPermission();
-        if (!result.granted) {
-          debugLog('📸 Helper: Skipping selfie - camera permission not granted');
-          return;
-        }
-      } catch (error) {
-        debugLog('📸 Helper: Skipping selfie - permission request failed', error);
-        return;
-      }
-    }
-
-    debugLog(`📸 Helper: Starting Selfie Sequence (delay: ${delay}ms)`);
-    // Fade in mirror
-    selfieMirrorOpacity.value = withTiming(1, { duration: 500 });
-
-    // Wait...
-    if (selfieCaptureTimeoutRef.current) {
-      clearTimeout(selfieCaptureTimeoutRef.current);
-    }
-    selfieCaptureTimeoutRef.current = setTimeout(async () => {
-      const cameraReady = await waitForSelfieCameraReady();
-      if (!cameraReady) {
-        debugLog('📸 Helper: Skipping selfie - camera was not ready');
-        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
-        return;
-      }
-
-      debugLog('📸 Helper: Snapping now...');
-      // Flash
-      flashOpacity.value = withTiming(1, { duration: 150 }, () => {
-        flashOpacity.value = withTiming(0, { duration: 250 });
-      });
-
-      // Capture
-      await onCaptureSelfieRef.current();
-
-      // Fade out
-      if (selfieFadeTimeoutRef.current) {
-        clearTimeout(selfieFadeTimeoutRef.current);
-      }
-      selfieFadeTimeoutRef.current = setTimeout(() => {
-        debugLog('📸 Helper: Fading out bubble');
-        selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
-      }, 500);
-    }, delay);
-  }, [onCaptureSelfie, flashOpacity, selfieMirrorOpacity, waitForSelfieCameraReady]);
-
-  // Update performSelfieCapture ref for machine
-  useEffect(() => {
-    performSelfieCaptureRef.current = performSelfieCapture;
-  }, [performSelfieCapture]);
 
   // Play deep dive directly (bypasses state machine).
   // Used when the machine is in a state that doesn't handle TELL_ME_MORE
@@ -2255,6 +2386,9 @@ export default function MainStageView({
     // Videos don't pause - only play or stop (including during like feedback; narration-only duck/pause).
     // Avoid redundant player.play() — limits bridge/native churn (Now Playing).
     if (isMachinePlayingVideo && !isFinished) {
+      if (documentaryReactionRef.current.selfieUsesParentVideo) {
+        return;
+      }
       if (!isVideoPlaying) {
         debugLog('⚡ Hardware Sync: Playing Video');
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
@@ -2294,26 +2428,31 @@ export default function MainStageView({
     stateRef.current = state;
     onEventSelectRef.current = onEventSelect;
     onDeleteRef.current = onDelete;
-    onCaptureSelfieRef.current = onCaptureSelfie;
     onReplayRef.current = onReplay;
     selectedMetadataRef.current = selectedMetadata;
-    onPlaybackIdleRef.current = onPlaybackIdle;
     configRef.current = config;
-  }, [events, selectedEvent, state, onEventSelect, onDelete, onCaptureSelfie, onReplay, selectedMetadata, config]);
+    playbackEventRef.current = state.context.event ?? selectedEvent;
+    playbackMetadataRef.current = state.context.metadata ?? selectedMetadata;
+  }, [events, selectedEvent, state, onEventSelect, onDelete, onReplay, selectedMetadata, config]);
 
   // Notify parent when we enter the finished state (video/audio/narration completed).
   const wasFinishedRef = useRef(false);
   useEffect(() => {
     const isFinished = !!state && state.matches('finished');
     if (isFinished && !wasFinishedRef.current) {
-      // Try to advance the documentary sequence first
       if (docState.chapters.length > 1 && docState.phase === 'playing') {
-        docActions.onChapterFinished({
-          sendSelectEventInstant,
-          takeSelfie: config?.takeSelfie !== false,
-        });
-      } else {
-        onPlaybackIdleRef.current?.();
+        // After the original Reflection, play Deep Dive before advancing to reactions.
+        if (docCurrentIndexRef.current === 0) {
+          const meta = selectedMetadataRef.current;
+          const ev = selectedEventRef.current;
+          const hasDeepDive = !!meta?.deep_dive || !!ev?.deep_dive_audio_url;
+          const autoDeepDive = configRef.current?.autoPlayDeepDive !== false;
+          if (hasDeepDive && autoDeepDive && !hasAutoPlayedDeepDiveRef.current) {
+            wasFinishedRef.current = isFinished;
+            return;
+          }
+        }
+        docActions.onChapterFinished({ sendSelectEventInstant });
       }
     }
     wasFinishedRef.current = isFinished;
@@ -2345,8 +2484,8 @@ export default function MainStageView({
     if (!captionCycleDone || !selectedEvent) return;
     if (config?.autoPlayDeepDive === false) return;
     if (hasAutoPlayedDeepDiveRef.current) return;
-    // Deep Dive is bypassed when this Reflection has Companion reactions
-    if (docState.bypassDeepDive) return;
+    // Deep Dive is only for the original Reflection (chapter 0), not reactions.
+    if (docState.currentIndex > 0) return;
 
     const hasDeepDive = !!selectedMetadata?.deep_dive || !!selectedEvent?.deep_dive_audio_url;
     if (!hasDeepDive) return;
@@ -2372,7 +2511,7 @@ export default function MainStageView({
       deepDiveBreathTimeoutRef.current = null;
       setIsDeepDivePending(false);
     };
-  }, [captionCycleDone, selectedEvent?.event_id, selectedMetadata?.deep_dive, selectedEvent?.deep_dive_audio_url, config?.autoPlayDeepDive, send, playDeepDiveDirectly]);
+  }, [captionCycleDone, selectedEvent?.event_id, docState.currentIndex, selectedMetadata?.deep_dive, selectedEvent?.deep_dive_audio_url, config?.autoPlayDeepDive, send, playDeepDiveDirectly]);
 
   // --- SYNC REACT EVENTS TO MACHINE ---
 
@@ -2384,11 +2523,6 @@ export default function MainStageView({
 
     // Only send SELECT_EVENT if the event ID actually changed
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
-      // We are leaving the previous reflection; treat this as an "idle" moment for parent work
-      // (e.g. flush pending selfie upload queue).
-      if (prevEventIdRef.current) {
-        onPlaybackIdleRef.current?.();
-      }
       prevEventIdRef.current = currentEventId;
       debugLog(`📩 User selected reflection: ${currentEventId}`);
 
@@ -2407,14 +2541,14 @@ export default function MainStageView({
           type: 'SELECT_EVENT_INSTANT',
           event: selectedEvent!,
           metadata: selectedMetadata!,
-          takeSelfie: config?.takeSelfie !== false,
+          takeSelfie: false,
         });
       } else {
         send({
           type: 'SELECT_EVENT',
           event: selectedEvent!,
           metadata: selectedMetadata!,
-          takeSelfie: config?.takeSelfie !== false,
+          takeSelfie: false,
         });
       }
 
@@ -2426,7 +2560,7 @@ export default function MainStageView({
       // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
       performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, config?.takeSelfie, performUpNextAutoscrollToEvent]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -2501,11 +2635,8 @@ export default function MainStageView({
 
     if (state.matches('idle')) {
       controlsOpacity.value = withTiming(1, { duration: 200 });
-      selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
     } else if (state.matches('finished')) {
-      // Finished: Show controls AND hide bubble
       controlsOpacity.value = withTiming(1, { duration: 200 });
-      selfieMirrorOpacity.value = withTiming(0, { duration: 500 });
     } else if (!isVideo && state.hasTag('paused')) {
       // Paused (non-video only): Show controls
       controlsOpacity.value = withTiming(1, { duration: 200 });
@@ -2519,7 +2650,7 @@ export default function MainStageView({
       // Playing: Hide controls (videos never show pause controls)
       controlsOpacity.value = withTiming(0, { duration: 200 });
     }
-  }, [state, controlsOpacity, selfieMirrorOpacity]);
+  }, [state, controlsOpacity]);
 
   // 4. ANIMATIONS (VU Meter & Pulse)
   const isMachineSpeaking = state && (state.matches({ playingVideo: { playback: 'narratingCaption' } }) ||
@@ -2583,7 +2714,7 @@ export default function MainStageView({
         type: 'SELECT_EVENT',
         event: selectedEventRef.current,
         metadata: selectedMetadataRef.current,
-        takeSelfie: configRef.current?.takeSelfie !== false,
+        takeSelfie: false,
       });
     } else {
       const isVideo = !!selectedEventRef.current?.video_url;
@@ -2595,7 +2726,7 @@ export default function MainStageView({
           type: 'SELECT_EVENT_INSTANT',
           event: selectedEventRef.current,
           metadata: selectedMetadataRef.current,
-          takeSelfie: configRef.current?.takeSelfie !== false,
+          takeSelfie: false,
         });
       } else {
         send({ type: 'REPLAY' });
@@ -3006,18 +3137,17 @@ export default function MainStageView({
     opacity: controlsOpacity.value,
   }));
 
-  const selfieMirrorAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: selfieMirrorOpacity.value,
-  }));
-
-  const flashAnimatedStyle = useAnimatedStyle(() => ({
-    opacity: flashOpacity.value,
-  }));
-
   const audioIndicatorAnimatedStyle = useAnimatedStyle(() => ({
     opacity: audioIndicatorAnim.value,
   }));
-  void audioIndicatorAnimatedStyle; // Retained for VU meter future use
+
+  const activeChapter = docState.chapters[docState.currentIndex] ?? docState.chapters[0] ?? null;
+  const stageCaptionText =
+    docState.activeSubtitle ??
+    displayCaptionFrom(selectedMetadata, selectedEvent);
+  const stageSenderName = activeChapter?.speakerName ?? selectedMetadata?.sender ?? null;
+  const stageCaptionEventId = activeChapter?.event.event_id ?? selectedEvent?.event_id ?? null;
+  const stageCaptionDate = stageCaptionEventId ? formatEventDateFromId(stageCaptionEventId) : null;
 
   const tellMeMoreAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: tellMeMorePulse.value }],
@@ -3097,7 +3227,7 @@ export default function MainStageView({
                     };
                   }}
                 >
-                    <StageCrossFadeMedia activeEventId={docState.activeEvent?.event_id}>
+                    <StageCrossFadeMedia activeEventId={parentMediaEvent?.event_id}>
                     {/* Layer 1: stage video player, rendered only after a Reflection has a valid source. */}
                     {videoSource && player ? (
                       <StableStageVideoView
@@ -3118,6 +3248,15 @@ export default function MainStageView({
                         priority="high"
                       />
                     )}
+
+                    {documentaryReactionPipVisible ? (
+                      <DocumentaryReactionPip
+                        visible
+                        mode={reactionPipVideoUrl ? 'selfie-video' : 'companion-avatar'}
+                        chapter={documentaryActiveChapter}
+                        reactionPlayer={reactionPipPlayer}
+                      />
+                    ) : null}
 
                     {/* Bring It to Life: selfie narration PIP over the full-screen photo */}
                     {narrationPipVisible ? (
@@ -3191,24 +3330,27 @@ export default function MainStageView({
                 {/* Loading Indicator removed - was blocking video */}
               </View>
 
-              {/* Activity Row + Subtitle Ribbon + Like Row */}
-              <ActivityRow
-                chapters={docState.chapters}
-                activeIndex={docState.currentIndex}
-                isPlayingSequence={docState.isPlayingSequence}
-                onAvatarPress={(index: number) => {
-                  docActions.gotoIndex({
-                    index,
-                    sendSelectEvent: sendSelectEventForIndexing,
-                    takeSelfie: config?.takeSelfie !== false,
-                  });
-                }}
-              />
+              {/* Companion avatars + production caption bar */}
+              <View style={[styles.stageMetadataSection, { paddingBottom: insets.bottom + 8 }]}>
+                <ActivityRow
+                  chapters={docState.chapters}
+                  activeIndex={docState.currentIndex}
+                  isPlayingSequence={docState.isPlayingSequence}
+                  onAvatarPress={(index: number) => {
+                    docActions.gotoIndex({
+                      index,
+                      sendSelectEvent: sendSelectEventForIndexing,
+                    });
+                  }}
+                />
 
-              <SubtitleRibbon text={docState.activeSubtitle} />
-
-              {selectedEvent?.event_id ? (
-                <StageLikeRow
+                <StageCaptionBar
+                  captionText={stageCaptionText}
+                  senderName={stageSenderName}
+                  formattedDate={stageCaptionDate}
+                  reflectionId={selectedEvent?.event_id}
+                  isAnyAudioPlaying={isAnyAudioPlaying}
+                  audioIndicatorAnimatedStyle={audioIndicatorAnimatedStyle}
                   likedByCurrentUser={likedByCurrentUser}
                   likeCount={likeCount}
                   heartAnimatedStyle={heartAnimatedStyle}
@@ -3217,8 +3359,17 @@ export default function MainStageView({
                     setLikeFacesLikedBy(null);
                     setShowLikeFaces(true);
                   }}
+                  onCopyReflectionId={async () => {
+                    if (!selectedEvent?.event_id) return;
+                    try {
+                      await Clipboard.setStringAsync(selectedEvent.event_id);
+                      showToast('Copied reflection ID');
+                    } catch {
+                      showToast('Could not copy');
+                    }
+                  }}
                 />
-              ) : null}
+              </View>
 
             </View>
 
@@ -3315,28 +3466,6 @@ export default function MainStageView({
 
 
           </View>
-
-          {/* Selfie Mirror - Rendered at ROOT level to override native Image/Video layers */}
-          <Animated.View style={[styles.cameraBubble, {
-            top: insets.top + 16,
-            // In landscape, offset by right pane width (30%) to keep bubble in left pane
-            right: isLandscape ? (width * 0.3 + insets.right + 16) : (insets.right + 16),
-          }, selfieMirrorAnimatedStyle]}>
-            {cameraPermission?.granted ? (
-              <CameraView
-                ref={cameraRef}
-                style={styles.cameraPreview}
-                facing="front"
-                active={visible && cameraPermission.granted}
-                onCameraReady={() => onSelfieCameraReadyChange(true)}
-                onMountError={(event) => {
-                  console.warn('Selfie camera mount error:', event.message);
-                  onSelfieCameraReadyChange(false);
-                }}
-              />
-            ) : null}
-            <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'white' }, flashAnimatedStyle]} />
-          </Animated.View>
 
           {/* Toast Notification */}
           {toastMessage ? (
@@ -3492,7 +3621,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 20,
     paddingTop: 80,
-    paddingBottom: 120,
+    paddingBottom: 12,
+  },
+  stageMetadataSection: {
+    width: '100%',
   },
   mediaFrame: {
     flex: 1,
@@ -3547,8 +3679,6 @@ const styles = StyleSheet.create({
   },
   playButton: { width: 120, height: 120, borderRadius: 60, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0, 0, 0, 0.3)' },
   playOverlayBlur: { width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(255, 255, 255, 0.1)' },
-  cameraBubble: { position: 'absolute', width: 100, height: 100, borderRadius: 50, overflow: 'hidden', borderWidth: 2, borderColor: '#fff', zIndex: 99999, elevation: 10 },
-  cameraPreview: { flex: 1 },
   metadataContainer: {
     position: 'absolute',
     bottom: 20,

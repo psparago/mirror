@@ -12,12 +12,11 @@ export interface ActivityRowProps {
 }
 
 /**
- * Horizontal row of speaker avatars beneath the main stage.
- * Chapter 0 = base Reflection author; 1…n = Companion reactions.
- * Only renders when there are 2+ chapters (base + at least one reaction).
+ * Horizontal row of speaker avatars beneath the main stage media.
+ * Chapter 0 = base Reflection author (always shown); 1…n = Companion reactions.
  */
 export function ActivityRow({ chapters, activeIndex, isPlayingSequence, onAvatarPress }: ActivityRowProps) {
-  if (chapters.length < 2) return null;
+  if (chapters.length < 1) return null;
 
   return (
     <ScrollView

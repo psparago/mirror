@@ -20,6 +20,7 @@ export * from './auth/AuthContext';
 export * from './explorer/ExplorerConfig';
 export * from './explorer/ExplorerContext';
 export * from './explorer/documentarySequence';
+export * from './explorer/reactionPlayback';
 
 // Hooks
 export * from './hooks/useCompanionAvatars';

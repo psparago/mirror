@@ -20,13 +20,11 @@ export interface DocState {
 
 export interface GotoIndexOptions {
   index: number;
-  sendSelectEvent: (ev: Event, meta: EventMetadata, takeSelfie: boolean) => void;
-  takeSelfie: boolean;
+  sendSelectEvent: (ev: Event, meta: EventMetadata) => void;
 }
 
 export interface ChapterFinishedOptions {
-  sendSelectEventInstant: (ev: Event, meta: EventMetadata, takeSelfie: boolean) => void;
-  takeSelfie: boolean;
+  sendSelectEventInstant: (ev: Event, meta: EventMetadata) => void;
 }
 
 export interface DocActions {
@@ -59,7 +57,6 @@ export function useDocumentarySequence(
   const [currentIndex, setCurrentIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>('idle');
 
-  // Stable refs so callbacks always see the latest values without stale closures
   const currentIndexRef = useRef(0);
   const phaseRef = useRef<Phase>('idle');
   const prevEventIdRef = useRef<string | null>(null);
@@ -79,7 +76,6 @@ export function useDocumentarySequence(
     eventMetadataRef.current = eventMetadata;
   }, [chapters, eventMetadata]);
 
-  // Reset when the base Reflection changes
   useEffect(() => {
     const newId = selectedEvent?.event_id ?? null;
     if (newId === prevEventIdRef.current) return;
@@ -91,14 +87,13 @@ export function useDocumentarySequence(
     setPhase('idle');
   }, [selectedEvent?.event_id]);
 
-  // Keep refs in sync with state
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   const activeChapter = chapters[currentIndex] ?? null;
   const activeEvent = activeChapter?.event ?? selectedEvent ?? null;
   const activeSubtitle = activeChapter ? resolveChapterSubtitle(activeChapter) : null;
-  const bypassDeepDive = shouldBypassDeepDive(chapters);
+  const bypassDeepDive = shouldBypassDeepDive(currentIndex);
   const isPlayingSequence = phase === 'playing' && chapters.length > 1;
 
   const markPlaying = useCallback(() => {
@@ -116,7 +111,7 @@ export function useDocumentarySequence(
   }, []);
 
   const onChapterFinished = useCallback(
-    ({ sendSelectEventInstant, takeSelfie }: ChapterFinishedOptions) => {
+    ({ sendSelectEventInstant }: ChapterFinishedOptions) => {
       if (advanceGuardRef.current) return;
       if (phaseRef.current !== 'playing') return;
 
@@ -132,20 +127,18 @@ export function useDocumentarySequence(
           buildFallbackMeta(nextChapter);
         currentIndexRef.current = nextIndex;
         setCurrentIndex(nextIndex);
-        sendSelectEventInstant(nextChapter.event, meta, takeSelfie);
-        // Release the guard after a short delay so subsequent chapters can advance
+        sendSelectEventInstant(nextChapter.event, meta);
         setTimeout(() => { advanceGuardRef.current = false; }, 300);
       } else {
-        // Sequence complete
         phaseRef.current = 'complete';
         setPhase('complete');
       }
     },
-    [], // All values accessed via refs
+    [],
   );
 
   const gotoIndex = useCallback(
-    ({ index, sendSelectEvent, takeSelfie }: GotoIndexOptions) => {
+    ({ index, sendSelectEvent }: GotoIndexOptions) => {
       const currentChapters = chaptersRef.current;
       if (index < 0 || index >= currentChapters.length) return;
       const chapter = currentChapters[index];
@@ -157,7 +150,7 @@ export function useDocumentarySequence(
       advanceGuardRef.current = false;
       setCurrentIndex(index);
       setPhase('playing');
-      sendSelectEvent(chapter.event, meta, takeSelfie);
+      sendSelectEvent(chapter.event, meta);
     },
     [],
   );
