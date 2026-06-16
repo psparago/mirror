@@ -1,8 +1,10 @@
 import { FontAwesome } from '@expo/vector-icons';
 import {
   buildLikeFeedbackPhrase,
+  buildDocumentaryChapters,
   coerceThumbnailTimeMs,
   CompanionAvatar,
+  DocumentaryChapter,
   API_ENDPOINTS,
   Event,
   EventMetadata,
@@ -93,6 +95,37 @@ export function ensureExplorerAudioSessionOnce(): void {
 
 function trimMeta(s?: string): string {
   return typeof s === 'string' ? s.trim() : '';
+}
+
+type DocumentaryDiagnosticEvent = {
+  at: number;
+  label: string;
+};
+
+function shortDiagId(id?: string | null): string {
+  if (!id) return 'none';
+  return id.length <= 8 ? id : id.slice(-8);
+}
+
+function playerDiag(player: unknown): string {
+  const p = player as { status?: string; playing?: boolean; currentTime?: number; duration?: number } | null;
+  if (!p) return 'none';
+  const time =
+    typeof p.currentTime === 'number' && Number.isFinite(p.currentTime)
+      ? ` @${p.currentTime.toFixed(1)}s`
+      : '';
+  const duration =
+    typeof p.duration === 'number' && Number.isFinite(p.duration) && p.duration > 0
+      ? `/${p.duration.toFixed(1)}`
+      : '';
+  return `${p.status ?? 'unknown'}:${p.playing ? 'play' : 'stop'}${time}${duration}`;
+}
+
+function chapterBadgeIcon(chapter: DocumentaryChapter) {
+  if (!chapter.isReaction) return 'play' as const;
+  if (chapter.reactionType === 'typed') return 'keyboard-o' as const;
+  if (chapter.reactionType === 'voice') return 'microphone' as const;
+  return 'video-camera' as const;
 }
 
 /** True when the decoder is showing the trim window (not frame 0 before seek settles). */
@@ -317,9 +350,23 @@ export default function MainStageView({
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
   const DEBUG_LOGS = __DEV__ && false;
+  const ENABLE_DOC_DIAGNOSTICS = __DEV__;
   const debugLog = (...args: any[]) => {
     if (DEBUG_LOGS) console.log(...args);
   };
+  const [documentaryDiagnostics, setDocumentaryDiagnostics] = useState<DocumentaryDiagnosticEvent[]>([]);
+  const traceDocumentary = useCallback((label: string, data?: Record<string, unknown>) => {
+    if (!ENABLE_DOC_DIAGNOSTICS) return;
+    const at = Date.now();
+    const suffix = data
+      ? ` ${Object.entries(data)
+        .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+        .join(' ')}`
+      : '';
+    const message = `${label}${suffix}`;
+    console.log(`[DOC-DIAG] ${message}`);
+    setDocumentaryDiagnostics((prev) => [...prev.slice(-11), { at, label: message }]);
+  }, [ENABLE_DOC_DIAGNOSTICS]);
 
   useEffect(() => {
     ensureExplorerAudioSessionOnce();
@@ -628,6 +675,9 @@ export default function MainStageView({
   // event_id of a reaction whose PiP clip has finished — prevents the play-retry listener
   // from restarting a clip that already reached its end (it parks paused on the last frame).
   const reactionEndedForEventRef = useRef<string | null>(null);
+  // Image documentaries speak the parent caption before reactions, then only the Deep Dive at end.
+  const parentImageCaptionPlayedForEventRef = useRef<string | null>(null);
+  const mainFinishIgnoredForReactionRef = useRef<string | null>(null);
   const documentaryCompleteHandledRef = useRef<string | null>(null);
   const chapterPlaybackPulseIndexRef = useRef<number | null>(null);
   // True when the selected Reflection has reactions (chapters.length > 1). When true we
@@ -765,18 +815,21 @@ export default function MainStageView({
           return;
         }
 
-        // Multi-chapter documentary (reactions present): defer the original Reflection's
-        // caption until the whole documentary ends. Chapter 0 advances straight to the
-        // reactions so Cole isn't held by narration before the good part.
-        if (documentaryHasReactionsRef.current) {
-          debugLog('🎙️ speakCaption deferred — caption plays after documentary ends');
+        const captionEvent = playbackEventRef.current ?? selectedEventRef.current;
+
+        // Multi-chapter VIDEO documentaries: defer the original Reflection's caption until
+        // the whole documentary ends so Cole reaches the reactions quickly.
+        // Multi-chapter IMAGE documentaries are different: show the image and speak the
+        // caption FIRST, then reactions, then the Deep Dive at the end.
+        if (documentaryHasReactionsRef.current && !!captionEvent?.video_url) {
+          debugLog('🎙️ speakCaption deferred for video documentary — caption plays after documentary ends');
           sendRef.current({ type: 'NARRATION_FINISHED' });
           return;
         }
 
         const meta = playbackMetadataRef.current ?? selectedMetadataRef.current;
         const text = trimMeta(meta?.short_caption) || trimMeta(meta?.description);
-        const audioUrl = playbackEventRef.current?.audio_url ?? selectedEventRef.current?.audio_url;
+        const audioUrl = captionEvent?.audio_url;
 
         // Use current session (already incremented by stopAllMedia or initial)
         const thisSession = captionSessionRef.current;
@@ -1193,7 +1246,11 @@ export default function MainStageView({
   ]);
 
   const docActionsRef = useRef(docActions);
+  const docStateRef = useRef(docState);
   const docCurrentIndexRef = useRef(docState.currentIndex);
+  useEffect(() => {
+    docStateRef.current = docState;
+  }, [docState]);
   useEffect(() => {
     docCurrentIndexRef.current = docState.currentIndex;
   }, [docState.currentIndex]);
@@ -1212,26 +1269,42 @@ export default function MainStageView({
   // Stable send helpers for sequence transitions (avoid capturing stale closures)
   const sendSelectEventInstant = useCallback(
     (ev: Event, meta: EventMetadata) => {
+      const resolvedEvent = withResolvedReactionUrl(ev);
+      traceDocumentary('machine.send.SELECT_EVENT_INSTANT', {
+        event: shortDiagId(ev.event_id),
+        hasVideo: !!resolvedEvent.video_url,
+        resolved: resolvedEvent.video_url !== ev.video_url,
+        docPhase: docStateRef.current.phase,
+        docIndex: docStateRef.current.currentIndex,
+      });
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
-        event: withResolvedReactionUrl(ev),
+        event: resolvedEvent,
         metadata: meta,
         takeSelfie: false,
       });
     },
-    [withResolvedReactionUrl],
+    [traceDocumentary, withResolvedReactionUrl],
   );
 
   const sendSelectEventForIndexing = useCallback(
     (ev: Event, meta: EventMetadata) => {
+      const resolvedEvent = withResolvedReactionUrl(ev);
+      traceDocumentary('machine.send.SELECT_EVENT_INSTANT.index', {
+        event: shortDiagId(ev.event_id),
+        hasVideo: !!resolvedEvent.video_url,
+        resolved: resolvedEvent.video_url !== ev.video_url,
+        docPhase: docStateRef.current.phase,
+        docIndex: docStateRef.current.currentIndex,
+      });
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
-        event: withResolvedReactionUrl(ev),
+        event: resolvedEvent,
         metadata: meta,
         takeSelfie: false,
       });
     },
-    [withResolvedReactionUrl],
+    [traceDocumentary, withResolvedReactionUrl],
   );
 
   // Update all bridge refs
@@ -1485,6 +1558,12 @@ export default function MainStageView({
     if (videoFinishHandledForEventRef.current === eventId) return;
     videoFinishHandledForEventRef.current = eventId;
 
+    traceDocumentary('video.finish.signal', {
+      event: shortDiagId(eventId),
+      machine: JSON.stringify(currentState.value),
+      docPhase: documentaryPhaseRef.current,
+      docIndex: docStateRef.current?.currentIndex,
+    });
     debugLog('🏁 Video finished — parking on poster before caption');
     parkVideoForCaption();
     sendRef.current({ type: 'VIDEO_FINISHED' });
@@ -1492,7 +1571,7 @@ export default function MainStageView({
     if (lastVideoFinishedEventIdRef.current !== eventId) {
       lastVideoFinishedEventIdRef.current = eventId;
     }
-  }, [parkVideoForCaption]);
+  }, [parkVideoForCaption, traceDocumentary]);
 
   const signalVideoFinishedRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -1655,6 +1734,12 @@ export default function MainStageView({
     // For videos: no pause/resume - only replay when finished
     if (isVideo) {
       if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
+        traceDocumentary('replay.tap.video', {
+          event: shortDiagId(selectedEventRef.current?.event_id),
+          machine: JSON.stringify(currentState.value),
+          docPhase: docStateRef.current.phase,
+          docIndex: docStateRef.current.currentIndex,
+        });
         debugLog('🔁 User pressed REPLAY (video)');
         hasAutoPlayedDeepDiveRef.current = false;
 
@@ -1697,6 +1782,12 @@ export default function MainStageView({
       currentState.matches({ viewingPhoto: 'viewing' }) ||
       currentState.matches({ playingAudio: { playback: 'done' } })
     )) {
+      traceDocumentary('replay.tap.generic', {
+        event: shortDiagId(selectedEventRef.current?.event_id),
+        machine: JSON.stringify(currentState.value),
+        docPhase: docStateRef.current.phase,
+        docIndex: docStateRef.current.currentIndex,
+      });
       debugLog('🔁 User pressed REPLAY');
       hasAutoPlayedDeepDiveRef.current = false;
 
@@ -1715,9 +1806,43 @@ export default function MainStageView({
         onReplayRef.current(selectedEventRef.current);
       }
     }
-  }, [send, config?.instantVideoPlayback]);
+  }, [send, config?.instantVideoPlayback, traceDocumentary]);
 
   const throttledSingleTap = useThrottledCallback(handleSingleTap);
+
+  const handleChapterAvatarPress = useCallback(
+    (index: number) => {
+      const chapter = docStateRef.current.chapters[index];
+      if (!chapter) return;
+
+      traceDocumentary('avatar.chapter.tap', {
+        index,
+        event: shortDiagId(chapter.event.event_id),
+        reaction: chapter.isReaction ? chapter.reactionType ?? 'unknown' : 'parent',
+        phase: docStateRef.current.phase,
+        machine: JSON.stringify(stateRef.current?.value),
+      });
+
+      // Any chapter tap is an explicit gear shift: cancel in-flight end narration and allow
+      // completion handling to run again after the newly chosen chapter path finishes.
+      documentaryCompleteHandledRef.current = null;
+      chapterPlaybackPulseIndexRef.current = null;
+      mainFinishIgnoredForReactionRef.current = null;
+      endNarrationTokenRef.current += 1;
+
+      // A tap on avatar 1 is an explicit restart of the whole documentary. Reset the
+      // image-caption marker so image captions advance to reactions again after replaying.
+      if (index === 0) {
+        parentImageCaptionPlayedForEventRef.current = null;
+      }
+
+      docActionsRef.current.gotoIndex({
+        index,
+        sendSelectEvent: sendSelectEventForIndexing,
+      });
+    },
+    [sendSelectEventForIndexing, traceDocumentary],
+  );
 
   const handleMediaDoubleTapLike = useCallback((x: number, y: number) => {
     runLikeFeedbackAtPoint(x, y);
@@ -2059,7 +2184,27 @@ export default function MainStageView({
     playNarrationPipRef.current = playNarrationPip;
   }, [playNarrationPip]);
 
-  const reactionPipPlayer = useVideoPlayer('', (p) => {
+  const reactionChapterEventId = isDocumentaryReactionChapter
+    ? documentaryActiveChapter?.event.event_id ?? null
+    : null;
+
+  // Active selfie reaction's resolved URL — the freshly-fetched map URL wins; the list URL is
+  // only a fallback for the brief window before the fresh fetch lands.
+  const reactionPipResolvedUrl =
+    isDocumentaryReactionChapter && documentaryReactionType === 'selfie' && reactionChapterEventId
+      ? reactionVideoUrlMap[reactionChapterEventId] ??
+        documentaryActiveChapter?.event.video_url ??
+        null
+      : null;
+
+  const reactionPipVideoUrl = reactionPipResolvedUrl ?? '';
+
+  // Recreate the PiP player per reaction clip. expo-video's `useVideoPlayer` keys the native
+  // player on the source (useReleasingSharedObject), so passing the URL gives every reaction a
+  // FRESH player and releases the previous one. Reusing one player via `replace()` left the
+  // 2nd/3rd clip rendering as a solid black box — the swapped source reported `readyToPlay` but
+  // the reused decoder never produced a frame.
+  const reactionPipPlayer = useVideoPlayer(reactionPipVideoUrl || '', (p) => {
     p.loop = false;
     // Emit timeUpdate so the documentary stall watchdog sees PiP playback as progress.
     p.timeUpdateEventInterval = 0.25;
@@ -2070,13 +2215,18 @@ export default function MainStageView({
     reactionPipPlayerRef.current = reactionPipPlayer;
   }, [reactionPipPlayer]);
 
-  const reactionChapterEventId = isDocumentaryReactionChapter
-    ? documentaryActiveChapter?.event.event_id ?? null
-    : null;
-
   useEffect(() => {
     reactionVideoUrlMapRef.current = reactionVideoUrlMap;
   }, [reactionVideoUrlMap]);
+
+  const reactionPrefetchKey = useMemo(
+    () =>
+      docState.chapters
+        .filter((c) => c.isReaction && c.reactionType === 'selfie')
+        .map((c) => c.event.event_id)
+        .join('|'),
+    [docState.chapters],
+  );
 
   // Pre-resolve playable video URLs for ALL selfie reaction chapters up front. We ALWAYS fetch
   // a fresh presigned URL via GET_EVENT_BUNDLE rather than trusting the list Event's video_url,
@@ -2098,6 +2248,10 @@ export default function MainStageView({
       }
     });
     if (Object.keys(seed).length) {
+      traceDocumentary('reaction.url.seed', {
+        count: Object.keys(seed).length,
+        events: Object.keys(seed).map(shortDiagId).join(','),
+      });
       setReactionVideoUrlMap((prev) => ({ ...seed, ...prev }));
     }
 
@@ -2106,6 +2260,10 @@ export default function MainStageView({
       (c) => c.isReaction && c.reactionType === 'selfie',
     );
     if (!toFetch.length) return;
+    traceDocumentary('reaction.url.prefetch.start', {
+      count: toFetch.length,
+      events: toFetch.map((c) => shortDiagId(c.event.event_id)).join(','),
+    });
 
     (async () => {
       for (const c of toFetch) {
@@ -2114,14 +2272,32 @@ export default function MainStageView({
           const response = await fetch(
             `${API_ENDPOINTS.GET_EVENT_BUNDLE}?event_id=${c.event.event_id}&explorer_id=${explorerId}`,
           );
-          if (!response.ok || cancelled) continue;
+          if (cancelled) return;
+          if (!response.ok) {
+            traceDocumentary('reaction.url.prefetch.http_fail', {
+              event: shortDiagId(c.event.event_id),
+              status: response.status,
+            });
+            continue;
+          }
           const bundle = (await response.json()) as Event;
           if (!cancelled && bundle?.video_url) {
             const url = bundle.video_url;
             // Fresh URL always wins over the seeded (possibly expired) list URL.
+            traceDocumentary('reaction.url.prefetch.ok', {
+              event: shortDiagId(c.event.event_id),
+            });
             setReactionVideoUrlMap((prev) => ({ ...prev, [c.event.event_id]: url }));
+          } else {
+            traceDocumentary('reaction.url.prefetch.no_video', {
+              event: shortDiagId(c.event.event_id),
+            });
           }
         } catch (error) {
+          traceDocumentary('reaction.url.prefetch.error', {
+            event: shortDiagId(c.event.event_id),
+            error: error instanceof Error ? error.message : String(error),
+          });
           console.warn('[MainStage] reaction bundle prefetch failed:', error);
         }
       }
@@ -2130,37 +2306,44 @@ export default function MainStageView({
     return () => {
       cancelled = true;
     };
-  }, [docState.chapters, explorerId]);
+  }, [reactionPrefetchKey, explorerId, traceDocumentary]);
 
-  // Active selfie reaction's resolved URL — the freshly-fetched map URL wins; the list URL is
-  // only a fallback for the brief window before the fresh fetch lands.
-  const reactionPipResolvedUrl =
-    isDocumentaryReactionChapter && documentaryReactionType === 'selfie' && reactionChapterEventId
-      ? reactionVideoUrlMap[reactionChapterEventId] ??
-        documentaryActiveChapter?.event.video_url ??
-        null
-      : null;
-
-  const reactionPipVideoUrl = reactionPipResolvedUrl ?? '';
-
+  // A new clip (fresh player) starts un-ready; the play driver below marks it ready once the
+  // native player reports `readyToPlay` for this source.
   useEffect(() => {
-    if (!reactionPipPlayer) return;
     setReactionPipReady(false);
     if (reactionPipVideoUrl) {
-      try {
-        reactionPipPlayer.replace(reactionPipVideoUrl);
-      } catch {
-        /* teardown / invalid URI */
-      }
-    } else {
-      try {
-        reactionPipPlayer.pause();
-        reactionPipPlayer.replace('');
-      } catch {
-        /* ignore */
-      }
+      traceDocumentary('reaction.pip.player.new_source', {
+        event: shortDiagId(reactionChapterEventId),
+        urlTail: reactionPipVideoUrl.slice(-18),
+      });
     }
-  }, [reactionPipPlayer, reactionPipVideoUrl]);
+  }, [reactionPipPlayer, reactionPipVideoUrl, reactionChapterEventId, traceDocumentary]);
+
+  useEffect(() => {
+    if (!reactionPipPlayer || !reactionPipVideoUrl) return;
+    const event = () => shortDiagId(reactionChapterEventId);
+    traceDocumentary('reaction.pip.player.attached', {
+      event: event(),
+      player: playerDiag(reactionPipPlayer),
+    });
+    const statusSub = reactionPipPlayer.addListener('statusChange', () => {
+      traceDocumentary('reaction.pip.status', {
+        event: event(),
+        player: playerDiag(reactionPipPlayerRef.current),
+      });
+    });
+    const playingSub = reactionPipPlayer.addListener('playingChange', () => {
+      traceDocumentary('reaction.pip.playing', {
+        event: event(),
+        player: playerDiag(reactionPipPlayerRef.current),
+      });
+    });
+    return () => {
+      statusSub.remove();
+      playingSub.remove();
+    };
+  }, [reactionPipPlayer, reactionPipVideoUrl, reactionChapterEventId, traceDocumentary]);
 
   // Drive selfie-reaction PiP playback the proven ReplayModal way: a persistent listener that
   // (re)issues play() on every readiness signal. A one-shot play() races source loading and
@@ -2177,6 +2360,10 @@ export default function MainStageView({
 
     let cancelled = false;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let loggedReady = false;
+    let loggedWantsFalse = false;
+    let loggedPlayAttempt = false;
+    let loggedStarted = false;
 
     const stopPoll = () => {
       if (pollTimer) {
@@ -2206,6 +2393,10 @@ export default function MainStageView({
       if (status === 'error') {
         if (explorerId && reactionPipErrorRetriedRef.current !== eventId) {
           reactionPipErrorRetriedRef.current = eventId;
+          traceDocumentary('reaction.pip.error.retry_fetch', {
+            event: shortDiagId(eventId),
+            player: playerDiag(pipPlayer),
+          });
           debugLog('🟧 Reaction PiP load error — refetching fresh URL and retrying');
           (async () => {
             try {
@@ -2215,6 +2406,9 @@ export default function MainStageView({
               if (res.ok) {
                 const bundle = (await res.json()) as Event;
                 if (bundle?.video_url) {
+                  traceDocumentary('reaction.pip.error.retry_url_ok', {
+                    event: shortDiagId(eventId),
+                  });
                   setReactionVideoUrlMap((prev) => ({
                     ...prev,
                     [eventId]: bundle.video_url as string,
@@ -2222,12 +2416,23 @@ export default function MainStageView({
                   return;
                 }
               }
+              traceDocumentary('reaction.pip.error.retry_url_fail', {
+                event: shortDiagId(eventId),
+                status: res.status,
+              });
             } catch {
+              traceDocumentary('reaction.pip.error.retry_throw', {
+                event: shortDiagId(eventId),
+              });
               /* fall through to advance */
             }
             signalVideoFinishedRef.current();
           })();
         } else {
+          traceDocumentary('reaction.pip.error.advance', {
+            event: shortDiagId(eventId),
+            player: playerDiag(pipPlayer),
+          });
           debugLog('🟥 Reaction PiP still failing after retry — advancing past this chapter');
           stopPoll();
           signalVideoFinishedRef.current();
@@ -2239,13 +2444,30 @@ export default function MainStageView({
 
       // Mount the VideoView (swap the avatar fallback for the live frame).
       setReactionPipReady(true);
+      if (!loggedReady) {
+        loggedReady = true;
+        traceDocumentary('reaction.pip.ready', {
+          event: shortDiagId(eventId),
+          player: playerDiag(pipPlayer),
+          machine: JSON.stringify(stateRef.current?.value),
+        });
+      }
 
       // Clip already played to its end (it parks paused on the last frame) — never restart it.
       if (reactionEndedForEventRef.current === eventId) {
         stopPoll();
         return;
       }
-      if (!wantsPlaying()) return;
+      if (!wantsPlaying()) {
+        if (!loggedWantsFalse) {
+          loggedWantsFalse = true;
+          traceDocumentary('reaction.pip.ready_but_machine_not_playing', {
+            event: shortDiagId(eventId),
+            machine: JSON.stringify(stateRef.current?.value),
+          });
+        }
+        return;
+      }
 
       // Best-effort: play the parent video quietly underneath for time-synced selfies.
       const docReaction = documentaryReactionRef.current;
@@ -2266,12 +2488,26 @@ export default function MainStageView({
 
       try {
         if (!pipPlayer.playing) {
+          if (!loggedPlayAttempt) {
+            loggedPlayAttempt = true;
+            traceDocumentary('reaction.pip.play_attempt', {
+              event: shortDiagId(eventId),
+              player: playerDiag(pipPlayer),
+            });
+          }
           pipPlayer.muted = false;
           pipPlayer.volume = 1;
           pipPlayer.play();
         }
         if (pipPlayer.playing) {
           documentarySelfieStartedForEventRef.current = eventId;
+          if (!loggedStarted) {
+            loggedStarted = true;
+            traceDocumentary('reaction.pip.started', {
+              event: shortDiagId(eventId),
+              player: playerDiag(pipPlayer),
+            });
+          }
           stopPoll();
         }
       } catch {
@@ -2300,6 +2536,7 @@ export default function MainStageView({
     reactionChapterEventId,
     explorerId,
     state.value,
+    traceDocumentary,
   ]);
 
   // Attach the end-of-clip handler once per reaction chapter. Kept separate from the play
@@ -2313,6 +2550,10 @@ export default function MainStageView({
 
     reactionPipEndSubRef.current?.remove();
     const onEnd = () => {
+      traceDocumentary('reaction.pip.end', {
+        event: shortDiagId(eventId),
+        player: playerDiag(reactionPipPlayerRef.current),
+      });
       reactionEndedForEventRef.current = eventId;
       const docReaction = documentaryReactionRef.current;
       const mainPlayer = playerRef.current;
@@ -2338,7 +2579,7 @@ export default function MainStageView({
         reactionPipEndSubRef.current = null;
       }
     };
-  }, [reactionPipPlayer, isDocumentaryReactionChapter, documentaryReactionType, reactionChapterEventId]);
+  }, [reactionPipPlayer, isDocumentaryReactionChapter, documentaryReactionType, reactionChapterEventId, traceDocumentary]);
 
   const startCompanionMessageParentVideo = useCallback(async () => {
     const player = playerRef.current;
@@ -2370,6 +2611,7 @@ export default function MainStageView({
     companionMessageVideoStartedForEventRef.current = null;
     reactionPipErrorRetriedRef.current = null;
     reactionEndedForEventRef.current = null;
+    mainFinishIgnoredForReactionRef.current = null;
   }, [documentaryActiveChapter?.event.event_id]);
 
   const documentaryReactionPipVisible =
@@ -2444,6 +2686,11 @@ export default function MainStageView({
           ? Boolean((evt as { isPlaying?: boolean }).isPlaying)
           : false;
       setIsVideoPlaying(isPlaying);
+      traceDocumentary('main.playing', {
+        event: shortDiagId(selectedEventRef.current?.event_id),
+        player: playerDiag(player),
+        machine: JSON.stringify(stateRef.current?.value),
+      });
       if (isPlaying) {
         void ensureStageVideoAudibleRef.current(player);
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
@@ -2469,7 +2716,17 @@ export default function MainStageView({
         const currentState = stateRef.current;
         const isInPlayingState = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
-        if (documentaryReactionRef.current.selfieUsesParentVideo) {
+        const docReaction = documentaryReactionRef.current;
+        if (docReaction.active) {
+          const ignoreKey = `playingChange:${docReaction.reactionEvent?.event_id ?? 'unknown'}`;
+          if (mainFinishIgnoredForReactionRef.current !== ignoreKey) {
+            mainFinishIgnoredForReactionRef.current = ignoreKey;
+            traceDocumentary('main.finish.ignore_reaction.playingChange', {
+              active: shortDiagId(docReaction.reactionEvent?.event_id),
+              machine: JSON.stringify(currentState?.value),
+              main: playerDiag(player),
+            });
+          }
           return;
         }
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
@@ -2501,6 +2758,12 @@ export default function MainStageView({
         evt && typeof evt === 'object' && 'status' in evt
           ? String((evt as { status?: string }).status)
           : '';
+      traceDocumentary('main.status', {
+        event: shortDiagId(selectedEventRef.current?.event_id),
+        status,
+        player: playerDiag(player),
+        machine: JSON.stringify(stateRef.current?.value),
+      });
       if (status === 'readyToPlay') {
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
         if (trim.active) {
@@ -2510,13 +2773,15 @@ export default function MainStageView({
         const docReaction = documentaryReactionRef.current;
         const deferMainPlay =
           documentaryPhaseRef.current === 'complete' ||
-          (docReaction.active &&
-            (docReaction.selfieUsesParentVideo ||
-              docReaction.selfieUsesParentImage ||
-              docReaction.usesCompanionAvatarPip));
+          docReaction.active;
         const shouldBePlaying = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
         if (shouldBePlaying && !deferMainPlay && player && !player.playing) {
+          traceDocumentary('main.ready_retry_play', {
+            event: shortDiagId(selectedEventRef.current?.event_id),
+            deferMainPlay,
+            player: playerDiag(player),
+          });
           debugLog('⚡ Player became ready while machine expects playback - starting play');
           void ensureStageVideoAudibleRef.current(player);
           player.play();
@@ -2530,7 +2795,7 @@ export default function MainStageView({
       timeSub.remove();
       statusSub.remove();
     };
-  }, [player]);
+  }, [player, traceDocumentary]);
 
   // Cleanup video player on unmount to prevent stale playback
   useEffect(() => {
@@ -2620,6 +2885,8 @@ export default function MainStageView({
 
     const captionAudioUrl = event.audio_url ?? null;
     const captionText = trimMeta(metadata?.short_caption) || trimMeta(metadata?.description);
+    const parentImageCaptionAlreadySpoken =
+      !event.video_url && parentImageCaptionPlayedForEventRef.current === event.event_id;
 
     setIsCaptionOrSparklePlayingRef.current(true);
 
@@ -2641,6 +2908,14 @@ export default function MainStageView({
         }
         if (!stillCurrent()) {
           setIsCaptionOrSparklePlayingRef.current(false);
+          return;
+        }
+
+        if (parentImageCaptionAlreadySpoken) {
+          traceDocumentary('doc.end.skip_caption_for_image', {
+            parent: shortDiagId(event.event_id),
+          });
+          proceedToDeepDive();
           return;
         }
 
@@ -2685,7 +2960,7 @@ export default function MainStageView({
         proceedToDeepDive();
       }
     })();
-  }, [playDeepDiveDirectly]);
+  }, [playDeepDiveDirectly, traceDocumentary]);
 
   useEffect(() => {
     playEndNarrationRef.current = playEndNarration;
@@ -2718,12 +2993,12 @@ export default function MainStageView({
       if (docState.phase === 'complete') {
         return;
       }
-      if (
-        docReaction.active &&
-        (docReaction.selfieUsesParentVideo ||
-          docReaction.selfieUsesParentImage ||
-          docReaction.usesCompanionAvatarPip)
-      ) {
+      if (docReaction.active) {
+        traceDocumentary('main.hardware_sync.defer_reaction', {
+          active: shortDiagId(docReaction.reactionEvent?.event_id),
+          main: playerDiag(player),
+          machine: JSON.stringify(state.value),
+        });
         return;
       }
       if (!isVideoPlaying) {
@@ -2744,7 +3019,7 @@ export default function MainStageView({
       }
     }
     // Removed pause handling for videos - they play through or finish
-  }, [state.value, player, isVideoPlaying, docState.phase]);
+  }, [state.value, player, isVideoPlaying, docState.phase, traceDocumentary]);
 
   // --- DEBUG LOGGER (State Transitions) ---
   const prevStateRef = useRef<any>(null);
@@ -2776,21 +3051,102 @@ export default function MainStageView({
     documentaryPhaseRef.current = docState.phase;
   }, [events, selectedEvent, state, onEventSelect, onDelete, onReplay, selectedMetadata, config, docState.chapters.length, docState.phase]);
 
+  useEffect(() => {
+    traceDocumentary('doc.state', {
+      phase: docState.phase,
+      index: `${docState.currentIndex + 1}/${Math.max(docState.chapters.length, 1)}`,
+      active: shortDiagId(docState.activeEvent?.event_id),
+      reaction: isDocumentaryReactionChapter ? documentaryReactionType ?? 'unknown' : 'parent',
+      machine: JSON.stringify(state.value),
+    });
+  }, [
+    docState.phase,
+    docState.currentIndex,
+    docState.chapters.length,
+    docState.activeEvent?.event_id,
+    isDocumentaryReactionChapter,
+    documentaryReactionType,
+    state.value,
+    traceDocumentary,
+  ]);
+
   // Notify parent when we enter the finished state (video/audio/narration completed).
   const wasFinishedRef = useRef(false);
   useEffect(() => {
+    wasFinishedRef.current = false;
+  }, [selectedEvent?.event_id]);
+
+  useEffect(() => {
     const isFinished = !!state && state.matches('finished');
     if (isFinished && !wasFinishedRef.current) {
+      const finishedEventId = playbackEventRef.current?.event_id ?? selectedEventRef.current?.event_id;
+      const activeDocEventId = docState.activeEvent?.event_id ?? null;
+      traceDocumentary('machine.finished.enter', {
+        docPhase: docState.phase,
+        docIndex: docState.currentIndex,
+        chapters: docState.chapters.length,
+        event: shortDiagId(finishedEventId),
+      });
       if (docState.chapters.length > 1 && docState.phase === 'playing') {
+        if (activeDocEventId && finishedEventId && activeDocEventId !== finishedEventId) {
+          traceDocumentary('doc.advance.ignore_stale_finished', {
+            active: shortDiagId(activeDocEventId),
+            finished: shortDiagId(finishedEventId),
+          });
+          wasFinishedRef.current = isFinished;
+          return;
+        }
+        const activeParent = docState.currentIndex === 0
+          ? (docState.chapters[0]?.event ?? selectedEventRef.current)
+          : null;
+        if (activeParent && !activeParent.video_url) {
+          parentImageCaptionPlayedForEventRef.current = activeParent.event_id;
+          traceDocumentary('doc.image_parent.caption_done.finished', {
+            parent: shortDiagId(activeParent.event_id),
+            machine: JSON.stringify(state.value),
+          });
+        }
         // Caption + Deep Dive are deferred to the end of the documentary, so every
         // chapter (including the original Reflection at index 0) advances immediately.
         // When the final reaction finishes, onChapterFinished flips phase -> 'complete',
         // which triggers the end-of-documentary narration over the parked poster.
+        traceDocumentary('doc.advance.from_finished', {
+          fromIndex: docState.currentIndex,
+        });
         docActions.onChapterFinished({ sendSelectEventInstant });
       }
     }
     wasFinishedRef.current = isFinished;
   }, [state?.value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Image documentaries intentionally speak the parent image caption before reactions.
+  // `viewingPhoto` does not transition through the machine's top-level `finished` state,
+  // so advance the documentary as soon as that parent caption has completed.
+  useEffect(() => {
+    if (docState.phase !== 'playing') return;
+    if (docState.chapters.length <= 1) return;
+    if (docState.currentIndex !== 0) return;
+    const parent = docState.chapters[0]?.event ?? selectedEvent;
+    if (!parent || parent.video_url) return;
+    if (parentImageCaptionPlayedForEventRef.current === parent.event_id) return;
+    if (!state.matches('viewingPhoto')) return;
+    if (state.matches({ viewingPhoto: 'narrating' })) return;
+
+    parentImageCaptionPlayedForEventRef.current = parent.event_id;
+    traceDocumentary('doc.image_parent.caption_done.advance', {
+      parent: shortDiagId(parent.event_id),
+      machine: JSON.stringify(state.value),
+    });
+    docActionsRef.current.onChapterFinished({ sendSelectEventInstant });
+  }, [
+    docState.phase,
+    docState.chapters,
+    docState.currentIndex,
+    selectedEvent,
+    state,
+    sendSelectEventInstant,
+    traceDocumentary,
+  ]);
 
   // When the documentary finishes, reset UI to the original Reflection (chapter 0, parked poster, no PiP).
   useEffect(() => {
@@ -2800,6 +3156,10 @@ export default function MainStageView({
     if (!parentId) return;
     if (documentaryCompleteHandledRef.current === parentId) return;
     documentaryCompleteHandledRef.current = parentId;
+    traceDocumentary('doc.complete.handle', {
+      parent: shortDiagId(parentId),
+      chapters: docState.chapters.length,
+    });
 
     if (reactionPipEndSubRef.current) {
       reactionPipEndSubRef.current.remove();
@@ -2826,6 +3186,8 @@ export default function MainStageView({
   useEffect(() => {
     documentaryCompleteHandledRef.current = null;
     chapterPlaybackPulseIndexRef.current = null;
+    parentImageCaptionPlayedForEventRef.current = null;
+    mainFinishIgnoredForReactionRef.current = null;
     // Invalidate any in-flight end-of-documentary narration when the Reflection changes.
     endNarrationTokenRef.current += 1;
   }, [selectedEvent?.event_id]);
@@ -2866,11 +3228,19 @@ export default function MainStageView({
       }
       if (Date.now() - lastChapterProgressAtRef.current < CHAPTER_STALL_MS) return;
       debugLog('🐶 Chapter watchdog: no playback progress — recovering by advancing');
+      traceDocumentary('watchdog.advance', {
+        docIndex: docStateRef.current.currentIndex,
+        active: shortDiagId(docStateRef.current.activeEvent?.event_id),
+        machine: JSON.stringify(stateRef.current?.value),
+        main: playerDiag(playerRef.current),
+        pip: playerDiag(reactionPipPlayerRef.current),
+        msSinceProgress: Date.now() - lastChapterProgressAtRef.current,
+      });
       lastChapterProgressAtRef.current = Date.now();
       docActionsRef.current.onChapterFinished({ sendSelectEventInstant });
     }, CHAPTER_WATCHDOG_TICK_MS);
     return () => clearInterval(interval);
-  }, [docState.phase, docState.chapters.length, sendSelectEventInstant]);
+  }, [docState.phase, docState.chapters.length, sendSelectEventInstant, traceDocumentary]);
 
   // Bounce the active Activity avatar when its chapter begins playing.
   useEffect(() => {
@@ -2951,6 +3321,11 @@ export default function MainStageView({
     // Only send SELECT_EVENT if the event ID actually changed
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
       prevEventIdRef.current = currentEventId;
+      traceDocumentary('selection.new', {
+        event: shortDiagId(currentEventId),
+        hasVideo: !!selectedEvent?.video_url,
+        reactions: docStateRef.current.chapters.length,
+      });
       debugLog(`📩 User selected reflection: ${currentEventId}`);
 
       // Use instant video playback if configured and this is a video
@@ -2991,7 +3366,7 @@ export default function MainStageView({
       // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
       performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent]);
+  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent, traceDocumentary]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -2999,13 +3374,26 @@ export default function MainStageView({
 
     // Listen for the specific "End of Stream" event from the native player
     const subscription = player.addListener('playToEnd', () => {
+      const docReaction = documentaryReactionRef.current;
+      if (docReaction.active) {
+        const ignoreKey = `playToEnd:${docReaction.reactionEvent?.event_id ?? 'unknown'}`;
+        if (mainFinishIgnoredForReactionRef.current !== ignoreKey) {
+          mainFinishIgnoredForReactionRef.current = ignoreKey;
+          traceDocumentary('main.finish.ignore_reaction.playToEnd', {
+            active: shortDiagId(docReaction.reactionEvent?.event_id),
+            machine: JSON.stringify(stateRef.current?.value),
+            main: playerDiag(player),
+          });
+        }
+        return;
+      }
       signalVideoFinishedRef.current();
     });
 
     return () => {
       subscription.remove();
     };
-  }, [player, send]);
+  }, [player, send, traceDocumentary]);
 
   // Cloud master: pause at metadata end (full file may extend past the visible window).
   useEffect(() => {
@@ -3022,6 +3410,19 @@ export default function MainStageView({
         currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
         currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
       if (!isInPlayingState) return;
+      const docReaction = documentaryReactionRef.current;
+      if (docReaction.active) {
+        const ignoreKey = `trim:${docReaction.reactionEvent?.event_id ?? 'unknown'}`;
+        if (mainFinishIgnoredForReactionRef.current !== ignoreKey) {
+          mainFinishIgnoredForReactionRef.current = ignoreKey;
+          traceDocumentary('main.finish.ignore_reaction.trim', {
+            active: shortDiagId(docReaction.reactionEvent?.event_id),
+            machine: JSON.stringify(currentState?.value),
+            main: playerDiag(player),
+          });
+        }
+        return;
+      }
       if (player.currentTime >= endSec - 0.03) {
         try {
           player.pause();
@@ -3046,6 +3447,7 @@ export default function MainStageView({
     selectedEvent?.video_url,
     selectedMetadata?.video_start_ms,
     selectedMetadata?.video_end_ms,
+    traceDocumentary,
   ]);
 
   // 3. Keep video parked on poster/trim start when fully finished (replay / deep dive context)
@@ -3125,6 +3527,14 @@ export default function MainStageView({
   // --- RENDERING HELPERS ---
 
   const handleReplayImpl = useCallback(() => {
+    traceDocumentary('replay.overlay', {
+      event: shortDiagId(selectedEventRef.current?.event_id),
+      machine: JSON.stringify(state.value),
+      docPhase: docStateRef.current.phase,
+      docIndex: docStateRef.current.currentIndex,
+      main: playerDiag(playerRef.current),
+      pip: playerDiag(reactionPipPlayerRef.current),
+    });
     hasAutoPlayedDeepDiveRef.current = false;
     setIsDeepDivePending(false);
     docActionsRef.current.reset();
@@ -3167,7 +3577,7 @@ export default function MainStageView({
     if (onReplayRef.current && selectedEventRef.current) {
       onReplayRef.current(selectedEventRef.current);
     }
-  }, [state, send, config?.instantVideoPlayback]);
+  }, [state, send, config?.instantVideoPlayback, traceDocumentary]);
 
   const handleReplay = useThrottledCallback(handleReplayImpl);
 
@@ -3409,6 +3819,8 @@ export default function MainStageView({
     const itemLikedBy = reflectionLikes[item.event_id] ?? [];
     const itemLikedByMe = !!currentUserId && itemLikedBy.includes(currentUserId);
     const itemLikeCount = itemLikedBy.length;
+    const itemReactionEvents = reactionsByParentId?.get(item.event_id) ?? [];
+    const itemChapters = buildDocumentaryChapters(item, itemReactionEvents, eventMetadata, companions);
 
     return (
       <View style={[styles.upNextItemContainer, !isLandscape && { flex: 1 }]}>
@@ -3470,6 +3882,61 @@ export default function MainStageView({
             <Text style={[styles.upNextDate, isNowPlaying && styles.upNextDateNowPlaying]}>
               {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDateFromId(item.event_id)}
             </Text>
+
+            {itemChapters.length > 0 ? (
+              <View
+                style={styles.upNextChapterRibbon}
+                pointerEvents="none"
+                accessibilityElementsHidden
+                importantForAccessibility="no-hide-descendants"
+              >
+                <Text style={styles.upNextChapterRibbonLabel}>Chapters</Text>
+                <View style={styles.upNextChapterRibbonFaces}>
+                  {itemChapters.slice(0, 6).map((chapter) => (
+                    <View
+                      key={chapter.event.event_id}
+                      style={[
+                        styles.upNextChapterAvatarWrap,
+                        !chapter.isReaction && styles.upNextChapterAvatarWrapParent,
+                      ]}
+                    >
+                      {chapter.speakerAvatarUrl ? (
+                        <Image
+                          source={{ uri: chapter.speakerAvatarUrl }}
+                          style={styles.upNextChapterAvatar}
+                          contentFit="cover"
+                        />
+                      ) : (
+                        <View
+                          style={[
+                            styles.upNextChapterAvatar,
+                            styles.upNextChapterAvatarFallback,
+                            { backgroundColor: chapter.speakerColor },
+                          ]}
+                        >
+                          <Text style={styles.upNextChapterAvatarInitial}>
+                            {chapter.speakerInitial}
+                          </Text>
+                        </View>
+                      )}
+                      <View
+                        style={[
+                          styles.upNextChapterBadge,
+                          !chapter.isReaction && styles.upNextChapterBadgeParent,
+                        ]}
+                      >
+                        <FontAwesome name={chapterBadgeIcon(chapter)} size={7} color="#fff" />
+                      </View>
+                    </View>
+                  ))}
+                  {itemChapters.length > 6 ? (
+                    <View style={styles.upNextChapterMore}>
+                      <Text style={styles.upNextChapterMoreText}>+{itemChapters.length - 6}</Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
 
             <Pressable
               onPress={(event) => {
@@ -3603,6 +4070,38 @@ export default function MainStageView({
     explorerDisplayName?.trim().length
       ? `${explorerDisplayName.trim()}'s Reflections`
       : 'Reflections';
+
+  const diagnosticOverlayLines = useMemo(() => {
+    if (!ENABLE_DOC_DIAGNOSTICS) return [];
+    const active = docState.activeEvent ?? selectedEvent;
+    const recent = documentaryDiagnostics.slice(-6).map((entry) => {
+      const secondsAgo = Math.max(0, Math.round((Date.now() - entry.at) / 1000));
+      return `${secondsAgo}s ${entry.label}`;
+    });
+    return [
+      `DOC ${docState.phase} ${docState.currentIndex + 1}/${Math.max(docState.chapters.length, 1)} ${isDocumentaryReactionChapter ? `reaction:${documentaryReactionType}` : 'parent'} ev:${shortDiagId(active?.event_id)}`,
+      `MACHINE ${JSON.stringify(state.value)}`,
+      `MAIN ${playerDiag(player)} ready:${videoReady ? 'Y' : 'N'}`,
+      `PIP ev:${shortDiagId(reactionChapterEventId)} ready:${reactionPipReady ? 'Y' : 'N'} ${playerDiag(reactionPipPlayer)}`,
+      ...recent,
+    ];
+  }, [
+    ENABLE_DOC_DIAGNOSTICS,
+    docState.phase,
+    docState.currentIndex,
+    docState.chapters.length,
+    docState.activeEvent,
+    selectedEvent,
+    isDocumentaryReactionChapter,
+    documentaryReactionType,
+    state.value,
+    player,
+    videoReady,
+    reactionChapterEventId,
+    reactionPipReady,
+    reactionPipPlayer,
+    documentaryDiagnostics,
+  ]);
 
   return (
     <GestureDetector gesture={horizontalSwipeGesture}>
@@ -3760,6 +4259,23 @@ export default function MainStageView({
                         ) : null}
                       </Animated.View>
                     ) : null}
+
+                    {diagnosticOverlayLines.length > 0 ? (
+                      <View style={styles.documentaryDiagnosticOverlay} pointerEvents="none">
+                        {diagnosticOverlayLines.map((line, index) => (
+                          <Text
+                            key={`${index}-${line}`}
+                            style={[
+                              styles.documentaryDiagnosticLine,
+                              index < 4 && styles.documentaryDiagnosticSnapshotLine,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {line}
+                          </Text>
+                        ))}
+                      </View>
+                    ) : null}
                 </Animated.View>
 
                 {/* Loading Indicator removed - was blocking video */}
@@ -3772,12 +4288,7 @@ export default function MainStageView({
                   activeIndex={docState.currentIndex}
                   isPlayingSequence={docState.isPlayingSequence}
                   chapterPlaybackPulseKey={chapterPlaybackPulseKey}
-                  onAvatarPress={(index: number) => {
-                    docActions.gotoIndex({
-                      index,
-                      sendSelectEvent: sendSelectEventForIndexing,
-                    });
-                  }}
+                  onAvatarPress={handleChapterAvatarPress}
                 />
 
                 <StageCaptionBar
@@ -4083,6 +4594,29 @@ const styles = StyleSheet.create({
     zIndex: 45,
     elevation: 45,
   },
+  documentaryDiagnosticOverlay: {
+    position: 'absolute',
+    left: 10,
+    right: 10,
+    bottom: 10,
+    maxHeight: 150,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    zIndex: 80,
+    elevation: 80,
+  },
+  documentaryDiagnosticLine: {
+    color: 'rgba(255, 255, 255, 0.78)',
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: undefined }),
+    fontSize: 10,
+    lineHeight: 13,
+  },
+  documentaryDiagnosticSnapshotLine: {
+    color: '#B8F7FF',
+    fontWeight: '700',
+  },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   narrationPipFrame: {
     position: 'absolute',
@@ -4255,6 +4789,90 @@ const styles = StyleSheet.create({
   upNextDateNowPlaying: { color: '#4FC3F7' },
   upNextMeta: { color: '#aaa', fontSize: 12, marginTop: 2 },
   upNextMetaNowPlaying: { color: '#4FC3F7', fontWeight: 'bold' },
+  upNextChapterRibbon: {
+    marginTop: 8,
+    marginHorizontal: -4,
+    paddingTop: 7,
+    paddingHorizontal: 4,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.26)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  upNextChapterRibbonLabel: {
+    color: 'rgba(255, 255, 255, 0.45)',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.35,
+    textTransform: 'uppercase',
+  },
+  upNextChapterRibbonFaces: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    overflow: 'hidden',
+  },
+  upNextChapterAvatarWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: 'rgba(18, 18, 18, 0.95)',
+    backgroundColor: 'rgba(18, 18, 18, 0.95)',
+    position: 'relative',
+  },
+  upNextChapterAvatarWrapParent: {
+    borderColor: 'rgba(79, 195, 247, 0.72)',
+  },
+  upNextChapterAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
+  upNextChapterAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  upNextChapterAvatarInitial: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  upNextChapterBadge: {
+    position: 'absolute',
+    right: -3,
+    bottom: -3,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: 'rgba(46, 120, 183, 0.95)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  upNextChapterBadgeParent: {
+    backgroundColor: 'rgba(79, 195, 247, 0.95)',
+  },
+  upNextChapterMore: {
+    minWidth: 26,
+    height: 24,
+    paddingHorizontal: 5,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  upNextChapterMoreText: {
+    color: 'rgba(255,255,255,0.78)',
+    fontSize: 10,
+    fontWeight: '800',
+  },
   reflectionId: { fontSize: 9, color: 'rgba(255,255,255,0.3)', marginTop: 2, fontFamily: 'Courier' },
   upNextLikeControl: {
     alignSelf: 'flex-start',
