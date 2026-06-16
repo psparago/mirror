@@ -315,11 +315,11 @@ export async function fetchReactionEventForPlayback(
   const snap = await getDocs(reactionsQuery);
   const matchDoc = snap.docs.find((reactionDoc) => {
     const data = reactionDoc.data();
-    // Narrations are the author's content layer, not a response.
-    if (data?.isNarration === true) return false;
     if (face.reactionEventId && (reactionDoc.id === face.reactionEventId || data?.event_id === face.reactionEventId)) {
       return true;
     }
+    // Narrations are the author's content layer, not a response.
+    if (data?.isNarration === true) return false;
     if (data?.responderRelationshipId === face.key) return true;
     return data?.sender_id === face.userId;
   });
@@ -534,6 +534,8 @@ export type ReactionPlaybackSession = {
   parentAuthorName: string;
   parentEvent: Event;
   respondedRelationshipIds: string[];
+  /** Exact child reaction faces for this parent; preserves self-reactions and duplicate responders. */
+  reactionFaces?: ReactionResponderFace[];
 };
 
 export type ReactionParentPipMedia =

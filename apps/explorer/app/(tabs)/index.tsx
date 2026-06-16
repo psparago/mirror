@@ -270,7 +270,14 @@ export default function HomeScreen() {
       existing.push({
         ...reactionEvent,
         isReaction: true,
+        isNarration: signal.isNarration,
         parentReflectionId: signal.parentReflectionId,
+        reactionType: signal.reactionType ?? reactionEvent.reactionType,
+        metadata: {
+          ...(reactionEvent.metadata ?? eventMetadata[signal.eventId]),
+          ...(signal.senderId ? { sender_id: signal.senderId } : {}),
+          ...(signal.senderName ? { sender: signal.senderName } : {}),
+        } as EventMetadata,
         responderRelationshipId: signal.responderRelationshipId,
       } as Event & { responderRelationshipId?: string });
       map.set(signal.parentReflectionId, existing);
@@ -690,7 +697,7 @@ export default function HomeScreen() {
           if (coerceIsReaction(data?.isReaction)) {
             reactionIdsFromSnapshot.add(id);
             const parentId = typeof data?.parentReflectionId === 'string' ? data.parentReflectionId : null;
-            if (parentId && data?.isNarration !== true) {
+            if (parentId) {
               const tsRaw = data?.timestamp;
               let timestampMs = 0;
               if (typeof tsRaw === 'number') {
@@ -705,7 +712,21 @@ export default function HomeScreen() {
                 eventId: id,
                 parentReflectionId: parentId,
                 timestampMs,
-                isNarration: false,
+                isNarration: data?.isNarration === true,
+                senderId:
+                  typeof data?.sender_id === 'string'
+                    ? data.sender_id
+                    : meta?.sender_id,
+                senderName:
+                  typeof data?.sender === 'string'
+                    ? data.sender
+                    : meta?.sender,
+                reactionType:
+                  data?.reactionType === 'selfie' ||
+                  data?.reactionType === 'typed' ||
+                  data?.reactionType === 'voice'
+                    ? data.reactionType
+                    : undefined,
                 responderRelationshipId: typeof data?.responderRelationshipId === 'string' ? data.responderRelationshipId : undefined,
               });
             }

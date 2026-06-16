@@ -643,6 +643,7 @@ export function ReplayModal({
   const reactionSessionForUi = reactionSessionRef.current ?? reactionSession;
 
   const reactionResponderFaces = useMemo(() => {
+    if (reactionSessionForUi?.reactionFaces?.length) return reactionSessionForUi.reactionFaces;
     if (!reactionSessionForUi?.respondedRelationshipIds?.length) return [];
     return resolveReactionResponderFaces(
       { respondedRelationshipIds: reactionSessionForUi.respondedRelationshipIds },
@@ -674,6 +675,13 @@ export function ReplayModal({
 
   const activeReactionFaceKey = useMemo(() => {
     if (!isViewingChildReaction || !displayEvent) return null;
+    const matchedByEventId = reactionResponderFaces.find(
+      (face) => face.reactionEventId === displayEvent.event_id || face.key === displayEvent.event_id,
+    );
+    if (matchedByEventId) {
+      activeReactionResponderKeyRef.current = matchedByEventId.key;
+      return matchedByEventId.key;
+    }
     const senderId = displayEvent.metadata?.sender_id;
     if (senderId) {
       const matchedFace = reactionResponderFaces.find((face) => face.userId === senderId);
@@ -847,6 +855,9 @@ export function ReplayModal({
         parentEvent: parentPlaybackEvent,
         respondedRelationshipIds: session.respondedRelationshipIds.filter(
           (id) => id !== activeRelationshipId,
+        ),
+        reactionFaces: session.reactionFaces?.filter(
+          (face) => face.reactionEventId !== deletedReactionId && face.key !== deletedReactionId,
         ),
       };
       reactionSessionRef.current = updatedSession;

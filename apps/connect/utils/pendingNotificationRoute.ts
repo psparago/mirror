@@ -175,8 +175,8 @@ export function subscribePendingNotificationRoute(listener: () => void): () => v
 }
 
 /** Pin to the Reflections tab (index) where the deep-link consumer mounts. */
-export function tabsHomeHref(): '/(tabs)/' {
-  return '/(tabs)/';
+export function tabsHomeHref() {
+  return '/(tabs)/' as any;
 }
 
 // Cold-start read happens once at module load — before any component renders.

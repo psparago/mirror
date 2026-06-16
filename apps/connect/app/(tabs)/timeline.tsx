@@ -361,6 +361,53 @@ export default function SentTimelineScreen({
     },
     [companionById, reactionRespondersByParentId],
   );
+  const resolveReactionFacesForParent = useCallback(
+    (parentEventId: string, parentReflection?: SentReflection | null): ReactionResponderFace[] => {
+      const childResponders = reactionRespondersByParentId.get(parentEventId) ?? [];
+      const reactionTypeMap = reactionTypesByParentId.get(parentEventId);
+
+      if (childResponders.length > 0) {
+        return childResponders.map((responder) => {
+          const companion =
+            (responder.relationshipId
+              ? companionByRelationshipId.get(responder.relationshipId)
+              : undefined) ??
+            (responder.userId ? companionById.get(responder.userId) : undefined);
+          const userId = responder.userId ?? companion?.userId ?? responder.relationshipId ?? responder.eventId;
+          const companionName = companion?.companionName ?? responder.companionName ?? 'Companion';
+
+          return {
+            key: responder.eventId,
+            reactionEventId: responder.eventId,
+            userId,
+            companionName,
+            avatarUrl: companion?.avatarUrl ?? null,
+            color: companion?.color ?? getAvatarColor(userId),
+            initial: companion?.initial ?? getAvatarInitial(companionName),
+            reactionType:
+              responder.reactionType ??
+              (responder.relationshipId ? reactionTypeMap?.get(responder.relationshipId) : undefined) ??
+              'selfie',
+          };
+        });
+      }
+
+      return resolveReactionResponderFaces(
+        parentReflection ?? { respondedRelationshipIds: [] },
+        companionByRelationshipId,
+        companionById,
+      ).map((face) => ({
+        ...face,
+        reactionType: reactionTypeMap?.get(face.key) ?? 'selfie',
+      }));
+    },
+    [
+      companionById,
+      companionByRelationshipId,
+      reactionRespondersByParentId,
+      reactionTypesByParentId,
+    ],
+  );
 
   useEffect(() => {
     const parents = reflections.filter((reflection) => (reflection.respondedRelationshipIds?.length ?? 0) > 0);
@@ -602,6 +649,7 @@ export default function SentTimelineScreen({
         parentAuthorName,
         parentEvent,
         respondedRelationshipIds: resolveSessionRespondedRelationshipIds(parentEventId, parentReflection),
+        reactionFaces: resolveReactionFacesForParent(parentEventId, parentReflection),
       });
 
       const reactionEvent = await fetchReactionEventForPlayback(
@@ -633,6 +681,7 @@ export default function SentTimelineScreen({
     eventObjectsMap,
     fetchingReactionFaceKey,
     reflections,
+    resolveReactionFacesForParent,
     resolveSessionRespondedRelationshipIds,
     showToast,
   ]);
@@ -844,7 +893,7 @@ export default function SentTimelineScreen({
           const parentReflectionId = coerceParentReflectionId(data?.parentReflectionId);
           const isReactionDoc = coerceIsReaction(data?.isReaction) === true;
 
-          if (isReactionDoc && parentReflectionId && data?.isNarration !== true) {
+          if (isReactionDoc && parentReflectionId) {
             const metadata = coerceEmbeddedMetadata(data?.metadata, actualEventId);
             const responder: TimelineReactionResponder = {
               eventId: actualEventId,
@@ -1397,6 +1446,7 @@ export default function SentTimelineScreen({
                 parentReflectionId,
                 parentReflection,
               ),
+              reactionFaces: resolveReactionFacesForParent(parentReflectionId, parentReflection),
             });
             setSelectedReflection(reactionEvent);
             return;
@@ -1500,6 +1550,7 @@ export default function SentTimelineScreen({
     onDeepLinkHandled,
     reactionTarget?.id,
     reflections,
+    resolveReactionFacesForParent,
     resolveSessionRespondedRelationshipIds,
     showToast,
   ]);
@@ -1787,46 +1838,12 @@ export default function SentTimelineScreen({
             const likedByOthers = likeCount > 0 && !likedByMe;
             const activeRelationshipId = activeRelationship?.id;
             const currentUid = authUser?.uid;
-            const childResponders = reactionRespondersByParentId.get(item.event_id) ?? [];
             const sessionRespondedRelationshipIds = resolveSessionRespondedRelationshipIds(item.event_id, item);
             const hasReacted =
               (!!activeRelationshipId && sessionRespondedRelationshipIds.includes(activeRelationshipId)) ||
               (!!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false));
             const showReactAffordance = item.status !== 'deleted' && item.isReaction !== true;
-            const reactionTypeMap = reactionTypesByParentId.get(item.event_id);
-            const reactionResponderFaces =
-              childResponders.length > 0
-                ? childResponders.map((responder) => {
-                    const companion =
-                      (responder.relationshipId
-                        ? companionByRelationshipId.get(responder.relationshipId)
-                        : undefined) ??
-                      (responder.userId ? companionById.get(responder.userId) : undefined);
-                    const userId = responder.userId ?? companion?.userId ?? responder.relationshipId ?? responder.eventId;
-                    const companionName = companion?.companionName ?? responder.companionName ?? 'Companion';
-
-                    return {
-                      key: responder.eventId,
-                      reactionEventId: responder.eventId,
-                      userId,
-                      companionName,
-                      avatarUrl: companion?.avatarUrl ?? null,
-                      color: companion?.color ?? getAvatarColor(userId),
-                      initial: companion?.initial ?? getAvatarInitial(companionName),
-                      reactionType:
-                        responder.reactionType ??
-                        (responder.relationshipId ? reactionTypeMap?.get(responder.relationshipId) : undefined) ??
-                        'selfie',
-                    };
-                  })
-                : resolveReactionResponderFaces(
-                    item,
-                    companionByRelationshipId,
-                    companionById,
-                  ).map((face) => ({
-                    ...face,
-                    reactionType: reactionTypeMap?.get(face.key) ?? 'selfie',
-                  }));
+            const reactionResponderFaces = resolveReactionFacesForParent(item.event_id, item);
 
             return (
               <View style={styles.reflectionItem}>
@@ -1852,6 +1869,7 @@ export default function SentTimelineScreen({
                     parentAuthorName,
                     parentEvent,
                     respondedRelationshipIds: sessionRespondedRelationshipIds,
+                    reactionFaces: reactionResponderFaces,
                   });
                   void openReplayForEventId(item.event_id, {
                     metadata: item.metadata as EventMetadata | undefined,

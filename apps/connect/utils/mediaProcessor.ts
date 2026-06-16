@@ -478,11 +478,12 @@ async function probeDurationViaDisposablePlayerAsync(workUri: string): Promise<n
     console.warn('[probeLocalVideoDurationSeconds] createVideoPlayer failed:', error);
     return null;
   } finally {
-    if (!player) return;
-    try {
-      player.replace(null);
-    } catch {
-      /* ignore */
+    if (player) {
+      try {
+        player.replace(null);
+      } catch {
+        /* ignore */
+      }
     }
   }
 }

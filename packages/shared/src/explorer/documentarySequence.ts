@@ -31,6 +31,12 @@ export interface ReactionSignal {
   /** Unix ms derived from event_id or Firestore timestamp. */
   timestampMs: number;
   isNarration: boolean;
+  /** Companion Firebase uid, when stored on the reaction signal doc. */
+  senderId?: string;
+  /** Companion display name, when stored on the reaction signal doc or metadata. */
+  senderName?: string;
+  /** Reaction mode, when stored on the reaction signal doc. */
+  reactionType?: ReactionType;
   responderRelationshipId?: string;
   respondedRelationshipIds?: string[];
 }

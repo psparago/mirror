@@ -1209,7 +1209,6 @@ export default function MainStageView({
   const reactionSignalsByParentId = useMemo(() => {
     const map = new Map<string, ReactionSignal[]>();
     for (const signal of reactionSignals) {
-      if (signal.isNarration) continue;
       const existing = map.get(signal.parentReflectionId) ?? [];
       existing.push(signal);
       map.set(signal.parentReflectionId, existing);
@@ -3839,19 +3838,32 @@ export default function MainStageView({
     const itemLikeCount = itemLikedBy.length;
     const itemReactionEvents = reactionsByParentId?.get(item.event_id) ?? [];
     const resolvedReactionEventIds = new Set(itemReactionEvents.map((reaction) => reaction.event_id));
+    const ribbonReactionEvents = itemReactionEvents.map((reaction) => ({
+      ...reaction,
+      isNarration: false,
+    }));
     const fallbackReactionEvents = (reactionSignalsByParentId.get(item.event_id) ?? [])
       .filter((signal) => !resolvedReactionEventIds.has(signal.eventId))
       .map((signal) => ({
         event_id: signal.eventId,
         image_url: item.image_url,
-        metadata: eventMetadata[signal.eventId],
+        metadata: {
+          ...(eventMetadata[signal.eventId] ?? {}),
+          event_id: signal.eventId,
+          description: eventMetadata[signal.eventId]?.description ?? signal.senderName ?? 'Reaction',
+          sender: eventMetadata[signal.eventId]?.sender ?? signal.senderName ?? 'Companion',
+          timestamp: eventMetadata[signal.eventId]?.timestamp ?? new Date(signal.timestampMs || Date.now()).toISOString(),
+          ...(signal.senderId ? { sender_id: signal.senderId } : {}),
+        } as EventMetadata,
         isReaction: true,
+        isNarration: false,
         parentReflectionId: signal.parentReflectionId,
+        reactionType: signal.reactionType,
         responderRelationshipId: signal.responderRelationshipId,
       }) as Event & { responderRelationshipId?: string });
     const itemChapters = buildDocumentaryChapters(
       item,
-      [...itemReactionEvents, ...fallbackReactionEvents],
+      [...ribbonReactionEvents, ...fallbackReactionEvents],
       eventMetadata,
       companions,
     );
