@@ -20,6 +20,7 @@ import {
   seekVideoToSeconds,
   shouldUseCompanionAvatarReactionPip,
   useThrottledCallback,
+  type ReactionSignal,
 } from '@projectmirror/shared';
 import { LikeHeartBurstOverlay, useLikeHeartBursts } from '@/components/LikeHeartBurst';
 import { playLikeFeedbackAudio, stopLikeFeedbackAudio } from '@/utils/playLikeFeedbackAudio';
@@ -321,6 +322,8 @@ interface MainStageProps {
   explorerId?: string | null;
   /** Reaction Events keyed by parent event_id; used to build documentary chapters. */
   reactionsByParentId?: Map<string, Event[]>;
+  /** Firestore reaction docs keyed at render time for non-playable ribbon fallbacks. */
+  reactionSignals?: ReactionSignal[];
 }
 
 export default function MainStageView({
@@ -346,6 +349,7 @@ export default function MainStageView({
   explorerDisplayName,
   explorerId,
   reactionsByParentId,
+  reactionSignals = [],
 }: MainStageProps) {
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
@@ -1202,6 +1206,20 @@ export default function MainStageView({
     eventMetadata,
     companions,
   );
+  const reactionSignalsByParentId = useMemo(() => {
+    const map = new Map<string, ReactionSignal[]>();
+    for (const signal of reactionSignals) {
+      if (signal.isNarration) continue;
+      const existing = map.get(signal.parentReflectionId) ?? [];
+      existing.push(signal);
+      map.set(signal.parentReflectionId, existing);
+    }
+    for (const [parentId, signals] of map) {
+      signals.sort((a, b) => a.timestampMs - b.timestampMs);
+      map.set(parentId, signals);
+    }
+    return map;
+  }, [reactionSignals]);
 
   const parentMediaEvent = docState.chapters[0]?.event ?? selectedEvent;
   const documentaryActiveChapter = docState.chapters[docState.currentIndex] ?? null;
@@ -3820,7 +3838,23 @@ export default function MainStageView({
     const itemLikedByMe = !!currentUserId && itemLikedBy.includes(currentUserId);
     const itemLikeCount = itemLikedBy.length;
     const itemReactionEvents = reactionsByParentId?.get(item.event_id) ?? [];
-    const itemChapters = buildDocumentaryChapters(item, itemReactionEvents, eventMetadata, companions);
+    const resolvedReactionEventIds = new Set(itemReactionEvents.map((reaction) => reaction.event_id));
+    const fallbackReactionEvents = (reactionSignalsByParentId.get(item.event_id) ?? [])
+      .filter((signal) => !resolvedReactionEventIds.has(signal.eventId))
+      .map((signal) => ({
+        event_id: signal.eventId,
+        image_url: item.image_url,
+        metadata: eventMetadata[signal.eventId],
+        isReaction: true,
+        parentReflectionId: signal.parentReflectionId,
+        responderRelationshipId: signal.responderRelationshipId,
+      }) as Event & { responderRelationshipId?: string });
+    const itemChapters = buildDocumentaryChapters(
+      item,
+      [...itemReactionEvents, ...fallbackReactionEvents],
+      eventMetadata,
+      companions,
+    );
 
     return (
       <View style={[styles.upNextItemContainer, !isLandscape && { flex: 1 }]}>

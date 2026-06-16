@@ -267,7 +267,12 @@ export default function HomeScreen() {
       const reactionEvent = eventsById.get(signal.eventId);
       if (!reactionEvent) continue;
       const existing = map.get(signal.parentReflectionId) ?? [];
-      existing.push({ ...reactionEvent, isReaction: true });
+      existing.push({
+        ...reactionEvent,
+        isReaction: true,
+        parentReflectionId: signal.parentReflectionId,
+        responderRelationshipId: signal.responderRelationshipId,
+      } as Event & { responderRelationshipId?: string });
       map.set(signal.parentReflectionId, existing);
     }
     // Sort each list chronologically
@@ -1412,6 +1417,7 @@ export default function HomeScreen() {
             startIdleOnInitialSelection={startIdleOnInitialSelection}
             explorerDisplayName={explorerDisplayName}
             reactionsByParentId={reactionsByParentId}
+            reactionSignals={reactionSignals}
           />
         </View>
       )}

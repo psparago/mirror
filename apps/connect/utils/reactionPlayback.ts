@@ -93,6 +93,7 @@ export function defaultReactionOriginalAudioEnabled(options: {
 
 export type ReactionResponderFace = {
   key: string;
+  reactionEventId?: string;
   userId: string;
   companionName: string;
   avatarUrl: string | null;
@@ -316,6 +317,9 @@ export async function fetchReactionEventForPlayback(
     const data = reactionDoc.data();
     // Narrations are the author's content layer, not a response.
     if (data?.isNarration === true) return false;
+    if (face.reactionEventId && (reactionDoc.id === face.reactionEventId || data?.event_id === face.reactionEventId)) {
+      return true;
+    }
     if (data?.responderRelationshipId === face.key) return true;
     return data?.sender_id === face.userId;
   });

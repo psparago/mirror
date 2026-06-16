@@ -6,6 +6,8 @@ import {
   Event,
   EventMetadata,
   ExplorerConfig,
+  getAvatarColor,
+  getAvatarInitial,
   getValidVideoTrimFromFields,
   toggleReflectionLike,
   useAuth,
@@ -84,11 +86,22 @@ interface SentReflection {
   respondedCompanionIds?: string[];
 }
 
+type TimelineReactionResponder = {
+  eventId: string;
+  relationshipId: string | null;
+  userId: string | null;
+  companionName: string | null;
+  reactionType?: ReactionType;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
 const asOptionalString = (value: unknown): string | null =>
   typeof value === 'string' && value.length > 0 ? value : null;
+
+const coerceTimelineReactionType = (value: unknown): ReactionType | undefined =>
+  value === 'selfie' || value === 'typed' || value === 'voice' ? value : undefined;
 
 const coerceLikedBy = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((uid): uid is string => typeof uid === 'string' && uid.length > 0) : [];
@@ -307,6 +320,9 @@ export default function SentTimelineScreen({
   const [reactionTypesByParentId, setReactionTypesByParentId] = useState<
     Map<string, Map<string, ReactionType>>
   >(new Map());
+  const [reactionRespondersByParentId, setReactionRespondersByParentId] = useState<
+    Map<string, TimelineReactionResponder[]>
+  >(new Map());
   /** True total Firestore reflection signals for this Explorer (list query is capped at 100). */
   const [totalReflectionCount, setTotalReflectionCount] = useState<number | null>(null);
   const countRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -325,6 +341,25 @@ export default function SentTimelineScreen({
   const companionByRelationshipId = useMemo(
     () => new Map(companions.map((companion) => [companion.relationshipId, companion])),
     [companions]
+  );
+  const resolveSessionRespondedRelationshipIds = useCallback(
+    (parentEventId: string, parentReflection?: SentReflection | null): string[] => {
+      const childRelationshipIds = (reactionRespondersByParentId.get(parentEventId) ?? [])
+        .map((responder) => {
+          if (responder.relationshipId) return responder.relationshipId;
+          if (responder.userId) return companionById.get(responder.userId)?.relationshipId;
+          return undefined;
+        })
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+      return [
+        ...new Set([
+          ...(parentReflection?.respondedRelationshipIds ?? []),
+          ...childRelationshipIds,
+        ]),
+      ];
+    },
+    [companionById, reactionRespondersByParentId],
   );
 
   useEffect(() => {
@@ -566,7 +601,7 @@ export default function SentTimelineScreen({
         parentEventId,
         parentAuthorName,
         parentEvent,
-        respondedRelationshipIds: parentReflection?.respondedRelationshipIds ?? [],
+        respondedRelationshipIds: resolveSessionRespondedRelationshipIds(parentEventId, parentReflection),
       });
 
       const reactionEvent = await fetchReactionEventForPlayback(
@@ -593,7 +628,14 @@ export default function SentTimelineScreen({
     } finally {
       setFetchingReactionFaceKey(null);
     }
-  }, [currentExplorerId, eventObjectsMap, fetchingReactionFaceKey, reflections, showToast]);
+  }, [
+    currentExplorerId,
+    eventObjectsMap,
+    fetchingReactionFaceKey,
+    reflections,
+    resolveSessionRespondedRelationshipIds,
+    showToast,
+  ]);
 
   // Derive display reflections with fresh hasResponse values
   // This ensures the list updates when responseEventIds changes
@@ -744,6 +786,7 @@ export default function SentTimelineScreen({
     if (!currentExplorerId) {
       setLoading(false);
       setTotalReflectionCount(null);
+      setReactionRespondersByParentId(new Map());
       if (countRefreshTimerRef.current) {
         clearTimeout(countRefreshTimerRef.current);
         countRefreshTimerRef.current = null;
@@ -778,6 +821,7 @@ export default function SentTimelineScreen({
 
         // Group signals by event_id, keeping the one with highest status priority
         const reflectionMap = new Map<string, SentReflection>();
+        const reactionResponderMap = new Map<string, TimelineReactionResponder[]>();
 
         // Status priority: replayed > engaged > ready > deleted
         const statusPriority: { [key: string]: number } = {
@@ -797,6 +841,26 @@ export default function SentTimelineScreen({
           // Fall back to event_id field if document ID is somehow different
           const actualEventId = docId || eventIdFromData;
           if (!actualEventId) continue;
+          const parentReflectionId = coerceParentReflectionId(data?.parentReflectionId);
+          const isReactionDoc = coerceIsReaction(data?.isReaction) === true;
+
+          if (isReactionDoc && parentReflectionId && data?.isNarration !== true) {
+            const metadata = coerceEmbeddedMetadata(data?.metadata, actualEventId);
+            const responder: TimelineReactionResponder = {
+              eventId: actualEventId,
+              relationshipId: asOptionalString(data?.responderRelationshipId),
+              userId: asOptionalString(data?.sender_id) ?? metadata?.sender_id ?? null,
+              companionName:
+                metadata?.sender ||
+                asOptionalString(data?.sender) ||
+                null,
+              reactionType: coerceTimelineReactionType(data?.reactionType),
+            };
+            const current = reactionResponderMap.get(parentReflectionId) ?? [];
+            if (!current.some((existing) => existing.eventId === responder.eventId)) {
+              reactionResponderMap.set(parentReflectionId, [...current, responder]);
+            }
+          }
 
           // Warn if document ID doesn't match event_id field
           if (eventIdFromData && docId !== eventIdFromData) {
@@ -1015,6 +1079,7 @@ export default function SentTimelineScreen({
         });
 
         setReflections(reflectionsList);
+        setReactionRespondersByParentId(reactionResponderMap);
         setLoading(false);
         scheduleReflectionCountRefresh();
       },
@@ -1328,7 +1393,10 @@ export default function SentTimelineScreen({
               parentEventId: parentReflectionId,
               parentAuthorName,
               parentEvent,
-              respondedRelationshipIds: parentReflection?.respondedRelationshipIds ?? [],
+              respondedRelationshipIds: resolveSessionRespondedRelationshipIds(
+                parentReflectionId,
+                parentReflection,
+              ),
             });
             setSelectedReflection(reactionEvent);
             return;
@@ -1432,6 +1500,7 @@ export default function SentTimelineScreen({
     onDeepLinkHandled,
     reactionTarget?.id,
     reflections,
+    resolveSessionRespondedRelationshipIds,
     showToast,
   ]);
 
@@ -1718,19 +1787,46 @@ export default function SentTimelineScreen({
             const likedByOthers = likeCount > 0 && !likedByMe;
             const activeRelationshipId = activeRelationship?.id;
             const currentUid = authUser?.uid;
+            const childResponders = reactionRespondersByParentId.get(item.event_id) ?? [];
+            const sessionRespondedRelationshipIds = resolveSessionRespondedRelationshipIds(item.event_id, item);
             const hasReacted =
-              (!!activeRelationshipId && (item.respondedRelationshipIds?.includes(activeRelationshipId) ?? false)) ||
+              (!!activeRelationshipId && sessionRespondedRelationshipIds.includes(activeRelationshipId)) ||
               (!!currentUid && (item.respondedCompanionIds?.includes(currentUid) ?? false));
             const showReactAffordance = item.status !== 'deleted' && item.isReaction !== true;
             const reactionTypeMap = reactionTypesByParentId.get(item.event_id);
-            const reactionResponderFaces = resolveReactionResponderFaces(
-              item,
-              companionByRelationshipId,
-              companionById,
-            ).map((face) => ({
-              ...face,
-              reactionType: reactionTypeMap?.get(face.key) ?? 'selfie',
-            }));
+            const reactionResponderFaces =
+              childResponders.length > 0
+                ? childResponders.map((responder) => {
+                    const companion =
+                      (responder.relationshipId
+                        ? companionByRelationshipId.get(responder.relationshipId)
+                        : undefined) ??
+                      (responder.userId ? companionById.get(responder.userId) : undefined);
+                    const userId = responder.userId ?? companion?.userId ?? responder.relationshipId ?? responder.eventId;
+                    const companionName = companion?.companionName ?? responder.companionName ?? 'Companion';
+
+                    return {
+                      key: responder.eventId,
+                      reactionEventId: responder.eventId,
+                      userId,
+                      companionName,
+                      avatarUrl: companion?.avatarUrl ?? null,
+                      color: companion?.color ?? getAvatarColor(userId),
+                      initial: companion?.initial ?? getAvatarInitial(companionName),
+                      reactionType:
+                        responder.reactionType ??
+                        (responder.relationshipId ? reactionTypeMap?.get(responder.relationshipId) : undefined) ??
+                        'selfie',
+                    };
+                  })
+                : resolveReactionResponderFaces(
+                    item,
+                    companionByRelationshipId,
+                    companionById,
+                  ).map((face) => ({
+                    ...face,
+                    reactionType: reactionTypeMap?.get(face.key) ?? 'selfie',
+                  }));
 
             return (
               <View style={styles.reflectionItem}>
@@ -1755,7 +1851,7 @@ export default function SentTimelineScreen({
                     parentEventId: item.event_id,
                     parentAuthorName,
                     parentEvent,
-                    respondedRelationshipIds: item.respondedRelationshipIds ?? [],
+                    respondedRelationshipIds: sessionRespondedRelationshipIds,
                   });
                   void openReplayForEventId(item.event_id, {
                     metadata: item.metadata as EventMetadata | undefined,
