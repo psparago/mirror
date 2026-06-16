@@ -1,8 +1,9 @@
 import type { DocumentaryChapter } from '@projectmirror/shared';
 import { Image } from 'expo-image';
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
+  Easing,
   useAnimatedStyle,
   useSharedValue,
   withSequence,
@@ -11,7 +12,11 @@ import Animated, {
 
 const AVATAR_SIZE = 58;
 const RING_SIZE = AVATAR_SIZE + 6;
-const PULSE_MS = 500;
+const BOUNCE_UP_MS = 240;
+const BOUNCE_DOWN_MS = 620;
+const BOUNCE_HEIGHT = 22;
+const INACTIVE_SCALE = 0.82;
+const INACTIVE_OPACITY = 0.3;
 
 export interface ActivityAvatarProps {
   chapter: DocumentaryChapter;
@@ -19,33 +24,63 @@ export interface ActivityAvatarProps {
   /** When true, inactive avatars are blurred. When false/idle, all are crisp. */
   isPlaying: boolean;
   onPress: () => void;
+  /** Bumps when this chapter's media starts — triggers a short bounce. */
+  playbackPulseKey?: number;
 }
 
 /**
  * A single avatar in the Activity Row.
- * Blurs when inactive during playback; pulses briefly when it becomes active.
+ * Blurs when inactive during playback; bounces when its chapter starts playing.
  */
-export function ActivityAvatar({ chapter, isActive, isPlaying, onPress }: ActivityAvatarProps) {
-  const scaleAnim = useSharedValue(1);
+export function ActivityAvatar({
+  chapter,
+  isActive,
+  isPlaying,
+  onPress,
+  playbackPulseKey = 0,
+}: ActivityAvatarProps) {
+  const focusScale = useSharedValue(1);
+  const translateY = useSharedValue(0);
   const opacityAnim = useSharedValue(1);
+  const lastPulseKeyRef = useRef(0);
+  const wasActiveRef = useRef(isActive);
+  const wasPlayingRef = useRef(isPlaying);
 
-  // Scale pulse when this avatar becomes active
-  useEffect(() => {
-    if (isActive) {
-      scaleAnim.value = withSequence(
-        withTiming(1.18, { duration: PULSE_MS / 2 }),
-        withTiming(1.0, { duration: PULSE_MS / 2 }),
-      );
-    }
-  }, [isActive, scaleAnim]);
+  // macOS-dock-style hop: jump up, then settle with a real bounce (Easing.bounce gives
+  // the multiple decreasing rebounds) — reads as a bounce, not a throb.
+  const bounce = () => {
+    translateY.value = withSequence(
+      withTiming(-BOUNCE_HEIGHT, { duration: BOUNCE_UP_MS, easing: Easing.out(Easing.cubic) }),
+      withTiming(0, { duration: BOUNCE_DOWN_MS, easing: Easing.bounce }),
+    );
+  };
 
-  // Blur inactive avatars during playback (phase 4)
+  // Bounce when this chapter becomes active, when the sequence starts playing while this
+  // avatar is already active (covers the very first chapter), or on an explicit pulse.
   useEffect(() => {
-    opacityAnim.value = withTiming(!isPlaying || isActive ? 1 : 0.28, { duration: 180 });
-  }, [isActive, isPlaying, opacityAnim]);
+    const becameActive = isActive && !wasActiveRef.current;
+    const startedPlaying = isActive && isPlaying && !wasPlayingRef.current;
+    wasActiveRef.current = isActive;
+    wasPlayingRef.current = isPlaying;
+
+    const pulseChanged =
+      playbackPulseKey > 0 && playbackPulseKey !== lastPulseKeyRef.current;
+    if (pulseChanged) lastPulseKeyRef.current = playbackPulseKey;
+
+    if (!isActive) return;
+    if (becameActive || startedPlaying || pulseChanged) bounce();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, isPlaying, playbackPulseKey]);
+
+  // Focus the active avatar; dim + shrink the others during sequence playback.
+  useEffect(() => {
+    const dim = isPlaying && !isActive;
+    focusScale.value = withTiming(dim ? INACTIVE_SCALE : 1, { duration: 200 });
+    opacityAnim.value = withTiming(dim ? INACTIVE_OPACITY : 1, { duration: 200 });
+  }, [isActive, isPlaying, focusScale, opacityAnim]);
 
   const containerStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: scaleAnim.value }],
+    transform: [{ translateY: translateY.value }, { scale: focusScale.value }],
     opacity: opacityAnim.value,
   }));
 

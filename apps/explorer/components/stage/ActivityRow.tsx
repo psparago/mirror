@@ -8,6 +8,8 @@ export interface ActivityRowProps {
   activeIndex: number;
   /** When true, inactive avatars blur. When false (idle/complete), all avatars are crisp. */
   isPlayingSequence: boolean;
+  /** Increments when the active chapter's media starts playing. */
+  chapterPlaybackPulseKey?: number;
   onAvatarPress: (index: number) => void;
 }
 
@@ -15,7 +17,13 @@ export interface ActivityRowProps {
  * Horizontal row of speaker avatars beneath the main stage media.
  * Chapter 0 = base Reflection author (always shown); 1…n = Companion reactions.
  */
-export function ActivityRow({ chapters, activeIndex, isPlayingSequence, onAvatarPress }: ActivityRowProps) {
+export function ActivityRow({
+  chapters,
+  activeIndex,
+  isPlayingSequence,
+  chapterPlaybackPulseKey = 0,
+  onAvatarPress,
+}: ActivityRowProps) {
   if (chapters.length < 1) return null;
 
   return (
@@ -31,6 +39,7 @@ export function ActivityRow({ chapters, activeIndex, isPlayingSequence, onAvatar
           chapter={chapter}
           isActive={chapter.index === activeIndex}
           isPlaying={isPlayingSequence}
+          playbackPulseKey={chapter.index === activeIndex ? chapterPlaybackPulseKey : 0}
           onPress={() => onAvatarPress(chapter.index)}
         />
       ))}

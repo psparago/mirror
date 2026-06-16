@@ -131,6 +131,8 @@ export function useDocumentarySequence(
         setTimeout(() => { advanceGuardRef.current = false; }, 300);
       } else {
         phaseRef.current = 'complete';
+        currentIndexRef.current = 0;
+        setCurrentIndex(0);
         setPhase('complete');
       }
     },

@@ -1,8 +1,14 @@
 import type { DocumentaryChapter } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { VideoView } from 'expo-video';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 export interface DocumentaryReactionPipProps {
   visible: boolean;
@@ -10,6 +16,8 @@ export interface DocumentaryReactionPipProps {
   chapter: DocumentaryChapter | null;
   /** expo-video player for selfie reaction clips */
   reactionPlayer: ReturnType<typeof import('expo-video').useVideoPlayer> | null;
+  /** True once the PiP video source is loaded and ready to display. */
+  videoReady?: boolean;
 }
 
 /**
@@ -21,12 +29,51 @@ export function DocumentaryReactionPip({
   mode,
   chapter,
   reactionPlayer,
+  videoReady = false,
 }: DocumentaryReactionPipProps) {
+  const enter = useSharedValue(0);
+  const chapterIndex = chapter?.index ?? -1;
+
+  // Pop the PiP in whenever the chapter changes — this is the visible
+  // transition between documentary chapters (the main stage stays on the parent).
+  useEffect(() => {
+    enter.value = 0;
+    enter.value = withTiming(1, {
+      duration: 320,
+      easing: Easing.out(Easing.back(1.6)),
+    });
+  }, [chapterIndex, enter]);
+
+  const animStyle = useAnimatedStyle(() => ({
+    opacity: enter.value,
+    transform: [
+      { scale: 0.6 + 0.4 * enter.value },
+      { translateY: (1 - enter.value) * 16 },
+    ],
+  }));
+
   if (!visible || !chapter) return null;
 
+  const showSelfieVideo =
+    mode === 'selfie-video' && !!reactionPlayer && videoReady;
+
+  const avatarFallback = chapter.speakerAvatarUrl ? (
+    <Image
+      source={{ uri: chapter.speakerAvatarUrl }}
+      style={styles.media}
+      contentFit="cover"
+      recyclingKey={`doc-reaction-pip-${chapter.index}`}
+      cachePolicy="memory-disk"
+    />
+  ) : (
+    <View style={[styles.fallback, { backgroundColor: chapter.speakerColor }]}>
+      <Text style={styles.initial}>{chapter.speakerInitial}</Text>
+    </View>
+  );
+
   return (
-    <View style={styles.frame} pointerEvents="none">
-      {mode === 'selfie-video' && reactionPlayer ? (
+    <Animated.View style={[styles.frame, animStyle]} pointerEvents="none">
+      {showSelfieVideo ? (
         <VideoView
           player={reactionPlayer}
           style={styles.media}
@@ -35,23 +82,9 @@ export function DocumentaryReactionPip({
           allowsFullscreen={false}
         />
       ) : (
-        <>
-          {chapter.speakerAvatarUrl ? (
-            <Image
-              source={{ uri: chapter.speakerAvatarUrl }}
-              style={styles.media}
-              contentFit="cover"
-              recyclingKey={`doc-reaction-pip-${chapter.index}`}
-              cachePolicy="memory-disk"
-            />
-          ) : (
-            <View style={[styles.fallback, { backgroundColor: chapter.speakerColor }]}>
-              <Text style={styles.initial}>{chapter.speakerInitial}</Text>
-            </View>
-          )}
-        </>
+        avatarFallback
       )}
-    </View>
+    </Animated.View>
   );
 }
 
