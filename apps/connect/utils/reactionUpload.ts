@@ -1,4 +1,9 @@
-import { ensureFileUri, prepareImageForUpload } from '@/utils/mediaProcessor';
+import {
+  ensureFileUri,
+  getVideoUploadMetadataAsync,
+  prepareImageForUpload,
+  processVideoForUpload,
+} from '@/utils/mediaProcessor';
 import { formatTypedReactionSpeechText } from '@/utils/reactionPlayback';
 import { loadVoicePreferences } from '@/utils/ttsVoices';
 import { diagnosticsAppLog } from '@/utils/diagnosticsLog';
@@ -210,13 +215,20 @@ export async function uploadReaction({
     throw new Error('Upload service returned no upload URLs');
   }
 
+  let videoUriForUpload = recordedVideoUri;
+  let videoUploadMetadata: Awaited<ReturnType<typeof getVideoUploadMetadataAsync>> = null;
+  if (reactionType === 'selfie' && recordedVideoUri) {
+    videoUriForUpload = await processVideoForUpload(recordedVideoUri, { alwaysCompress: true });
+    videoUploadMetadata = await getVideoUploadMetadataAsync(videoUriForUpload);
+  }
+
   const imageUploadUrl = asOptionalString(urls['image.jpg']);
   if (!imageUploadUrl) {
     throw new Error('Upload service returned no image upload URL');
   }
 
   const posterUri = await resolvePosterUri(reactionType, {
-    recordedVideoUri,
+    recordedVideoUri: videoUriForUpload,
     parentPosterUri,
   });
   diagnosticsAppLog('reactionUpload', 'upload:poster-ready', { reactionType });
@@ -225,11 +237,11 @@ export async function uploadReaction({
 
   if (reactionType === 'selfie') {
     const videoUploadUrl = asOptionalString(urls['video.mp4']);
-    if (!videoUploadUrl || !recordedVideoUri) {
+    if (!videoUploadUrl || !videoUriForUpload) {
       throw new Error('Upload service returned incomplete selfie upload URLs');
     }
     uploadPromises.push(
-      FileSystem.uploadAsync(videoUploadUrl, recordedVideoUri, {
+      FileSystem.uploadAsync(videoUploadUrl, videoUriForUpload, {
         httpMethod: 'PUT',
         headers: { 'Content-Type': 'video/mp4' },
       }).then((res) => {
@@ -274,6 +286,11 @@ export async function uploadReaction({
     content_type: reactionType === 'selfie' ? 'video' : 'audio',
     image_source: 'camera',
     ...(reactionType === 'selfie' ? { is_selfie: true } : {}),
+    ...(videoUploadMetadata?.width ? { video_width: videoUploadMetadata.width } : {}),
+    ...(videoUploadMetadata?.height ? { video_height: videoUploadMetadata.height } : {}),
+    ...(videoUploadMetadata?.rotationDegrees !== undefined
+      ? { video_rotation_degrees: videoUploadMetadata.rotationDegrees }
+      : {}),
     ...(reactionType === 'typed'
       ? { reaction_message: trimmedMessage, description: trimmedMessage }
       : {}),

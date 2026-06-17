@@ -112,7 +112,7 @@ export function CompanionPreviewOverlay({
           <VideoView
             player={selfiePlayer}
             style={reactionPipStyles.pipFrame}
-            contentFit="cover"
+            contentFit="contain"
             nativeControls={false}
             allowsFullscreen={false}
             pointerEvents="none"

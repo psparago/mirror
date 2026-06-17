@@ -77,7 +77,7 @@ export function DocumentaryReactionPip({
         <VideoView
           player={reactionPlayer}
           style={styles.media}
-          contentFit="cover"
+          contentFit="contain"
           nativeControls={false}
           allowsFullscreen={false}
         />

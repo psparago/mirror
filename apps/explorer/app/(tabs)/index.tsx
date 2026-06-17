@@ -121,6 +121,15 @@ function normalizeFirestoreMetadata(raw: unknown, fallbackEventId: string): Even
     if (thumbMs !== undefined) {
       meta.thumbnail_time_ms = thumbMs;
     }
+    if (typeof o.video_width === 'number' && Number.isFinite(o.video_width)) {
+      meta.video_width = o.video_width;
+    }
+    if (typeof o.video_height === 'number' && Number.isFinite(o.video_height)) {
+      meta.video_height = o.video_height;
+    }
+    if (typeof o.video_rotation_degrees === 'number' && Number.isFinite(o.video_rotation_degrees)) {
+      meta.video_rotation_degrees = o.video_rotation_degrees;
+    }
 
     return meta;
   } catch (e) {

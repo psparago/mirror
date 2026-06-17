@@ -163,6 +163,15 @@ export function coerceEmbeddedMetadata(raw: unknown, fallbackEventId: string): E
   if (typeof o.narration_event_id === 'string' && o.narration_event_id) {
     meta.narration_event_id = o.narration_event_id;
   }
+  if (typeof o.video_width === 'number' && Number.isFinite(o.video_width)) {
+    meta.video_width = o.video_width;
+  }
+  if (typeof o.video_height === 'number' && Number.isFinite(o.video_height)) {
+    meta.video_height = o.video_height;
+  }
+  if (typeof o.video_rotation_degrees === 'number' && Number.isFinite(o.video_rotation_degrees)) {
+    meta.video_rotation_degrees = o.video_rotation_degrees;
+  }
   return meta;
 }
 

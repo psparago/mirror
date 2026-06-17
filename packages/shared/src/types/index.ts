@@ -63,6 +63,12 @@ export interface EventMetadata {
   video_end_ms?: number;
   /** Poster frame position within the source video, in milliseconds. */
   thumbnail_time_ms?: number;
+  /** Encoded video width in pixels, captured after upload normalization when known. */
+  video_width?: number;
+  /** Encoded video height in pixels, captured after upload normalization when known. */
+  video_height?: number;
+  /** Rotation metadata in degrees, when known. Prefer normalized uploads with 0/undefined. */
+  video_rotation_degrees?: number;
 }
 
 export type ReactionType = 'selfie' | 'typed' | 'voice';

@@ -305,6 +305,35 @@ export type VideoProcessProgress = {
   progress: number | null;
 };
 
+export type VideoUploadMetadata = {
+  width?: number;
+  height?: number;
+  rotationDegrees?: number;
+};
+
+function coerceFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+export async function getVideoUploadMetadataAsync(uri: string): Promise<VideoUploadMetadata | null> {
+  try {
+    const raw = await getVideoMetaData(uri);
+    const meta = raw as Record<string, unknown>;
+    const width = coerceFiniteNumber(meta.width);
+    const height = coerceFiniteNumber(meta.height);
+    const rotationDegrees =
+      coerceFiniteNumber(meta.rotation) ??
+      coerceFiniteNumber(meta.orientation) ??
+      coerceFiniteNumber(meta.rotationDegrees);
+
+    if (!width && !height && rotationDegrees === undefined) return null;
+    return { width, height, rotationDegrees };
+  } catch (error) {
+    console.warn('[getVideoUploadMetadataAsync] failed:', error);
+    return null;
+  }
+}
+
 function normalizeOutputFileUri(pathOrUri: string): string {
   return pathOrUri.startsWith('file://') ? pathOrUri : `file://${pathOrUri}`;
 }

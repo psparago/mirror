@@ -1805,7 +1805,7 @@ export function ReplayModal({
           ref={pipVideoRef}
           source={{ uri: displayEvent.video_url }}
           style={[styles.reactionPipVideo, styles.reactionSelfiePip]}
-          resizeMode={ResizeMode.COVER}
+          resizeMode={ResizeMode.CONTAIN}
           isMuted={false}
           volume={1}
           shouldPlay={false}
