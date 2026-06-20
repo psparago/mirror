@@ -271,7 +271,31 @@ const StableStageVideoView = React.memo(function StableStageVideoView({ player }
     ? prevId === nextId
     : prev.player === next.player;
 
-  return samePlayer && prev.sourceKey === next.sourceKey;
+  // The native player receives source changes through `player.replace()`. Re-rendering
+  // VideoView for the same player only re-sends identical native props on the main queue.
+  return samePlayer;
+});
+
+const StableNarrationVideoView = React.memo(function StableNarrationVideoView({
+  player,
+}: {
+  player: React.ComponentProps<typeof VideoView>['player'];
+}) {
+  return (
+    <VideoView
+      player={player}
+      style={styles.narrationPipVideo}
+      contentFit="cover"
+      nativeControls={false}
+      allowsFullscreen={false}
+    />
+  );
+}, (prev, next) => {
+  const prevId = getVideoPlayerId(prev.player);
+  const nextId = getVideoPlayerId(next.player);
+  return prevId !== undefined || nextId !== undefined
+    ? prevId === nextId
+    : prev.player === next.player;
 });
 
 function displayCaptionFrom(meta: EventMetadata | null | undefined, event: Event | null | undefined): string {
@@ -2002,23 +2026,16 @@ export default function MainStageView({
       height: Math.max(1, Math.round(stagePaneHeight - 290)),
     };
   }, [height, isLandscape, width]);
-  const [stageImageSource, setStageImageSource] = useState<React.ComponentProps<typeof Image>['source']>(undefined);
-
-  useEffect(() => {
+  const stageImageSource = useMemo<React.ComponentProps<typeof Image>['source']>(() => {
     if (!selectedImageUrl) {
-      setStageImageSource(undefined);
-      return;
+      return undefined;
     }
 
-    setStageImageSource({
+    return {
       uri: selectedImageUrl,
       cacheKey: imageUrlCacheKey(selectedImageUrl),
       width: stageImageDimensions.width,
       height: stageImageDimensions.height,
-    });
-
-    return () => {
-      setStageImageSource(undefined);
     };
   }, [selectedImageUrl, stageImageDimensions.height, stageImageDimensions.width]);
 
@@ -2639,7 +2656,6 @@ export default function MainStageView({
     !!narrationPlayback && narrationPlayback.parentEventId === selectedEvent?.event_id;
 
   const clearHeavyMediaRefs = useCallback(() => {
-    setStageImageSource(undefined);
     setVideoReady(false);
     setIsVideoPlaying(false);
     playerRef.current = null;
@@ -4242,13 +4258,7 @@ export default function MainStageView({
                     {/* Bring It to Life: selfie narration PIP over the full-screen photo */}
                     {narrationPipVisible ? (
                       <View style={styles.narrationPipFrame} pointerEvents="none">
-                        <VideoView
-                          player={narrationPlayer}
-                          style={styles.narrationPipVideo}
-                          contentFit="cover"
-                          nativeControls={false}
-                          allowsFullscreen={false}
-                        />
+                        <StableNarrationVideoView player={narrationPlayer} />
                       </View>
                     ) : null}
                     {/*

@@ -1,7 +1,7 @@
 import type { DocumentaryChapter } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { VideoView } from 'expo-video';
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Easing,
@@ -24,7 +24,12 @@ export interface DocumentaryReactionPipProps {
  * Picture-in-picture overlay for documentary reaction chapters.
  * Parent Reflection stays full-screen; the reaction plays in the corner.
  */
-export function DocumentaryReactionPip({
+function getVideoPlayerId(player: DocumentaryReactionPipProps['reactionPlayer']): string | number | undefined {
+  const id = (player as { id?: unknown } | null)?.id;
+  return typeof id === 'string' || typeof id === 'number' ? id : undefined;
+}
+
+function DocumentaryReactionPipInner({
   visible,
   mode,
   chapter,
@@ -52,6 +57,11 @@ export function DocumentaryReactionPip({
     ],
   }));
 
+  const avatarSource = useMemo(
+    () => chapter?.speakerAvatarUrl ? { uri: chapter.speakerAvatarUrl } : undefined,
+    [chapter?.speakerAvatarUrl],
+  );
+
   if (!visible || !chapter) return null;
 
   const showSelfieVideo =
@@ -59,7 +69,7 @@ export function DocumentaryReactionPip({
 
   const avatarFallback = chapter.speakerAvatarUrl ? (
     <Image
-      source={{ uri: chapter.speakerAvatarUrl }}
+      source={avatarSource}
       style={styles.media}
       contentFit="cover"
       recyclingKey={`doc-reaction-pip-${chapter.index}`}
@@ -87,6 +97,23 @@ export function DocumentaryReactionPip({
     </Animated.View>
   );
 }
+
+export const DocumentaryReactionPip = React.memo(DocumentaryReactionPipInner, (prev, next) => {
+  const prevId = getVideoPlayerId(prev.reactionPlayer);
+  const nextId = getVideoPlayerId(next.reactionPlayer);
+  const samePlayer = prevId !== undefined || nextId !== undefined
+    ? prevId === nextId
+    : prev.reactionPlayer === next.reactionPlayer;
+
+  return (
+    prev.visible === next.visible &&
+    prev.mode === next.mode &&
+    prev.videoReady === next.videoReady &&
+    prev.chapter?.event.event_id === next.chapter?.event.event_id &&
+    prev.chapter?.index === next.chapter?.index &&
+    samePlayer
+  );
+});
 
 const styles = StyleSheet.create({
   frame: {

@@ -461,12 +461,10 @@ export default function HomeScreen() {
           refreshEventUrlsRef.current(eventId).then(refreshed => {
             if (refreshed) {
               debugLog(`✅ Successfully refreshed URLs for ${eventId}`);
-              // Use a slight hack to force a re-trigger if it's the same object/content
-              // by setting to null then back, but better to just set it and ensure MainStage handles it.
-              setSelectedEvent(null);
-              setTimeout(() => {
-                setSelectedEvent(refreshed);
-              }, 50);
+              // Keep the stage mounted while refreshed presigned URLs arrive. Briefly
+              // unmounting the selected Reflection can leave expo-image completing
+              // against a UIImageView that UIKit has already removed from hierarchy.
+              setSelectedEvent(refreshed);
             }
           }).catch(err => {
             console.warn(`❌ Failed to auto-refresh current event ${eventId}:`, err);
