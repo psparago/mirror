@@ -173,6 +173,29 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function isNativeMediaInterruption(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return message.includes('Seeking interrupted');
+}
+
+async function stopAndUnloadSoundSafely(sound: Audio.Sound | null | undefined): Promise<void> {
+  if (!sound) return;
+  try {
+    await sound.stopAsync();
+  } catch (error) {
+    if (!isNativeMediaInterruption(error)) {
+      console.warn('[ReflectionComposer] preview audio stop failed:', error);
+    }
+  }
+  try {
+    await sound.unloadAsync();
+  } catch (error) {
+    if (!isNativeMediaInterruption(error)) {
+      console.warn('[ReflectionComposer] preview audio unload failed:', error);
+    }
+  }
+}
+
 function clampNumberWorklet(value: number, min: number, max: number): number {
   'worklet';
   return Math.min(Math.max(value, min), max);
@@ -1384,13 +1407,19 @@ function ReflectionComposerInner({
   const [previewPhase, setPreviewPhase] = useState<PreviewPhase>('idle');
   const previewAbortRef = useRef(false);
   const previewPhaseRef = useRef<PreviewPhase>('idle');
+  const previewRunIdRef = useRef(0);
+  const previewSoundRef = useRef<Audio.Sound | null>(null);
   previewPhaseRef.current = previewPhase;
 
   const isPlayingPreview = previewPhase !== 'idle';
 
   useEffect(() => {
-    return () => { previewSound?.unloadAsync(); };
-  }, [previewSound]);
+    return () => {
+      const sound = previewSoundRef.current;
+      previewSoundRef.current = null;
+      void stopAndUnloadSoundSafely(sound);
+    };
+  }, []);
 
   const ensureSpeakerMode = useCallback(async () => {
     await configureConnectPlaybackAudioSessionAsync();
@@ -1403,10 +1432,22 @@ function ReflectionComposerInner({
           { uri },
           { shouldPlay: true, volume: 1.0 },
         );
+        previewSoundRef.current = sound;
         setPreviewSound(sound);
         sound.setOnPlaybackStatusUpdate((status) => {
+          if (!status.isLoaded) {
+            if (previewSoundRef.current === sound) {
+              previewSoundRef.current = null;
+              setPreviewSound(null);
+            }
+            resolve('stopped');
+            return;
+          }
           if (status.isLoaded && status.didJustFinish) {
-            sound.unloadAsync();
+            if (previewSoundRef.current === sound) {
+              previewSoundRef.current = null;
+            }
+            void stopAndUnloadSoundSafely(sound);
             setPreviewSound(null);
             resolve('finished');
           }
@@ -1418,41 +1459,61 @@ function ReflectionComposerInner({
   }, []);
 
   const playAiPreview = useCallback(async () => {
+    const runId = previewRunIdRef.current + 1;
+    previewRunIdRef.current = runId;
     previewAbortRef.current = false;
 
-    await ensureSpeakerMode();
+    try {
+      await ensureSpeakerMode();
+      if (previewRunIdRef.current !== runId || previewAbortRef.current) return;
 
-    const captionUrl = audioUri || aiArtifacts?.audioUrl;
-    const deepDiveUrl = aiArtifacts?.deepDiveAudioUrl;
+      const captionUrl = audioUri || aiArtifacts?.audioUrl;
+      const deepDiveUrl = aiArtifacts?.deepDiveAudioUrl;
 
-    if (captionUrl) {
-      setPreviewPhase('caption');
-      const result = await playOneClip(captionUrl);
-      if (result === 'stopped' || previewAbortRef.current) { setPreviewPhase('idle'); return; }
+      if (captionUrl) {
+        setPreviewPhase('caption');
+        const result = await playOneClip(captionUrl);
+        if (result === 'stopped' || previewRunIdRef.current !== runId || previewAbortRef.current) {
+          setPreviewPhase('idle');
+          return;
+        }
+      }
+
+      if (deepDiveUrl && !previewAbortRef.current) {
+        setPreviewPhase('pause');
+        await new Promise<void>((r) => setTimeout(r, 800));
+        if (previewRunIdRef.current !== runId || previewAbortRef.current) {
+          setPreviewPhase('idle');
+          return;
+        }
+
+        setPreviewPhase('deep_dive');
+        const result = await playOneClip(deepDiveUrl);
+        if (result === 'stopped' || previewRunIdRef.current !== runId || previewAbortRef.current) {
+          setPreviewPhase('idle');
+          return;
+        }
+      }
+    } catch (error) {
+      if (!isNativeMediaInterruption(error)) {
+        console.warn('[ReflectionComposer] preview audio play failed:', error);
+      }
+    } finally {
+      if (previewRunIdRef.current === runId) {
+        setPreviewPhase('idle');
+      }
     }
-
-    if (deepDiveUrl && !previewAbortRef.current) {
-      setPreviewPhase('pause');
-      await new Promise<void>((r) => setTimeout(r, 800));
-      if (previewAbortRef.current) { setPreviewPhase('idle'); return; }
-
-      setPreviewPhase('deep_dive');
-      const result = await playOneClip(deepDiveUrl);
-      if (result === 'stopped' || previewAbortRef.current) { setPreviewPhase('idle'); return; }
-    }
-
-    setPreviewPhase('idle');
   }, [audioUri, aiArtifacts?.audioUrl, aiArtifacts?.deepDiveAudioUrl, ensureSpeakerMode, playOneClip]);
 
   playAiPreviewRef.current = playAiPreview;
 
   const stopAiPreview = useCallback(async () => {
+    previewRunIdRef.current += 1;
     previewAbortRef.current = true;
-    if (previewSound) {
-      await previewSound.stopAsync();
-      await previewSound.unloadAsync();
-      setPreviewSound(null);
-    }
+    const sound = previewSoundRef.current ?? previewSound;
+    previewSoundRef.current = null;
+    await stopAndUnloadSoundSafely(sound);
+    setPreviewSound(null);
     setPreviewPhase('idle');
   }, [previewSound]);
 
@@ -2355,7 +2416,9 @@ function ReflectionComposerInner({
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.aiPlayBtn, !hasAiAudio && { opacity: 0.3 }]}
-            onPress={isPlayingPreview ? stopAiPreview : playAiPreview}
+            onPress={() => {
+              void (isPlayingPreview ? stopAiPreview() : playAiPreview());
+            }}
             disabled={!hasAiAudio || isAiThinking}
             activeOpacity={0.7}
           >
