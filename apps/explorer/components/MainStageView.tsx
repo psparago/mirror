@@ -62,10 +62,13 @@ import {
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  cancelAnimation,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withSpring,
+  withRepeat,
+  withSequence,
   withTiming
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -819,7 +822,6 @@ export default function MainStageView({
         if (reactionPipPlayerRef.current) {
           try {
             reactionPipPlayerRef.current.pause();
-            reactionPipPlayerRef.current.replace('');
           } catch {
             /* player may be tearing down */
           }
@@ -2051,13 +2053,17 @@ export default function MainStageView({
   const player = useVideoPlayer('', (p) => {
     p.timeUpdateEventInterval = 0.25;
   });
+  const playerSourceRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!player) return;
     if (videoSource) {
       try {
         likeVideoDuckActiveRef.current = false;
-        player.replace(videoSource);
+        if (playerSourceRef.current !== videoSource) {
+          player.replace(videoSource);
+          playerSourceRef.current = videoSource;
+        }
         player.timeUpdateEventInterval = 0.25;
         void ensureStageVideoAudibleRef.current(player);
       } catch {
@@ -2066,7 +2072,10 @@ export default function MainStageView({
     } else {
       try {
         player.pause();
-        player.replace('');
+        if (playerSourceRef.current !== null) {
+          player.replace('');
+          playerSourceRef.current = null;
+        }
       } catch {
         /* ignore */
       }
@@ -2130,6 +2139,7 @@ export default function MainStageView({
   const narrationPlayer = useVideoPlayer('', (p) => {
     p.loop = false;
   });
+  const narrationPlayerSourceRef = useRef<string | null>(null);
 
   useEffect(() => {
     narrationPlayerRef.current = narrationPlayer;
@@ -2139,14 +2149,20 @@ export default function MainStageView({
     if (!narrationPlayer) return;
     if (narrationPlayback?.videoUrl) {
       try {
-        narrationPlayer.replace(narrationPlayback.videoUrl);
+        if (narrationPlayerSourceRef.current !== narrationPlayback.videoUrl) {
+          narrationPlayer.replace(narrationPlayback.videoUrl);
+          narrationPlayerSourceRef.current = narrationPlayback.videoUrl;
+        }
       } catch {
         /* teardown / invalid URI */
       }
     } else {
       try {
         narrationPlayer.pause();
-        narrationPlayer.replace('');
+        if (narrationPlayerSourceRef.current !== null) {
+          narrationPlayer.replace('');
+          narrationPlayerSourceRef.current = null;
+        }
       } catch {
         /* ignore */
       }
@@ -2665,7 +2681,10 @@ export default function MainStageView({
     if (player) {
       try {
         player.pause();
-        player.replace('');
+        if (playerSourceRef.current !== null) {
+          player.replace('');
+          playerSourceRef.current = null;
+        }
       } catch {
         /* Player may already be released during teardown. */
       }
@@ -2680,7 +2699,6 @@ export default function MainStageView({
     if (reactionPipPlayerRef.current) {
       try {
         reactionPipPlayerRef.current.pause();
-        reactionPipPlayerRef.current.replace('');
       } catch {
         /* ignore */
       }
@@ -3201,7 +3219,6 @@ export default function MainStageView({
     if (reactionPipPlayerRef.current) {
       try {
         reactionPipPlayerRef.current.pause();
-        reactionPipPlayerRef.current.replace('');
       } catch {
         /* ignore */
       }
@@ -3528,33 +3545,44 @@ export default function MainStageView({
 
   useEffect(() => {
     if (isAnyAudioPlaying) {
-      // Use Reanimated worklet for loop animation
-      const loop = () => {
-        'worklet';
-        audioIndicatorAnim.value = withTiming(1, { duration: 300 }, () => {
-          audioIndicatorAnim.value = withTiming(0.7, { duration: 300 }, loop);
-        });
-      };
-      loop();
+      audioIndicatorAnim.value = withRepeat(
+        withSequence(
+          withTiming(1, { duration: 300 }),
+          withTiming(0.7, { duration: 300 }),
+        ),
+        -1,
+        false,
+      );
     } else {
+      cancelAnimation(audioIndicatorAnim);
       audioIndicatorAnim.value = 0.7;
     }
-  }, [isAnyAudioPlaying]);
+    return () => {
+      cancelAnimation(audioIndicatorAnim);
+    };
+  }, [audioIndicatorAnim, isAnyAudioPlaying]);
 
   // Pulse animation for Tell Me More button
+  const shouldPulseTellMeMore =
+    !!state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }));
   useEffect(() => {
-    if (state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }))) {
-      const loop = () => {
-        'worklet';
-        tellMeMorePulse.value = withTiming(1.15, { duration: 600 }, () => {
-          tellMeMorePulse.value = withTiming(1, { duration: 600 }, loop);
-        });
-      };
-      loop();
+    if (shouldPulseTellMeMore) {
+      tellMeMorePulse.value = withRepeat(
+        withSequence(
+          withTiming(1.15, { duration: 600 }),
+          withTiming(1, { duration: 600 }),
+        ),
+        -1,
+        false,
+      );
     } else {
+      cancelAnimation(tellMeMorePulse);
       tellMeMorePulse.value = 1;
     }
-  }, [state]);
+    return () => {
+      cancelAnimation(tellMeMorePulse);
+    };
+  }, [shouldPulseTellMeMore, tellMeMorePulse]);
 
 
   // --- RENDERING HELPERS ---
