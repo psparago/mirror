@@ -1413,6 +1413,15 @@ export default function CreationModal({
 
     const reactionParentIdForUpload = reactionUploadParentIdRef.current ?? parentReflectionIdRef.current;
     const isReactionForUpload = isReaction && !!reactionParentIdForUpload;
+    const activeRelationshipId = activeRelationship?.id ?? null;
+    const narrationUriForUpload = overrides?.narrationUri ?? null;
+    if (narrationUriForUpload && !isReactionForUpload && (!user?.uid || !activeRelationshipId)) {
+      Alert.alert(
+        'Unable to Send Narration',
+        'Your Companion link is not ready. Please try sending this narrated Reflection again.'
+      );
+      return;
+    }
 
     try {
       setUploading(true);
@@ -1774,8 +1783,38 @@ export default function CreationModal({
         }
       }
 
-      // 9. Cleanup Staging & Local (image + TTS artifacts)
-      showToast('✅ Reflection sent!');
+      // 9. Upload the selfie narration before the parent signal doc exists, so
+      // the parent is written with its narration flags from birth. If this fails,
+      // do not silently ship a plain AI-caption photo.
+      let narrationEventId: string | null = null;
+      if (narrationUriForUpload && !isReactionForUpload && user?.uid && activeRelationshipId) {
+        try {
+          narrationEventId = await uploadReaction({
+            reactionType: 'selfie',
+            explorerId: currentExplorerId,
+            parentReflectionId: eventID,
+            syncStartTimeMillis: 0,
+            senderName: companionName || 'Companion',
+            senderId: user.uid,
+            activeRelationshipId,
+            recordedVideoUri: narrationUriForUpload,
+            isNarration: true,
+          });
+        } catch (narrationError) {
+          console.warn('[uploadEventBundle] narration upload failed:', narrationError);
+          Alert.alert(
+            'Narration Not Sent',
+            'The narrated video could not be uploaded, so this Reflection was not sent. Please try again.'
+          );
+          return;
+        }
+      }
+      if (narrationEventId) {
+        eventMetadata.has_narration = true;
+        eventMetadata.narration_event_id = narrationEventId;
+      }
+
+      // 10. Cleanup Staging & Local (image + TTS artifacts)
 
       if ((stagingIdToDelete || stagingEventId || stagingEventIdRef.current || stagingTtsKeysToDelete.length > 0) && currentExplorerId) {
         try {
@@ -1810,38 +1849,7 @@ export default function CreationModal({
         await stopRecording();
       }
 
-      // 10a. Upload the selfie narration BEFORE the parent signal doc exists, so
-      // the parent is written with its narration flags from birth. Flagging the
-      // parent afterwards created a race: tapping the fresh timeline row (or the
-      // Explorer opening it) saw a doc version without flags and played the
-      // photo without the narration PIP. A narration failure must not fail the send.
-      const activeRelationshipId = activeRelationship?.id ?? null;
-      const narrationUriForUpload = overrides?.narrationUri ?? null;
-      let narrationEventId: string | null = null;
-      if (narrationUriForUpload && !isReactionForUpload && user?.uid && activeRelationshipId) {
-        try {
-          narrationEventId = await uploadReaction({
-            reactionType: 'selfie',
-            explorerId: currentExplorerId,
-            parentReflectionId: eventID,
-            syncStartTimeMillis: 0,
-            senderName: companionName || 'Companion',
-            senderId: user.uid,
-            activeRelationshipId,
-            recordedVideoUri: narrationUriForUpload,
-            isNarration: true,
-          });
-        } catch (narrationError) {
-          console.warn('[uploadEventBundle] narration upload failed:', narrationError);
-          showToast('Reflection sent, but the narration could not be added');
-        }
-      }
-      if (narrationEventId) {
-        eventMetadata.has_narration = true;
-        eventMetadata.narration_event_id = narrationEventId;
-      }
-
-      // 10. Write signal to Firestore before closing the modal (onClose clears reaction parent refs).
+      // 11. Write signal to Firestore before closing the modal (onClose clears reaction parent refs).
       const firestorePayload: Record<string, unknown> = {
         explorerId: currentExplorerId,
         event_id: eventID,
@@ -1879,8 +1887,9 @@ export default function CreationModal({
         });
       }
       reactionUploadParentIdRef.current = null;
+      showToast('✅ Reflection sent!');
 
-      // 11. Reset State & close creation overlay.
+      // 12. Reset State & close creation overlay.
       // Do NOT reset phase to 'picker' — see handleClose comment.
       // On successful send, we want to fully close, not resurface picker.
       suppressPickerRecoveryRef.current = true;

@@ -157,6 +157,10 @@ func isReactionDocument(doc *firestoredata.Document) bool {
 	return boolField(doc, "isReaction")
 }
 
+func isNarrationDocument(doc *firestoredata.Document) bool {
+	return boolField(doc, "isNarration")
+}
+
 func parentReflectionID(doc *firestoredata.Document) string {
 	return stringField(doc, "parentReflectionId")
 }
@@ -354,6 +358,10 @@ func OnReflectionCreated(ctx context.Context, e event.Event) error {
 
 	sender := senderID(doc)
 	if isReactionDocument(doc) {
+		if isNarrationDocument(doc) {
+			fmt.Printf("OnReflectionCreated: skipping narration child %s; parent Reflection notification handles this content\n", id)
+			return nil
+		}
 		parentID := parentReflectionID(doc)
 		if parentID == "" {
 			fmt.Printf("OnReflectionCreated: skipping reaction %s; missing parentReflectionId\n", id)

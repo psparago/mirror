@@ -255,6 +255,10 @@ function reflectionSenderLabel(item: SentReflection): string | undefined {
   return item.metadata?.sender || item.sender;
 }
 
+function reflectionHasBringItToLifeNarration(item: SentReflection): boolean {
+  return item.metadata?.has_narration === true || !!item.metadata?.narration_event_id;
+}
+
 /**
  * Whether this row is the current Companion's own reflection (for showing Edit).
  * Firestore often has `metadata.sender_id` but omits root `sender_id`; older rows may only match by display name.
@@ -927,7 +931,9 @@ export default function SentTimelineScreen({
           const parentReflectionId = coerceParentReflectionId(data?.parentReflectionId);
           const isReactionDoc = coerceIsReaction(data?.isReaction) === true;
 
-          if (isReactionDoc && parentReflectionId) {
+          // Bring-It-to-Life narration is authored content on the parent Reflection,
+          // not a Companion response. Do not surface it in reaction faces/badges.
+          if (isReactionDoc && parentReflectionId && data?.isNarration !== true) {
             const metadata = coerceEmbeddedMetadata(data?.metadata, actualEventId);
             const responder: TimelineReactionResponder = {
               eventId: actualEventId,
@@ -1916,7 +1922,7 @@ export default function SentTimelineScreen({
                     parentEvent,
                     respondedRelationshipIds: sessionRespondedRelationshipIds,
                     reactionFaces: reactionResponderFaces,
-                    suppressAutoPlayNarration: true,
+                    suppressAutoPlayNarration: !reflectionHasBringItToLifeNarration(item),
                   });
                   void openReplayForEventId(item.event_id, {
                     metadata: item.metadata as EventMetadata | undefined,

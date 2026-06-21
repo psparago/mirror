@@ -1255,7 +1255,28 @@ function ReflectionComposerInner({
   const showSoftVideoWarning =
     mediaType === 'video' && currentPlaybackWindowSeconds > SOFT_VIDEO_RECOMMENDED_SECONDS;
 
-  const showNarrationGuidance = canNarrate && !narrationUri;
+  const showNarrationGuidance = canNarrate;
+
+  const handleNarrationBannerPress = useCallback(() => {
+    if (!narrationUri) {
+      setIsNarrationSheetOpen(true);
+      return;
+    }
+    Alert.alert(
+      'Brought to Life',
+      'This photo has a selfie narration.',
+      [
+        { text: 'Preview', onPress: () => setIsNarrationPreviewOpen(true) },
+        { text: 'Redo', onPress: () => setIsNarrationSheetOpen(true) },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => setNarrationUri(null),
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  }, [narrationUri]);
 
   const exportCurrentPhoto = useCallback(async (): Promise<string | null> => {
     if (mediaType !== 'photo') return null;
@@ -2064,15 +2085,45 @@ function ReflectionComposerInner({
         </View>
       ) : null}
       {showNarrationGuidance ? (
-        <View style={[styles.videoGuidanceBanner, styles.narrationGuidanceBanner]}>
-          <FontAwesome name="video-camera" size={14} color="#f5c842" style={styles.narrationGuidanceIcon} />
+        <TouchableOpacity
+          style={[
+            styles.videoGuidanceBanner,
+            styles.narrationGuidanceBanner,
+            (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
+          ]}
+          onPress={handleNarrationBannerPress}
+          disabled={isSending || isBlockedByAi || photoExportBusy}
+          activeOpacity={0.82}
+          accessibilityRole="button"
+          accessibilityLabel={
+            narrationUri
+              ? 'Narration recorded. Preview, redo, or remove narration'
+              : 'Bring this photo to life with a selfie narration'
+          }
+        >
+          <FontAwesome
+            name={narrationUri ? 'check-circle' : 'video-camera'}
+            size={16}
+            color="#f5c842"
+            style={styles.narrationGuidanceIcon}
+          />
           <View style={styles.narrationGuidanceTextCol}>
-            <Text style={styles.narrationGuidanceHeadline}>Bring your photo to life!</Text>
+            <Text style={styles.narrationGuidanceHeadline}>
+              {narrationUri ? 'Your photo is brought to life' : 'Bring your photo to life'}
+            </Text>
             <Text style={styles.narrationGuidanceSubtext}>
-              Tap Narrate and tell {explorerName || 'Explorer'} about this Reflection.
+              {narrationUri
+                ? 'Tap to preview, redo, or remove the selfie narration.'
+                : `Tap here and tell ${explorerName || 'Explorer'} about this Reflection.`}
             </Text>
           </View>
-        </View>
+          <View style={styles.narrationGuidanceAction}>
+            <Text style={styles.narrationGuidanceActionText}>
+              {narrationUri ? 'Manage' : 'Start'}
+            </Text>
+            <FontAwesome name="chevron-right" size={10} color="#e0f2fe" />
+          </View>
+        </TouchableOpacity>
       ) : null}
       <TouchableOpacity
         style={styles.infoBtn}
@@ -2654,50 +2705,6 @@ function ReflectionComposerInner({
               <FontAwesome name="refresh" size={20} color="#fff" />
               <Text style={styles.photoToolBtnText}>Reset</Text>
             </TouchableOpacity>
-            {canNarrate ? (
-              <TouchableOpacity
-                style={[styles.photoToolBtn, (isBlockedByAi || photoExportBusy) && { opacity: 0.35 }]}
-                onPress={() => {
-                  if (!narrationUri) {
-                    setIsNarrationSheetOpen(true);
-                    return;
-                  }
-                  Alert.alert(
-                    'Brought to Life',
-                    'This photo has a selfie narration.',
-                    [
-                      { text: 'Preview', onPress: () => setIsNarrationPreviewOpen(true) },
-                      { text: 'Redo', onPress: () => setIsNarrationSheetOpen(true) },
-                      {
-                        text: 'Remove',
-                        style: 'destructive',
-                        onPress: () => setNarrationUri(null),
-                      },
-                      { text: 'Cancel', style: 'cancel' },
-                    ],
-                  );
-                }}
-                disabled={isSending || isBlockedByAi || photoExportBusy}
-                activeOpacity={0.75}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  narrationUri
-                    ? 'Narration recorded — preview, redo, or remove'
-                    : 'Bring this photo to life with a selfie narration'
-                }
-              >
-                <FontAwesome
-                  name="video-camera"
-                  size={20}
-                  color={narrationUri ? '#4ade80' : '#fff'}
-                />
-                <Text
-                  style={[styles.photoToolBtnText, narrationUri && styles.photoToolBtnTextActive]}
-                >
-                  Narrate
-                </Text>
-              </TouchableOpacity>
-            ) : null}
           </View>
         </View>
       )}
@@ -2745,7 +2752,7 @@ function ReflectionComposerInner({
                     {mediaType === 'video'
                       ? `Trim, set a poster, and tap the video to pause or resume. Sparkle is the next stage. X closes to the timeline. Reflections play best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
                       : canNarrate
-                        ? `Frame the photo, then tap Narrate to bring it to life — tell ${explorerName || 'Explorer'} about this Reflection in your own voice. Sparkle is the next stage. X closes to the timeline.`
+                        ? `Frame the photo, then tap the Bring your photo to life banner to tell ${explorerName || 'Explorer'} about this Reflection in your own voice. Sparkle is the next stage. X closes to the timeline.`
                         : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
                   </Text>
 
@@ -2794,12 +2801,12 @@ function ReflectionComposerInner({
                           <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
                         </View>
                         <View style={styles.infoTextWrap}>
-                          <Text style={styles.infoLabel}>Narrate — Bring It to Life</Text>
+                          <Text style={styles.infoLabel}>Bring It to Life</Text>
                           <Text style={styles.infoDesc}>
-                            Optional but powerful. Tap Narrate to open the recorder — hold the
-                            button and tell {explorerName || 'Explorer'} about this Reflection. The
-                            photo stays full screen while your selfie plays in the corner. Preview,
-                            redo, or remove from the Narrate button when you are done. A narration
+                            Optional but powerful. Tap the Bring your photo to life banner to open
+                            the recorder — hold the button and tell {explorerName || 'Explorer'} about
+                            this Reflection. The photo stays full screen while your selfie plays in
+                            the corner. Tap the banner again to preview, redo, or remove it. A narration
                             replaces the spoken caption (voice intro and AI audio); the caption text
                             and Rich Narration still work as usual.
                           </Text>
@@ -2822,7 +2829,7 @@ function ReflectionComposerInner({
                     {mediaType === 'video'
                       ? 'Video pauses when you leave Workbench for Sparkle.'
                       : canNarrate
-                        ? 'Reset snaps back to the original framing. Missed Narrate? You can return from Sparkle with the top-left arrow and add one before you send.'
+                        ? 'Reset snaps back to the original framing. Missed the banner? You can return from Sparkle with the top-left arrow and add one before you send.'
                         : 'Reset snaps back to the original framing.'}
                   </Text>
                   <Text style={styles.infoProTip}>
@@ -2837,7 +2844,7 @@ function ReflectionComposerInner({
                     {canNarrate && narrationUri
                       ? ' Your Workbench narration is attached — preview it from the Brought to Life card.'
                       : canNarrate
-                        ? ' Optional: go back to Workbench and tap Narrate to bring the photo to life first.'
+                        ? ' Optional: go back to Workbench and tap the Bring your photo to life banner first.'
                         : ' Optionally record your voice, then preview before sending.'}
                   </Text>
 
@@ -2879,7 +2886,7 @@ function ReflectionComposerInner({
                         <Text style={styles.infoDesc}>
                           Optional. Record a short intro in your own voice.
                           {canNarrate
-                            ? ' For photos, you can also go back to Workbench and tap Narrate for a selfie video instead.'
+                            ? ' For photos, you can also go back to Workbench and use the Bring your photo to life banner for a selfie video instead.'
                             : ''}{' '}
                           For videos, the Explorer watches first, then hears your voice as the caption
                           after playback ends. For photos, they hear it while viewing the image. Your
@@ -2895,10 +2902,10 @@ function ReflectionComposerInner({
                         <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
                       </View>
                       <View style={styles.infoTextWrap}>
-                        <Text style={styles.infoLabel}>Narrate — Bring It to Life</Text>
+                        <Text style={styles.infoLabel}>Bring It to Life</Text>
                         <Text style={styles.infoDesc}>
-                          Optional. Tap the top-left arrow to return to Workbench, then tap Narrate
-                          to record yourself telling {explorerName || 'Explorer'} about this
+                          Optional. Tap the top-left arrow to return to Workbench, then tap the
+                          Bring your photo to life banner to record yourself telling {explorerName || 'Explorer'} about this
                           Reflection. The photo stays full screen while your selfie plays in the
                           corner — a great alternative to a voice intro.
                         </Text>
@@ -2940,7 +2947,9 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
                       <Text style={styles.infoDesc}>
-                        Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.
+                        {canNarrate && narrationUri
+                          ? 'Run Sparkle drafts caption text and Rich Narration while your Bring-It-to-Life recording remains the spoken intro. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.'
+                          : 'Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.'}
                       </Text>
                     </View>
                   </View>
@@ -2984,7 +2993,7 @@ function ReflectionComposerInner({
                           : canNarrate && narrationUri
                             ? `Plays the Bring-It-to-Life experience ${explorerName || 'Explorer'} will see: your cropped photo full screen, your selfie narration in the corner. Rich Narration still works if they tap Tell Me More. Tap the heart to try likes — nothing sends until Send.`
                             : canNarrate
-                              ? `Shows your cropped photo, then plays your voice or AI caption — or go back to Workbench and tap Narrate first. Tap the heart to try likes; nothing sends until Send.`
+                              ? `Shows your cropped photo, then plays your voice or AI caption — or go back to Workbench and use the Bring your photo to life banner first. Tap the heart to try likes; nothing sends until Send.`
                               : 'Shows your cropped photo, then plays your voice or AI caption. You can like from the heart control, but nothing is sent until you tap Send.'}
                       </Text>
                     </View>
@@ -3230,27 +3239,53 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   narrationGuidanceBanner: {
-    alignItems: 'flex-start',
-    paddingVertical: 12,
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(20, 83, 145, 0.94)',
+    borderColor: 'rgba(125, 211, 252, 0.55)',
+    shadowColor: '#38bdf8',
+    shadowOpacity: 0.24,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
   },
   narrationGuidanceIcon: {
-    marginTop: 2,
+    width: 20,
+    textAlign: 'center',
   },
   narrationGuidanceTextCol: {
     flex: 1,
     gap: 3,
   },
   narrationGuidanceHeadline: {
-    color: 'rgba(255,255,255,0.94)',
-    fontSize: 15,
-    lineHeight: 19,
+    color: '#f5c842',
+    fontSize: 14,
+    lineHeight: 17,
     fontWeight: '700',
   },
   narrationGuidanceSubtext: {
-    color: 'rgba(255,255,255,0.76)',
+    color: 'rgba(224,242,254,0.86)',
     fontSize: 11,
-    lineHeight: 15,
+    lineHeight: 14,
     fontWeight: '600',
+  },
+  narrationGuidanceAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(15,23,42,0.34)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(224,242,254,0.42)',
+  },
+  narrationGuidanceActionText: {
+    color: '#f0f9ff',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.2,
   },
   gradientOverlay: {
     position: 'absolute',

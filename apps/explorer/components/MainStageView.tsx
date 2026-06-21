@@ -1246,6 +1246,45 @@ export default function MainStageView({
     return map;
   }, [reactionSignals]);
 
+  const narrationEventId = useMemo(() => {
+    if (!selectedEvent || selectedEvent.video_url) return null;
+    const explicitId = selectedMetadata?.narration_event_id ?? selectedEvent.narration_event_id ?? null;
+    if (explicitId) return explicitId;
+    const reactionNarration = reactionsByParentId
+      ?.get(selectedEvent.event_id)
+      ?.find((reaction) => reaction.isNarration === true);
+    if (reactionNarration?.event_id) return reactionNarration.event_id;
+    return (
+      reactionSignalsByParentId
+        .get(selectedEvent.event_id)
+        ?.find((signal) => signal.isNarration)?.eventId ?? null
+    );
+  }, [selectedEvent, selectedMetadata?.narration_event_id, reactionsByParentId, reactionSignalsByParentId]);
+
+  const selectedPlaybackEvent = useMemo((): Event | null => {
+    if (!selectedEvent || !narrationEventId || selectedEvent.video_url) return selectedEvent;
+    if (selectedEvent.has_narration === true && selectedEvent.narration_event_id === narrationEventId) {
+      return selectedEvent;
+    }
+    return {
+      ...selectedEvent,
+      has_narration: true,
+      narration_event_id: narrationEventId,
+    };
+  }, [selectedEvent, narrationEventId]);
+
+  const selectedPlaybackMetadata = useMemo((): EventMetadata | null => {
+    if (!selectedMetadata || !narrationEventId || selectedEvent?.video_url) return selectedMetadata;
+    if (selectedMetadata.has_narration === true && selectedMetadata.narration_event_id === narrationEventId) {
+      return selectedMetadata;
+    }
+    return {
+      ...selectedMetadata,
+      has_narration: true,
+      narration_event_id: narrationEventId,
+    };
+  }, [selectedMetadata, narrationEventId, selectedEvent?.video_url]);
+
   const parentMediaEvent = docState.chapters[0]?.event ?? selectedEvent;
   const documentaryActiveChapter = docState.chapters[docState.currentIndex] ?? null;
   const isDocumentaryReactionChapter = !!documentaryActiveChapter?.isReaction;
@@ -2090,11 +2129,6 @@ export default function MainStageView({
   // --- BRING IT TO LIFE (selfie narration PIP for photos) ---
   // The parent doc points at a child narration event; resolve its video URL
   // from the already-fetched feed when possible, else fetch a fresh bundle.
-  const narrationEventId = useMemo(() => {
-    if (!selectedEvent || selectedEvent.video_url) return null;
-    return selectedMetadata?.narration_event_id ?? selectedEvent.narration_event_id ?? null;
-  }, [selectedEvent, selectedMetadata?.narration_event_id]);
-
   const [narrationPlayback, setNarrationPlayback] = useState<{
     parentEventId: string;
     videoUrl: string;
@@ -3089,18 +3123,18 @@ export default function MainStageView({
   // Sync Live refs on every render
   useEffect(() => {
     eventsRef.current = events;
-    selectedEventRef.current = selectedEvent;
+    selectedEventRef.current = selectedPlaybackEvent;
     stateRef.current = state;
     onEventSelectRef.current = onEventSelect;
     onDeleteRef.current = onDelete;
     onReplayRef.current = onReplay;
-    selectedMetadataRef.current = selectedMetadata;
+    selectedMetadataRef.current = selectedPlaybackMetadata;
     configRef.current = config;
-    playbackEventRef.current = state.context.event ?? selectedEvent;
-    playbackMetadataRef.current = state.context.metadata ?? selectedMetadata;
+    playbackEventRef.current = state.context.event ?? selectedPlaybackEvent;
+    playbackMetadataRef.current = state.context.metadata ?? selectedPlaybackMetadata;
     documentaryHasReactionsRef.current = docState.chapters.length > 1;
     documentaryPhaseRef.current = docState.phase;
-  }, [events, selectedEvent, state, onEventSelect, onDelete, onReplay, selectedMetadata, config, docState.chapters.length, docState.phase]);
+  }, [events, selectedPlaybackEvent, state, onEventSelect, onDelete, onReplay, selectedPlaybackMetadata, config, docState.chapters.length, docState.phase]);
 
   useEffect(() => {
     traceDocumentary('doc.state', {
@@ -3366,7 +3400,7 @@ export default function MainStageView({
   useEffect(() => {
     const currentEventId = selectedEvent?.event_id || null;
 
-    if (!selectedMetadata) return;
+    if (!selectedPlaybackMetadata || !selectedPlaybackEvent) return;
 
     // Only send SELECT_EVENT if the event ID actually changed
     if (currentEventId && currentEventId !== prevEventIdRef.current) {
@@ -3394,16 +3428,16 @@ export default function MainStageView({
         docActionsRef.current.markPlaying();
         send({
           type: 'SELECT_EVENT_INSTANT',
-          event: selectedEvent!,
-          metadata: selectedMetadata!,
+          event: selectedPlaybackEvent,
+          metadata: selectedPlaybackMetadata,
           takeSelfie: false,
         });
       } else {
         docActionsRef.current.markPlaying();
         send({
           type: 'SELECT_EVENT',
-          event: selectedEvent!,
-          metadata: selectedMetadata!,
+          event: selectedPlaybackEvent,
+          metadata: selectedPlaybackMetadata,
           takeSelfie: false,
         });
       }
@@ -3416,7 +3450,7 @@ export default function MainStageView({
       // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
       performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedEvent, selectedMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent, traceDocumentary]);
+  }, [selectedEvent?.event_id, selectedPlaybackEvent, selectedPlaybackMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent, traceDocumentary]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -3882,10 +3916,7 @@ export default function MainStageView({
     const itemLikeCount = itemLikedBy.length;
     const itemReactionEvents = reactionsByParentId?.get(item.event_id) ?? [];
     const resolvedReactionEventIds = new Set(itemReactionEvents.map((reaction) => reaction.event_id));
-    const ribbonReactionEvents = itemReactionEvents.map((reaction) => ({
-      ...reaction,
-      isNarration: false,
-    }));
+    const ribbonReactionEvents = itemReactionEvents;
     const fallbackReactionEvents = (reactionSignalsByParentId.get(item.event_id) ?? [])
       .filter((signal) => !resolvedReactionEventIds.has(signal.eventId))
       .map((signal) => ({
@@ -3900,7 +3931,7 @@ export default function MainStageView({
           ...(signal.senderId ? { sender_id: signal.senderId } : {}),
         } as EventMetadata,
         isReaction: true,
-        isNarration: false,
+        isNarration: signal.isNarration,
         parentReflectionId: signal.parentReflectionId,
         reactionType: signal.reactionType,
         responderRelationshipId: signal.responderRelationshipId,

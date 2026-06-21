@@ -545,7 +545,7 @@ export type ReactionPlaybackSession = {
   respondedRelationshipIds: string[];
   /** Exact child reaction faces for this parent; preserves self-reactions and duplicate responders. */
   reactionFaces?: ReactionResponderFace[];
-  /** Timeline card taps should play the original parent Reflection, not auto-open narration. */
+  /** When true, parent playback stays on the plain Reflection instead of auto-opening narration. */
   suppressAutoPlayNarration?: boolean;
 };
 
