@@ -1361,7 +1361,12 @@ export default function MainStageView({
     return resolved ? { ...ev, video_url: resolved } : ev;
   }, []);
 
-  // Stable send helpers for sequence transitions (avoid capturing stale closures)
+  // Stable send helpers for sequence transitions (avoid capturing stale closures).
+  // Prime the playback refs to the chapter we're about to play BEFORE sending. The machine's
+  // entry actions (playAudio / playVideo / speakCaption) run synchronously inside send(), before
+  // the ref-sync effect updates, and read playbackEventRef. Without this a voice/typed reaction
+  // (which routes to playingAudio) replays the PARENT's caption audio instead of the reaction —
+  // the "caption plays twice" bug. Selfie reactions are unaffected (playVideo early-returns).
   const sendSelectEventInstant = useCallback(
     (ev: Event, meta: EventMetadata) => {
       const resolvedEvent = withResolvedReactionUrl(ev);
@@ -1372,6 +1377,8 @@ export default function MainStageView({
         docPhase: docStateRef.current.phase,
         docIndex: docStateRef.current.currentIndex,
       });
+      playbackEventRef.current = resolvedEvent;
+      playbackMetadataRef.current = meta;
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
         event: resolvedEvent,
@@ -1392,6 +1399,8 @@ export default function MainStageView({
         docPhase: docStateRef.current.phase,
         docIndex: docStateRef.current.currentIndex,
       });
+      playbackEventRef.current = resolvedEvent;
+      playbackMetadataRef.current = meta;
       sendRef.current?.({
         type: 'SELECT_EVENT_INSTANT',
         event: resolvedEvent,
@@ -3499,6 +3508,11 @@ export default function MainStageView({
       // Use instant video playback if configured and this is a video
       const isVideo = !!selectedEvent?.video_url;
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
+
+      // Prime the playback refs before sending so the machine's synchronous entry actions
+      // (playAudio/speakCaption) read THIS Reflection — not the previously played one.
+      playbackEventRef.current = selectedPlaybackEvent;
+      playbackMetadataRef.current = selectedPlaybackMetadata;
 
       if (startIdleOnInitialSelection && !hasConsumedInitialIdleSelectionRef.current) {
         hasConsumedInitialIdleSelectionRef.current = true;

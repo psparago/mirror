@@ -1,6 +1,15 @@
-# Reflections Connect — Client Diagnostic Logs
+# Reflections — Client Diagnostic Logs (Connect & Explorer)
 
 Opt-in diagnostic logging for family testers and production debugging. Logs are captured on the device, uploaded manually by the user, and stored in **Google Cloud Logging** (same project as the backend).
+
+Both apps share one implementation (`packages/shared/src/diagnostics/clientDiagnostics.ts`) and one ingest endpoint (`submit-client-logs`). Each app tags its uploads with a distinct `source` so the two streams stay filterable:
+
+| App | `jsonPayload.source` |
+|-----|----------------------|
+| Reflections Connect (Companion) | `connect-diagnostics` |
+| Reflections Explorer | `explorer-diagnostics` |
+
+Explorer batches also carry `jsonPayload.explorerId` (e.g. `COLE-01052010`). Because the maintainer can sign into Cole's Explorer directly, the workflow is: **Settings → System Information → Diagnostic Logs**, turn on recording, reproduce the issue, then **Send diagnostic logs** and quote the batch ID.
 
 ---
 
@@ -23,6 +32,7 @@ Everything logs to **one** Google Cloud Logging store for project **`reflections
 | View | Link |
 |------|------|
 | All Connect client diagnostics (7 days) | [open query](https://console.cloud.google.com/logs/query;query=jsonPayload.source%3D%22connect-diagnostics%22;timeRange=P7D?project=reflections-1200b) |
+| All Explorer client diagnostics (7 days) | [open query](https://console.cloud.google.com/logs/query;query=jsonPayload.source%3D%22explorer-diagnostics%22;timeRange=P7D?project=reflections-1200b) |
 | `submit-client-logs` service (ingest + errors) | [open query](https://console.cloud.google.com/logs/query;query=resource.type%3D%22cloud_run_revision%22%0Aresource.labels.service_name%3D%22submit-client-logs%22;timeRange=P7D?project=reflections-1200b) |
 | Backend example (slow-lane notifications) | [open query](https://console.cloud.google.com/logs/query;query=resource.type%3D%22cloud_run_revision%22%0Aresource.labels.service_name%3D%22aggregate-slow-lane-notifications%22;timeRange=P7D?project=reflections-1200b) |
 | Project home (pick Logs Explorer) | [Cloud Logging](https://console.cloud.google.com/logs?project=reflections-1200b) |
@@ -36,9 +46,10 @@ Requires Google sign-in with access to `reflections-1200b`.
 | Component | OTA? | Notes |
 |-----------|------|--------|
 | Connect app (Settings UI, console capture, camera instrumentation) | **Yes** | Pure JavaScript/TypeScript — ship via `eas update` on the `production` channel |
-| Cloud Function `submit-client-logs` | **No** | Deploy once: `./scripts/gcloud/deploy.sh submit-client-logs` |
+| Explorer app (System Information UI, console capture) | **Yes** | Pure JavaScript/TypeScript — `./scripts/eas/ota-update.sh explorer` |
+| Cloud Function `submit-client-logs` | **No** | Redeploy required for the `source` whitelist + `explorerId` field: `./scripts/gcloud/deploy.sh submit-client-logs` |
 
-After the function is deployed, all future app-side improvements can reach testers over OTA without a new store build.
+The function change is backward compatible: older clients that omit `source` are still tagged `connect-diagnostics`. But Explorer batches will be **mis-tagged as connect-diagnostics until the function is redeployed**, so deploy it before relying on Explorer log capture. After that, app-side improvements reach testers over OTA without a new store build.
 
 ---
 
@@ -85,9 +96,10 @@ Then OTA the Connect app changes:
 
 | Value | Meaning |
 |-------|---------|
-| `connect-diagnostics` | **Only production source tag today.** Every line from an uploaded Companion batch uses this. Also used if `submit-client-logs` fails to marshal a log row (rare server error). |
+| `connect-diagnostics` | Every line from an uploaded **Companion** (Reflections Connect) batch. Also the server fallback if `submit-client-logs` cannot marshal a row, or if an older client omits `source`. |
+| `explorer-diagnostics` | Every line from an uploaded **Explorer** (Reflections Explorer) batch. |
 
-There are no other `source` values written by the app or ingest path today. Backend functions do not use this field for their normal logs.
+The server whitelists the client-supplied `source`; anything outside the table falls back to `connect-diagnostics`. Backend functions do not use this field for their normal logs.
 
 **Base query (always start here for Companion logs):**
 
@@ -106,6 +118,7 @@ Each uploaded log line repeats batch metadata on every row. Combine with `AND`:
 | `firebaseUid` | string | `jsonPayload.firebaseUid="UID"` (server-added at upload) |
 | `companionName` | string | `jsonPayload.companionName="Auntie Ellen"` |
 | `explorerName` | string | `jsonPayload.explorerName="Cole"` |
+| `explorerId` | string | `jsonPayload.explorerId="COLE-01052010"` (Explorer batches) |
 | `relationshipId` | string | `jsonPayload.relationshipId="..."` |
 | `platform` | string | `jsonPayload.platform="android"` or `"ios"` |
 | `deviceModel` | string | `jsonPayload.deviceModel="SM-S931U"` |
@@ -322,11 +335,13 @@ Upload limits (server): **512 KB** body, **500 entries** per batch, **10 batches
 
 | File | Role |
 |------|------|
-| `apps/connect/utils/diagnosticsLog.ts` | Buffer, console patch, send batch |
-| `apps/connect/app/_layout.tsx` | Bootstraps diagnostics on launch |
-| `apps/connect/app/(tabs)/settings.tsx` | User toggle + send UI |
+| `packages/shared/src/diagnostics/clientDiagnostics.ts` | **Shared** buffer, console patch, send batch (used by both apps) |
+| `apps/connect/utils/diagnosticsLog.ts` | Connect shim — pins `source: connect-diagnostics` + selfie noise filters |
+| `apps/explorer/utils/diagnosticsLog.ts` | Explorer shim — pins `source: explorer-diagnostics` |
+| `apps/connect/app/_layout.tsx` / `apps/explorer/app/_layout.tsx` | Bootstraps diagnostics on launch |
+| `apps/connect/app/(tabs)/settings.tsx` / `apps/explorer/app/settings.tsx` | User toggle + send UI |
 | `apps/connect/components/ReactionSheet.tsx` | Camera instrumentation |
-| `backend/gcloud/functions/submit_client_logs.go` | Ingest + Cloud Logging |
+| `backend/gcloud/functions/submit_client_logs.go` | Ingest + Cloud Logging (whitelists `source`, records `explorerId`) |
 | `packages/shared/src/api/endpoints.ts` | `SUBMIT_CLIENT_LOGS` URL |
 | `scripts/gcloud/logs-client-diagnostics.sh` | Query helper |
 

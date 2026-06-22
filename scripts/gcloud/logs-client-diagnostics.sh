@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# Read Reflections Connect client diagnostic logs from Cloud Logging.
+# Read Reflections client diagnostic logs (Connect + Explorer) from Cloud Logging.
 #
 # Usage:
 #   ./scripts/gcloud/logs-client-diagnostics.sh
 #   ./scripts/gcloud/logs-client-diagnostics.sh --batch-id abc123
 #   ./scripts/gcloud/logs-client-diagnostics.sh --explorer "Mom" --freshness 1d
+#   ./scripts/gcloud/logs-client-diagnostics.sh --explorer-app --explorer-id COLE-01052010 --freshness 1d
 #   ./scripts/gcloud/logs-client-diagnostics.sh --filter 'camera:ready-timeout'
 #   ./scripts/gcloud/logs-client-diagnostics.sh --download batch.json --batch-id abc123
 
@@ -16,10 +17,12 @@ LIMIT=200
 FRESHNESS="7d"
 BATCH_ID=""
 EXPLORER_NAME=""
+EXPLORER_ID=""
 COMPANION_NAME=""
 FILTER=""
 DOWNLOAD=""
 LOGGING_READ=0
+SOURCE="connect-diagnostics"
 
 usage() {
   cat <<'EOF'
@@ -27,8 +30,11 @@ Usage: logs-client-diagnostics.sh [options]
 
 Options:
   --project NAME       GCP project (default: reflections-1200b)
+  --source NAME        jsonPayload.source (default: connect-diagnostics)
+  --explorer-app       Shortcut for --source explorer-diagnostics
   --batch-id ID        Filter to one upload batch
   --explorer NAME      Filter jsonPayload.explorerName
+  --explorer-id ID     Filter jsonPayload.explorerId (Explorer batches)
   --companion NAME     Filter jsonPayload.companionName
   --filter TEXT        Extra SEARCH() text (e.g. camera:mount-error)
   --freshness DURATION Cloud Logging freshness (default: 7d)
@@ -42,8 +48,11 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
+    --source) SOURCE="$2"; shift 2 ;;
+    --explorer-app) SOURCE="explorer-diagnostics"; shift ;;
     --batch-id) BATCH_ID="$2"; shift 2 ;;
     --explorer) EXPLORER_NAME="$2"; shift 2 ;;
+    --explorer-id) EXPLORER_ID="$2"; shift 2 ;;
     --companion) COMPANION_NAME="$2"; shift 2 ;;
     --filter) FILTER="$2"; shift 2 ;;
     --freshness) FRESHNESS="$2"; shift 2 ;;
@@ -55,17 +64,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -n "$BATCH_ID" || -n "$EXPLORER_NAME" || -n "$COMPANION_NAME" || -n "$FILTER" || -n "$DOWNLOAD" ]]; then
+if [[ -n "$BATCH_ID" || -n "$EXPLORER_NAME" || -n "$EXPLORER_ID" || -n "$COMPANION_NAME" || -n "$FILTER" || -n "$DOWNLOAD" ]]; then
   LOGGING_READ=1
 fi
 
-QUERY='jsonPayload.source="connect-diagnostics"'
+QUERY="jsonPayload.source=\"${SOURCE}\""
 
 if [[ -n "$BATCH_ID" ]]; then
   QUERY+=" AND jsonPayload.batchId=\"${BATCH_ID}\""
 fi
 if [[ -n "$EXPLORER_NAME" ]]; then
   QUERY+=" AND jsonPayload.explorerName=\"${EXPLORER_NAME}\""
+fi
+if [[ -n "$EXPLORER_ID" ]]; then
+  QUERY+=" AND jsonPayload.explorerId=\"${EXPLORER_ID}\""
 fi
 if [[ -n "$COMPANION_NAME" ]]; then
   QUERY+=" AND jsonPayload.companionName=\"${COMPANION_NAME}\""
@@ -93,7 +105,7 @@ if [[ "$LOGGING_READ" -eq 1 ]]; then
     --project="${PROJECT}" \
     --freshness="${FRESHNESS}" \
     --limit="${LIMIT}" \
-    --format='table(timestamp,jsonPayload.batchId,jsonPayload.companionName,jsonPayload.explorerName,jsonPayload.entryLevel,jsonPayload.message)'
+    --format='table(timestamp,jsonPayload.batchId,jsonPayload.companionName,jsonPayload.explorerName,jsonPayload.explorerId,jsonPayload.entryLevel,jsonPayload.message)'
   exit 0
 fi
 

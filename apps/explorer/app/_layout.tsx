@@ -10,6 +10,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { DeviceSetupScreen } from '../components/DeviceSetupScreen';
 import { SystemUpdateModal } from '../components/SystemUpdateModal';
 import { ExplorerSelfProvider, useExplorerSelf } from '../context/ExplorerSelfContext';
+import { bootstrapDiagnostics } from '../utils/diagnosticsLog';
 
 const sentryDsn = (Constants.expoConfig?.extra as { sentryDsn?: string } | undefined)?.sentryDsn;
 Sentry.init({
@@ -47,6 +48,10 @@ function ExplorerAppContent() {
 
 function RootLayout() {
   const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    void bootstrapDiagnostics();
+  }, []);
 
   // Explorer must always be authenticated (anonymous) so Firestore rules using request.auth work.
   useEffect(() => {

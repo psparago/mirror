@@ -17,12 +17,30 @@ import (
 )
 
 const (
-	clientDiagnosticsSource     = "connect-diagnostics"
-	maxClientLogBodyBytes       = 512 * 1024
-	maxClientLogEntries         = 500
-	maxClientLogUserNoteRunes   = 500
-	maxClientLogBatchesPerHour  = 10
+	clientDiagnosticsSource    = "connect-diagnostics"
+	explorerDiagnosticsSource  = "explorer-diagnostics"
+	maxClientLogBodyBytes      = 512 * 1024
+	maxClientLogEntries        = 500
+	maxClientLogUserNoteRunes  = 500
+	maxClientLogBatchesPerHour = 10
 )
+
+// allowedClientLogSources whitelists the Cloud Logging `source` tags a client
+// may set. Anything else (or omitted) falls back to connect-diagnostics so
+// older Connect builds that predate the source field stay correctly tagged.
+var allowedClientLogSources = map[string]bool{
+	clientDiagnosticsSource:   true,
+	explorerDiagnosticsSource: true,
+}
+
+func resolveClientLogSource(raw *string) string {
+	if raw != nil {
+		if s := strings.TrimSpace(*raw); allowedClientLogSources[s] {
+			return s
+		}
+	}
+	return clientDiagnosticsSource
+}
 
 var (
 	clientLogAuthOnce sync.Once
@@ -44,26 +62,28 @@ type clientDiagnosticEntry struct {
 }
 
 type clientDiagnosticApp struct {
-	Version         string  `json:"version"`
-	BuildNumber     string  `json:"buildNumber"`
-	RuntimeVersion  string  `json:"runtimeVersion"`
-	OtaLabel        *string `json:"otaLabel"`
-	UpdateChannel   *string `json:"updateChannel"`
-	Platform        string  `json:"platform"`
-	OSVersion       string  `json:"osVersion"`
-	DeviceModel     *string `json:"deviceModel"`
+	Version        string  `json:"version"`
+	BuildNumber    string  `json:"buildNumber"`
+	RuntimeVersion string  `json:"runtimeVersion"`
+	OtaLabel       *string `json:"otaLabel"`
+	UpdateChannel  *string `json:"updateChannel"`
+	Platform       string  `json:"platform"`
+	OSVersion      string  `json:"osVersion"`
+	DeviceModel    *string `json:"deviceModel"`
 }
 
 type clientDiagnosticBatch struct {
-	BatchID          string                  `json:"batchId"`
-	SentAt           string                  `json:"sentAt"`
-	InstallID        string                  `json:"installId"`
-	CompanionName    *string                 `json:"companionName"`
-	ExplorerName     *string                 `json:"explorerName"`
-	RelationshipID   *string                 `json:"relationshipId"`
-	App              clientDiagnosticApp     `json:"app"`
-	UserNote         *string                 `json:"userNote"`
-	Entries          []clientDiagnosticEntry `json:"entries"`
+	BatchID        string                  `json:"batchId"`
+	Source         *string                 `json:"source"`
+	SentAt         string                  `json:"sentAt"`
+	InstallID      string                  `json:"installId"`
+	CompanionName  *string                 `json:"companionName"`
+	ExplorerName   *string                 `json:"explorerName"`
+	ExplorerID     *string                 `json:"explorerId"`
+	RelationshipID *string                 `json:"relationshipId"`
+	App            clientDiagnosticApp     `json:"app"`
+	UserNote       *string                 `json:"userNote"`
+	Entries        []clientDiagnosticEntry `json:"entries"`
 }
 
 func getClientLogAuth(ctx context.Context) (*auth.Client, error) {
@@ -203,32 +223,35 @@ func SubmitClientLogs(w http.ResponseWriter, r *http.Request) {
 		userNote = redactClientLogMessage(strings.TrimSpace(*batch.UserNote))
 	}
 
+	source := resolveClientLogSource(batch.Source)
+
 	for _, entry := range batch.Entries {
 		level := entry.Level
 		if level == "" {
 			level = "log"
 		}
 		writeClientDiagnosticLog(map[string]any{
-			"severity":        strings.ToUpper(level),
-			"source":          clientDiagnosticsSource,
-			"batchId":         batch.BatchID,
-			"installId":       batch.InstallID,
-			"firebaseUid":     decoded.UID,
-			"companionName":   batch.CompanionName,
-			"explorerName":    batch.ExplorerName,
-			"relationshipId":  batch.RelationshipID,
-			"appVersion":      batch.App.Version,
-			"buildNumber":     batch.App.BuildNumber,
-			"runtimeVersion":  batch.App.RuntimeVersion,
-			"platform":        batch.App.Platform,
-			"osVersion":       batch.App.OSVersion,
-			"deviceModel":     batch.App.DeviceModel,
-			"otaLabel":        batch.App.OtaLabel,
-			"updateChannel":   batch.App.UpdateChannel,
-			"userNote":        userNote,
-			"entryTs":         entry.Ts,
-			"entryLevel":      level,
-			"message":         redactClientLogMessage(entry.Message),
+			"severity":       strings.ToUpper(level),
+			"source":         source,
+			"batchId":        batch.BatchID,
+			"installId":      batch.InstallID,
+			"firebaseUid":    decoded.UID,
+			"companionName":  batch.CompanionName,
+			"explorerName":   batch.ExplorerName,
+			"explorerId":     batch.ExplorerID,
+			"relationshipId": batch.RelationshipID,
+			"appVersion":     batch.App.Version,
+			"buildNumber":    batch.App.BuildNumber,
+			"runtimeVersion": batch.App.RuntimeVersion,
+			"platform":       batch.App.Platform,
+			"osVersion":      batch.App.OSVersion,
+			"deviceModel":    batch.App.DeviceModel,
+			"otaLabel":       batch.App.OtaLabel,
+			"updateChannel":  batch.App.UpdateChannel,
+			"userNote":       userNote,
+			"entryTs":        entry.Ts,
+			"entryLevel":     level,
+			"message":        redactClientLogMessage(entry.Message),
 		})
 	}
 

@@ -1,18 +1,16 @@
 /**
- * Reflections Connect diagnostics.
+ * Reflections Explorer diagnostics.
  *
  * Thin wrapper around the shared client-diagnostics module. All buffering,
  * console capture, and upload logic lives in `@projectmirror/shared`; this file
- * only pins Connect's `source` tag and its high-volume noise filters.
+ * only pins Explorer's `source` tag and its high-volume noise filters.
  */
 import { configureClientDiagnostics } from '@projectmirror/shared/diagnostics/clientDiagnostics';
 
 configureClientDiagnostics({
-  source: 'connect-diagnostics',
-  // Samsung selfie sessions emit hundreds of these; they evict useful rows from the 500-entry buffer.
-  extraDropPatterns: [/selfie:app-background-debounce/, /selfie:app-background-cancelled/],
-  // Sample the global AppState line so a Samsung flicker loop cannot fill the buffer.
-  appStateSamplePattern: /📱 \[Connect\] AppState:/,
+  source: 'explorer-diagnostics',
+  // Sample the global AppState line so a foreground/background loop cannot fill the buffer.
+  appStateSamplePattern: /📱 \[Explorer\] AppState:/,
 });
 
 export type {
