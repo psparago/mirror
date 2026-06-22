@@ -32,6 +32,7 @@ import { StageCrossFadeMedia } from '@/components/stage/StageCrossFadeMedia';
 import { useDocumentarySequence } from '@/hooks/useDocumentarySequence';
 
 import { useMachine } from '@xstate/react';
+import * as Sentry from '@sentry/react-native';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
@@ -100,11 +101,6 @@ export function ensureExplorerAudioSessionOnce(): void {
 function trimMeta(s?: string): string {
   return typeof s === 'string' ? s.trim() : '';
 }
-
-type DocumentaryDiagnosticEvent = {
-  at: number;
-  label: string;
-};
 
 function shortDiagId(id?: string | null): string {
   if (!id) return 'none';
@@ -395,23 +391,23 @@ export default function MainStageView({
   // Perf: keep console logging opt-in; excessive logs + JSON.stringify can jank Hermes.
   const DEBUG_TRANSITIONS = __DEV__ && false;
   const DEBUG_LOGS = __DEV__ && false;
-  const ENABLE_DOC_DIAGNOSTICS = __DEV__;
   const debugLog = (...args: any[]) => {
     if (DEBUG_LOGS) console.log(...args);
   };
-  const [documentaryDiagnostics, setDocumentaryDiagnostics] = useState<DocumentaryDiagnosticEvent[]>([]);
+  // Documentary diagnostics. In development they print to the Metro console; in every build
+  // they are also recorded as Sentry breadcrumbs (cheap in-memory ring buffer, auto-capped),
+  // so a frenetic Explorer's exact Reflection/reaction sequence is attached to any field error
+  // report. This is the One Trail that lets us debug Cole's device without a debug overlay.
   const traceDocumentary = useCallback((label: string, data?: Record<string, unknown>) => {
-    if (!ENABLE_DOC_DIAGNOSTICS) return;
-    const at = Date.now();
     const suffix = data
       ? ` ${Object.entries(data)
         .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
         .join(' ')}`
       : '';
     const message = `${label}${suffix}`;
-    console.log(`[DOC-DIAG] ${message}`);
-    setDocumentaryDiagnostics((prev) => [...prev.slice(-11), { at, label: message }]);
-  }, [ENABLE_DOC_DIAGNOSTICS]);
+    Sentry.addBreadcrumb({ category: 'documentary', message, level: 'info' });
+    if (__DEV__) console.log(`[DOC-DIAG] ${message}`);
+  }, []);
 
   useEffect(() => {
     ensureExplorerAudioSessionOnce();
@@ -4258,38 +4254,6 @@ export default function MainStageView({
       ? `${explorerDisplayName.trim()}'s Reflections`
       : 'Reflections';
 
-  const diagnosticOverlayLines = useMemo(() => {
-    if (!ENABLE_DOC_DIAGNOSTICS) return [];
-    const active = docState.activeEvent ?? selectedEvent;
-    const recent = documentaryDiagnostics.slice(-6).map((entry) => {
-      const secondsAgo = Math.max(0, Math.round((Date.now() - entry.at) / 1000));
-      return `${secondsAgo}s ${entry.label}`;
-    });
-    return [
-      `DOC ${docState.phase} ${docState.currentIndex + 1}/${Math.max(docState.chapters.length, 1)} ${isDocumentaryReactionChapter ? `reaction:${documentaryReactionType}` : 'parent'} ev:${shortDiagId(active?.event_id)}`,
-      `MACHINE ${JSON.stringify(state.value)}`,
-      `MAIN ${playerDiag(player)} ready:${videoReady ? 'Y' : 'N'}`,
-      `PIP ev:${shortDiagId(reactionChapterEventId)} ready:${reactionPipReady ? 'Y' : 'N'} ${playerDiag(reactionPipPlayer)}`,
-      ...recent,
-    ];
-  }, [
-    ENABLE_DOC_DIAGNOSTICS,
-    docState.phase,
-    docState.currentIndex,
-    docState.chapters.length,
-    docState.activeEvent,
-    selectedEvent,
-    isDocumentaryReactionChapter,
-    documentaryReactionType,
-    state.value,
-    player,
-    videoReady,
-    reactionChapterEventId,
-    reactionPipReady,
-    reactionPipPlayer,
-    documentaryDiagnostics,
-  ]);
-
   return (
     <GestureDetector gesture={horizontalSwipeGesture}>
       <Animated.View style={[styles.modalContainer, rootAnimatedStyle]}>
@@ -4441,22 +4405,6 @@ export default function MainStageView({
                       </Animated.View>
                     ) : null}
 
-                    {diagnosticOverlayLines.length > 0 ? (
-                      <View style={styles.documentaryDiagnosticOverlay} pointerEvents="none">
-                        {diagnosticOverlayLines.map((line, index) => (
-                          <Text
-                            key={`${index}-${line}`}
-                            style={[
-                              styles.documentaryDiagnosticLine,
-                              index < 4 && styles.documentaryDiagnosticSnapshotLine,
-                            ]}
-                            numberOfLines={1}
-                          >
-                            {line}
-                          </Text>
-                        ))}
-                      </View>
-                    ) : null}
                 </Animated.View>
 
                 {/* Loading Indicator removed - was blocking video */}
@@ -4774,29 +4722,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 45,
     elevation: 45,
-  },
-  documentaryDiagnosticOverlay: {
-    position: 'absolute',
-    left: 10,
-    right: 10,
-    bottom: 10,
-    maxHeight: 150,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 10,
-    backgroundColor: 'rgba(0, 0, 0, 0.72)',
-    zIndex: 80,
-    elevation: 80,
-  },
-  documentaryDiagnosticLine: {
-    color: 'rgba(255, 255, 255, 0.78)',
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: undefined }),
-    fontSize: 10,
-    lineHeight: 13,
-  },
-  documentaryDiagnosticSnapshotLine: {
-    color: '#B8F7FF',
-    fontWeight: '700',
   },
   mediaImage: { width: '100%', height: '100%', resizeMode: 'contain' },
   narrationPipFrame: {
