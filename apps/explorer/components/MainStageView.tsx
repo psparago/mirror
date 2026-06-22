@@ -125,6 +125,20 @@ function playerDiag(player: unknown): string {
   return `${p.status ?? 'unknown'}:${p.playing ? 'play' : 'stop'}${time}${duration}`;
 }
 
+/**
+ * True when a video player has effectively reached the end of its clip.
+ * expo-video's `playToEnd` event is unreliable on some sources (notably reaction selfie
+ * clips over image parents), so we also detect completion from currentTime vs duration.
+ */
+function isVideoPlayerAtEnd(player: unknown): boolean {
+  const p = player as { currentTime?: number; duration?: number } | null;
+  if (!p) return false;
+  const dur = typeof p.duration === 'number' && Number.isFinite(p.duration) ? p.duration : 0;
+  const cur = typeof p.currentTime === 'number' && Number.isFinite(p.currentTime) ? p.currentTime : 0;
+  // Require a real duration; 0.3s tolerance absorbs the gap between the last frame and `duration`.
+  return dur > 0.3 && cur >= dur - 0.3;
+}
+
 function chapterBadgeIcon(chapter: DocumentaryChapter) {
   if (!chapter.isReaction) return 'play' as const;
   if (chapter.reactionType === 'typed') return 'keyboard-o' as const;
@@ -708,6 +722,9 @@ export default function MainStageView({
   const reactionEndedForEventRef = useRef<string | null>(null);
   // Image documentaries speak the parent caption before reactions, then only the Deep Dive at end.
   const parentImageCaptionPlayedForEventRef = useRef<string | null>(null);
+  // True once we've handled the machine's `finished` state for the current chapter. Reset on
+  // Reflection change AND on replay (where the selected Reflection id does not change).
+  const wasFinishedRef = useRef(false);
   const mainFinishIgnoredForReactionRef = useRef<string | null>(null);
   const documentaryCompleteHandledRef = useRef<string | null>(null);
   const chapterPlaybackPulseIndexRef = useRef<number | null>(null);
@@ -1786,6 +1803,53 @@ export default function MainStageView({
     requestAnimationFrame(onClose);
   }, [sound, captionSound, onClose]);
 
+  // Replay must restart the whole Reflection from chapter 0 by re-selecting the PARENT event.
+  // A raw `REPLAY` relies on the machine's `context.event`, which — after a documentary plays
+  // its reactions via SELECT_EVENT_INSTANT — is the last *reaction* (a video), not the parent.
+  // For an image parent that misroutes REPLAY into `playingVideo` (no video → error → watchdog
+  // stall) and skips the caption. Re-selecting the parent restores caption → reactions → deep dive.
+  const replayFromParent = useCallback(() => {
+    const parent = selectedEventRef.current;
+    const parentMeta = selectedMetadataRef.current;
+    // Replaying re-runs the whole documentary from chapter 0. These one-shot guards are
+    // otherwise only cleared when the selected Reflection changes (which it doesn't on a
+    // replay), so reset them here — otherwise the parent image caption is skipped and the
+    // end-of-documentary deep dive never fires (its complete-handler is already "handled").
+    documentaryCompleteHandledRef.current = null;
+    parentImageCaptionPlayedForEventRef.current = null;
+    chapterPlaybackPulseIndexRef.current = null;
+    mainFinishIgnoredForReactionRef.current = null;
+    reactionEndedForEventRef.current = null;
+    documentarySelfieStartedForEventRef.current = null;
+    wasFinishedRef.current = false;
+    endNarrationTokenRef.current += 1;
+
+    const replayInstant = !!(config?.instantVideoPlayback && parent?.video_url);
+    traceDocumentary('replay.from_parent', {
+      parent: shortDiagId(parent?.event_id),
+      hasMeta: !!parentMeta,
+      instant: replayInstant,
+      machine: JSON.stringify(stateRef.current?.value),
+    });
+    if (parent && parentMeta) {
+      // Prime the playback refs to the PARENT *before* sending. The machine's entry actions
+      // (playAudio / speakCaption) run synchronously inside send() — before the ref-sync effect
+      // updates — and read playbackEventRef. After a documentary that ref still points at the
+      // last reaction (a video with no audio_url), so the caption would be skipped via an
+      // immediate AUDIO_FINISHED. Setting it here makes the parent caption play on replay.
+      playbackEventRef.current = parent;
+      playbackMetadataRef.current = parentMeta;
+      send({
+        type: replayInstant ? 'SELECT_EVENT_INSTANT' : 'SELECT_EVENT',
+        event: parent,
+        metadata: parentMeta,
+        takeSelfie: false,
+      });
+    } else {
+      send({ type: 'REPLAY' });
+    }
+  }, [send, config?.instantVideoPlayback, traceDocumentary]);
+
   const handleSingleTap = useCallback(() => {
     const currentState = stateRef.current;
     const isVideo =
@@ -1825,22 +1889,7 @@ export default function MainStageView({
         debugLog('🔁 User pressed REPLAY (video)');
         hasAutoPlayedDeepDiveRef.current = false;
 
-        // For videos, respect instant playback config on replay
-        const useInstantPlayback = config?.instantVideoPlayback;
-
-        if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
-          // Replay with instant playback (skip narration)
-          debugLog('⚡ Replaying with instant video playback (skipping narration)');
-          send({
-            type: 'SELECT_EVENT_INSTANT',
-            event: selectedEventRef.current,
-            metadata: selectedMetadataRef.current,
-            takeSelfie: false,
-          });
-        } else {
-          // Standard replay (respects narration for videos)
-          send({ type: 'REPLAY' });
-        }
+        replayFromParent();
 
         if (onReplayRef.current && selectedEventRef.current) {
           onReplayRef.current(selectedEventRef.current);
@@ -1873,22 +1922,12 @@ export default function MainStageView({
       debugLog('🔁 User pressed REPLAY');
       hasAutoPlayedDeepDiveRef.current = false;
 
-      // playingAudio doesn't handle REPLAY — re-select the event
-      if (currentState.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
-        send({
-          type: 'SELECT_EVENT',
-          event: selectedEventRef.current,
-          metadata: selectedMetadataRef.current,
-          takeSelfie: false,
-        });
-      } else {
-        send({ type: 'REPLAY' });
-      }
+      replayFromParent();
       if (onReplayRef.current && selectedEventRef.current) {
         onReplayRef.current(selectedEventRef.current);
       }
     }
-  }, [send, config?.instantVideoPlayback, traceDocumentary]);
+  }, [send, config?.instantVideoPlayback, traceDocumentary, replayFromParent]);
 
   const throttledSingleTap = useThrottledCallback(handleSingleTap);
 
@@ -2429,6 +2468,41 @@ export default function MainStageView({
     };
   }, [reactionPipPlayer, reactionPipVideoUrl, reactionChapterEventId, traceDocumentary]);
 
+  // Single, idempotent end-of-reaction handler. Marks the clip ended (so the play driver
+  // never restarts it), pauses the PiP + any synced parent video, and advances the
+  // documentary exactly once per reaction — regardless of whether completion was detected
+  // via `playToEnd`, a `timeUpdate` at-end check, or the play driver.
+  const finishReactionClip = useCallback(
+    (eventId: string) => {
+      if (reactionEndedForEventRef.current === eventId) return;
+      reactionEndedForEventRef.current = eventId;
+      traceDocumentary('reaction.pip.finish', {
+        event: shortDiagId(eventId),
+        player: playerDiag(reactionPipPlayerRef.current),
+      });
+      const docReaction = documentaryReactionRef.current;
+      const mainPlayer = playerRef.current;
+      if (docReaction.selfieUsesParentVideo && mainPlayer) {
+        try {
+          mainPlayer.pause();
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        reactionPipPlayerRef.current?.pause();
+      } catch {
+        /* ignore */
+      }
+      signalVideoFinishedRef.current();
+    },
+    [traceDocumentary],
+  );
+  const finishReactionClipRef = useRef(finishReactionClip);
+  useEffect(() => {
+    finishReactionClipRef.current = finishReactionClip;
+  }, [finishReactionClip]);
+
   // Drive selfie-reaction PiP playback the proven ReplayModal way: a persistent listener that
   // (re)issues play() on every readiness signal. A one-shot play() races source loading and
   // silently no-ops — fatal for the 2nd/3rd chapter, where `replace()` swaps in a new clip while
@@ -2570,6 +2644,18 @@ export default function MainStageView({
         }
       }
 
+      // If the clip already started and has reached its end, finish instead of re-playing.
+      // Re-issuing play() on a clip parked at its last frame re-buffers in a loop (loading ↔
+      // readyToPlay) and floods status/playing events — the source of the runaway PiP churn.
+      if (
+        documentarySelfieStartedForEventRef.current === eventId &&
+        isVideoPlayerAtEnd(pipPlayer)
+      ) {
+        stopPoll();
+        finishReactionClipRef.current(eventId);
+        return;
+      }
+
       try {
         if (!pipPlayer.playing) {
           if (!loggedPlayAttempt) {
@@ -2638,28 +2724,31 @@ export default function MainStageView({
         event: shortDiagId(eventId),
         player: playerDiag(reactionPipPlayerRef.current),
       });
-      reactionEndedForEventRef.current = eventId;
-      const docReaction = documentaryReactionRef.current;
-      const mainPlayer = playerRef.current;
-      if (docReaction.selfieUsesParentVideo && mainPlayer) {
-        try {
-          mainPlayer.pause();
-        } catch {
-          /* ignore */
-        }
+      finishReactionClipRef.current(eventId);
+    };
+    // `playToEnd` is the primary completion signal, but it is unreliable on some sources
+    // (selfie reactions over image parents never emit it). A `timeUpdate` backstop detects
+    // completion from currentTime vs duration so the documentary always advances.
+    const onTimeUpdate = () => {
+      if (reactionEndedForEventRef.current === eventId) return;
+      if (documentarySelfieStartedForEventRef.current !== eventId) return;
+      if (isVideoPlayerAtEnd(reactionPipPlayerRef.current)) {
+        finishReactionClipRef.current(eventId);
       }
-      try {
-        reactionPipPlayerRef.current?.pause();
-      } catch {
-        /* ignore */
-      }
-      signalVideoFinishedRef.current();
     };
     const sub = reactionPipPlayer.addListener('playToEnd', onEnd);
-    reactionPipEndSubRef.current = sub;
+    const timeSub = reactionPipPlayer.addListener('timeUpdate', onTimeUpdate);
+    reactionPipEndSubRef.current = {
+      remove: () => {
+        sub.remove();
+        timeSub.remove();
+      },
+    };
+    const currentSub = reactionPipEndSubRef.current;
     return () => {
       sub.remove();
-      if (reactionPipEndSubRef.current === sub) {
+      timeSub.remove();
+      if (reactionPipEndSubRef.current === currentSub) {
         reactionPipEndSubRef.current = null;
       }
     };
@@ -3156,7 +3245,6 @@ export default function MainStageView({
   ]);
 
   // Notify parent when we enter the finished state (video/audio/narration completed).
-  const wasFinishedRef = useRef(false);
   useEffect(() => {
     wasFinishedRef.current = false;
   }, [selectedEvent?.event_id]);
@@ -3645,34 +3733,12 @@ export default function MainStageView({
 
     debugLog('🔁 User pressed REPLAY');
 
-    if (state.matches('playingAudio') && selectedEventRef.current && selectedMetadataRef.current) {
-      send({
-        type: 'SELECT_EVENT',
-        event: selectedEventRef.current,
-        metadata: selectedMetadataRef.current,
-        takeSelfie: false,
-      });
-    } else {
-      const isVideo = !!selectedEventRef.current?.video_url;
-      const useInstantPlayback = config?.instantVideoPlayback && isVideo;
-
-      if (useInstantPlayback && selectedEventRef.current && selectedMetadataRef.current) {
-        debugLog('⚡ Replaying with instant video playback (skipping narration)');
-        send({
-          type: 'SELECT_EVENT_INSTANT',
-          event: selectedEventRef.current,
-          metadata: selectedMetadataRef.current,
-          takeSelfie: false,
-        });
-      } else {
-        send({ type: 'REPLAY' });
-      }
-    }
+    replayFromParent();
 
     if (onReplayRef.current && selectedEventRef.current) {
       onReplayRef.current(selectedEventRef.current);
     }
-  }, [state, send, config?.instantVideoPlayback, traceDocumentary]);
+  }, [state, replayFromParent, traceDocumentary]);
 
   const handleReplay = useThrottledCallback(handleReplayImpl);
 

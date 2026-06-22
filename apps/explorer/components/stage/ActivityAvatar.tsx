@@ -43,8 +43,9 @@ export function ActivityAvatar({
   const translateY = useSharedValue(0);
   const opacityAnim = useSharedValue(1);
   const lastPulseKeyRef = useRef(0);
-  const wasActiveRef = useRef(isActive);
-  const wasPlayingRef = useRef(isPlaying);
+
+  // The base Reflection author (chapter 0) is never a "reaction" and must never bounce.
+  const isReactionChapter = chapter.isReaction;
 
   // macOS-dock-style hop: jump up, then settle with a real bounce (Easing.bounce gives
   // the multiple decreasing rebounds) — reads as a bounce, not a throb.
@@ -55,29 +56,26 @@ export function ActivityAvatar({
     );
   };
 
-  // Bounce when this chapter becomes active, when the sequence starts playing while this
-  // avatar is already active (covers the very first chapter), or on an explicit pulse.
+  // Bounce ONLY when a reaction chapter's own media actually begins playing. The pulse key
+  // is bumped by the stage when the active chapter's media starts, so this fires at reaction
+  // start — not when the Reflection (chapter 0) starts, and not merely on selection/focus.
   useEffect(() => {
-    const becameActive = isActive && !wasActiveRef.current;
-    const startedPlaying = isActive && isPlaying && !wasPlayingRef.current;
-    wasActiveRef.current = isActive;
-    wasPlayingRef.current = isPlaying;
-
     const pulseChanged =
       playbackPulseKey > 0 && playbackPulseKey !== lastPulseKeyRef.current;
     if (pulseChanged) lastPulseKeyRef.current = playbackPulseKey;
 
-    if (!isActive) return;
-    if (becameActive || startedPlaying || pulseChanged) bounce();
+    if (pulseChanged && isReactionChapter) bounce();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive, isPlaying, playbackPulseKey]);
+  }, [playbackPulseKey, isReactionChapter]);
 
-  // Focus the active avatar; dim + shrink the others during sequence playback.
+  // Focus rule: during sequence playback keep the Reflection creator (chapter 0) AND the
+  // currently-active speaker crisp; dim + shrink everyone else.
   useEffect(() => {
-    const dim = isPlaying && !isActive;
+    const isReflectionCreator = chapter.index === 0;
+    const dim = isPlaying && !isActive && !isReflectionCreator;
     focusScale.value = withTiming(dim ? INACTIVE_SCALE : 1, { duration: 200 });
     opacityAnim.value = withTiming(dim ? INACTIVE_OPACITY : 1, { duration: 200 });
-  }, [isActive, isPlaying, focusScale, opacityAnim]);
+  }, [isActive, isPlaying, chapter.index, focusScale, opacityAnim]);
 
   const containerStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: translateY.value }, { scale: focusScale.value }],
