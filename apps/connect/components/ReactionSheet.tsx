@@ -492,7 +492,7 @@ export function ReactionSheet({
   // Stable key — the selfie CameraView is intentionally never remounted.
   const [cameraInstanceKey] = useState(0);
   const cameraInstanceKeyRef = useRef(0);
-  const [isParentReflectionMuted, setIsParentReflectionMuted] = useState(false);
+  const [isParentReflectionMuted, setIsParentReflectionMuted] = useState(true);
   const [reactionMode, setReactionMode] = useState<ReactionComposeMode>('selfie');
   const [typedMessage, setTypedMessage] = useState('');
   const [voiceRecordedUri, setVoiceRecordedUri] = useState<string | null>(null);
@@ -1798,8 +1798,8 @@ export function ReactionSheet({
     setTrimEndMs(0);
     trimStartMsRef.current = 0;
     trimEndMsRef.current = 0;
-    setIsParentReflectionMuted(false);
-    isParentReflectionMutedRef.current = false;
+    setIsParentReflectionMuted(true);
+    isParentReflectionMutedRef.current = true;
     userToggledMuteRef.current = false;
     setReactionMode('selfie');
     setTypedMessage('');

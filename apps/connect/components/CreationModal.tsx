@@ -1276,6 +1276,19 @@ export default function CreationModal({
         : null;
     const photoCompositionNeedsBinaryUpload =
       mediaType === 'photo' && remotePoster && !!filteredForUpload;
+    const previousCaptionMeta =
+      (typeof editEvent?.metadata?.short_caption === 'string' && editEvent.metadata.short_caption.trim()) ||
+      (typeof editEvent?.metadata?.description === 'string' && editEvent.metadata.description.trim()) ||
+      '';
+    const previousDeepDiveMeta =
+      typeof editEvent?.metadata?.deep_dive === 'string' ? editEvent.metadata.deep_dive.trim() : '';
+    const captionTextChangedForEdit =
+      !!editIdMeta && finalCaption !== previousCaptionMeta;
+    const deepDiveTextChangedForEdit =
+      !!editIdMeta && (finalDeepDive ?? '').trim() !== previousDeepDiveMeta;
+    const aiSpeechChangedForEdit =
+      !activeAudioUri &&
+      (captionTextChangedForEdit || deepDiveTextChangedForEdit || !!aiAudioS3Key || !!aiDeepDiveS3Key);
 
     // Detect if the poster frame changed for a video edit — requires re-extracting and re-uploading image.jpg.
     const origThumbMs = editEvent?.metadata?.thumbnail_time_ms;
@@ -1294,7 +1307,15 @@ export default function CreationModal({
     // Cloud master: remote poster and/or remote video unchanged — no S3 media re-upload; Firestore-only (incl. trim/thumbnail).
     // Photo + edited square composition: must re-upload image.jpg so Explorer sees the latest framing.
     // Video + changed poster frame: must re-extract thumbnail and re-upload image.jpg.
-    if (editIdMeta && !replacedMeta && !hasNewLocalVoiceMeta && remoteMediaUnchanged && !photoCompositionNeedsBinaryUpload && !videoThumbNeedsPosterUpload) {
+    if (
+      editIdMeta &&
+      !replacedMeta &&
+      !hasNewLocalVoiceMeta &&
+      !aiSpeechChangedForEdit &&
+      remoteMediaUnchanged &&
+      !photoCompositionNeedsBinaryUpload &&
+      !videoThumbNeedsPosterUpload
+    ) {
       try {
         setUploading(true);
         const ref = doc(collection(db, ExplorerConfig.collections.reflections), editIdMeta);
