@@ -37,15 +37,20 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import * as Speech from 'expo-speech';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { Image } from 'expo-image';
-import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
-import { playVideoPlayerWhenReady } from '@/utils/videoPlayerReady';
+import { ExplorerCachedImage } from '@/components/ExplorerCachedImage';
+import {
+  playVideoPlayerWhenReady,
+  safeVideoPlayerCurrentTime,
+  safeVideoPlayerDuration,
+  safeVideoPlayerPlaying,
+  safeVideoPlayerStatus,
+} from '@/utils/videoPlayerReady';
 import {
   Alert,
   FlatList,
@@ -108,17 +113,14 @@ function shortDiagId(id?: string | null): string {
 }
 
 function playerDiag(player: unknown): string {
-  const p = player as { status?: string; playing?: boolean; currentTime?: number; duration?: number } | null;
-  if (!p) return 'none';
-  const time =
-    typeof p.currentTime === 'number' && Number.isFinite(p.currentTime)
-      ? ` @${p.currentTime.toFixed(1)}s`
-      : '';
-  const duration =
-    typeof p.duration === 'number' && Number.isFinite(p.duration) && p.duration > 0
-      ? `/${p.duration.toFixed(1)}`
-      : '';
-  return `${p.status ?? 'unknown'}:${p.playing ? 'play' : 'stop'}${time}${duration}`;
+  if (!player) return 'none';
+  const currentTime = safeVideoPlayerCurrentTime(player);
+  const duration = safeVideoPlayerDuration(player);
+  const time = currentTime > 0 ? ` @${currentTime.toFixed(1)}s` : '';
+  const durationLabel = duration > 0 ? `/${duration.toFixed(1)}` : '';
+  const status = safeVideoPlayerStatus(player) ?? 'unknown';
+  const playing = safeVideoPlayerPlaying(player);
+  return `${status}:${playing ? 'play' : 'stop'}${time}${durationLabel}`;
 }
 
 /**
@@ -127,10 +129,8 @@ function playerDiag(player: unknown): string {
  * clips over image parents), so we also detect completion from currentTime vs duration.
  */
 function isVideoPlayerAtEnd(player: unknown): boolean {
-  const p = player as { currentTime?: number; duration?: number } | null;
-  if (!p) return false;
-  const dur = typeof p.duration === 'number' && Number.isFinite(p.duration) ? p.duration : 0;
-  const cur = typeof p.currentTime === 'number' && Number.isFinite(p.currentTime) ? p.currentTime : 0;
+  const dur = safeVideoPlayerDuration(player);
+  const cur = safeVideoPlayerCurrentTime(player);
   // Require a real duration; 0.3s tolerance absorbs the gap between the last frame and `duration`.
   return dur > 0.3 && cur >= dur - 0.3;
 }
@@ -436,6 +436,8 @@ export default function MainStageView({
 
   // Track if the video has actually buffered and started rendering
   const [videoReady, setVideoReady] = useState(false);
+  /** Defer Up Next / activity avatars until the main poster or video is ready. */
+  const [sidebarImagesReady, setSidebarImagesReady] = useState(false);
 
   // Need to track video playing for VU meter
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -670,6 +672,8 @@ export default function MainStageView({
 
   // Track active caption session to prevent ghost TTS callbacks
   const captionSessionRef = useRef(0);
+  /** True while System Info (or similar overlay) covers the stage — blocks async video retries. */
+  const stageOverlayNavigationHoldRef = useRef(false);
 
   const [isAdminMode, setIsAdminMode] = useState(false);
   const [showAdminChallenge, setShowAdminChallenge] = useState(false);
@@ -1434,7 +1438,7 @@ export default function MainStageView({
 
     try {
       const player = playerRef.current;
-      if (player?.playing) {
+      if (safeVideoPlayerPlaying(player)) {
         const currentVolume = typeof player.volume === 'number' ? player.volume : STAGE_VIDEO_FULL_VOLUME;
         snapshot.videoVolumeBeforeDuck = currentVolume;
         likeVideoDuckActiveRef.current = true;
@@ -1808,6 +1812,66 @@ export default function MainStageView({
     requestAnimationFrame(onClose);
   }, [sound, captionSound, onClose]);
 
+  /** Kill Switch for overlay navigation (Settings) — pause media without tearing down players. */
+  const pauseStageMediaForOverlayNavigation = useCallback(() => {
+    stageOverlayNavigationHoldRef.current = true;
+    abortLikeFeedbackForNavigationRef.current();
+
+    captionSessionRef.current += 1;
+    Speech.stop();
+
+    if (sound) {
+      sound.stopAsync().catch(() => { });
+      sound.unloadAsync().catch(() => { });
+    }
+    if (captionSound || captionSoundRef.current) {
+      const soundToStop = captionSound || captionSoundRef.current;
+      soundToStop?.stopAsync().catch(() => { });
+      soundToStop?.unloadAsync().catch(() => { });
+    }
+
+    if (safetyTimeoutRef.current) {
+      clearTimeout(safetyTimeoutRef.current);
+      safetyTimeoutRef.current = null;
+    }
+
+    for (const activePlayer of [
+      playerRef.current,
+      narrationPlayerRef.current,
+      reactionPipPlayerRef.current,
+    ]) {
+      if (!activePlayer) continue;
+      try {
+        activePlayer.pause();
+      } catch {
+        /* native object may already be gone */
+      }
+    }
+
+    setIsVideoPlaying(false);
+
+    const currentState = stateRef.current;
+    if (currentState?.hasTag('active') && !currentState.hasTag('paused')) {
+      sendRef.current({ type: 'PAUSE' });
+    }
+  }, [sound, captionSound]);
+
+  const handleOpenSettings = useCallback(() => {
+    pauseStageMediaForOverlayNavigation();
+    router.push('/settings');
+  }, [pauseStageMediaForOverlayNavigation, router]);
+
+  useFocusEffect(
+    useCallback(() => {
+      stageOverlayNavigationHoldRef.current = false;
+    }, []),
+  );
+
+  const shouldContinueStageVideoPlayback = useCallback(
+    () => !stageOverlayNavigationHoldRef.current,
+    [],
+  );
+
   // Replay must restart the whole Reflection from chapter 0 by re-selecting the PARENT event.
   // A raw `REPLAY` relies on the machine's `context.event`, which — after a documentary plays
   // its reactions via SELECT_EVENT_INSTANT — is the last *reaction* (a video), not the parent.
@@ -2111,23 +2175,25 @@ export default function MainStageView({
       height: Math.max(1, Math.round(stagePaneHeight - 290)),
     };
   }, [height, isLandscape, width]);
-  const stageImageSource = useMemo<React.ComponentProps<typeof Image>['source']>(() => {
-    if (!selectedImageUrl) {
-      return undefined;
-    }
-
-    return {
-      uri: selectedImageUrl,
-      cacheKey: imageUrlCacheKey(selectedImageUrl),
-      width: stageImageDimensions.width,
-      height: stageImageDimensions.height,
-    };
-  }, [selectedImageUrl, stageImageDimensions.height, stageImageDimensions.width]);
-
   // Reset readiness when source changes
   useEffect(() => {
     setVideoReady(false);
   }, [videoSource]);
+
+  useEffect(() => {
+    setSidebarImagesReady(false);
+    if (!videoSource) {
+      const frame = requestAnimationFrame(() => setSidebarImagesReady(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    if (videoReady) {
+      setSidebarImagesReady(true);
+      return;
+    }
+    const timeout = setTimeout(() => setSidebarImagesReady(true), 1500);
+    return () => clearTimeout(timeout);
+  }, [selectedEvent?.event_id, videoSource, videoReady]);
+
 
   // Stable source for the hook — expo-video's useVideoPlayer recreates the native player when
   // its `source` argument changes (see JSON.stringify(parsedSource) in the hook). Recreating
@@ -2293,7 +2359,7 @@ export default function MainStageView({
       });
 
       const durationSec =
-        Number.isFinite(pipPlayer.duration) && pipPlayer.duration > 0 ? pipPlayer.duration : 60;
+        safeVideoPlayerDuration(pipPlayer) > 0 ? safeVideoPlayerDuration(pipPlayer) : 60;
       safetyTimeoutRef.current = setTimeout(() => {
         if (captionSessionRef.current === session) {
           console.warn(`⚠️ Narration PIP safety fallback triggered [Session: ${session}]`);
@@ -2543,15 +2609,12 @@ export default function MainStageView({
 
     const ensure = () => {
       if (cancelled) return;
+      if (stageOverlayNavigationHoldRef.current) return;
       const pipPlayer = reactionPipPlayerRef.current;
       if (!pipPlayer) return;
 
-      let status: string | undefined;
-      try {
-        status = pipPlayer.status;
-      } catch {
-        return;
-      }
+      const status = safeVideoPlayerStatus(pipPlayer);
+      if (!status) return;
 
       if (status === 'error') {
         if (explorerId && reactionPipErrorRetriedRef.current !== eventId) {
@@ -2637,7 +2700,10 @@ export default function MainStageView({
       const mainPlayer = playerRef.current;
       if (docReaction.selfieUsesParentVideo && mainPlayer) {
         try {
-          if (mainPlayer.status === 'readyToPlay' && !mainPlayer.playing) {
+          if (
+            safeVideoPlayerStatus(mainPlayer) === 'readyToPlay' &&
+            !safeVideoPlayerPlaying(mainPlayer)
+          ) {
             const syncSec = (docReaction.reactionEvent?.syncStartTimeMillis ?? 0) / 1000;
             seekVideoToSeconds(mainPlayer, syncSec);
             mainPlayer.muted = false;
@@ -2662,7 +2728,7 @@ export default function MainStageView({
       }
 
       try {
-        if (!pipPlayer.playing) {
+        if (!safeVideoPlayerPlaying(pipPlayer)) {
           if (!loggedPlayAttempt) {
             loggedPlayAttempt = true;
             traceDocumentary('reaction.pip.play_attempt', {
@@ -2674,7 +2740,7 @@ export default function MainStageView({
           pipPlayer.volume = 1;
           pipPlayer.play();
         }
-        if (pipPlayer.playing) {
+        if (safeVideoPlayerPlaying(pipPlayer)) {
           documentarySelfieStartedForEventRef.current = eventId;
           if (!loggedStarted) {
             loggedStarted = true;
@@ -2773,6 +2839,7 @@ export default function MainStageView({
         player.muted = false;
         player.volume = REACTION_PARENT_PLAYBACK_VOLUME;
       },
+      shouldContinue: shouldContinueStageVideoPlayback,
     });
     if (started) {
       companionMessageVideoStartedForEventRef.current = eventId;
@@ -2853,7 +2920,7 @@ export default function MainStageView({
 
     const tryLiftThumbnailShield = () => {
       const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
-      if (playheadShowsTrimStart(trim, player.currentTime)) {
+      if (playheadShowsTrimStart(trim, safeVideoPlayerCurrentTime(player))) {
         clearShieldLiftFallback();
         setVideoReady(true);
       }
@@ -2878,7 +2945,7 @@ export default function MainStageView({
           setVideoReady(true);
         } else {
           tryLiftThumbnailShield();
-          if (!playheadShowsTrimStart(trim, player.currentTime)) {
+          if (!playheadShowsTrimStart(trim, safeVideoPlayerCurrentTime(player))) {
             clearShieldLiftFallback();
             shieldLiftFallback = setTimeout(() => {
               shieldLiftFallback = null;
@@ -2909,12 +2976,13 @@ export default function MainStageView({
           return;
         }
         const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
-        if (isInPlayingState && player.duration > 0) {
+        const playerDuration = safeVideoPlayerDuration(player);
+        if (isInPlayingState && playerDuration > 0) {
           if (trim.active) {
             // Trim window end is handled by the cloud-master `timeUpdate` listener.
             return;
           }
-          if (player.currentTime >= player.duration - 0.5) {
+          if (safeVideoPlayerCurrentTime(player) >= playerDuration - 0.5) {
             debugLog('🏁 Video finished (detected via playingChange near end)');
             signalVideoFinishedRef.current();
           }
@@ -2923,7 +2991,7 @@ export default function MainStageView({
     });
 
     const timeSub = player.addListener('timeUpdate', () => {
-      if (!player.playing) return;
+      if (!safeVideoPlayerPlaying(player)) return;
       const trim = getCloudMasterTrimWindow(selectedMetadataRef.current);
       if (!trim.active) return;
       tryLiftThumbnailShield();
@@ -2955,7 +3023,13 @@ export default function MainStageView({
           docReaction.active;
         const shouldBePlaying = currentState?.matches({ playingVideo: { playback: 'playing' } }) ||
           currentState?.matches({ playingVideoInstant: { playback: 'playing' } });
-        if (shouldBePlaying && !deferMainPlay && player && !player.playing) {
+        if (
+          shouldBePlaying &&
+          !deferMainPlay &&
+          player &&
+          !safeVideoPlayerPlaying(player) &&
+          !stageOverlayNavigationHoldRef.current
+        ) {
           traceDocumentary('main.ready_retry_play', {
             event: shortDiagId(selectedEventRef.current?.event_id),
             deferMainPlay,
@@ -3163,7 +3237,7 @@ export default function MainStageView({
 
     // Videos don't pause - only play or stop (including during like feedback; narration-only duck/pause).
     // Avoid redundant player.play() — limits bridge/native churn (Now Playing).
-    if (isMachinePlayingVideo && !isFinished) {
+    if (isMachinePlayingVideo && !isFinished && !stageOverlayNavigationHoldRef.current) {
       const docReaction = documentaryReactionRef.current;
       // Don't auto-play the parent video during the end-of-documentary narration.
       // Read the reactive `docState.phase` (not the ref) so this effect re-runs and
@@ -3190,6 +3264,7 @@ export default function MainStageView({
             beforePlay: () => {
               void ensureStageVideoAudibleRef.current(player);
             },
+            shouldContinue: shouldContinueStageVideoPlayback,
           });
           if (started) {
             setVideoReady(true);
@@ -3198,7 +3273,7 @@ export default function MainStageView({
       }
     }
     // Removed pause handling for videos - they play through or finish
-  }, [state.value, player, isVideoPlaying, docState.phase, traceDocumentary]);
+  }, [state.value, player, isVideoPlaying, docState.phase, traceDocumentary, shouldContinueStageVideoPlayback]);
 
   // --- DEBUG LOGGER (State Transitions) ---
   const prevStateRef = useRef<any>(null);
@@ -3605,7 +3680,7 @@ export default function MainStageView({
         }
         return;
       }
-      if (player.currentTime >= endSec - 0.03) {
+      if (safeVideoPlayerCurrentTime(player) >= endSec - 0.03) {
         try {
           player.pause();
         } catch {
@@ -4036,18 +4111,16 @@ export default function MainStageView({
               position: 'absolute', left: -6, top: '50%', marginTop: -5, zIndex: 10
             }} />
           )}
-          <Image
-            source={{
-              uri: item.image_url,
-              cacheKey: imageUrlCacheKey(item.image_url),
-              width: 56,
-              height: 56,
-            }}
+          <ExplorerCachedImage
+            uri={item.image_url}
+            width={56}
+            height={56}
             style={styles.upNextThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
             cachePolicy="memory-disk"
             priority="low"
+            deferLoad={!sidebarImagesReady}
           />
           <View style={styles.upNextInfo}>
             <Text style={[styles.upNextTitle, isNowPlaying && styles.upNextTitleNowPlaying]} numberOfLines={2}>
@@ -4098,10 +4171,16 @@ export default function MainStageView({
                       ]}
                     >
                       {chapter.speakerAvatarUrl ? (
-                        <Image
-                          source={{ uri: chapter.speakerAvatarUrl }}
+                        <ExplorerCachedImage
+                          uri={chapter.speakerAvatarUrl}
+                          width={24}
+                          height={24}
                           style={styles.upNextChapterAvatar}
                           contentFit="cover"
+                          recyclingKey={`upnext-chapter-${chapter.event.event_id}`}
+                          cachePolicy="memory-disk"
+                          priority="low"
+                          deferLoad={!sidebarImagesReady}
                         />
                       ) : (
                         <View
@@ -4336,9 +4415,11 @@ export default function MainStageView({
 
                     {/* Layer 2: Thumbnail Shield (Rendered ON TOP until video is ready) */}
                     {/* We keep this visible if: (1) It's a photo OR (2) It's a video that hasn't started playing yet */}
-                    {stageImageSource && (!videoSource || !videoReady) && (
-                      <Image
-                        source={stageImageSource}
+                    {selectedImageUrl && (!videoSource || !videoReady) && (
+                      <ExplorerCachedImage
+                        uri={selectedImageUrl}
+                        width={stageImageDimensions.width}
+                        height={stageImageDimensions.height}
                         style={[styles.mediaImage, { position: 'absolute', zIndex: 10 }]}
                         contentFit="contain"
                         recyclingKey={activeMediaEvent?.event_id ?? selectedEvent.event_id}
@@ -4431,6 +4512,7 @@ export default function MainStageView({
                   activeIndex={docState.currentIndex}
                   isPlayingSequence={docState.isPlayingSequence}
                   chapterPlaybackPulseKey={chapterPlaybackPulseKey}
+                  deferAvatarLoad={!sidebarImagesReady}
                   onAvatarPress={handleChapterAvatarPress}
                 />
 
@@ -4481,7 +4563,7 @@ export default function MainStageView({
                     />
                   </TouchableOpacity>
                   <TouchableOpacity
-                    onPress={() => router.push('/settings')}
+                    onPress={handleOpenSettings}
                     style={{ marginLeft: 12, padding: 4 }}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   >
@@ -4529,9 +4611,9 @@ export default function MainStageView({
                   wrapToTop();
                 }}
                 removeClippedSubviews={true}
-                initialNumToRender={6}
-                maxToRenderPerBatch={6}
-                windowSize={3}
+                initialNumToRender={sidebarImagesReady ? 6 : 3}
+                maxToRenderPerBatch={sidebarImagesReady ? 6 : 3}
+                windowSize={sidebarImagesReady ? 3 : 2}
                 key={isLandscape ? 'list' : 'grid'}
                 numColumns={isLandscape ? 1 : 2}
                 columnWrapperStyle={!isLandscape ? { gap: 8 } : undefined}
@@ -4601,11 +4683,12 @@ export default function MainStageView({
                   renderItem={({ item }) => (
                     <View style={styles.faceGridItem}>
                       {item.avatarUrl ? (
-                        <Image
-                          source={{ uri: item.avatarUrl }}
+                        <ExplorerCachedImage
+                          uri={item.avatarUrl}
                           style={styles.faceAvatar}
                           contentFit="cover"
                           recyclingKey={`face-${item.uid}`}
+                          priority="low"
                         />
                       ) : (
                         <View style={[styles.faceAvatarFallback, { backgroundColor: item.color }]}>

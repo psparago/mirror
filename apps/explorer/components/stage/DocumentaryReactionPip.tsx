@@ -1,7 +1,7 @@
 import type { DocumentaryChapter } from '@projectmirror/shared';
-import { Image } from 'expo-image';
+import { ExplorerCachedImage } from '@/components/ExplorerCachedImage';
 import { VideoView } from 'expo-video';
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Easing,
@@ -57,23 +57,19 @@ function DocumentaryReactionPipInner({
     ],
   }));
 
-  const avatarSource = useMemo(
-    () => chapter?.speakerAvatarUrl ? { uri: chapter.speakerAvatarUrl } : undefined,
-    [chapter?.speakerAvatarUrl],
-  );
-
   if (!visible || !chapter) return null;
 
   const showSelfieVideo =
     mode === 'selfie-video' && !!reactionPlayer && videoReady;
 
   const avatarFallback = chapter.speakerAvatarUrl ? (
-    <Image
-      source={avatarSource}
+    <ExplorerCachedImage
+      uri={chapter.speakerAvatarUrl}
       style={styles.media}
       contentFit="cover"
       recyclingKey={`doc-reaction-pip-${chapter.index}`}
       cachePolicy="memory-disk"
+      priority="low"
     />
   ) : (
     <View style={[styles.fallback, { backgroundColor: chapter.speakerColor }]}>

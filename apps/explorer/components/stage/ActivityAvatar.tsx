@@ -1,5 +1,5 @@
 import type { DocumentaryChapter } from '@projectmirror/shared';
-import { Image } from 'expo-image';
+import { ExplorerCachedImage } from '@/components/ExplorerCachedImage';
 import React, { useEffect, useRef } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Animated, {
@@ -26,18 +26,17 @@ export interface ActivityAvatarProps {
   onPress: () => void;
   /** Bumps when this chapter's media starts — triggers a short bounce. */
   playbackPulseKey?: number;
+  /** Defer avatar decode until main stage media is ready. */
+  deferLoad?: boolean;
 }
 
-/**
- * A single avatar in the Activity Row.
- * Blurs when inactive during playback; bounces when its chapter starts playing.
- */
-export function ActivityAvatar({
+function ActivityAvatarInner({
   chapter,
   isActive,
   isPlaying,
   onPress,
   playbackPulseKey = 0,
+  deferLoad = false,
 }: ActivityAvatarProps) {
   const focusScale = useSharedValue(1);
   const translateY = useSharedValue(0);
@@ -47,8 +46,6 @@ export function ActivityAvatar({
   // The base Reflection author (chapter 0) is never a "reaction" and must never bounce.
   const isReactionChapter = chapter.isReaction;
 
-  // macOS-dock-style hop: jump up, then settle with a real bounce (Easing.bounce gives
-  // the multiple decreasing rebounds) — reads as a bounce, not a throb.
   const bounce = () => {
     translateY.value = withSequence(
       withTiming(-BOUNCE_HEIGHT, { duration: BOUNCE_UP_MS, easing: Easing.out(Easing.cubic) }),
@@ -56,9 +53,6 @@ export function ActivityAvatar({
     );
   };
 
-  // Bounce ONLY when a reaction chapter's own media actually begins playing. The pulse key
-  // is bumped by the stage when the active chapter's media starts, so this fires at reaction
-  // start — not when the Reflection (chapter 0) starts, and not merely on selection/focus.
   useEffect(() => {
     const pulseChanged =
       playbackPulseKey > 0 && playbackPulseKey !== lastPulseKeyRef.current;
@@ -68,8 +62,6 @@ export function ActivityAvatar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playbackPulseKey, isReactionChapter]);
 
-  // Focus rule: during sequence playback keep the Reflection creator (chapter 0) AND the
-  // currently-active speaker crisp; dim + shrink everyone else.
   useEffect(() => {
     const isReflectionCreator = chapter.index === 0;
     const dim = isPlaying && !isActive && !isReflectionCreator;
@@ -89,12 +81,16 @@ export function ActivityAvatar({
       <Animated.View style={containerStyle}>
         <View style={[styles.ring, { borderColor: ringColor }]}>
           {chapter.speakerAvatarUrl ? (
-            <Image
-              source={{ uri: chapter.speakerAvatarUrl }}
+            <ExplorerCachedImage
+              uri={chapter.speakerAvatarUrl}
+              width={AVATAR_SIZE}
+              height={AVATAR_SIZE}
               style={styles.image}
               contentFit="cover"
               recyclingKey={`activity-avatar-${chapter.index}`}
               cachePolicy="memory-disk"
+              priority="low"
+              deferLoad={deferLoad}
             />
           ) : (
             <View style={[styles.fallback, { backgroundColor: chapter.speakerColor }]}>
@@ -109,6 +105,8 @@ export function ActivityAvatar({
     </TouchableOpacity>
   );
 }
+
+export const ActivityAvatar = React.memo(ActivityAvatarInner);
 
 const styles = StyleSheet.create({
   item: {

@@ -1,3 +1,4 @@
+import { ExplorerCachedImage } from '@/components/ExplorerCachedImage';
 import MainStageView, { ensureExplorerAudioSessionOnce, refreshExplorerAudioSessionForVideo } from '@/components/MainStageView';
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { GridBrowseChrome } from '@/components/GridBrowseChrome';
@@ -38,8 +39,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import { BlurView } from 'expo-blur';
 import * as Clipboard from 'expo-clipboard';
-import { Image } from 'expo-image';
-import { imageUrlCacheKey } from '@/utils/imageUrlCacheKey';
 import { useFocusEffect, useRouter } from 'expo-router';
 import * as Speech from 'expo-speech';
 import type { QuerySnapshot } from 'firebase/firestore';
@@ -1036,18 +1035,16 @@ export default function HomeScreen() {
 
         {/* Thumbnail */}
         <View style={styles.gridThumbnailContainer}>
-          <Image
-            source={{
-              uri: item.image_url,
-              cacheKey: imageUrlCacheKey(item.image_url),
-              width: gridThumbnailSize.width,
-              height: gridThumbnailSize.height,
-            }}
+          <ExplorerCachedImage
+            uri={item.image_url}
+            width={gridThumbnailSize.width}
+            height={gridThumbnailSize.height}
             style={styles.gridThumbnail}
             contentFit="cover"
             recyclingKey={item.event_id}
             cachePolicy="memory-disk"
             priority="low"
+            deferLoad={selectedEvent !== null}
             onError={(error) => {
               console.error(`Error loading image for event ${item.event_id}:`, error);
             }}
@@ -1414,10 +1411,10 @@ export default function HomeScreen() {
         columnWrapperStyle={styles.row}
         showsVerticalScrollIndicator={false}
         removeClippedSubviews={true}
-        initialNumToRender={12}
-        maxToRenderPerBatch={6}
-        updateCellsBatchingPeriod={80}
-        windowSize={3}
+        initialNumToRender={selectedEvent ? 4 : 12}
+        maxToRenderPerBatch={selectedEvent ? 2 : 6}
+        updateCellsBatchingPeriod={selectedEvent ? 120 : 80}
+        windowSize={selectedEvent ? 1 : 3}
       />
 
       {/* Layer 2 (Top): MainStageView Overlay - Only rendered when event selected */}
@@ -1486,11 +1483,12 @@ export default function HomeScreen() {
               renderItem={({ item }) => (
                 <View style={styles.gridFaceItem}>
                   {item.avatarUrl ? (
-                    <Image
-                      source={{ uri: item.avatarUrl }}
+                    <ExplorerCachedImage
+                      uri={item.avatarUrl}
                       style={styles.gridFaceAvatar}
                       contentFit="cover"
                       recyclingKey={`grid-face-${item.uid}`}
+                      priority="low"
                     />
                   ) : (
                     <View style={[styles.gridFaceAvatarFallback, { backgroundColor: item.color }]}>

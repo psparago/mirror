@@ -10,6 +10,8 @@ export interface ActivityRowProps {
   isPlayingSequence: boolean;
   /** Increments when the active chapter's media starts playing. */
   chapterPlaybackPulseKey?: number;
+  /** Defer avatar decode until main stage media is ready. */
+  deferAvatarLoad?: boolean;
   onAvatarPress: (index: number) => void;
 }
 
@@ -22,6 +24,7 @@ export function ActivityRow({
   activeIndex,
   isPlayingSequence,
   chapterPlaybackPulseKey = 0,
+  deferAvatarLoad = false,
   onAvatarPress,
 }: ActivityRowProps) {
   if (chapters.length < 1) return null;
@@ -40,6 +43,7 @@ export function ActivityRow({
           isActive={chapter.index === activeIndex}
           isPlaying={isPlayingSequence}
           playbackPulseKey={chapter.index === activeIndex ? chapterPlaybackPulseKey : 0}
+          deferLoad={deferAvatarLoad}
           onPress={() => onAvatarPress(chapter.index)}
         />
       ))}
