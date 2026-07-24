@@ -3,6 +3,7 @@ import MainStageView, { ensureExplorerAudioSessionOnce, refreshExplorerAudioSess
 import { ExplorerGradientBackdrop } from '@/components/ExplorerGradientBackdrop';
 import { GridBrowseChrome } from '@/components/GridBrowseChrome';
 import { DEFAULT_AUTOPLAY, DEFAULT_INSTANT_VIDEO_PLAYBACK } from '@/constants/Defaults';
+import { stopAndUnloadSoundSafely } from '@/utils/avSoundSafe';
 import { FontAwesome } from '@expo/vector-icons';
 import {
   API_ENDPOINTS,
@@ -166,6 +167,16 @@ export default function HomeScreen() {
   const debugLog = (...args: any[]) => {
     if (DEBUG_LOGS) console.log(...args);
   };
+  /** Always-on in __DEV__ — traces golden "new reflection" badge / pill countdown. */
+  const logArrival = (
+    step: string,
+    detail?: Record<string, string | number | boolean | null | undefined>,
+  ) => {
+    if (!__DEV__) return;
+    const extra =
+      detail && Object.keys(detail).length > 0 ? ` ${JSON.stringify(detail)}` : '';
+    console.log(`[ARRIVAL] ${step}${extra}`);
+  };
 
   const [events, setEvents] = useState<Event[]>([]);
   const [reactionEventIds, setReactionEventIds] = useState<Set<string>>(() => new Set());
@@ -196,9 +207,61 @@ export default function HomeScreen() {
   const [isReadStateLoaded, setIsReadStateLoaded] = useState(false);
   /** Session-only — prevents replaying the arrival chime for the same id. */
   const chimedArrivalIdsRef = useRef<Set<string>>(new Set());
-  /** Event ids present when the session's first fetch completed — arrivals after this are "new". */
+  /**
+   * Event ids present at session baseline seal. Arrivals after seal (or explicitly claimed
+   * via `sessionArrivalIdsRef`) are "new" for the golden badge / pill countdown.
+   */
   const sessionBaselineIdsRef = useRef<Set<string> | null>(null);
   const [sessionBaselineTick, setSessionBaselineTick] = useState(0);
+  /** Ids claimed as in-session arrivals (Firestore `added`) — never swallowed by baseline. */
+  const sessionArrivalIdsRef = useRef<Set<string>>(new Set());
+  const [sessionArrivalTick, setSessionArrivalTick] = useState(0);
+  const listFetchCompletedRef = useRef(false);
+  const firestoreInitialReadyRef = useRef(false);
+  // Declared early — fetchEvents / Firestore listener write these before the later sync effect.
+  const eventsRef = useRef(events);
+  const selectedEventRef = useRef(selectedEvent);
+
+  const noteSessionArrivals = useCallback((ids: string[]) => {
+    let added = 0;
+    for (const id of ids) {
+      if (!id || sessionArrivalIdsRef.current.has(id)) continue;
+      sessionArrivalIdsRef.current.add(id);
+      added += 1;
+    }
+    if (added > 0) {
+      logArrival('session.claim', {
+        added,
+        total: sessionArrivalIdsRef.current.size,
+      });
+      setSessionArrivalTick((tick) => tick + 1);
+    }
+  }, []);
+
+  const trySealSessionBaseline = useCallback((reason: string) => {
+    if (sessionBaselineIdsRef.current !== null) return;
+    if (!listFetchCompletedRef.current || !firestoreInitialReadyRef.current) {
+      logArrival('baseline.wait', {
+        reason,
+        list: listFetchCompletedRef.current,
+        firestore: firestoreInitialReadyRef.current,
+      });
+      return;
+    }
+    const ids = eventsRef.current.map((event) => event.event_id);
+    const baseline = new Set<string>();
+    for (const id of ids) {
+      if (!sessionArrivalIdsRef.current.has(id)) baseline.add(id);
+    }
+    sessionBaselineIdsRef.current = baseline;
+    setSessionBaselineTick((tick) => tick + 1);
+    logArrival('baseline.seal', {
+      reason,
+      baseline: baseline.size,
+      heldArrivals: sessionArrivalIdsRef.current.size,
+      events: ids.length,
+    });
+  }, []);
 
   // Responsive column count: 2 for iPhone, 4-5 for iPad
   const numColumns = width >= 768 ? (width >= 1024 ? 5 : 4) : 2;
@@ -303,21 +366,31 @@ export default function HomeScreen() {
     return map;
   }, [reactionSignals, events]);
 
-  // Derive "new" from the live list: reflections that arrived after this session
-  // started, are still unread, and aren't currently on the main stage.
+  // Derive "new" from the live list: session arrivals / post-baseline reflections that are
+  // still unread, have a poster, and aren't currently on the main stage. Pill shows N and
+  // counts down by 1 each time an arrival is opened.
   const newArrivalIds = useMemo(() => {
     const baseline = sessionBaselineIdsRef.current;
     if (!isReadStateLoaded || !baseline) return [];
     const selectedId = selectedEvent?.event_id ?? null;
+    const sessionArrivals = sessionArrivalIdsRef.current;
     return filteredEvents
-      .filter(
-        (event) =>
-          !baseline.has(event.event_id) &&
-          !readEventIds.includes(event.event_id) &&
-          event.event_id !== selectedId
-      )
+      .filter((event) => {
+        if (!event.image_url) return false;
+        if (readEventIds.includes(event.event_id)) return false;
+        if (event.event_id === selectedId) return false;
+        const claimedArrival = sessionArrivals.has(event.event_id);
+        return claimedArrival || !baseline.has(event.event_id);
+      })
       .map((event) => event.event_id);
-  }, [filteredEvents, readEventIds, selectedEvent?.event_id, isReadStateLoaded, sessionBaselineTick]);
+  }, [
+    filteredEvents,
+    readEventIds,
+    selectedEvent?.event_id,
+    isReadStateLoaded,
+    sessionBaselineTick,
+    sessionArrivalTick,
+  ]);
 
   // When filter changes, ensure selectedEvent is still in the filtered list
   useEffect(() => {
@@ -415,7 +488,7 @@ export default function HomeScreen() {
       // Clean up after playing
       sound.setOnPlaybackStatusUpdate((status: any) => {
         if (status.isLoaded && status.didJustFinish) {
-          sound.unloadAsync();
+          void stopAndUnloadSoundSafely(sound);
         }
       });
       debugLog('🔔 Played arrival chime');
@@ -504,9 +577,11 @@ export default function HomeScreen() {
           setReadEventIds(parsed);
           readEventIdsRef.current = parsed;
         }
-        setIsReadStateLoaded(true);
       } catch (error) {
         console.error('Failed to load read state:', error);
+      } finally {
+        // Always unblock arrival UI — a failed load must not leave newArrivalIds stuck at [].
+        setIsReadStateLoaded(true);
       }
     };
 
@@ -625,11 +700,9 @@ export default function HomeScreen() {
 
       // Just update immediately, the centering logic in MainStageView will handle the focus stability
       setEvents(eventsWithTimestamp);
-
-      if (sessionBaselineIdsRef.current === null && sortedEvents.length > 0) {
-        sessionBaselineIdsRef.current = new Set(sortedEvents.map((event) => event.event_id));
-        setSessionBaselineTick((tick) => tick + 1);
-      }
+      eventsRef.current = eventsWithTimestamp;
+      listFetchCompletedRef.current = true;
+      trySealSessionBaseline('list-fetch');
 
       const embeddedById: Record<string, EventMetadata> = {};
       for (const e of sortedEvents) {
@@ -647,13 +720,10 @@ export default function HomeScreen() {
       setLoading(false);
       setIsRefreshing(false);
     }
-  }, [events.length]);
+  }, [events.length, trySealSessionBaseline, currentExplorerId]);
 
   // Keep ref to latest fetchEvents to avoid dependency cycles
   const fetchEventsRef = useRef(fetchEvents);
-  // Refs for stable access inside the listener
-  const eventsRef = useRef(events);
-  const selectedEventRef = useRef(selectedEvent);
 
   useEffect(() => {
     fetchEventsRef.current = fetchEvents;
@@ -665,6 +735,12 @@ export default function HomeScreen() {
   useEffect(() => {
     debugLog('🔌 Firestore listener attached');
     setFirestoreSignalsReady(false);
+    firestoreInitialReadyRef.current = false;
+    listFetchCompletedRef.current = false;
+    sessionBaselineIdsRef.current = null;
+    sessionArrivalIdsRef.current = new Set();
+    setSessionBaselineTick((tick) => tick + 1);
+    setSessionArrivalTick((tick) => tick + 1);
     setReactionEventIds(new Set());
     setReactionSignals([]);
 
@@ -745,6 +821,8 @@ export default function HomeScreen() {
         setReactionEventIds(reactionIdsFromSnapshot);
         setReactionSignals(reactionSignalsFromSnapshot);
         setFirestoreSignalsReady(true);
+        firestoreInitialReadyRef.current = true;
+        trySealSessionBaseline('firestore-ready');
 
         if (isInitialLoad) {
           isInitialLoad = false;
@@ -777,6 +855,7 @@ export default function HomeScreen() {
             (e) => !removedReflectionIds.includes(e.event_id)
           );
           setEvents(remaining);
+          eventsRef.current = remaining;
           setReflectionLikes((prev) => {
             const next = { ...prev };
             removedReflectionIds.forEach((id) => {
@@ -794,63 +873,95 @@ export default function HomeScreen() {
         const newNonReactionIds = newReflectionIds.filter((id) => !reactionIdsFromSnapshot.has(id));
         if (newNonReactionIds.length === 0) return;
 
-        debugLog(`🔔 Reflections received for: ${newNonReactionIds.join(', ')}`);
+        // Claim before list fetch so a concurrent baseline seal cannot swallow these ids.
+        noteSessionArrivals(newNonReactionIds);
+        logArrival('firestore.added', {
+          count: newNonReactionIds.length,
+          ids: newNonReactionIds.slice(0, 5).join(','),
+        });
 
         // 3. FETCH & SIGN (The "Mailbox Walk")
+        const injectFromFreshList = (freshEvents: Event[]) => {
+          const currentIds = new Set(eventsRef.current.map((e) => e.event_id));
+          const newItems = freshEvents.filter(
+            (e) =>
+              !!e.image_url &&
+              !currentIds.has(e.event_id) &&
+              !reactionIdsFromSnapshot.has(e.event_id),
+          );
+
+          if (newItems.length === 0) {
+            logArrival('inject.empty', {
+              fresh: freshEvents.length,
+              claimed: newNonReactionIds.length,
+            });
+            return newItems;
+          }
+
+          logArrival('inject', { count: newItems.length });
+          const now = Date.now();
+          const signedNewItems = newItems.map((e) => ({ ...e, refreshedAt: now }));
+
+          const fromListOnly: Record<string, EventMetadata> = {};
+          for (const item of newItems) {
+            if (eventHasEmbeddedMetadata(item) && !firestoreMetadataById[item.event_id]) {
+              fromListOnly[item.event_id] = item.metadata as EventMetadata;
+            }
+          }
+          if (Object.keys(fromListOnly).length > 0) {
+            setEventMetadata((prev) => ({ ...prev, ...fromListOnly }));
+          }
+
+          setEvents((prev) => {
+            const merged = [...signedNewItems, ...prev].sort((a, b) =>
+              b.event_id.localeCompare(a.event_id),
+            );
+            eventsRef.current = merged;
+            return merged;
+          });
+
+          for (const item of newItems) {
+            const eventId = item.event_id;
+            if (eventId === selectedEventIdRef.current) continue;
+            if (readEventIdsRef.current.includes(eventId)) continue;
+            if (chimedArrivalIdsRef.current.has(eventId)) continue;
+            chimedArrivalIdsRef.current.add(eventId);
+            logArrival('chime', { eventId });
+            void playArrivalChime();
+          }
+          return newItems;
+        };
+
         try {
-          const response = await fetch(`${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`);
+          const response = await fetch(
+            `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`,
+          );
           if (!response.ok) throw new Error('Failed to fetch fresh events');
 
           const data: ListEventsResponse = await response.json();
-          const freshEvents = data.events || [];
+          let freshEvents = data.events || [];
+          let injected = injectFromFreshList(freshEvents);
 
-          // 4. IMMEDIATE INJECTION LOGIC
-          const currentIds = new Set(eventsRef.current.map(e => e.event_id));
-          const newItems = freshEvents.filter(
-            (e) => !currentIds.has(e.event_id) && !reactionIdsFromSnapshot.has(e.event_id)
+          const stillMissing = newNonReactionIds.filter(
+            (id) => !eventsRef.current.some((e) => e.event_id === id && !!e.image_url),
           );
-
-          if (newItems.length > 0) {
-            debugLog(`✨ Injecting ${newItems.length} new items immediately`);
-
-            const now = Date.now();
-            const signedNewItems = newItems.map(e => ({ ...e, refreshedAt: now }));
-
-            const fromListOnly: Record<string, EventMetadata> = {};
-            for (const item of newItems) {
-              if (eventHasEmbeddedMetadata(item) && !firestoreMetadataById[item.event_id]) {
-                fromListOnly[item.event_id] = item.metadata as EventMetadata;
-              }
-            }
-            if (Object.keys(fromListOnly).length > 0) {
-              setEventMetadata((prev) => ({ ...prev, ...fromListOnly }));
-            }
-
-            // Merge new events immediately; metadata and arrival UI follow incrementally
-            setEvents(prev => {
-              const merged = [...signedNewItems, ...prev];
-              return merged.sort((a, b) => b.event_id.localeCompare(a.event_id));
-            });
-
-            const notifyNewArrivalForEvent = (eventId: string) => {
-              if (eventId === selectedEventIdRef.current) return;
-              if (readEventIdsRef.current.includes(eventId)) return;
-              if (chimedArrivalIdsRef.current.has(eventId)) return;
-              chimedArrivalIdsRef.current.add(eventId);
-              debugLog(`✨ New arrival chime: ${eventId}`);
-              void playArrivalChime();
-            };
-
-            const newIds = newItems.map((item) => item.event_id);
-            debugLog(`🔔 New arrivals detected: ${newIds.join(', ')}`);
-
-            for (const item of newItems) {
-              notifyNewArrivalForEvent(item.event_id);
+          if (stillMissing.length > 0 && injected.length === 0) {
+            logArrival('inject.retry', { missing: stillMissing.length });
+            await new Promise((resolve) => setTimeout(resolve, 700));
+            const retryResponse = await fetch(
+              `${API_ENDPOINTS.LIST_MIRROR_EVENTS}?explorer_id=${currentExplorerId}`,
+            );
+            if (retryResponse.ok) {
+              const retryData: ListEventsResponse = await retryResponse.json();
+              freshEvents = retryData.events || [];
+              injectFromFreshList(freshEvents);
             }
           }
-
         } catch (error) {
           console.error('Error fetching fresh data on reflection:', error);
+          logArrival('inject.error', {
+            message: error instanceof Error ? error.message : 'unknown',
+          });
         }
       },
       (error) => {
@@ -862,7 +973,7 @@ export default function HomeScreen() {
       debugLog('🔌 Firestore listener detached');
       unsubscribe();
     };
-  }, [currentExplorerId]); // Stable dependency
+  }, [currentExplorerId, noteSessionArrivals, trySealSessionBaseline]); // Stable-ish deps
 
 
   const refreshEventUrls = useCallback(async (eventId: string): Promise<Event | null> => {
@@ -935,58 +1046,98 @@ export default function HomeScreen() {
     });
   }, []);
 
-  const handleEventPress = useCallback(async (item: Event) => {
-    setStartIdleOnInitialSelection(false);
-    // Ignore multiple taps on the already-selected card (use ref for immediate effect before state updates)
-    if (item.event_id === selectedEventIdRef.current) return;
+  const openEvent = useCallback(
+    (item: Event, options?: { bypassThrottle?: boolean }) => {
+      setStartIdleOnInitialSelection(false);
 
-    const now = Date.now();
-    if (now - lastSelectionTime.current < 800) {
-      debugLog('Reflections: selection ignored (800ms lockout)');
+      if (item.event_id === selectedEventIdRef.current) {
+        return 'already-selected' as const;
+      }
+
+      const now = Date.now();
+      if (!options?.bypassThrottle && now - lastSelectionTime.current < 800) {
+        debugLog('Reflections: selection ignored (800ms lockout)');
+        logArrival('select.throttled', { eventId: item.event_id });
+        return 'throttled' as const;
+      }
+      lastSelectionTime.current = now;
+
+      selectedEventIdRef.current = item.event_id;
+      setSelectedEvent(item);
+
+      if (!eventMetadata[item.event_id] && eventHasEmbeddedMetadata(item)) {
+        setEventMetadata((prev) => ({
+          ...prev,
+          [item.event_id]: item.metadata as EventMetadata,
+        }));
+      }
+
+      const STALE_THRESHOLD = 3 * 60 * 60 * 1000;
+      const isStale = !item.refreshedAt || Date.now() - item.refreshedAt > STALE_THRESHOLD;
+      if (isStale) {
+        debugLog(`Reflections: item ${item.event_id} is stale. Refreshing in background...`);
+        const eventIdToRefresh = item.event_id;
+        refreshEventUrls(eventIdToRefresh)
+          .then((refreshedEvent) => {
+            if (refreshedEvent) {
+              refreshNeighborUrls(eventIdToRefresh);
+              if (
+                !eventMetadata[refreshedEvent.event_id] &&
+                eventHasEmbeddedMetadata(refreshedEvent)
+              ) {
+                setEventMetadata((prev) => ({
+                  ...prev,
+                  [refreshedEvent.event_id]: refreshedEvent.metadata as EventMetadata,
+                }));
+              }
+            }
+          })
+          .catch((err) => {
+            console.warn('Background URL refresh failed:', err);
+          });
+      } else {
+        refreshNeighborUrls(item.event_id);
+      }
+      return 'opened' as const;
+    },
+    [eventMetadata, refreshEventUrls, refreshNeighborUrls],
+  );
+
+  const handleEventPress = useCallback(
+    async (item: Event) => {
+      openEvent(item);
+    },
+    [openEvent],
+  );
+
+  /**
+   * Golden pill / "N New Reflections": open the newest arrival and clear that one
+   * (count downs by 1). Marks read even if select would no-op, and bypasses the
+   * 800ms selection lockout so clumsy double-taps still advance the countdown.
+   */
+  const openNewestArrival = useCallback(() => {
+    const newestId = newArrivalIds[0];
+    if (!newestId) {
+      logArrival('pill.empty');
       return;
     }
-    lastSelectionTime.current = now;
-
-    selectedEventIdRef.current = item.event_id;
-    // Open immediately with existing URLs for instant response
-    setSelectedEvent(item);
-
-    // Copy embedded metadata into grid state if not already loaded
-    if (!eventMetadata[item.event_id] && eventHasEmbeddedMetadata(item)) {
-      setEventMetadata((prev) => ({
-        ...prev,
-        [item.event_id]: item.metadata as EventMetadata,
-      }));
+    const newest = filteredEvents.find((event) => event.event_id === newestId);
+    if (!newest) {
+      logArrival('pill.missing', { eventId: newestId });
+      return;
     }
 
-    // Refresh URLs in background (non-blocking) if they are stale
-    const STALE_THRESHOLD = 3 * 60 * 60 * 1000; // 3 hours
-    const isStale = !item.refreshedAt || (Date.now() - item.refreshedAt > STALE_THRESHOLD);
+    const remainingBefore = newArrivalIds.length;
+    logArrival('pill.open', {
+      eventId: newestId,
+      remainingBefore,
+      remainingAfter: Math.max(0, remainingBefore - 1),
+    });
 
-    if (isStale) {
-      debugLog(`Reflections: item ${item.event_id} is stale. Refreshing in background...`);
-      const eventIdToRefresh = item.event_id;
-      refreshEventUrls(eventIdToRefresh).then(refreshedEvent => {
-        if (refreshedEvent) {
-          // Trigger predictive refresh for neighbors
-          refreshNeighborUrls(eventIdToRefresh);
-
-          // Merge embedded metadata from refreshed bundle if not already loaded
-          if (!eventMetadata[refreshedEvent.event_id] && eventHasEmbeddedMetadata(refreshedEvent)) {
-            setEventMetadata((prev) => ({
-              ...prev,
-              [refreshedEvent.event_id]: refreshedEvent.metadata as EventMetadata,
-            }));
-          }
-        }
-      }).catch(err => {
-        console.warn("Background URL refresh failed:", err);
-      });
-    } else {
-      // Still refresh neighbors, they might be stale
-      refreshNeighborUrls(item.event_id);
-    }
-  }, [eventMetadata, refreshEventUrls, refreshNeighborUrls]);
+    // Always clear this arrival from the badge, even if already selected / throttled.
+    void markEventAsRead(newestId);
+    openEvent(newest, { bypassThrottle: true });
+  }, [newArrivalIds, filteredEvents, markEventAsRead, openEvent]);
 
   const throttledHandleEventPress = useThrottledCallback(handleEventPress, 800);
 
@@ -1384,12 +1535,7 @@ export default function HomeScreen() {
         newArrivalIds={newArrivalIds}
         isRefreshing={isRefreshing}
         onSettingsPress={() => router.push('/settings')}
-        onNewArrivalPress={() => {
-          const newestArrival = filteredEvents.find((event) => newArrivalIds.includes(event.event_id));
-          if (newestArrival) {
-            throttledHandleEventPress(newestArrival);
-          }
-        }}
+        onNewArrivalPress={openNewestArrival}
         companions={companions}
         selectedCompanionId={selectedCompanionId}
         onSelectCompanion={setSelectedCompanionId}
@@ -1411,10 +1557,10 @@ export default function HomeScreen() {
         columnWrapperStyle={styles.row}
         showsVerticalScrollIndicator={false}
         removeClippedSubviews={true}
-        initialNumToRender={selectedEvent ? 4 : 12}
-        maxToRenderPerBatch={selectedEvent ? 2 : 6}
-        updateCellsBatchingPeriod={selectedEvent ? 120 : 80}
-        windowSize={selectedEvent ? 1 : 3}
+        initialNumToRender={selectedEvent ? 3 : 10}
+        maxToRenderPerBatch={selectedEvent ? 2 : 4}
+        updateCellsBatchingPeriod={selectedEvent ? 140 : 90}
+        windowSize={selectedEvent ? 1 : 2}
       />
 
       {/* Layer 2 (Top): MainStageView Overlay - Only rendered when event selected */}
@@ -1437,6 +1583,7 @@ export default function HomeScreen() {
             onMediaError={handleMediaError}
             newArrivalIds={newArrivalIds}
             readEventIds={readEventIds}
+            onOpenNewestArrival={openNewestArrival}
             onReplay={(event) => sendReplaySignal(event.event_id)}
             config={EXPLORER_CONFIG}
             startIdleOnInitialSelection={startIdleOnInitialSelection}

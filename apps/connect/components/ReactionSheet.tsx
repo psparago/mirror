@@ -16,6 +16,7 @@ import {
   runConnectAvCommandWithRetry,
   waitForStableAndroidAppForeground,
 } from '@/utils/audioSession';
+import { stopAndUnloadSoundSafely, takeAndUnloadSoundRef } from '@/utils/avSoundSafe';
 import { diagnosticsAppLog, type DiagnosticLogLevel } from '@/utils/diagnosticsLog';
 import { FontAwesome } from '@expo/vector-icons';
 import {
@@ -430,6 +431,12 @@ export interface ReactionSheetProps {
   mode?: 'reaction' | 'narration';
   /** Narration mode: receives the recorded selfie video URI. No upload occurs. */
   onNarrationComplete?: (videoUri: string) => void;
+  /**
+   * `modal` (default): RN `<Modal>` — fine when nothing else owns a UIWindow.
+   * `overlay`: absolute View in the parent hierarchy — use from Timeline so we
+   * never stack a second Modal on top of ReplayModal (iOS UIWindow hang).
+   */
+  presentation?: 'modal' | 'overlay';
 }
 
 export function ReactionSheet({
@@ -440,6 +447,7 @@ export function ReactionSheet({
   onUploadSuccess,
   mode = 'reaction',
   onNarrationComplete,
+  presentation = 'modal',
 }: ReactionSheetProps) {
   const isNarrationMode = mode === 'narration';
   const insets = useSafeAreaInsets();
@@ -708,19 +716,7 @@ export function ReactionSheet({
   }, [reactionMode, syncStartTimeMillis]);
 
   const unloadPreviewAudio = useCallback(async () => {
-    const sound = voicePreviewPlayerRef.current;
-    voicePreviewPlayerRef.current = null;
-    if (!sound) return;
-    try {
-      await sound.stopAsync();
-    } catch {
-      /* ignore */
-    }
-    try {
-      await sound.unloadAsync();
-    } catch {
-      /* ignore */
-    }
+    await takeAndUnloadSoundRef(voicePreviewPlayerRef);
   }, []);
 
   const playCompanionPreviewClip = useCallback(
@@ -738,7 +734,7 @@ export function ReactionSheet({
           if (voicePreviewPlayerRef.current === sound) {
             voicePreviewPlayerRef.current = null;
           }
-          void sound.unloadAsync().catch(() => {});
+          void stopAndUnloadSoundSafely(sound);
           onFinished();
         });
       };
@@ -1610,8 +1606,9 @@ export function ReactionSheet({
     if (!REACTION_COMPOSE_DIAG) return;
     logComposeDiag(visible ? 'sheet:open' : 'sheet:close', {
       parentType: isVideoParent ? 'video' : isImageParent ? 'image' : 'unknown',
+      presentation,
     });
-  }, [visible, isVideoParent, isImageParent]);
+  }, [visible, isVideoParent, isImageParent, presentation]);
 
   const ensureCameraPermission = useCallback(async () => {
     let current = await Camera.getCameraPermissionsAsync();
@@ -3490,13 +3487,8 @@ export function ReactionSheet({
     );
   };
 
-  return (
-    <Modal
-      visible={visible && hasValidParentMedia}
-      animationType="slide"
-      presentationStyle="fullScreen"
-      onRequestClose={handleAbandonReaction}
-    >
+  const sheetOpen = visible && hasValidParentMedia;
+  const sheetBody = (
       <GestureHandlerRootView style={styles.container}>
         <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
           {companionPreviewOpen ? (
@@ -4136,11 +4128,32 @@ export function ReactionSheet({
           </View>
         </Modal>
       </GestureHandlerRootView>
+  );
+
+  // Overlay avoids stacking a second RN Modal / iOS UIWindow on top of ReplayModal.
+  if (presentation === 'overlay') {
+    if (!sheetOpen) return null;
+    return <View style={styles.fullScreenOverlay}>{sheetBody}</View>;
+  }
+
+  return (
+    <Modal
+      visible={sheetOpen}
+      animationType="slide"
+      presentationStyle="fullScreen"
+      onRequestClose={handleAbandonReaction}
+    >
+      {sheetBody}
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  fullScreenOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 9999,
+    elevation: 9999,
+  },
   container: {
     flex: 1,
     backgroundColor: '#000',

@@ -2,6 +2,13 @@ import { FontAwesome, FontAwesome5 } from '@expo/vector-icons';
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
 import { configureConnectPlaybackAudioSessionAsync, runConnectAvCommandWithRetry, waitForStableAndroidAppForeground } from '@/utils/audioSession';
 import {
+  pauseSoundIfLoaded,
+  playSoundIfLoaded,
+  stopAndUnloadSoundSafely,
+  takeAndUnloadSoundRef,
+} from '@/utils/avSoundSafe';
+import { diagnosticsAppLog } from '@/utils/diagnosticsLog';
+import {
   buildEventForReplay,
   deleteReflectionDocument,
   fetchMirrorEventById,
@@ -63,28 +70,8 @@ interface ReplayModalProps {
   explorerId?: string;
   /** React while watching: closes the player and opens the reaction composer for this parent. */
   onRequestReact?: (parentEventId: string) => void;
-}
-
-async function unloadAvSoundSafely(sound: Audio.Sound | null | undefined): Promise<void> {
-  if (!sound) return;
-  try {
-    await sound.stopAsync();
-  } catch {
-    /* ignore */
-  }
-  try {
-    await sound.unloadAsync();
-  } catch {
-    /* ignore */
-  }
-}
-
-async function takeAndUnloadSoundRef(
-  ref: React.MutableRefObject<Audio.Sound | null>,
-): Promise<void> {
-  const sound = ref.current;
-  ref.current = null;
-  await unloadAvSoundSafely(sound);
+  /** iOS: fires after the Modal dismiss animation completes (safer handoff to ReactionSheet). */
+  onDismiss?: () => void;
 }
 
 export function ReplayModal({
@@ -107,6 +94,7 @@ export function ReplayModal({
   activeRelationshipId = null,
   explorerId,
   onRequestReact,
+  onDismiss,
 }: ReplayModalProps) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -1011,7 +999,7 @@ export function ReplayModal({
             sound.setOnPlaybackStatusUpdate((status) => {
               if (status.isLoaded && status.didJustFinish) {
                 debugLog('✅ [speakCaption] Caption audio finished');
-                sound.unloadAsync();
+                void stopAndUnloadSoundSafely(sound);
                 captionSoundRef.current = null;
                 sendRef.current({ type: 'NARRATION_FINISHED' });
               }
@@ -1123,8 +1111,8 @@ export function ReplayModal({
       pauseMedia: () => {
         videoPlayer.pause();
         void pipVideoRef.current?.pauseAsync().catch(() => {});
-        if (soundRef.current) soundRef.current.pauseAsync();
-        if (captionSoundRef.current) captionSoundRef.current.pauseAsync();
+        void pauseSoundIfLoaded(soundRef.current);
+        void pauseSoundIfLoaded(captionSoundRef.current);
         Speech.stop();
       },
       
@@ -1136,7 +1124,7 @@ export function ReplayModal({
         if (companionMessageUsesParentVideoMainStageRef.current) {
           companionMessagePlaybackStartedForEventRef.current = null;
           ensureCompanionMessageVideoPlayingRef.current();
-          if (soundRef.current) soundRef.current.playAsync();
+          void playSoundIfLoaded(soundRef.current);
           return;
         }
         try {
@@ -1151,8 +1139,8 @@ export function ReplayModal({
         } catch (e) {
           console.warn('[ReplayModal] resumeMedia video failed:', e);
         }
-        if (soundRef.current) soundRef.current.playAsync();
-        if (captionSoundRef.current) captionSoundRef.current.playAsync();
+        void playSoundIfLoaded(soundRef.current);
+        void playSoundIfLoaded(captionSoundRef.current);
       },
 
       // --- SELFIE ACTIONS ---
@@ -1169,11 +1157,8 @@ export function ReplayModal({
       playDeepDive: async () => {
         // Stop previous media
         Speech.stop();
-        if (captionSoundRef.current) {
-          await captionSoundRef.current.unloadAsync().catch(()=>{});
-          setCaptionSound(null);
-          captionSoundRef.current = null;
-        }
+        await takeAndUnloadSoundRef(captionSoundRef);
+        setCaptionSound(null);
 
         if (eventRef.current?.deep_dive_audio_url) {
           debugLog('🧠 Playing deep dive audio');
@@ -1188,7 +1173,7 @@ export function ReplayModal({
               if (status.isLoaded && status.didJustFinish) {
                 debugLog('✅ Deep dive audio finished');
                 sendRef.current({ type: 'NARRATION_FINISHED' });
-                newSound.unloadAsync();
+                void stopAndUnloadSoundSafely(newSound);
                 soundRef.current = null;
               }
             });
@@ -1694,7 +1679,7 @@ export function ReplayModal({
         newSound.setOnPlaybackStatusUpdate((status) => {
           if (status.isLoaded && status.didJustFinish) {
             setIsDirectDeepDivePlaying(false);
-            newSound.unloadAsync();
+            void stopAndUnloadSoundSafely(newSound);
             soundRef.current = null;
           }
         });
@@ -1921,7 +1906,8 @@ export function ReplayModal({
 
     // Stop existing
     Speech.stop();
-    if (captionSoundRef.current) await captionSoundRef.current.unloadAsync().catch(()=>{});
+    await takeAndUnloadSoundRef(captionSoundRef);
+    setCaptionSound(null);
 
     const audioUrl = normalizeAudioUrl(displayEvent?.audio_url);
     // expo-av accepts http/https URLs and file:// URLs
@@ -1942,7 +1928,7 @@ export function ReplayModal({
         captionSoundRef.current = sound;
         sound.setOnPlaybackStatusUpdate((status) => {
           if (status.isLoaded && status.didJustFinish) {
-            sound.unloadAsync();
+            void stopAndUnloadSoundSafely(sound);
             setCaptionSound(null);
             captionSoundRef.current = null;
           }
@@ -1982,7 +1968,7 @@ export function ReplayModal({
               soundRef.current = sound;
               sound.setOnPlaybackStatusUpdate((status) => {
                 if (status.isLoaded && status.didJustFinish) {
-                  sound.unloadAsync();
+                  void stopAndUnloadSoundSafely(sound);
                   soundRef.current = null;
                 }
               });
@@ -2002,7 +1988,12 @@ export function ReplayModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" transparent={false}>
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent={false}
+      onDismiss={onDismiss}
+    >
       <GestureDetector gesture={swipeDownGesture}>
         <View style={styles.container}>
           {/* MAIN STAGE */}
@@ -2135,39 +2126,6 @@ export function ReplayModal({
                 )}
               </View>
 
-              {showReactButton ? (
-                <TouchableOpacity
-                  style={[styles.reactButton, hasReactedToParent && styles.reactButtonDisabled]}
-                  onPress={() => {
-                    if (!reactionSessionForUi) return;
-                    onRequestReact?.(reactionSessionForUi.parentEventId);
-                  }}
-                  disabled={hasReactedToParent}
-                  activeOpacity={0.75}
-                  accessibilityRole="button"
-                  accessibilityLabel={
-                    hasReactedToParent
-                      ? 'You already reacted to this Reflection'
-                      : 'React to this Reflection'
-                  }
-                  accessibilityState={{ disabled: hasReactedToParent }}
-                >
-                  <FontAwesome
-                    name={hasReactedToParent ? 'check' : 'video-camera'}
-                    size={15}
-                    color={hasReactedToParent ? 'rgba(125,211,168,0.9)' : 'rgba(255,255,255,0.9)'}
-                  />
-                  <Text
-                    style={[
-                      styles.reactButtonText,
-                      hasReactedToParent && styles.reactButtonTextDisabled,
-                    ]}
-                  >
-                    {hasReactedToParent ? 'Reacted' : 'React'}
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-
               {!isReactionPlayback ? (
               <TouchableOpacity
                 style={[styles.likeButton, likedByMe && styles.likeButtonActive]}
@@ -2286,6 +2244,63 @@ export function ReplayModal({
                   ) : (
                     <FontAwesome name="trash-o" size={17} color="#fff" />
                   )}
+                </TouchableOpacity>
+                <View style={styles.topControlGap} />
+              </>
+            ) : null}
+            {showReactButton ? (
+              <>
+                <TouchableOpacity
+                  style={[
+                    styles.reactButton,
+                    (hasReactedToParent || isAnyAudioPlaying || isDeepDivePlaying) &&
+                      styles.reactButtonDisabled,
+                  ]}
+                  onPress={() => {
+                    if (!reactionSessionForUi) return;
+                    if (isAnyAudioPlaying || isDeepDivePlaying) return;
+                    diagnosticsAppLog('ReactHandoff', 'player:react-tap', {
+                      parentEventId: reactionSessionForUi.parentEventId,
+                      alreadyReacted: hasReactedToParent,
+                    });
+                    onRequestReact?.(reactionSessionForUi.parentEventId);
+                  }}
+                  disabled={hasReactedToParent || isAnyAudioPlaying || isDeepDivePlaying}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    hasReactedToParent
+                      ? 'You already reacted to this Reflection'
+                      : isAnyAudioPlaying || isDeepDivePlaying
+                        ? 'React unavailable while content is playing'
+                        : 'React to this Reflection'
+                  }
+                  accessibilityState={{
+                    disabled: hasReactedToParent || isAnyAudioPlaying || isDeepDivePlaying,
+                  }}
+                >
+                  <FontAwesome
+                    name={hasReactedToParent ? 'check' : 'video-camera'}
+                    size={15}
+                    color={
+                      hasReactedToParent
+                        ? 'rgba(125,211,168,0.9)'
+                        : isAnyAudioPlaying || isDeepDivePlaying
+                          ? 'rgba(255,255,255,0.35)'
+                          : 'rgba(255,255,255,0.9)'
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.reactButtonText,
+                      hasReactedToParent && styles.reactButtonTextDisabled,
+                      !hasReactedToParent &&
+                        (isAnyAudioPlaying || isDeepDivePlaying) &&
+                        styles.reactButtonTextPlaybackDisabled,
+                    ]}
+                  >
+                    {hasReactedToParent ? 'Reacted' : 'React'}
+                  </Text>
                 </TouchableOpacity>
                 <View style={styles.topControlGap} />
               </>
@@ -2458,9 +2473,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 6,
     paddingHorizontal: 14,
-    marginLeft: 12,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.22)',
+    zIndex: 1001,
+    elevation: 1001,
   },
   reactButtonDisabled: {
     backgroundColor: 'rgba(255, 255, 255, 0.10)',
@@ -2473,6 +2489,9 @@ const styles = StyleSheet.create({
   },
   reactButtonTextDisabled: {
     color: 'rgba(125, 211, 168, 0.9)',
+  },
+  reactButtonTextPlaybackDisabled: {
+    color: 'rgba(255, 255, 255, 0.35)',
   },
   likeButton: {
     minWidth: 44,

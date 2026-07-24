@@ -4,6 +4,7 @@ import {
 } from '@projectmirror/shared';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
+import { stopAndUnloadSoundSafely } from '@/utils/avSoundSafe';
 
 /** Single static cache path — overwritten each like to prevent storage leaks. */
 export const LIKE_FEEDBACK_CACHE_PATH = `${FileSystem.cacheDirectory}like-feedback.mp3`;
@@ -51,15 +52,9 @@ export async function stopLikeFeedbackAudio(
   } else {
     await clearPendingLikeAfterPlay();
   }
-  if (activeLikeSound) {
-    try {
-      await activeLikeSound.stopAsync();
-      await activeLikeSound.unloadAsync();
-    } catch {
-      // already stopped
-    }
-    activeLikeSound = null;
-  }
+  const sound = activeLikeSound;
+  activeLikeSound = null;
+  await stopAndUnloadSoundSafely(sound);
   await clearPendingLikeAfterPlay();
 }
 
@@ -85,13 +80,9 @@ export async function playLikeFeedbackAudio(
 
   if (activeLikeSound) {
     likeAudioRequestId += 1;
-    try {
-      await activeLikeSound.stopAsync();
-      await activeLikeSound.unloadAsync();
-    } catch {
-      // already stopped
-    }
+    const previous = activeLikeSound;
     activeLikeSound = null;
+    await stopAndUnloadSoundSafely(previous);
   }
 
   const requestId = ++likeAudioRequestId;
@@ -136,11 +127,7 @@ export async function playLikeFeedbackAudio(
       { shouldPlay: true, volume: 1.0, isLooping: false }
     );
     if (requestId !== likeAudioRequestId) {
-      try {
-        await sound.unloadAsync();
-      } catch {
-        // ignore
-      }
+      await stopAndUnloadSoundSafely(sound);
       await finishLikeFeedbackPlayback(requestId, onAfterPlay);
       return;
     }
@@ -148,7 +135,7 @@ export async function playLikeFeedbackAudio(
     activeLikeSound = sound;
     sound.setOnPlaybackStatusUpdate((status) => {
       if (status.isLoaded && status.didJustFinish) {
-        sound.unloadAsync().catch(() => {});
+        void stopAndUnloadSoundSafely(sound);
         if (activeLikeSound === sound) {
           activeLikeSound = null;
         }

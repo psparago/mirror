@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { takeAndUnloadSoundRef } from '@/utils/avSoundSafe';
 import {
   VOICE_OPTIONS,
   type VoiceOption,
@@ -37,14 +38,7 @@ export function VoicePickerModal({
   const soundRef = useRef<Audio.Sound | null>(null);
 
   const stopSample = useCallback(async () => {
-    if (soundRef.current) {
-      try {
-        await soundRef.current.unloadAsync();
-      } catch {
-        /* ignore */
-      }
-      soundRef.current = null;
-    }
+    await takeAndUnloadSoundRef(soundRef);
     setPlayingVoice(null);
   }, []);
 

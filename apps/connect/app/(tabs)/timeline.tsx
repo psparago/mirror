@@ -32,7 +32,9 @@ import {
   Animated,
   AppState,
   FlatList,
+  InteractionManager,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   StyleSheet,
@@ -41,10 +43,12 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as Sentry from '@sentry/react-native';
 
 import { ReactionRespondentsBar } from '@/components/ReactionRespondentsBar';
 import { ReactionSheet, type ReactionParentMedia } from '@/components/ReactionSheet';
 import { ReplayModal } from '@/components/ReplayModal';
+import { diagnosticsAppLog } from '@/utils/diagnosticsLog';
 import {
   buildEventForReplay,
   fetchMirrorEventById,
@@ -61,6 +65,20 @@ import {
 // re-opens the ReplayModal, leading to multiple videos playing simultaneously.
 let timelineDeepLinkResolvingReflectionId: string | null = null;
 let timelineDeepLinkPresentedReflectionId: string | null = null;
+
+/** Trace React-while-viewing hangs → GCP (diagnostics on) + Sentry breadcrumbs. */
+function logReactHandoff(
+  step: string,
+  detail?: Record<string, string | number | boolean | null | undefined>,
+): void {
+  diagnosticsAppLog('ReactHandoff', step, detail);
+  Sentry.addBreadcrumb({
+    category: 'react-handoff',
+    message: step,
+    data: detail,
+    level: 'info',
+  });
+}
 
 interface SentReflection {
   event_id: string;
@@ -351,6 +369,9 @@ export default function SentTimelineScreen({
   const [selectedReactionSession, setSelectedReactionSession] = useState<ReactionPlaybackSession | null>(null);
   const [reactionTarget, setReactionTarget] = useState<{ id: string; media: ReactionParentMedia } | null>(null);
   const [openingReactionId, setOpeningReactionId] = useState<string | null>(null);
+  /** Parent to open in ReactionSheet after ReplayModal fully dismisses (no stacked Modals). */
+  const pendingReactAfterPlayerRef = useRef<SentReflection | null>(null);
+  const playerDismissFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Row opened via ⋮ overflow (Edit / Delete use the same icon styling as before). */
   const [reflectionActionMenu, setReflectionActionMenu] = useState<SentReflection | null>(null);
   const [likesModalReflection, setLikesModalReflection] = useState<SentReflection | null>(null);
@@ -546,11 +567,19 @@ export default function SentTimelineScreen({
 
   const openReactionComposer = useCallback(
     async (item: SentReflection) => {
+      logReactHandoff('composer-open-start', { parentEventId: item.event_id });
       if (!currentExplorerId) {
+        logReactHandoff('composer-open-blocked', { reason: 'no-explorer' });
         showToast('Explorer not ready yet');
         return;
       }
-      if (openingReactionId === item.event_id) return;
+      if (openingReactionId === item.event_id) {
+        logReactHandoff('composer-open-blocked', {
+          reason: 'already-opening',
+          parentEventId: item.event_id,
+        });
+        return;
+      }
 
       setOpeningReactionId(item.event_id);
       try {
@@ -588,6 +617,11 @@ export default function SentTimelineScreen({
             id: item.event_id,
             media: { mediaType: 'video', videoUrl },
           });
+          logReactHandoff('composer-open-done', {
+            parentEventId: item.event_id,
+            mediaType: 'video',
+            presentation: 'overlay',
+          });
           return;
         }
         if (imageUrl) {
@@ -597,10 +631,24 @@ export default function SentTimelineScreen({
             id: item.event_id,
             media: { mediaType: 'image', imageUrl },
           });
+          logReactHandoff('composer-open-done', {
+            parentEventId: item.event_id,
+            mediaType: 'image',
+            presentation: 'overlay',
+          });
           return;
         }
+        logReactHandoff('composer-open-failed', {
+          parentEventId: item.event_id,
+          reason: 'no-media',
+        });
         showToast('This Reflection has no media to react to');
       } catch (error) {
+        logReactHandoff('composer-open-failed', {
+          parentEventId: item.event_id,
+          reason: 'exception',
+          message: error instanceof Error ? error.message : 'unknown',
+        });
         console.warn('[Reaction] failed to open composer:', error);
         showToast('Could not open reaction composer');
       } finally {
@@ -610,24 +658,77 @@ export default function SentTimelineScreen({
     [currentExplorerId, eventObjectsMap, openingReactionId, showToast],
   );
 
+  const flushPendingReactAfterPlayer = useCallback(() => {
+    const item = pendingReactAfterPlayerRef.current;
+    if (!item) return;
+    pendingReactAfterPlayerRef.current = null;
+    if (playerDismissFallbackRef.current) {
+      clearTimeout(playerDismissFallbackRef.current);
+      playerDismissFallbackRef.current = null;
+    }
+    logReactHandoff('player-dismissed-open-composer', {
+      parentEventId: item.event_id,
+      platform: Platform.OS,
+    });
+    // Wait for interactions/animations to settle before mounting the overlay sheet.
+    InteractionManager.runAfterInteractions(() => {
+      void openReactionComposer(item);
+    });
+  }, [openReactionComposer]);
+
   const handleReactFromPlayer = useCallback(
     (parentEventId: string) => {
       const item = reflections.find((reflection) => reflection.event_id === parentEventId);
       if (!item) {
+        logReactHandoff('react-tap-failed', {
+          parentEventId,
+          reason: 'reflection-not-in-timeline',
+        });
         showToast('Could not open reaction composer');
         return;
       }
-      // Close the player first and let the Modal dismissal settle before
-      // presenting the ReactionSheet — iOS drops the second Modal if the
-      // first is still animating out.
+      logReactHandoff('react-tap', {
+        parentEventId,
+        hadPlayerOpen: !!selectedReflection,
+      });
+      // Close the player first; open ReactionSheet only after Modal onDismiss
+      // (iOS) or a fallback timeout (Android / missed dismiss). Overlay
+      // presentation avoids stacking a second RN Modal UIWindow.
+      pendingReactAfterPlayerRef.current = item;
       setSelectedReflection(null);
       setSelectedReactionSession(null);
-      setTimeout(() => {
-        void openReactionComposer(item);
-      }, 400);
+      if (playerDismissFallbackRef.current) {
+        clearTimeout(playerDismissFallbackRef.current);
+      }
+      playerDismissFallbackRef.current = setTimeout(() => {
+        logReactHandoff('player-dismiss-fallback', {
+          parentEventId,
+          platform: Platform.OS,
+        });
+        flushPendingReactAfterPlayer();
+      }, Platform.OS === 'ios' ? 900 : 450);
     },
-    [openReactionComposer, reflections, showToast],
+    [flushPendingReactAfterPlayer, reflections, selectedReflection, showToast],
   );
+
+  const handlePlayerDismiss = useCallback(() => {
+    if (!pendingReactAfterPlayerRef.current) return;
+    logReactHandoff('player-onDismiss', {
+      parentEventId: pendingReactAfterPlayerRef.current.event_id,
+      platform: Platform.OS,
+    });
+    flushPendingReactAfterPlayer();
+  }, [flushPendingReactAfterPlayer]);
+
+  useEffect(() => {
+    return () => {
+      if (playerDismissFallbackRef.current) {
+        clearTimeout(playerDismissFallbackRef.current);
+        playerDismissFallbackRef.current = null;
+      }
+      pendingReactAfterPlayerRef.current = null;
+    };
+  }, []);
 
   const selectedReflectionLikedBy = useMemo(() => (
     selectedReflection
@@ -1717,6 +1818,7 @@ export default function SentTimelineScreen({
   };
 
   return (
+    <View style={styles.container}>
     <SafeAreaView style={styles.container}>
       {/* Selfie Image Modal */}
       <Modal
@@ -2176,6 +2278,8 @@ export default function SentTimelineScreen({
 
       </View>
 
+      </SafeAreaView>
+
       <ReplayModal
         visible={!!selectedReflection}
         event={selectedReflection}
@@ -2203,6 +2307,7 @@ export default function SentTimelineScreen({
         companions={companions}
         onToggleLike={handleReplayToggleLike}
         onRequestReact={handleReactFromPlayer}
+        onDismiss={handlePlayerDismiss}
         onClose={() => {
           const openedViaDeepLink = deepLinkHandledRef.current !== null;
           setSelectedReflection(null);
@@ -2217,6 +2322,7 @@ export default function SentTimelineScreen({
 
       <ReactionSheet
         visible={!!reactionTarget}
+        presentation="overlay"
         parentReflectionId={reactionTarget?.id ?? ''}
         parentMedia={reactionTarget?.media ?? null}
         onClose={() => {
@@ -2355,7 +2461,7 @@ export default function SentTimelineScreen({
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 

@@ -32,6 +32,7 @@ import {
 } from 'react-native';
 
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
+import { takeAndUnloadSoundRef } from '../../utils/avSoundSafe';
 import {
   getDiagnosticsBufferStats,
   isDiagnosticsEnabled,
@@ -303,10 +304,7 @@ export default function SettingsScreen() {
   const soundRef = useRef<Audio.Sound | null>(null);
 
   const stopSample = useCallback(async () => {
-    if (soundRef.current) {
-      try { await soundRef.current.unloadAsync(); } catch { /* ignore */ }
-      soundRef.current = null;
-    }
+    await takeAndUnloadSoundRef(soundRef);
     setPlayingVoice(null);
   }, []);
 

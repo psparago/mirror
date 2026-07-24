@@ -24,12 +24,18 @@ import {
 } from '@projectmirror/shared';
 import { LikeHeartBurstOverlay, useLikeHeartBursts } from '@/components/LikeHeartBurst';
 import { playLikeFeedbackAudio, stopLikeFeedbackAudio } from '@/utils/playLikeFeedbackAudio';
+import {
+  pauseSoundIfLoaded,
+  playSoundIfLoaded,
+  stopAndUnloadSoundSafely,
+  takeAndUnloadSoundRef,
+} from '@/utils/avSoundSafe';
 import { TellMeMoreButton } from '@/components/stage/TellMeMoreButton';
 import { ActivityRow } from '@/components/stage/ActivityRow';
 import { DocumentaryReactionPip } from '@/components/stage/DocumentaryReactionPip';
 import { StageCaptionBar } from '@/components/stage/StageCaptionBar';
 import { StageCrossFadeMedia } from '@/components/stage/StageCrossFadeMedia';
-import { useDocumentarySequence } from '@/hooks/useDocumentarySequence';
+import { useDocumentarySequence, type DocState } from '@/hooks/useDocumentarySequence';
 
 import { useMachine } from '@xstate/react';
 import * as Sentry from '@sentry/react-native';
@@ -226,10 +232,14 @@ function applyStageVideoAudible(player: StageVideoPlayer | null | undefined): vo
   }
 }
 
-/** Re-apply audio session after expo-av (chime, like TTS) so expo-video regains output. */
+/**
+ * Re-apply audio session after expo-av (chime, like TTS) so expo-video regains output.
+ * Throttled aggressively: rapid setAudioModeAsync + Now Playing updates contribute to
+ * main-thread AppHangs (Sentry REFLECTIONS-EXPLORER-W).
+ */
 export async function refreshExplorerAudioSessionForVideo(): Promise<void> {
   const now = Date.now();
-  if (now - lastVideoAudioSessionRefreshAt < 350) return;
+  if (now - lastVideoAudioSessionRefreshAt < 1200) return;
   lastVideoAudioSessionRefreshAt = now;
   try {
     await Audio.setAudioModeAsync({
@@ -341,6 +351,8 @@ interface MainStageProps {
   onMediaError?: (event: Event) => void;
   readEventIds: string[];
   newArrivalIds: string[]; // Unread reflections visible in the list (derived, not session state)
+  /** Golden pill: open newest arrival and count down by 1 (parent marks read + bypasses throttle). */
+  onOpenNewestArrival?: () => void;
   onReplay?: (event: Event) => void;
   config?: {
     autoplay?: boolean;
@@ -380,6 +392,7 @@ export default function MainStageView({
   onMediaError,
   readEventIds,
   newArrivalIds,
+  onOpenNewestArrival,
   onReplay,
   config,
   filterBar,
@@ -459,6 +472,8 @@ export default function MainStageView({
 
   // True while the co-host breath timer is active (hides replay button during breath)
   const [isDeepDivePending, setIsDeepDivePending] = useState(false);
+  /** After Deep Dive plays once for this Reflection, stop inviting with the sparkle pulse. */
+  const [hasCompletedDeepDive, setHasCompletedDeepDive] = useState(false);
   const [chapterPlaybackPulseKey, setChapterPlaybackPulseKey] = useState(0);
   // Resolved playable video URLs for selfie reaction chapters, keyed by event_id. Selfie
   // reaction list Events frequently lack a top-level video_url (presigned URLs expire), so we
@@ -728,13 +743,25 @@ export default function MainStageView({
   const mainFinishIgnoredForReactionRef = useRef<string | null>(null);
   const documentaryCompleteHandledRef = useRef<string | null>(null);
   const chapterPlaybackPulseIndexRef = useRef<number | null>(null);
-  // True when the selected Reflection has reactions (chapters.length > 1). When true we
-  // defer the spoken caption + Deep Dive until the whole documentary ends, so Cole reaches
-  // the reactions quickly instead of sitting through two narrations up front.
+  // True when the *latched* play-session has reactions (see documentarySequenceLengthRef).
+  // When true we defer Deep Dive until the whole documentary ends.
   const documentaryHasReactionsRef = useRef(false);
+  /**
+   * Chapter count frozen at play-start. A reaction signal can land mid-caption/deep-dive and
+   * grow live `chapters` from 1→2; without this latch the finished handler mid-converts a
+   * single-chapter play into a documentary (deep dive + reaction + end narration again).
+   */
+  const documentarySequenceLengthRef = useRef(1);
+  /**
+   * Shared gate across Up Next reselect, media tap replay, and the replay overlay — they each
+   * have their own throttle, so a clumsy double-tap can start two captions at once.
+   */
+  const playbackRestartGateUntilRef = useRef(0);
   // Guards the end-of-documentary narration so a navigation/selection change cancels it.
   const endNarrationTokenRef = useRef(0);
   const playEndNarrationRef = useRef<() => void>(() => {});
+  /** Previous doc phase — used so end-narration only runs on a real transition into `complete`. */
+  const prevDocPhaseForCompleteRef = useRef<DocState['phase']>('idle');
   // Watchdog heartbeat: updated whenever the main player or reaction PiP reports playback
   // progress, or a chapter advances. The watchdog recovers a chapter only if NO media has
   // made progress for CHAPTER_STALL_MS (e.g. a reaction whose video URL never resolved).
@@ -776,38 +803,15 @@ export default function MainStageView({
         Speech.stop();
 
         // Stop voice message audio
-        const soundToUnload = soundRef.current;
-        soundRef.current = null;
         setSound(null); // Clear state immediately to prevent race conditions
-        if (soundToUnload) {
-          try {
-            const status = await soundToUnload.getStatusAsync();
-            if (status.isLoaded) {
-              await soundToUnload.stopAsync();
-              await soundToUnload.unloadAsync();
-            }
-          } catch (e) {
-            // Ignore errors - sound may already be unloaded
-            debugLog('Sound already unloaded or error:', (e as Error).message);
-          }
-        }
+        await takeAndUnloadSoundRef(soundRef);
 
         // Stop companion caption audio
         const soundToStop = captionSoundRefForActions.current || captionSoundRef.current;
-        if (soundToStop) {
-          try {
-            const status = await soundToStop.getStatusAsync();
-            if (status.isLoaded) {
-              await soundToStop.stopAsync();
-              await soundToStop.unloadAsync();
-            }
-          } catch (e) {
-            console.error('Error stopping caption:', e);
-          }
-          captionSoundRef.current = null;
-          captionSoundRefForActions.current = null;
-          setCaptionSound(null);
-        }
+        captionSoundRef.current = null;
+        captionSoundRefForActions.current = null;
+        setCaptionSound(null);
+        await stopAndUnloadSoundSafely(soundToStop);
 
         if (playerRef.current) {
           try {
@@ -919,14 +923,14 @@ export default function MainStageView({
                         clearTimeout(safetyTimeoutRef.current);
                         safetyTimeoutRef.current = null;
                       }
-                      newCaptionSound.unloadAsync();
+                      void stopAndUnloadSoundSafely(newCaptionSound);
                       setCaptionSound(null);
                       captionSoundRef.current = null;
                       debugLog(`✅ Narration finished [Session: ${thisSession}] - sending NARRATION_FINISHED`);
                       sendRef.current({ type: 'NARRATION_FINISHED' });
                     } else {
                       debugLog(`🚫 Narration finished but session changed [${thisSession} vs ${captionSessionRef.current}] - cleaning up`);
-                      newCaptionSound.unloadAsync();
+                      void stopAndUnloadSoundSafely(newCaptionSound);
                       captionSoundRef.current = null;
                     }
                   }
@@ -936,7 +940,7 @@ export default function MainStageView({
               // CHECK SESSION AGAIN after load completes
               if (captionSessionRef.current !== thisSession) {
                 debugLog(`🚫 Session changed during narration load [${thisSession} vs ${captionSessionRef.current}] - discarding`);
-                newCaptionSound.unloadAsync();
+                await stopAndUnloadSoundSafely(newCaptionSound);
                 return;
               }
 
@@ -944,7 +948,7 @@ export default function MainStageView({
               captionSoundRefForActions.current = newCaptionSound;
               setCaptionSound(newCaptionSound);
 
-              await newCaptionSound.playAsync();
+              await playSoundIfLoaded(newCaptionSound);
               debugLog(`🎧 Narration playing [Session: ${thisSession}]`);
 
               // Smart Fallback based on actual duration
@@ -1034,7 +1038,7 @@ export default function MainStageView({
       playAudio: async () => {
         const playWithRetry = async (retryCount = 0): Promise<void> => {
           try {
-            if (soundRef.current) await soundRef.current.unloadAsync();
+            await takeAndUnloadSoundRef(soundRef);
 
             const audioEvent = playbackEventRef.current ?? selectedEventRef.current;
             if (!audioEvent?.audio_url) {
@@ -1098,21 +1102,15 @@ export default function MainStageView({
 
         // Stop any existing audio before playing deep dive
         Speech.stop();
-        if (captionSoundRefForActions.current) {
-          try {
-            await captionSoundRefForActions.current.stopAsync();
-            await captionSoundRefForActions.current.unloadAsync();
-          } catch (e) {
-            debugLog('Caption already stopped');
-          }
-          setCaptionSound(null);
-          captionSoundRef.current = null;
-          captionSoundRefForActions.current = null;
-        }
+        const captionToStop = captionSoundRefForActions.current;
+        captionSoundRef.current = null;
+        captionSoundRefForActions.current = null;
+        setCaptionSound(null);
+        await stopAndUnloadSoundSafely(captionToStop);
 
         const playDeepDiveWithRetry = async (retryCount = 0): Promise<void> => {
           try {
-            if (soundRef.current) await soundRef.current.unloadAsync();
+            await takeAndUnloadSoundRef(soundRef);
 
             if (selectedEventRef.current?.deep_dive_audio_url) {
               debugLog(`🧠 Playing deep dive audio: ${selectedEventRef.current.deep_dive_audio_url.substring(0, 80)}... (Attempt ${retryCount + 1})`);
@@ -1218,8 +1216,8 @@ export default function MainStageView({
             /* ignore */
           }
         }
-        if (soundRef.current) await soundRef.current.pauseAsync();
-        if (captionSoundRefForActions.current) await captionSoundRefForActions.current.pauseAsync();
+        await pauseSoundIfLoaded(soundRef.current);
+        await pauseSoundIfLoaded(captionSoundRefForActions.current);
       },
 
       resumeMedia: async () => {
@@ -1233,8 +1231,8 @@ export default function MainStageView({
           }
           playerRef.current.play();
         }
-        if (soundRef.current) await soundRef.current.playAsync();
-        if (captionSoundRefForActions.current) await captionSoundRefForActions.current.playAsync();
+        await playSoundIfLoaded(soundRef.current);
+        await playSoundIfLoaded(captionSoundRefForActions.current);
       }
     }
   }), []); // Empty deps - all values accessed via refs (bridge pattern)
@@ -1355,6 +1353,55 @@ export default function MainStageView({
   }, [docState.currentIndex]);
   useEffect(() => { docActionsRef.current = docActions; }, [docActions]);
 
+  const latchDocumentarySequenceLength = useCallback(
+    (reason: string) => {
+      const n = Math.max(1, docStateRef.current.chapters.length);
+      documentarySequenceLengthRef.current = n;
+      documentaryHasReactionsRef.current = n > 1;
+      traceDocumentary('doc.sequence.latch', {
+        reason,
+        chapters: n,
+        event: shortDiagId(selectedEventRef.current?.event_id),
+      });
+    },
+    [traceDocumentary],
+  );
+
+  const tryBeginPlaybackRestart = useCallback(
+    (reason: string): boolean => {
+      const now = Date.now();
+      if (now < playbackRestartGateUntilRef.current) {
+        traceDocumentary('playback.restart.ignored', {
+          reason,
+          event: shortDiagId(selectedEventRef.current?.event_id),
+          machine: JSON.stringify(stateRef.current?.value),
+          msLeft: playbackRestartGateUntilRef.current - now,
+        });
+        return false;
+      }
+      const st = stateRef.current;
+      // After the first restart leaves `finished`, a second tap often still sees a
+      // "replayable" UI for one frame — or hits a different control (overlay vs media).
+      // Never stack a second caption/deep-dive on top of one already speaking.
+      const alreadyNarrating =
+        !!st &&
+        (st.matches({ playingAudio: { playback: 'playing' } }) ||
+          st.matches({ playingDeepDive: { active: 'playing' } }) ||
+          st.hasTag('speaking'));
+      if (alreadyNarrating && reason !== 'idle-start') {
+        traceDocumentary('playback.restart.ignored_busy', {
+          reason,
+          event: shortDiagId(selectedEventRef.current?.event_id),
+          machine: JSON.stringify(st.value),
+        });
+        return false;
+      }
+      playbackRestartGateUntilRef.current = now + 1000;
+      return true;
+    },
+    [traceDocumentary],
+  );
+
   // Inject a pre-resolved playable video_url onto a selfie reaction event so the machine
   // routes it to video playback (playingVideoInstant) instead of the photo/selfie path.
   // Without this, reactions whose list Event lacks video_url land in viewingPhoto, which
@@ -1449,17 +1496,7 @@ export default function MainStageView({
     }
 
     const tryPauseSound = async (activeSound: Audio.Sound | null): Promise<boolean> => {
-      if (!activeSound) return false;
-      try {
-        const status = await activeSound.getStatusAsync();
-        if (status.isLoaded && status.isPlaying) {
-          await activeSound.pauseAsync();
-          return true;
-        }
-      } catch {
-        // sound may already be stopped
-      }
-      return false;
+      return pauseSoundIfLoaded(activeSound);
     };
 
     snapshot.captionSoundPaused = await tryPauseSound(captionSoundRefForActions.current);
@@ -1531,19 +1568,11 @@ export default function MainStageView({
       if (selectedEventRef.current?.event_id !== resumeEventId) return;
 
       if (snapshot.captionSoundPaused && captionSoundRefForActions.current) {
-        try {
-          await captionSoundRefForActions.current.playAsync();
-        } catch {
-          // caption may have been torn down
-        }
+        await playSoundIfLoaded(captionSoundRefForActions.current);
       }
 
       if (snapshot.deepDiveSoundPaused && soundRef.current) {
-        try {
-          await soundRef.current.playAsync();
-        } catch {
-          // deep dive audio may have been torn down
-        }
+        await playSoundIfLoaded(soundRef.current);
       }
 
       if (snapshot.speechWasActive && snapshot.speechResumeText) {
@@ -1791,15 +1820,16 @@ export default function MainStageView({
     Speech.stop();
 
     // 3. Stop any playing audio
-    if (sound) {
-      sound.stopAsync().catch(() => { });
-      sound.unloadAsync().catch(() => { });
-    }
-    if (captionSound || captionSoundRef.current) {
-      const soundToStop = captionSound || captionSoundRef.current;
-      soundToStop?.stopAsync().catch(() => { });
-      soundToStop?.unloadAsync().catch(() => { });
-    }
+    const voiceToStop = sound ?? soundRef.current;
+    soundRef.current = null;
+    setSound(null);
+    void stopAndUnloadSoundSafely(voiceToStop);
+
+    const captionToStop = captionSound || captionSoundRef.current;
+    captionSoundRef.current = null;
+    captionSoundRefForActions.current = null;
+    setCaptionSound(null);
+    void stopAndUnloadSoundSafely(captionToStop);
 
     // 4. Clear safety timers
     if (safetyTimeoutRef.current) {
@@ -1821,13 +1851,16 @@ export default function MainStageView({
     Speech.stop();
 
     if (sound) {
-      sound.stopAsync().catch(() => { });
-      sound.unloadAsync().catch(() => { });
+      void stopAndUnloadSoundSafely(sound);
+      soundRef.current = null;
+      setSound(null);
     }
     if (captionSound || captionSoundRef.current) {
       const soundToStop = captionSound || captionSoundRef.current;
-      soundToStop?.stopAsync().catch(() => { });
-      soundToStop?.unloadAsync().catch(() => { });
+      captionSoundRef.current = null;
+      captionSoundRefForActions.current = null;
+      setCaptionSound(null);
+      void stopAndUnloadSoundSafely(soundToStop);
     }
 
     if (safetyTimeoutRef.current) {
@@ -1925,7 +1958,9 @@ export default function MainStageView({
       !!selectedEventRef.current?.video_url || selectedMetadataRef.current?.content_type === 'video';
 
     if (currentState?.matches('idle') && selectedEventRef.current && selectedMetadataRef.current) {
+      if (!tryBeginPlaybackRestart('idle-start')) return;
       debugLog('▶️ Tapped to start playback from idle');
+      latchDocumentarySequenceLength('idle-start');
       docActionsRef.current.markPlaying();
       const useInstantPlayback = config?.instantVideoPlayback && isVideo;
       if (useInstantPlayback) {
@@ -1949,6 +1984,7 @@ export default function MainStageView({
     // For videos: no pause/resume - only replay when finished
     if (isVideo) {
       if (currentState && (currentState.matches('finished') || currentState.matches({ viewingPhoto: 'viewing' }))) {
+        if (!tryBeginPlaybackRestart('tap-replay-video')) return;
         traceDocumentary('replay.tap.video', {
           event: shortDiagId(selectedEventRef.current?.event_id),
           machine: JSON.stringify(currentState.value),
@@ -1957,6 +1993,9 @@ export default function MainStageView({
         });
         debugLog('🔁 User pressed REPLAY (video)');
         hasAutoPlayedDeepDiveRef.current = false;
+        setHasCompletedDeepDive(false);
+        latchDocumentarySequenceLength('tap-replay-video');
+        docActionsRef.current.markPlaying();
 
         replayFromParent();
 
@@ -1982,6 +2021,7 @@ export default function MainStageView({
       currentState.matches({ viewingPhoto: 'viewing' }) ||
       currentState.matches({ playingAudio: { playback: 'done' } })
     )) {
+      if (!tryBeginPlaybackRestart('tap-replay')) return;
       traceDocumentary('replay.tap.generic', {
         event: shortDiagId(selectedEventRef.current?.event_id),
         machine: JSON.stringify(currentState.value),
@@ -1990,13 +2030,23 @@ export default function MainStageView({
       });
       debugLog('🔁 User pressed REPLAY');
       hasAutoPlayedDeepDiveRef.current = false;
+      setHasCompletedDeepDive(false);
+      latchDocumentarySequenceLength('tap-replay');
+      docActionsRef.current.markPlaying();
 
       replayFromParent();
       if (onReplayRef.current && selectedEventRef.current) {
         onReplayRef.current(selectedEventRef.current);
       }
     }
-  }, [send, config?.instantVideoPlayback, traceDocumentary, replayFromParent]);
+  }, [
+    send,
+    config?.instantVideoPlayback,
+    traceDocumentary,
+    replayFromParent,
+    tryBeginPlaybackRestart,
+    latchDocumentarySequenceLength,
+  ]);
 
   const throttledSingleTap = useThrottledCallback(handleSingleTap);
 
@@ -2183,14 +2233,16 @@ export default function MainStageView({
   useEffect(() => {
     setSidebarImagesReady(false);
     if (!videoSource) {
-      const frame = requestAnimationFrame(() => setSidebarImagesReady(true));
-      return () => cancelAnimationFrame(frame);
+      // Stagger decode so stage layout settles before Up Next thumbnails hit the main thread.
+      const timeout = setTimeout(() => setSidebarImagesReady(true), 250);
+      return () => clearTimeout(timeout);
     }
     if (videoReady) {
-      setSidebarImagesReady(true);
-      return;
+      // Avoid contending with AVPlayer first-frame / Now Playing setup (AppHang 1S/1R/W).
+      const timeout = setTimeout(() => setSidebarImagesReady(true), 500);
+      return () => clearTimeout(timeout);
     }
-    const timeout = setTimeout(() => setSidebarImagesReady(true), 1500);
+    const timeout = setTimeout(() => setSidebarImagesReady(true), 2000);
     return () => clearTimeout(timeout);
   }, [selectedEvent?.event_id, videoSource, videoReady]);
 
@@ -3064,23 +3116,20 @@ export default function MainStageView({
   // (e.g. playingAudio). All values accessed via refs so deps are empty.
   const playDeepDiveDirectly = useCallback(async () => {
     setIsCaptionOrSparklePlayingRef.current(true);
+    setHasCompletedDeepDive(true);
     Speech.stop();
-    if (captionSoundRefForActions.current) {
-      try {
-        await captionSoundRefForActions.current.stopAsync();
-        await captionSoundRefForActions.current.unloadAsync();
-      } catch (e) { /* already stopped */ }
-      captionSoundRefForActions.current = null;
-      captionSoundRef.current = null;
-      setCaptionSound(null);
-    }
+    const captionToStop = captionSoundRefForActions.current;
+    captionSoundRefForActions.current = null;
+    captionSoundRef.current = null;
+    setCaptionSound(null);
+    await stopAndUnloadSoundSafely(captionToStop);
 
     const event = selectedEventRef.current;
     const metadata = selectedMetadataRef.current;
 
     if (event?.deep_dive_audio_url) {
       try {
-        if (soundRef.current) await soundRef.current.unloadAsync();
+        await takeAndUnloadSoundRef(soundRef);
         const { sound: newSound } = await Audio.Sound.createAsync(
           { uri: event.deep_dive_audio_url },
           {
@@ -3094,7 +3143,7 @@ export default function MainStageView({
         newSound.setOnPlaybackStatusUpdate((status) => {
           if (status.isLoaded && status.didJustFinish) {
             setIsCaptionOrSparklePlayingRef.current(false);
-            newSound.unloadAsync();
+            void stopAndUnloadSoundSafely(newSound);
             soundRef.current = null;
           }
         });
@@ -3151,14 +3200,8 @@ export default function MainStageView({
     void (async () => {
       try {
         Speech.stop();
-        if (soundRef.current) {
-          try {
-            await soundRef.current.unloadAsync();
-          } catch {
-            /* already unloaded */
-          }
-          soundRef.current = null;
-        }
+        await takeAndUnloadSoundRef(soundRef);
+        setSound(null);
         if (!stillCurrent()) {
           setIsCaptionOrSparklePlayingRef.current(false);
           return;
@@ -3182,11 +3225,7 @@ export default function MainStageView({
             },
           );
           if (!stillCurrent()) {
-            try {
-              await newSound.unloadAsync();
-            } catch {
-              /* ignore */
-            }
+            await stopAndUnloadSoundSafely(newSound);
             setIsCaptionOrSparklePlayingRef.current(false);
             return;
           }
@@ -3194,7 +3233,7 @@ export default function MainStageView({
           setSound(newSound);
           newSound.setOnPlaybackStatusUpdate((status) => {
             if (status.isLoaded && status.didJustFinish) {
-              newSound.unloadAsync().catch(() => {});
+              void stopAndUnloadSoundSafely(newSound);
               if (soundRef.current === newSound) soundRef.current = null;
               proceedToDeepDive();
             }
@@ -3301,8 +3340,14 @@ export default function MainStageView({
     configRef.current = config;
     playbackEventRef.current = state.context.event ?? selectedPlaybackEvent;
     playbackMetadataRef.current = state.context.metadata ?? selectedPlaybackMetadata;
-    documentaryHasReactionsRef.current = docState.chapters.length > 1;
     documentaryPhaseRef.current = docState.phase;
+    // Freeze the play-session chapter latch while a sequence is in flight. Live chapter
+    // growth (reaction signal arriving mid-caption) must not flip single→documentary.
+    if (docState.phase !== 'playing' && docState.phase !== 'complete') {
+      const n = Math.max(1, docState.chapters.length);
+      documentarySequenceLengthRef.current = n;
+      documentaryHasReactionsRef.current = n > 1;
+    }
   }, [events, selectedPlaybackEvent, state, onEventSelect, onDelete, onReplay, selectedPlaybackMetadata, config, docState.chapters.length, docState.phase]);
 
   useEffect(() => {
@@ -3338,9 +3383,10 @@ export default function MainStageView({
         docPhase: docState.phase,
         docIndex: docState.currentIndex,
         chapters: docState.chapters.length,
+        latchedChapters: documentarySequenceLengthRef.current,
         event: shortDiagId(finishedEventId),
       });
-      if (docState.chapters.length > 1 && docState.phase === 'playing') {
+      if (documentarySequenceLengthRef.current > 1 && docState.phase === 'playing') {
         if (activeDocEventId && finishedEventId && activeDocEventId !== finishedEventId) {
           traceDocumentary('doc.advance.ignore_stale_finished', {
             active: shortDiagId(activeDocEventId),
@@ -3377,7 +3423,7 @@ export default function MainStageView({
   // so advance the documentary as soon as that parent caption has completed.
   useEffect(() => {
     if (docState.phase !== 'playing') return;
-    if (docState.chapters.length <= 1) return;
+    if (documentarySequenceLengthRef.current <= 1) return;
     if (docState.currentIndex !== 0) return;
     const parent = docState.chapters[0]?.event ?? selectedEvent;
     if (!parent || parent.video_url) return;
@@ -3403,15 +3449,21 @@ export default function MainStageView({
 
   // When the documentary finishes, reset UI to the original Reflection (chapter 0, parked poster, no PiP).
   useEffect(() => {
-    if (docState.phase !== 'complete') return;
-    if (docState.chapters.length <= 1) return;
+    const prevPhase = prevDocPhaseForCompleteRef.current;
+    prevDocPhaseForCompleteRef.current = docState.phase;
+    // Only fire on a real transition into `complete`. A Reflection switch can briefly keep
+    // the prior play's `complete` phase on the first render of the new selection, which used
+    // to start end-narration (deep dive) before selection.new — stacked on the new caption.
+    const enteredComplete = docState.phase === 'complete' && prevPhase !== 'complete';
+    if (!enteredComplete) return;
+    if (documentarySequenceLengthRef.current <= 1) return;
     const parentId = selectedEvent?.event_id;
     if (!parentId) return;
     if (documentaryCompleteHandledRef.current === parentId) return;
     documentaryCompleteHandledRef.current = parentId;
     traceDocumentary('doc.complete.handle', {
       parent: shortDiagId(parentId),
-      chapters: docState.chapters.length,
+      chapters: documentarySequenceLengthRef.current,
     });
 
     if (reactionPipEndSubRef.current) {
@@ -3440,6 +3492,8 @@ export default function MainStageView({
     chapterPlaybackPulseIndexRef.current = null;
     parentImageCaptionPlayedForEventRef.current = null;
     mainFinishIgnoredForReactionRef.current = null;
+    playbackRestartGateUntilRef.current = 0;
+    prevDocPhaseForCompleteRef.current = 'idle';
     // Invalidate any in-flight end-of-documentary narration when the Reflection changes.
     endNarrationTokenRef.current += 1;
   }, [selectedEvent?.event_id]);
@@ -3465,7 +3519,7 @@ export default function MainStageView({
   // If nothing has progressed for CHAPTER_STALL_MS, force-advance so the sequence can never
   // zombie (e.g. a selfie reaction whose video URL never resolved).
   useEffect(() => {
-    if (docState.phase !== 'playing' || docState.chapters.length <= 1) return;
+    if (docState.phase !== 'playing' || documentarySequenceLengthRef.current <= 1) return;
     lastChapterProgressAtRef.current = Date.now();
     const interval = setInterval(() => {
       // Audio-only / spoken reactions (e.g. a voice reaction over an image parent) make no
@@ -3516,6 +3570,7 @@ export default function MainStageView({
   // Reset the auto-play guard whenever the reflection changes
   useEffect(() => {
     hasAutoPlayedDeepDiveRef.current = false;
+    setHasCompletedDeepDive(false);
     setIsDeepDivePending(false);
     if (deepDiveBreathTimeoutRef.current) {
       clearTimeout(deepDiveBreathTimeoutRef.current);
@@ -3534,7 +3589,9 @@ export default function MainStageView({
     if (docState.currentIndex > 0) return;
     // Multi-chapter documentary: caption + Deep Dive are played together at the very
     // end (see the documentary-complete effect), not while chapter 0 is finishing.
-    if (docState.chapters.length > 1) return;
+    // Use the latched play-session length — a reaction arriving mid-caption must not
+    // cancel an already-armed single-chapter deep dive or vice versa.
+    if (documentarySequenceLengthRef.current > 1) return;
 
     const hasDeepDive = !!selectedMetadata?.deep_dive || !!selectedEvent?.deep_dive_audio_url;
     if (!hasDeepDive) return;
@@ -3545,6 +3602,7 @@ export default function MainStageView({
       hasAutoPlayedDeepDiveRef.current = true;
       deepDiveBreathTimeoutRef.current = null;
       setIsDeepDivePending(false);
+      setHasCompletedDeepDive(true);
 
       const currentState = stateRef.current;
       if (currentState?.matches({ playingAudio: { playback: 'done' } })) {
@@ -3576,7 +3634,7 @@ export default function MainStageView({
       traceDocumentary('selection.new', {
         event: shortDiagId(currentEventId),
         hasVideo: !!selectedEvent?.video_url,
-        reactions: docStateRef.current.chapters.length,
+        chapters: docStateRef.current.chapters.length,
       });
       debugLog(`📩 User selected reflection: ${currentEventId}`);
 
@@ -3598,6 +3656,7 @@ export default function MainStageView({
         debugLog('⚡ Using instant video playback (skipping narration)');
         // Mark the sequence as playing so chapter advance + avatar blur work the same
         // whether playback started here (auto) or via the play-overlay tap.
+        latchDocumentarySequenceLength('selection-instant');
         docActionsRef.current.markPlaying();
         send({
           type: 'SELECT_EVENT_INSTANT',
@@ -3606,6 +3665,7 @@ export default function MainStageView({
           takeSelfie: false,
         });
       } else {
+        latchDocumentarySequenceLength('selection');
         docActionsRef.current.markPlaying();
         send({
           type: 'SELECT_EVENT',
@@ -3623,7 +3683,7 @@ export default function MainStageView({
       // Auto-scroll the list to show the selected item (bounds + fallbacks in performUpNextAutoscrollToEvent).
       performUpNextAutoscrollToEvent(currentEventId);
     }
-  }, [selectedEvent?.event_id, selectedPlaybackEvent, selectedPlaybackMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent, traceDocumentary]);
+  }, [selectedEvent?.event_id, selectedPlaybackEvent, selectedPlaybackMetadata, send, translateY, scale, opacity, config?.instantVideoPlayback, performUpNextAutoscrollToEvent, traceDocumentary, latchDocumentarySequenceLength]);
 
   // 2. Video Player Finished (Event Listener)
   useEffect(() => {
@@ -3769,9 +3829,12 @@ export default function MainStageView({
     };
   }, [audioIndicatorAnim, isAnyAudioPlaying]);
 
-  // Pulse animation for Tell Me More button
+  // Pulse animation for Tell Me More button — invite once, then stop after Deep Dive runs.
   const shouldPulseTellMeMore =
-    !!state && (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }));
+    !!state &&
+    !hasCompletedDeepDive &&
+    !isCaptionOrSparklePlaying &&
+    (state.matches('finished') || state.matches({ viewingPhoto: 'viewing' }));
   useEffect(() => {
     if (shouldPulseTellMeMore) {
       tellMeMorePulse.value = withRepeat(
@@ -3795,6 +3858,7 @@ export default function MainStageView({
   // --- RENDERING HELPERS ---
 
   const handleReplayImpl = useCallback(() => {
+    if (!tryBeginPlaybackRestart('overlay-replay')) return;
     traceDocumentary('replay.overlay', {
       event: shortDiagId(selectedEventRef.current?.event_id),
       machine: JSON.stringify(state.value),
@@ -3804,15 +3868,17 @@ export default function MainStageView({
       pip: playerDiag(reactionPipPlayerRef.current),
     });
     hasAutoPlayedDeepDiveRef.current = false;
+    setHasCompletedDeepDive(false);
     setIsDeepDivePending(false);
+    latchDocumentarySequenceLength('overlay-replay');
     docActionsRef.current.reset();
     docActionsRef.current.markPlaying();
 
     Speech.stop();
     if (soundRef.current) {
-      soundRef.current.stopAsync().catch(() => { });
-      soundRef.current.unloadAsync().catch(() => { });
+      const voiceToStop = soundRef.current;
       soundRef.current = null;
+      void stopAndUnloadSoundSafely(voiceToStop);
     }
     setIsCaptionOrSparklePlaying(false);
 
@@ -3823,7 +3889,7 @@ export default function MainStageView({
     if (onReplayRef.current && selectedEventRef.current) {
       onReplayRef.current(selectedEventRef.current);
     }
-  }, [state, replayFromParent, traceDocumentary]);
+  }, [state, replayFromParent, traceDocumentary, tryBeginPlaybackRestart, latchDocumentarySequenceLength]);
 
   const handleReplay = useThrottledCallback(handleReplayImpl);
 
@@ -3868,10 +3934,33 @@ export default function MainStageView({
 
   const handleUpNextItemPressCore = useCallback(
     (event: Event) => {
-      if (event.event_id === selectedEvent?.event_id) return;
+      if (event.event_id === selectedEvent?.event_id) {
+        // Cold-start with autoplay off auto-selects the first card and leaves the
+        // machine idle. Re-tapping that Up Next row used to no-op, so the Explorer
+        // never started the documentary (caption/reactions/deep dive) — only a later
+        // different card appeared to "play". Start or replay when idle/finished.
+        const currentState = stateRef.current;
+        const canStartOrReplay =
+          !!currentState &&
+          (currentState.matches('idle') ||
+            currentState.matches('finished') ||
+            currentState.matches({ viewingPhoto: 'viewing' }) ||
+            currentState.matches({ playingAudio: { playback: 'done' } }) ||
+            docStateRef.current.phase === 'complete');
+        if (!canStartOrReplay) return;
+        traceDocumentary('upnext.reselect', {
+          event: shortDiagId(event.event_id),
+          machine: JSON.stringify(currentState.value),
+          docPhase: docStateRef.current.phase,
+          chapters: docStateRef.current.chapters.length,
+          latchedChapters: documentarySequenceLengthRef.current,
+        });
+        handleSingleTap();
+        return;
+      }
       onEventSelect(event);
     },
-    [selectedEvent?.event_id, onEventSelect]
+    [selectedEvent?.event_id, onEventSelect, handleSingleTap, traceDocumentary],
   );
 
   const handleUpNextItemPress = useThrottledCallback(handleUpNextItemPressCore);
@@ -3884,13 +3973,10 @@ export default function MainStageView({
     setIsCaptionOrSparklePlaying(true);
     Speech.stop();
     if (captionSound) {
-      try {
-        await captionSound.stopAsync();
-        await captionSound.unloadAsync();
-      } catch (e) {
-        debugLog('Caption already stopped');
-      }
       setCaptionSound(null);
+      captionSoundRef.current = null;
+      captionSoundRefForActions.current = null;
+      await stopAndUnloadSoundSafely(captionSound);
     }
 
     if (selectedEvent?.audio_url) {
@@ -3908,7 +3994,7 @@ export default function MainStageView({
           if (status.isLoaded && status.didJustFinish) {
             debugLog('✅ Caption audio finished');
             setIsCaptionOrSparklePlaying(false);
-            newSound.unloadAsync();
+            void stopAndUnloadSoundSafely(newSound);
           }
         });
         setCaptionSound(newSound);
@@ -3952,25 +4038,22 @@ export default function MainStageView({
 
     debugLog('✨ User pressed Tell Me More button');
     setIsCaptionOrSparklePlaying(true);
+    setHasCompletedDeepDive(true);
     const currentState = state;
 
     if (currentState.matches({ playingAudio: { playback: 'done' } })) {
       debugLog('🔄 In playingAudio state - directly playing deep dive');
       Speech.stop();
-      if (captionSoundRefForActions.current) {
-        try {
-          await captionSoundRefForActions.current.stopAsync();
-          await captionSoundRefForActions.current.unloadAsync();
-        } catch (e) { /* already stopped */ }
-        captionSoundRefForActions.current = null;
-      }
+      const captionToStop = captionSoundRefForActions.current;
+      captionSoundRefForActions.current = null;
+      await stopAndUnloadSoundSafely(captionToStop);
 
       const event = selectedEventRef.current;
       const metadata = selectedMetadataRef.current;
 
       if (event?.deep_dive_audio_url) {
         try {
-          if (soundRef.current) await soundRef.current.unloadAsync();
+          await takeAndUnloadSoundRef(soundRef);
           const { sound: newSound } = await Audio.Sound.createAsync(
             { uri: event.deep_dive_audio_url },
             {
@@ -3983,7 +4066,7 @@ export default function MainStageView({
           newSound.setOnPlaybackStatusUpdate((status) => {
             if (status.isLoaded && status.didJustFinish) {
               setIsCaptionOrSparklePlaying(false);
-              newSound.unloadAsync();
+              void stopAndUnloadSoundSafely(newSound);
               soundRef.current = null;
             }
           });
@@ -4045,16 +4128,23 @@ export default function MainStageView({
 
 
   const scrollToNewestArrival = () => {
-    if (newArrivalIds.length === 0 || !flatListRef.current) return;
+    if (newArrivalIds.length === 0) return;
 
+    // Capture target before parent marks it read (it drops out of newArrivalIds on the next render).
+    const targetId = newArrivalIds[0];
     const evs = eventsRef.current;
-    const newestIndex = evs.findIndex(e => newArrivalIds.includes(e.event_id));
-    if (newestIndex < 0 || newestIndex >= evs.length) return;
+    const newestIndex = evs.findIndex((e) => e.event_id === targetId);
 
-    debugLog(`📜 Scrolling and playing newest arrival at index ${newestIndex}`);
+    if (onOpenNewestArrival) {
+      onOpenNewestArrival();
+    } else if (newestIndex >= 0) {
+      onEventSelect(evs[newestIndex]);
+    }
 
-    onEventSelect(evs[newestIndex]);
-    scrollFlatListToDataIndex(newestIndex, true);
+    if (newestIndex >= 0 && flatListRef.current) {
+      debugLog(`📜 Scrolling to newest arrival at index ${newestIndex}`);
+      scrollFlatListToDataIndex(newestIndex, true);
+    }
   };
 
   const renderUpNextItem = ({ item }: { item: Event }) => {
@@ -4153,7 +4243,7 @@ export default function MainStageView({
               {itemMetadata?.sender ? `${itemMetadata.sender} • ` : ''}{formatEventDateFromId(item.event_id)}
             </Text>
 
-            {itemChapters.length > 0 ? (
+            {itemChapters.length > 1 ? (
               <View
                 style={styles.upNextChapterRibbon}
                 pointerEvents="none"
@@ -4611,9 +4701,10 @@ export default function MainStageView({
                   wrapToTop();
                 }}
                 removeClippedSubviews={true}
-                initialNumToRender={sidebarImagesReady ? 6 : 3}
-                maxToRenderPerBatch={sidebarImagesReady ? 6 : 3}
-                windowSize={sidebarImagesReady ? 3 : 2}
+                initialNumToRender={sidebarImagesReady ? 4 : 2}
+                maxToRenderPerBatch={sidebarImagesReady ? 3 : 2}
+                updateCellsBatchingPeriod={100}
+                windowSize={sidebarImagesReady ? 2 : 1}
                 key={isLandscape ? 'list' : 'grid'}
                 numColumns={isLandscape ? 1 : 2}
                 columnWrapperStyle={!isLandscape ? { gap: 8 } : undefined}

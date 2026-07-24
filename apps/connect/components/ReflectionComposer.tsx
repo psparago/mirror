@@ -3,6 +3,7 @@ import { Event, WaitOverlay } from '@projectmirror/shared';
 import { Image } from 'expo-image';
 import { Audio } from 'expo-av';
 import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
+import { stopAndUnloadSoundSafely } from '@/utils/avSoundSafe';
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useVideoPlayer, VideoView, type VideoPlayer } from 'expo-video';
@@ -176,24 +177,6 @@ function clampNumber(value: number, min: number, max: number): number {
 function isNativeMediaInterruption(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
   return message.includes('Seeking interrupted');
-}
-
-async function stopAndUnloadSoundSafely(sound: Audio.Sound | null | undefined): Promise<void> {
-  if (!sound) return;
-  try {
-    await sound.stopAsync();
-  } catch (error) {
-    if (!isNativeMediaInterruption(error)) {
-      console.warn('[ReflectionComposer] preview audio stop failed:', error);
-    }
-  }
-  try {
-    await sound.unloadAsync();
-  } catch (error) {
-    if (!isNativeMediaInterruption(error)) {
-      console.warn('[ReflectionComposer] preview audio unload failed:', error);
-    }
-  }
 }
 
 function clampNumberWorklet(value: number, min: number, max: number): number {
