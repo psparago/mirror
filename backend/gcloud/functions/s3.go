@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -137,6 +138,35 @@ func UploadToS3(ctx context.Context, key string, data []byte, contentType string
 		ContentType: aws.String(contentType),
 	})
 	return err
+}
+
+// DownloadFromS3 fetches an object and returns its bytes plus Content-Type (may be empty).
+func DownloadFromS3(ctx context.Context, key string) ([]byte, string, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, "", fmt.Errorf("empty S3 key")
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion("us-east-1"))
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load AWS config: %w", err)
+	}
+	s3Client := s3.NewFromConfig(cfg)
+	out, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("reflections-1200b-storage"),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("S3 get %s: %w", key, err)
+	}
+	defer out.Body.Close()
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, "", fmt.Errorf("read S3 body %s: %w", key, err)
+	}
+	contentType := ""
+	if out.ContentType != nil {
+		contentType = *out.ContentType
+	}
+	return data, contentType, nil
 }
 
 // S3FileExists checks if a specific file exists in the event folder

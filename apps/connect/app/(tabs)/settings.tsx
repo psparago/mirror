@@ -32,6 +32,7 @@ import {
 } from 'react-native';
 
 import { formatTime, useDailyReminder } from '../../hooks/useDailyReminder';
+import { clearAllAnnouncementSeen } from '../../hooks/useAppAnnouncements';
 import { takeAndUnloadSoundRef } from '../../utils/avSoundSafe';
 import {
   getDiagnosticsBufferStats,
@@ -39,6 +40,7 @@ import {
   sendDiagnosticBatch,
   setDiagnosticsEnabled,
 } from '../../utils/diagnosticsLog';
+import { clearAllTipsSeen } from '../../utils/tips';
 
 const CAPTION_VOICE_STORAGE_KEY = 'tts_voice_caption';
 const DEEP_DIVE_VOICE_STORAGE_KEY = 'tts_voice_deep_dive';
@@ -1085,12 +1087,52 @@ export default function SettingsScreen() {
         <Text style={[styles.sectionTitle, { color: tintColor }]}>Learn</Text>
         <View style={styles.card}>
           <TouchableOpacity
-            style={[styles.row, { marginBottom: 0 }]}
+            style={styles.row}
             onPress={() => setTutorialModalVisible(true)}
             activeOpacity={0.7}
           >
             <Text style={styles.rowLabel}>Watch App Tutorial</Text>
             <FontAwesome name="chevron-right" size={14} color="#555" />
+          </TouchableOpacity>
+
+          <View style={styles.divider} />
+
+          <TouchableOpacity
+            style={[styles.row, { marginBottom: 0 }]}
+            onPress={() => {
+              Alert.alert(
+                'Reset tips?',
+                'One-time tips (Bring to life, Poster & scrubbing, Tell the story) will show again the next time you open those screens. What’s New and system message seen state are cleared too.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Reset',
+                    style: 'destructive',
+                    onPress: () => {
+                      void (async () => {
+                        try {
+                          await clearAllTipsSeen();
+                          await clearAllAnnouncementSeen();
+                          Alert.alert('Tips reset', 'Tips will show again when you visit those screens.');
+                        } catch (e) {
+                          console.warn('[Settings] clear tips failed', e);
+                          Alert.alert('Error', 'Could not reset tips.');
+                        }
+                      })();
+                    },
+                  },
+                ],
+              );
+            }}
+            activeOpacity={0.7}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.rowLabel}>Reset tips</Text>
+              <Text style={styles.description}>
+                Clear locally stored “already seen” flags for Workbench tips, What’s New, and system messages.
+              </Text>
+            </View>
+            <FontAwesome name="refresh" size={14} color="#555" />
           </TouchableOpacity>
         </View>
       </View>

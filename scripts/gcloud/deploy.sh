@@ -169,6 +169,7 @@ case "$FUNCTION_NAME" in
       exit 1
     fi
     echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
+    # 120s: spoken-context STT + image Sparkle + dual TTS can exceed the old 60s default.
     gcloud functions deploy generate-ai-description \
       --gen2 \
       --runtime=${RUNTIME} \
@@ -177,6 +178,8 @@ case "$FUNCTION_NAME" in
       --entry-point=GenerateAIDescription \
       --trigger-http \
       --allow-unauthenticated \
+      --timeout=120s \
+      --memory=512MB \
       --set-env-vars ${ENV_VARS},GEMINI_API_KEY=${GEMINI_API_KEY} \
       --quiet
     ;;

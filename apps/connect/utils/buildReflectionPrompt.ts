@@ -4,6 +4,11 @@ export interface ReflectionPromptParams {
   companionInReflection?: boolean;
   explorerInReflection?: boolean;
   peopleContext?: string;
+  /**
+   * When true, peopleContext came from Companion speech (cleaned transcript).
+   * Instructs the model to trust spoken facts over visual guessing when they conflict.
+   */
+  spokenContextTrusted?: boolean;
 }
 
 export function buildReflectionPrompt(params: ReflectionPromptParams): string {
@@ -13,6 +18,7 @@ export function buildReflectionPrompt(params: ReflectionPromptParams): string {
     companionInReflection,
     explorerInReflection,
     peopleContext,
+    spokenContextTrusted,
   } = params;
 
   // --- Context lines ---
@@ -34,19 +40,36 @@ export function buildReflectionPrompt(params: ReflectionPromptParams): string {
 
   const trimmed = peopleContext?.trim();
   if (trimmed) {
-    contextLines.push(
-      `The sender provided additional context: ${trimmed}. ` +
-      'Each comma-separated entry describes a person, pet, or setting.\n' +
-      'RULES for these entries:\n' +
-      '  - Entries starting with "at" describe a location (e.g. "at Nona\'s house" means this was taken at a place called Nona\'s house). ' +
-        'Weave location naturally into the description.\n' +
-      '  - Age/species words (baby, toddler, dog, cat, puppy, kitten) before a name are descriptors regardless of capitalization — they are NOT part of the name and must NEVER appear in your output. ' +
-        '"baby Dante" or "Baby Dante" means Dante is a baby — call him "Dante". ' +
-        '"dog Dalton" or "Dog Dalton" means Dalton is a dog — call him "Dalton". NEVER say "Dog Dalton" or "dog Dalton".\n' +
-      '  - Relationship words and nicknames (Grandma, Nona, Uncle, Aunt, Papa) ARE how the person is known. ' +
-        '"Grandma Marion" stays "Grandma Marion". "Nona" stays "Nona".\n' +
-      '  - Humans are the primary subjects. Pets/animals and locations are mentioned naturally but are secondary.',
-    );
+    if (spokenContextTrusted) {
+      contextLines.push(
+        `The sender spoke this context aloud (cleaned transcript): ${trimmed}. ` +
+          'TRUST THIS SPOKEN CONTEXT over visual guessing when they conflict — ' +
+          'names, relationships, pets, and places the sender mentioned are authoritative.\n' +
+          'RULES for this spoken context:\n' +
+          '  - Do NOT invent people, pets, or places the sender did not mention.\n' +
+          '  - Entries or phrases starting with "at" describe a location — weave location naturally.\n' +
+          '  - Age/species words (baby, toddler, dog, cat, puppy, kitten) before a name are descriptors — ' +
+          'they are NOT part of the name and must NEVER appear in your output. ' +
+          '"baby Dante" means Dante is a baby — call him "Dante". ' +
+          '"dog Dalton" means Dalton is a dog — call him "Dalton".\n' +
+          '  - Relationship words and nicknames (Grandma, Nona, Uncle, Aunt, Papa) ARE how the person is known.\n' +
+          '  - Humans are the primary subjects. Pets/animals and locations are mentioned naturally but are secondary.',
+      );
+    } else {
+      contextLines.push(
+        `The sender provided additional context: ${trimmed}. ` +
+          'Each comma-separated entry describes a person, pet, or setting.\n' +
+          'RULES for these entries:\n' +
+          '  - Entries starting with "at" describe a location (e.g. "at Nona\'s house" means this was taken at a place called Nona\'s house). ' +
+          'Weave location naturally into the description.\n' +
+          '  - Age/species words (baby, toddler, dog, cat, puppy, kitten) before a name are descriptors regardless of capitalization — they are NOT part of the name and must NEVER appear in your output. ' +
+          '"baby Dante" or "Baby Dante" means Dante is a baby — call him "Dante". ' +
+          '"dog Dalton" or "Dog Dalton" means Dalton is a dog — call him "Dalton". NEVER say "Dog Dalton" or "dog Dalton".\n' +
+          '  - Relationship words and nicknames (Grandma, Nona, Uncle, Aunt, Papa) ARE how the person is known. ' +
+          '"Grandma Marion" stays "Grandma Marion". "Nona" stays "Nona".\n' +
+          '  - Humans are the primary subjects. Pets/animals and locations are mentioned naturally but are secondary.',
+      );
+    }
   }
 
   // --- Identity rules ---

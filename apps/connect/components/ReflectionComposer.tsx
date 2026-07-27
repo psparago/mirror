@@ -46,9 +46,11 @@ import {
   REFLECTION_MAX_VIDEO_MS,
   REFLECTION_MAX_VIDEO_SECONDS,
 } from '@/utils/mediaProcessor';
+import { useTip } from '@/hooks/useTip';
 import { NarrationPreviewModal } from './reaction/NarrationPreviewModal';
 import { ReactionSheet } from './ReactionSheet';
 import { ReplayModal } from './ReplayModal';
+import { TipModal } from './TipModal';
 import { VoicePickerModal } from './VoicePickerModal';
 import {
   VideoTrimSlider,
@@ -63,121 +65,30 @@ import {
   type VoiceOption,
   type VoicePickerTarget,
 } from '@/utils/ttsVoices';
+import {
+  type CaptionSource,
+  type ComposerSendPayload,
+  type ComposerStage,
+  type ComposerVideoMeta,
+  type ReflectionComposerProps,
+  type TriggerMagicOptions,
+  MAX_PHOTO_SCALE,
+  MIN_PHOTO_SCALE,
+  SOFT_VIDEO_RECOMMENDED_SECONDS,
+} from '@/components/reflectionComposer/types';
+import {
+  clampNumber,
+  clampVideoTrimWindowMs,
+  isNativeMediaInterruption,
+} from '@/components/reflectionComposer/videoTrim';
 
-export type ComposerVideoMeta = {
-  video_start_ms: number;
-  video_end_ms: number;
-  thumbnail_time_ms: number | null;
-  /** Local JPEG from view-shot when native thumbnails fail (e.g. Space Saver / codec quirks). */
-  poster_custom_uri?: string | null;
+export type {
+  CaptionSource,
+  ComposerSendPayload,
+  ComposerStage,
+  ComposerVideoMeta,
+  TriggerMagicOptions,
 };
-
-export type TriggerMagicOptions = {
-  targetCaption?: string;
-  targetDeepDive?: string;
-  /** Keep staging media when only regenerating TTS (e.g. voice change). */
-  preserveStaging?: boolean;
-  captionVoice?: string;
-  deepDiveVoice?: string;
-};
-
-export type ComposerSendPayload = {
-  caption: string;
-  audioUri: string | null;
-  deepDive: string | null;
-  videoMeta?: ComposerVideoMeta | null;
-  /** Final square photo export (framing baked) to upload instead of the raw source photo. */
-  filteredPhotoUri?: string | null;
-  /** Local selfie narration video for image reflections (uploaded as a flagged child reaction). */
-  narrationUri?: string | null;
-};
-
-export type ComposerStage = 'workbench' | 'ai' | 'send';
-
-// --- TYPES ---
-interface ReflectionComposerProps {
-  mediaUri: string;
-  mediaType: 'photo' | 'video';
-  // State from Parent
-  initialCaption?: string;
-  audioUri?: string | null;
-  aiArtifacts?: {
-    caption?: string;
-    deepDive?: string;
-    audioUrl?: string;
-    deepDiveAudioUrl?: string;
-  };
-  isAiThinking: boolean;
-  // Actions
-  onCancel: () => void;
-  onReplaceMedia: () => void;
-  onSend: (data: ComposerSendPayload) => void;
-  /** Hydrate trim / thumbnail when editing an existing video reflection. */
-  initialVideoMeta?: Partial<ComposerVideoMeta> | null;
-  /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
-  onVideoMetaChange?: (meta: ComposerVideoMeta) => void;
-  onTriggerMagic: (options?: TriggerMagicOptions) => Promise<void>;
-  isSending: boolean;
-  captionVoice?: string;
-  deepDiveVoice?: string;
-  onCaptionVoiceChange?: (voice: string) => void;
-  onDeepDiveVoiceChange?: (voice: string) => void;
-  /** Shown on Replay preview header when editing an existing reflection (CreationModal). */
-  onReplaceMediaFromPreview?: () => void;
-  
-  // Audio Recorder (passed from parent or hook)
-  audioRecorder?: any; 
-  onStartRecording?: () => void;
-  onStopRecording?: () => void;
-  // AI hint controls (surfaced in Reflection Hints sheet)
-  companionInReflection?: boolean;
-  onCompanionInReflectionChange?: (v: boolean) => void;
-  explorerInReflection?: boolean;
-  onExplorerInReflectionChange?: (v: boolean) => void;
-  peopleContext?: string;
-  onPeopleContextChange?: (v: string) => void;
-  explorerName?: string;
-  stage: ComposerStage;
-  onStageChange: (next: ComposerStage) => void;
-  /** Workbench back: where re-pick media opens (Library, Camera, Search). */
-  replaceMediaBackLabel?: string;
-  /** Overrides send-stage center title (e.g. Companion reaction flow). */
-  composerHeaderTitle?: string;
-  /** Offer selfie narration for image reflections (new, non-reaction sends only). */
-  allowNarration?: boolean;
-}
-
-const MIN_PHOTO_SCALE = 0.35;
-const MAX_PHOTO_SCALE = 4;
-const SOFT_VIDEO_RECOMMENDED_SECONDS = 60;
-
-function clampVideoTrimWindowMs(
-  start: number,
-  end: number,
-  durationMs: number,
-  maxSpanMs: number,
-): { start: number; end: number } {
-  const d = Math.max(0, Math.round(durationMs));
-  let s = Math.max(0, Math.min(Math.round(start), Math.max(0, d - 1)));
-  let e = Math.max(s + 1, Math.min(Math.round(end), d));
-  if (e - s > maxSpanMs) {
-    e = s + maxSpanMs;
-    if (e > d) {
-      e = d;
-      s = Math.max(0, e - maxSpanMs);
-    }
-  }
-  return { start: s, end: Math.max(s + 1, e) };
-}
-
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
-function isNativeMediaInterruption(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  return message.includes('Seeking interrupted');
-}
 
 function clampNumberWorklet(value: number, min: number, max: number): number {
   'worklet';
@@ -246,6 +157,7 @@ function ReflectionComposerInner({
   onDeepDiveVoiceChange,
   onReplaceMediaFromPreview,
   audioRecorder,
+  isSpeakRecording = false,
   onStartRecording,
   onStopRecording,
   initialVideoMeta,
@@ -262,6 +174,10 @@ function ReflectionComposerInner({
   replaceMediaBackLabel = 'Library',
   composerHeaderTitle,
   allowNarration = false,
+  captionSource = 'ai',
+  onCaptionSourceChange,
+  isProcessingSpoken = false,
+  onSpokenNarration,
 }: ReflectionComposerProps) {
   // --- STATE ---
   const insets = useSafeAreaInsets();
@@ -274,6 +190,8 @@ function ReflectionComposerInner({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isCaptionFocused, setIsCaptionFocused] = useState(false);
   const [isContextFocused, setIsContextFocused] = useState(false);
+  const [showTypedContext, setShowTypedContext] = useState(false);
+  const [showAiVoiceAdvanced, setShowAiVoiceAdvanced] = useState(false);
   const [voicePickerTarget, setVoicePickerTarget] = useState<VoicePickerTarget | null>(null);
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
@@ -323,8 +241,29 @@ function ReflectionComposerInner({
   const [sendPreparing, setSendPreparing] = useState(false);
 
   const [isAiCancelled, setIsAiCancelled] = useState(false);
-  const isBlockedByAi = isAiThinking && !isAiCancelled;
+  const isBlockedByAi = (isAiThinking || isProcessingSpoken) && !isAiCancelled;
+  // Skip Sparkle mic tip after BITL — they already spoke; showing it when Sparkle
+  // finishes (processing gate clears) feels like a late "voice context" lecture.
+  const sparkleTip = useTip(
+    'sparkle_tell_the_story',
+    stage === 'ai' && !isProcessingSpoken && !isAiThinking && !narrationUri,
+    {
+      explorerName: explorerName || undefined,
+    },
+  );
+  const bitlTip = useTip(
+    'workbench_bring_to_life',
+    stage === 'workbench' && canNarrate && !narrationUri && !isBlockedByAi,
+    {
+      explorerName: explorerName || undefined,
+    },
+  );
+  const videoPosterTip = useTip(
+    'workbench_video_poster',
+    stage === 'workbench' && mediaType === 'video' && !isBlockedByAi,
+  );
   const hasRecordedAudio = !!audioUri;
+  const isMicRecording = Boolean(isSpeakRecording || audioRecorder?.isRecording);
 
   // Sparkle animation: rotating and pulsing star
   const sparkleRotation = useSharedValue(0);
@@ -396,7 +335,11 @@ function ReflectionComposerInner({
       const aiCaptionText = aiArtifacts?.caption?.trim() ?? '';
       const aiDeepDiveText = aiArtifacts?.deepDive?.trim() ?? '';
       const missingDeepDiveTts = !!aiDeepDiveText && !aiArtifacts?.deepDiveAudioUrl;
-      const missingCaptionTts = !audioUri && !!aiCaptionText && !aiArtifacts?.audioUrl;
+      // Human voice / BITL intentionally skip caption TTS — do not "repair" that away.
+      const captionTtsExpected =
+        captionSource !== 'human_voice' && captionSource !== 'bitl';
+      const missingCaptionTts =
+        captionTtsExpected && !audioUri && !!aiCaptionText && !aiArtifacts?.audioUrl;
       if ((missingDeepDiveTts || missingCaptionTts) && !ttsRepairAttemptedRef.current) {
         ttsRepairAttemptedRef.current = true;
         console.warn(
@@ -464,11 +407,19 @@ function ReflectionComposerInner({
     onStageChange,
     onTriggerMagic,
     audioUri,
+    captionSource,
     aiArtifacts?.caption,
     aiArtifacts?.deepDive,
     aiArtifacts?.audioUrl,
     aiArtifacts?.deepDiveAudioUrl,
   ]);
+
+  // After Sparkle Speak / BITL STT finishes, auto-play caption + Rich Narration.
+  useEffect(() => {
+    if (isProcessingSpoken) {
+      wantsAutoPlayRef.current = true;
+    }
+  }, [isProcessingSpoken]);
 
   // Classifies what changed since the last successful Sparkle run:
   //  - 'full': image/video frame or people context changed → regenerate from media.
@@ -558,6 +509,9 @@ function ReflectionComposerInner({
       const options: TriggerMagicOptions = {
         captionVoice,
         deepDiveVoice,
+        skipCaptionTts:
+          captionSource === 'human_voice' || captionSource === 'bitl',
+        spokenContextTrusted: !!(peopleContext ?? '').trim(),
       };
       if (mode === 'ttsOnly') {
         // Preserve both the user's caption and the existing deep dive; only the
@@ -574,7 +528,14 @@ function ReflectionComposerInner({
       }
       return options;
     },
-    [caption, aiArtifacts?.deepDive, captionVoice, deepDiveVoice],
+    [
+      caption,
+      aiArtifacts?.deepDive,
+      captionVoice,
+      deepDiveVoice,
+      captionSource,
+      peopleContext,
+    ],
   );
 
   const handleVoicePick = useCallback(
@@ -908,11 +869,56 @@ function ReflectionComposerInner({
   const trimAppliedRef = useRef(false);
   const trimScrubDepthRef = useRef(0);
   const wasPlayingBeforeTrimScrubRef = useRef(false);
+  /** True while we paused for the first-visit video tip; resume play when tip closes. */
+  const heldPlaybackForVideoTipRef = useRef(false);
 
   useEffect(() => {
     if (mediaType !== 'video') return;
     void configureConnectPlaybackAudioSessionAsync();
   }, [mediaType, mediaUri]);
+
+  // Hold video until the poster tip has either shown+dismissed or been skipped (already seen).
+  useEffect(() => {
+    if (mediaType !== 'video' || !player) return;
+
+    const tipMayAppear = stage === 'workbench' && !isBlockedByAi;
+    const holdForTip =
+      tipMayAppear &&
+      (videoPosterTip.visible ||
+        videoPosterTip.autoShowState === 'idle' ||
+        videoPosterTip.autoShowState === 'checking' ||
+        videoPosterTip.autoShowState === 'will_show');
+
+    if (holdForTip) {
+      heldPlaybackForVideoTipRef.current = true;
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+      setVideoPaused(true);
+      return;
+    }
+
+    if (!heldPlaybackForVideoTipRef.current && videoPosterTip.autoShowState !== 'skipped') {
+      return;
+    }
+    heldPlaybackForVideoTipRef.current = false;
+    try {
+      player.play();
+    } catch {
+      /* ignore */
+    }
+    setVideoPaused(false);
+  }, [
+    mediaUri,
+    mediaType,
+    player,
+    stage,
+    isBlockedByAi,
+    videoPosterTip.visible,
+    videoPosterTip.autoShowState,
+  ]);
 
   useEffect(() => {
     if (mediaType !== 'video' || !player) return;
@@ -1207,12 +1213,13 @@ function ReflectionComposerInner({
   // --- HANDLERS ---
 
   const buildSendPayload = useCallback(() => {
+    const useHumanVoice =
+      !narrationUri && captionSource === 'human_voice' && !!audioUri;
     const base = {
       caption,
-      // A Bring-It-to-Life narration replaces the spoken caption, so any voice
-      // intro recorded before it is dropped (caption TTS still uploads for
-      // manual playback).
-      audioUri: narrationUri ? null : audioUri || null,
+      // BITL replaces spoken caption. Clean caption / AI use TTS from parent.
+      // My voice keeps the raw mic recording.
+      audioUri: useHumanVoice ? audioUri || null : null,
       deepDive: aiArtifacts?.deepDive || null,
       narrationUri,
     };
@@ -1228,7 +1235,17 @@ function ReflectionComposerInner({
       };
     }
     return { ...base, videoMeta: null };
-  }, [caption, audioUri, aiArtifacts?.deepDive, narrationUri, mediaType, videoRangeMs, thumbnailTimeMs, posterCustomUri]);
+  }, [
+    caption,
+    audioUri,
+    aiArtifacts?.deepDive,
+    narrationUri,
+    captionSource,
+    mediaType,
+    videoRangeMs,
+    thumbnailTimeMs,
+    posterCustomUri,
+  ]);
 
   const currentPlaybackWindowSeconds = useMemo(() => {
     if (mediaType !== 'video' || !videoRangeMs) return 0;
@@ -1364,6 +1381,50 @@ function ReflectionComposerInner({
     onStageChange('ai');
   }, [mediaType, player, onStageChange]);
 
+  /**
+   * Cancel tips + close How-it-works before tearing down the composer.
+   * How-it-works still uses RN Modal — delay dismiss before navigation.
+   * Tips are View overlays (safe), but we still cancel pending auto-show.
+   */
+  const runReplaceMediaSafely = useCallback(() => {
+    const infoWasOpen = isInfoOpen;
+    const tipWasVisible = bitlTip.visible || sparkleTip.visible || videoPosterTip.visible;
+    console.log('[GalleryFlow] replace:tap', {
+      stage,
+      tipWasVisible,
+      infoWasOpen,
+      bitlTip: bitlTip.visible,
+      sparkleTip: sparkleTip.visible,
+      videoPosterTip: videoPosterTip.visible,
+    });
+    bitlTip.hide();
+    sparkleTip.hide();
+    videoPosterTip.hide();
+    if (isInfoOpen) {
+      setIsInfoOpen(false);
+    }
+    const go = () => {
+      console.log('[GalleryFlow] replace:invoke-onReplaceMedia');
+      onReplaceMedia();
+    };
+    // Only How-it-works needs a Modal dismiss beat; tips no longer use RN Modal.
+    if (infoWasOpen) {
+      setTimeout(go, 400);
+    } else {
+      go();
+    }
+  }, [
+    bitlTip.visible,
+    bitlTip.hide,
+    sparkleTip.visible,
+    sparkleTip.hide,
+    videoPosterTip.visible,
+    videoPosterTip.hide,
+    isInfoOpen,
+    onReplaceMedia,
+    stage,
+  ]);
+
   const goToSend = useCallback(() => {
     void stopAiPreviewRef.current?.();
     Keyboard.dismiss();
@@ -1401,8 +1462,21 @@ function ReflectionComposerInner({
   }, []);
 
   useEffect(() => {
-    // Help sheet should never persist across stage/screen transitions.
+    // Help sheet / tips should never persist across stage or preview transitions.
+    // Only hide tips that don't belong on the current stage — otherwise a mount-time
+    // hide() cancels the pending first-visit auto-show (video poster tip never appeared).
     setIsInfoOpen(false);
+    if (isPreviewOpen) {
+      bitlTip.hide();
+      sparkleTip.hide();
+      videoPosterTip.hide();
+      return;
+    }
+    if (stage !== 'ai') sparkleTip.hide();
+    if (stage !== 'workbench') {
+      bitlTip.hide();
+      videoPosterTip.hide();
+    }
   }, [stage, isPreviewOpen]);
 
   // AI audio preview playback — caption → pause → deep dive
@@ -1471,7 +1545,12 @@ function ReflectionComposerInner({
       await ensureSpeakerMode();
       if (previewRunIdRef.current !== runId || previewAbortRef.current) return;
 
-      const captionUrl = audioUri || aiArtifacts?.audioUrl;
+      const captionUrl =
+        !narrationUri && captionSource === 'human_voice' && audioUri
+          ? audioUri
+          : aiArtifacts?.audioUrl ||
+            (captionSource === 'human_voice' ? audioUri : undefined) ||
+            undefined;
       const deepDiveUrl = aiArtifacts?.deepDiveAudioUrl;
 
       if (captionUrl) {
@@ -1507,7 +1586,15 @@ function ReflectionComposerInner({
         setPreviewPhase('idle');
       }
     }
-  }, [audioUri, aiArtifacts?.audioUrl, aiArtifacts?.deepDiveAudioUrl, ensureSpeakerMode, playOneClip]);
+  }, [
+    audioUri,
+    aiArtifacts?.audioUrl,
+    aiArtifacts?.deepDiveAudioUrl,
+    captionSource,
+    narrationUri,
+    ensureSpeakerMode,
+    playOneClip,
+  ]);
 
   playAiPreviewRef.current = playAiPreview;
 
@@ -1563,10 +1650,10 @@ function ReflectionComposerInner({
   }, [stage]);
 
   useEffect(() => {
-    if (audioRecorder?.isRecording) {
+    if (isMicRecording) {
       void stopAiPreviewRef.current?.();
     }
-  }, [audioRecorder?.isRecording]);
+  }, [isMicRecording]);
 
   const handleRunSparkleAndPlay = useCallback(() => {
     void stopAiPreviewRef.current?.();
@@ -1930,7 +2017,7 @@ function ReflectionComposerInner({
           <View style={styles.photoUtilityRow}>
             <TouchableOpacity
               style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onReplaceMedia}
+              onPress={runReplaceMediaSafely}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
@@ -1974,7 +2061,7 @@ function ReflectionComposerInner({
           <View style={styles.videoUtilityRow}>
           <TouchableOpacity 
               style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onReplaceMedia}
+              onPress={runReplaceMediaSafely}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
@@ -2036,8 +2123,8 @@ function ReflectionComposerInner({
                 <FontAwesome name="repeat" size={16} color="#fff" />
                 <Text style={styles.toolbarChipText}>Replay</Text>
               </TouchableOpacity>
-          <TouchableOpacity 
-            style={[
+              <TouchableOpacity
+                style={[
                   styles.toolbarChip,
                   styles.videoActionChip,
                   thumbnailTimeMs !== null && styles.toolbarChipActive,
@@ -2049,7 +2136,17 @@ function ReflectionComposerInner({
               >
                 <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
                 <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
-          </TouchableOpacity>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={videoPosterTip.showAgain}
+                style={[styles.tipReplayBtn, isBlockedByAi && { opacity: 0.35 }]}
+                disabled={isSending || isBlockedByAi}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Show tip about poster and scrubbing"
+              >
+                <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+              </TouchableOpacity>
       </View>
           </View>
         </View>
@@ -2068,45 +2165,62 @@ function ReflectionComposerInner({
         </View>
       ) : null}
       {showNarrationGuidance ? (
-        <TouchableOpacity
-          style={[
-            styles.videoGuidanceBanner,
-            styles.narrationGuidanceBanner,
-            (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
-          ]}
-          onPress={handleNarrationBannerPress}
-          disabled={isSending || isBlockedByAi || photoExportBusy}
-          activeOpacity={0.82}
-          accessibilityRole="button"
-          accessibilityLabel={
-            narrationUri
-              ? 'Narration recorded. Preview, redo, or remove narration'
-              : 'Bring this photo to life with a selfie narration'
-          }
-        >
-          <FontAwesome
-            name={narrationUri ? 'check-circle' : 'video-camera'}
-            size={16}
-            color="#f5c842"
-            style={styles.narrationGuidanceIcon}
-          />
-          <View style={styles.narrationGuidanceTextCol}>
-            <Text style={styles.narrationGuidanceHeadline}>
-              {narrationUri ? 'Your photo is brought to life' : 'Bring your photo to life'}
-            </Text>
-            <Text style={styles.narrationGuidanceSubtext}>
-              {narrationUri
-                ? 'Tap to preview, redo, or remove the selfie narration.'
-                : `Tap here and tell ${explorerName || 'Explorer'} about this Reflection.`}
-            </Text>
-          </View>
-          <View style={styles.narrationGuidanceAction}>
-            <Text style={styles.narrationGuidanceActionText}>
-              {narrationUri ? 'Manage' : 'Start'}
-            </Text>
-            <FontAwesome name="chevron-right" size={10} color="#e0f2fe" />
-          </View>
-        </TouchableOpacity>
+        <View style={styles.narrationGuidanceRow}>
+          <TouchableOpacity
+            style={[
+              styles.videoGuidanceBanner,
+              styles.narrationGuidanceBanner,
+              styles.narrationGuidanceBannerFlex,
+              (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
+            ]}
+            onPress={handleNarrationBannerPress}
+            disabled={isSending || isBlockedByAi || photoExportBusy}
+            activeOpacity={0.82}
+            accessibilityRole="button"
+            accessibilityLabel={
+              narrationUri
+                ? 'Narration recorded. Preview, redo, or remove narration'
+                : 'Bring this photo to life with a selfie narration'
+            }
+          >
+            <FontAwesome
+              name={narrationUri ? 'check-circle' : 'video-camera'}
+              size={16}
+              color="#f5c842"
+              style={styles.narrationGuidanceIcon}
+            />
+            <View style={styles.narrationGuidanceTextCol}>
+              <Text style={styles.narrationGuidanceHeadline}>
+                {narrationUri ? 'Your photo is brought to life' : 'Bring your photo to life'}
+              </Text>
+              <Text style={styles.narrationGuidanceSubtext}>
+                {narrationUri
+                  ? 'Tap to preview, redo, or remove. Sparkle already learned from your narration.'
+                  : `Tell ${explorerName || 'Explorer'} about this — Sparkle listens too.`}
+              </Text>
+            </View>
+            <View style={styles.narrationGuidanceAction}>
+              <Text style={styles.narrationGuidanceActionText}>
+                {narrationUri ? 'Manage' : 'Start'}
+              </Text>
+              <FontAwesome name="chevron-right" size={10} color="#e0f2fe" />
+            </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={bitlTip.showAgain}
+            style={[
+              styles.tipReplayBtn,
+              styles.narrationTipBtn,
+              (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
+            ]}
+            disabled={isSending || isBlockedByAi || photoExportBusy}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Show tip about Bring your photo to life"
+          >
+            <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+          </TouchableOpacity>
+        </View>
       ) : null}
       <TouchableOpacity
         style={styles.infoBtn}
@@ -2119,7 +2233,13 @@ function ReflectionComposerInner({
     </Animated.View>
   );
 
-  const hasAiAudio = !!(audioUri || aiArtifacts?.audioUrl);
+  const preferHumanCaptionAudio =
+    !narrationUri && captionSource === 'human_voice' && !!audioUri;
+  const hasAiAudio = !!(
+    preferHumanCaptionAudio ||
+    aiArtifacts?.audioUrl ||
+    (captionSource === 'human_voice' && audioUri)
+  );
 
   const renderAiTab = () => (
     <Animated.View entering={FadeIn} exiting={FadeOut} style={[styles.aiScreen, { paddingTop: insets.top + 8 }]}>
@@ -2175,18 +2295,11 @@ function ReflectionComposerInner({
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.aiSubtitleText}>
-          No changes needed? Tap Finish (top-right) to keep your current draft and open preview.
+          Just talk — names, places, what’s happening. Uhhs are fine. Or tap Finish to keep your draft.
         </Text>
 
-        {/* SECTION: Reflection Hints */}
-        <View style={[styles.aiCard, styles.aiCardProminent]}>
-          <View style={styles.aiCardHeader}>
-            <FontAwesome name="magic" size={15} color="#f5c842" />
-            <Text style={[styles.aiCardTitle, styles.aiCardTitleProminent]}>Reflection Hints</Text>
-          </View>
-          <Text style={styles.aiCardDesc}>
-            Tell AI who and what is in this reflection.
-          </Text>
+        {/* SECTION: Presence toggles */}
+        <View style={styles.aiCard}>
           <View style={styles.aiTogglePair}>
             <TouchableOpacity
               style={styles.aiToggleRow}
@@ -2227,93 +2340,31 @@ function ReflectionComposerInner({
               >
                 {explorerName || 'Explorer'} is in this
               </Text>
-             </TouchableOpacity>
-           </View>
-          <Text style={styles.aiHintLabel}>Context for AI</Text>
-          <View style={styles.aiInputRow}>
-            <FontAwesome name="users" size={13} color="rgba(255,255,255,0.35)" style={{ marginTop: 12 }} />
-            <TextInput
-              style={styles.aiHintInput}
-              placeholder="Names, pets, places, what's happening..."
-              placeholderTextColor="rgba(255,255,255,0.28)"
-              value={peopleContext ?? ''}
-              onChangeText={(t) => onPeopleContextChange?.(t)}
-              onFocus={() => setIsContextFocused(true)}
-              onBlur={() => setIsContextFocused(false)}
-              multiline
-              textAlignVertical="top"
-              autoCorrect={false}
-              autoCapitalize="words"
-            />
-          </View>
-          {isContextFocused ? (
-            <TouchableOpacity
-              style={styles.aiCaptionDoneBtn}
-              onPress={() => Keyboard.dismiss()}
-              activeOpacity={0.75}
-            >
-              <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
-              <Text style={styles.aiCaptionDoneText}>Done editing</Text>
             </TouchableOpacity>
-          ) : null}
-          <View style={styles.aiHintsFootnoteRow}>
-            <FontAwesome name="volume-up" size={12} color="rgba(255,255,255,0.35)" />
-            <Text style={styles.aiHintsFootnote}>
-              After Sparkle runs, you can scroll down to AI Voice to change how the caption and Rich Narration sound.
-            </Text>
           </View>
         </View>
 
-        {/* SECTION: Caption */}
-        <View style={[styles.aiCard, { flex: 1 }]}>
-          <View style={styles.aiCardHeader}>
-            <FontAwesome name="pencil" size={14} color="#8e44ad" />
-            <Text style={styles.aiCardTitle}>Caption (Optional)</Text>
-          </View>
-          <TextInput
-            style={styles.aiCaptionInput}
-            placeholder="Edit the AI caption or write your own..."
-            placeholderTextColor="rgba(255,255,255,0.28)"
-            value={caption}
-            onChangeText={setCaption}
-            onFocus={() => setIsCaptionFocused(true)}
-            onBlur={() => setIsCaptionFocused(false)}
-            multiline
-            textAlignVertical="top"
-            blurOnSubmit={false}
-          />
-          {isCaptionFocused ? (
-            <TouchableOpacity
-              style={styles.aiCaptionDoneBtn}
-              onPress={() => Keyboard.dismiss()}
-              activeOpacity={0.75}
-            >
-              <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
-              <Text style={styles.aiCaptionDoneText}>Done editing</Text>
-            </TouchableOpacity>
-          ) : null}
-          {captionVoiceStale ? (
-            <View style={styles.captionVoiceStaleRow}>
-              <FontAwesome name="magic" size={12} color="#f0c674" />
-              <Text style={styles.captionVoiceStaleText}>
-                Voice will update to match this caption on the next Sparkle run.
-              </Text>
-            </View>
-          ) : null}
-        </View>
-
-        {/* SECTION: Voice Intro — replaced by the Brought-to-Life card when a
-            narration exists (the selfie narration IS the spoken caption then). */}
+        {/* SECTION: Brought to Life (PiP narration) — keeps beloved face-in-corner path */}
         {canNarrate && narrationUri ? (
-          <View style={styles.aiCard}>
+          <View style={[styles.aiCard, styles.aiCardProminent]}>
             <View style={styles.aiCardHeader}>
               <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
-              <Text style={styles.aiCardTitle}>Brought to Life</Text>
+              <Text style={[styles.aiCardTitle, styles.aiCardTitleProminent, { flex: 1 }]}>
+                Brought to Life
+              </Text>
+              <TouchableOpacity
+                onPress={sparkleTip.showAgain}
+                style={styles.tipReplayBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Show tip about telling the story"
+              >
+                <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+              </TouchableOpacity>
             </View>
             <Text style={styles.aiCardDesc}>
-              Your selfie narration speaks for this photo — the Explorer sees it full screen while
-              you tell the story. The caption below stays as text the Explorer can still play by
-              hand.
+              Your selfie narration speaks for this photo — {explorerName || 'Explorer'} sees it full
+              screen while you tell the story. Sparkle also learns from what you said.
             </Text>
             <View style={styles.bitlActionsRow}>
               <TouchableOpacity
@@ -2349,78 +2400,320 @@ function ReflectionComposerInner({
                 </Text>
               </TouchableOpacity>
             </View>
+            {isProcessingSpoken ? (
+              <View style={styles.spokenProcessingRow}>
+                <ActivityIndicator size="small" color="#f5c842" />
+                <Text style={styles.spokenProcessingText}>Learning from your narration…</Text>
+              </View>
+            ) : peopleContext?.trim() && !showTypedContext ? (
+              <Text style={styles.cleanedContextPreview} numberOfLines={3}>
+                {peopleContext.trim()}
+              </Text>
+            ) : null}
+            <TouchableOpacity
+              style={styles.orTypeContextBtn}
+              onPress={() => setShowTypedContext((v) => !v)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.orTypeContextText}>
+                {showTypedContext ? 'Hide typed context' : 'Or type context'}
+              </Text>
+              <FontAwesome
+                name={showTypedContext ? 'chevron-up' : 'chevron-down'}
+                size={11}
+                color="rgba(255,255,255,0.45)"
+              />
+            </TouchableOpacity>
+            {showTypedContext ? (
+              <View style={styles.typedContextBlock}>
+                <Text style={styles.aiHintLabel}>Context for AI</Text>
+                <View style={styles.aiInputRow}>
+                  <FontAwesome
+                    name="users"
+                    size={13}
+                    color="rgba(255,255,255,0.35)"
+                    style={{ marginTop: 12 }}
+                  />
+                  <TextInput
+                    style={styles.aiHintInput}
+                    placeholder="Names, pets, places, what's happening..."
+                    placeholderTextColor="rgba(255,255,255,0.28)"
+                    value={peopleContext ?? ''}
+                    onChangeText={(t) => onPeopleContextChange?.(t)}
+                    onFocus={() => setIsContextFocused(true)}
+                    onBlur={() => setIsContextFocused(false)}
+                    multiline
+                    textAlignVertical="top"
+                    autoCorrect={false}
+                    autoCapitalize="words"
+                  />
+                </View>
+              </View>
+            ) : null}
           </View>
         ) : (
-        <View style={styles.aiCard}>
-          <View style={styles.aiCardHeader}>
-            <FontAwesome name="microphone" size={14} color="#2e78b7" />
-            <Text style={styles.aiCardTitle}>Voice Intro (Optional)</Text>
-          </View>
-          <Text style={styles.aiCardDesc}>
-            Record a short intro in your own voice.
-          </Text>
-          <View style={styles.aiVoiceCentered}>
-        <TouchableOpacity 
-              style={[styles.aiRecordBtn, audioRecorder?.isRecording && styles.aiRecordBtnActive]}
-          onPress={audioRecorder?.isRecording ? onStopRecording : onStartRecording}
-              activeOpacity={0.7}
-        >
-          <FontAwesome 
-                name={audioRecorder?.isRecording ? 'stop' : 'microphone'}
-                size={18}
-            color="#fff" 
-          />
-        </TouchableOpacity>
-            {hasRecordedAudio && !audioRecorder?.isRecording ? (
-              <View style={styles.aiVoiceDoneCol}>
-                <View style={styles.aiVoiceBadgeRow}>
-                  <FontAwesome name="check-circle" size={14} color="#27ae60" />
-                  <Text style={styles.aiVoiceDoneText}>Recorded</Text>
+          /* SECTION: Tell the story (Sparkle Speak hero) */
+          <View style={[styles.aiCard, styles.aiCardProminent]}>
+            <View style={styles.aiCardHeader}>
+              <FontAwesome name="microphone" size={15} color="#f5c842" />
+              <Text style={[styles.aiCardTitle, styles.aiCardTitleProminent, { flex: 1 }]}>
+                Tell the story
+              </Text>
+              <TouchableOpacity
+                onPress={sparkleTip.showAgain}
+                style={styles.tipReplayBtn}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Show tip about telling the story"
+              >
+                <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.aiCardDesc}>
+              Speak freely — Sparkle cleans it up for accurate captions and Rich Narration.
+            </Text>
+            <View style={styles.aiVoiceCentered}>
+              <TouchableOpacity
+                style={[
+                  styles.aiRecordBtnHero,
+                  isMicRecording && styles.aiRecordBtnActive,
+                  (isAiThinking || isProcessingSpoken) && { opacity: 0.45 },
+                ]}
+                onPress={() => {
+                  if (isMicRecording) {
+                    void onStopRecording?.();
+                  } else {
+                    void onStartRecording?.();
+                  }
+                }}
+                disabled={isAiThinking || isProcessingSpoken}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  isMicRecording ? 'Stop recording' : 'Tell the story'
+                }
+              >
+                <FontAwesome
+                  name={isMicRecording ? 'stop' : 'microphone'}
+                  size={26}
+                  color="#fff"
+                />
+              </TouchableOpacity>
+              {isProcessingSpoken ? (
+                <View style={styles.spokenProcessingRow}>
+                  <ActivityIndicator size="small" color="#f5c842" />
+                  <Text style={styles.spokenProcessingText}>Listening & Sparkling…</Text>
                 </View>
-                <Text style={styles.aiVoiceHint}>Tap to overwrite</Text>
+              ) : hasRecordedAudio && !isMicRecording ? (
+                <View style={styles.aiVoiceDoneCol}>
+                  <View style={styles.aiVoiceBadgeRow}>
+                    <FontAwesome name="check-circle" size={14} color="#27ae60" />
+                    <Text style={styles.aiVoiceDoneText}>Got it</Text>
+                  </View>
+                  <Text style={styles.aiVoiceHint}>Tap mic to record again</Text>
+                </View>
+              ) : (
+                <Text style={styles.aiVoicePrompt}>
+                  {isMicRecording ? 'Recording… tap to stop' : 'Tap to speak'}
+                </Text>
+              )}
+            </View>
+
+            {hasRecordedAudio && !isMicRecording ? (
+              <View style={styles.captionSourceRow}>
+                <Text style={styles.captionSourceLabel}>Explorer hears</Text>
+                <View style={styles.captionSourceSegment}>
+                  <TouchableOpacity
+                    style={[
+                      styles.captionSourceChip,
+                      captionSource === 'human_voice' && styles.captionSourceChipActive,
+                    ]}
+                    onPress={() => onCaptionSourceChange?.('human_voice')}
+                    activeOpacity={0.75}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: captionSource === 'human_voice' }}
+                    accessibilityLabel="My voice"
+                  >
+                    <Text
+                      style={[
+                        styles.captionSourceChipText,
+                        captionSource === 'human_voice' && styles.captionSourceChipTextActive,
+                      ]}
+                    >
+                      My voice
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.captionSourceChip,
+                      captionSource === 'clean_text' && styles.captionSourceChipActive,
+                    ]}
+                    onPress={() => onCaptionSourceChange?.('clean_text')}
+                    activeOpacity={0.75}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: captionSource === 'clean_text' }}
+                    accessibilityLabel="Clean caption"
+                  >
+                    <Text
+                      style={[
+                        styles.captionSourceChipText,
+                        captionSource === 'clean_text' && styles.captionSourceChipTextActive,
+                      ]}
+                    >
+                      Clean caption
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-            ) : (
-              <Text style={styles.aiVoicePrompt}>
-                {audioRecorder?.isRecording ? 'Recording...' : 'Tap to Record'}
-        </Text>
-            )}
-      </View>
-      </View>
+            ) : null}
+
+            <TouchableOpacity
+              style={styles.orTypeContextBtn}
+              onPress={() => setShowTypedContext((v) => !v)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.orTypeContextText}>
+                {showTypedContext ? 'Hide typed context' : 'Or type context'}
+              </Text>
+              <FontAwesome
+                name={showTypedContext ? 'chevron-up' : 'chevron-down'}
+                size={11}
+                color="rgba(255,255,255,0.45)"
+              />
+            </TouchableOpacity>
+
+            {showTypedContext ? (
+              <View style={styles.typedContextBlock}>
+                <Text style={styles.aiHintLabel}>Context for AI</Text>
+                <View style={styles.aiInputRow}>
+                  <FontAwesome
+                    name="users"
+                    size={13}
+                    color="rgba(255,255,255,0.35)"
+                    style={{ marginTop: 12 }}
+                  />
+                  <TextInput
+                    style={styles.aiHintInput}
+                    placeholder="Names, pets, places, what's happening..."
+                    placeholderTextColor="rgba(255,255,255,0.28)"
+                    value={peopleContext ?? ''}
+                    onChangeText={(t) => onPeopleContextChange?.(t)}
+                    onFocus={() => setIsContextFocused(true)}
+                    onBlur={() => setIsContextFocused(false)}
+                    multiline
+                    textAlignVertical="top"
+                    autoCorrect={false}
+                    autoCapitalize="words"
+                  />
+                </View>
+                {isContextFocused ? (
+                  <TouchableOpacity
+                    style={styles.aiCaptionDoneBtn}
+                    onPress={() => Keyboard.dismiss()}
+                    activeOpacity={0.75}
+                  >
+                    <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
+                    <Text style={styles.aiCaptionDoneText}>Done editing</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ) : peopleContext?.trim() ? (
+              <Text style={styles.cleanedContextPreview} numberOfLines={3}>
+                {peopleContext.trim()}
+              </Text>
+            ) : null}
+          </View>
         )}
 
-        {/* SECTION: AI Voice */}
-        <View style={styles.aiCard}>
+        {/* SECTION: Caption (edit after speak / Sparkle) */}
+        <View style={[styles.aiCard, { flex: 1 }]}>
           <View style={styles.aiCardHeader}>
+            <FontAwesome name="pencil" size={14} color="#8e44ad" />
+            <Text style={styles.aiCardTitle}>Caption</Text>
+          </View>
+          <TextInput
+            style={styles.aiCaptionInput}
+            placeholder="Filled from your story — edit anytime..."
+            placeholderTextColor="rgba(255,255,255,0.28)"
+            value={caption}
+            onChangeText={setCaption}
+            onFocus={() => setIsCaptionFocused(true)}
+            onBlur={() => setIsCaptionFocused(false)}
+            multiline
+            textAlignVertical="top"
+            blurOnSubmit={false}
+          />
+          {isCaptionFocused ? (
+            <TouchableOpacity
+              style={styles.aiCaptionDoneBtn}
+              onPress={() => Keyboard.dismiss()}
+              activeOpacity={0.75}
+            >
+              <FontAwesome name="keyboard-o" size={13} color="#dbeafe" />
+              <Text style={styles.aiCaptionDoneText}>Done editing</Text>
+            </TouchableOpacity>
+          ) : null}
+          {captionVoiceStale ? (
+            <View style={styles.captionVoiceStaleRow}>
+              <FontAwesome name="magic" size={12} color="#f0c674" />
+              <Text style={styles.captionVoiceStaleText}>
+                Voice will update to match this caption on the next Sparkle run.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {/* SECTION: AI Voice (advanced / collapsed) */}
+        <View style={styles.aiCard}>
+          <TouchableOpacity
+            style={styles.aiCardHeader}
+            onPress={() => setShowAiVoiceAdvanced((v) => !v)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="AI Voice advanced options"
+          >
             <FontAwesome name="volume-up" size={14} color="#5aadde" />
-            <Text style={styles.aiCardTitle}>AI Voice</Text>
-          </View>
-          <Text style={styles.aiCardDesc}>
-            Choose how Sparkle speaks your caption and Rich Narration. Changes apply right away after Sparkle has run once.
-          </Text>
-          <View style={styles.aiVoiceRow}>
-            <Text style={styles.aiVoiceRowLabel}>Caption Voice</Text>
-            <TouchableOpacity
-              style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
-              onPress={() => setVoicePickerTarget('caption')}
-              disabled={isAiThinking}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(captionVoice)}</Text>
-              <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.aiVoiceRow}>
-            <Text style={styles.aiVoiceRowLabel}>Rich Narration Voice</Text>
-            <TouchableOpacity
-              style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
-              onPress={() => setVoicePickerTarget('deep_dive')}
-              disabled={isAiThinking}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(deepDiveVoice)}</Text>
-              <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
-            </TouchableOpacity>
-          </View>
+            <Text style={[styles.aiCardTitle, { flex: 1 }]}>AI Voice</Text>
+            <FontAwesome
+              name={showAiVoiceAdvanced ? 'chevron-up' : 'chevron-down'}
+              size={12}
+              color="rgba(255,255,255,0.45)"
+            />
+          </TouchableOpacity>
+          {showAiVoiceAdvanced ? (
+            <>
+              <Text style={styles.aiCardDesc}>
+                How Sparkle speaks Clean caption and Rich Narration. Changes apply after Sparkle has
+                run once.
+              </Text>
+              <View style={styles.aiVoiceRow}>
+                <Text style={styles.aiVoiceRowLabel}>Caption Voice</Text>
+                <TouchableOpacity
+                  style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
+                  onPress={() => setVoicePickerTarget('caption')}
+                  disabled={isAiThinking}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(captionVoice)}</Text>
+                  <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
+                </TouchableOpacity>
+              </View>
+              <View style={styles.aiVoiceRow}>
+                <Text style={styles.aiVoiceRowLabel}>Rich Narration Voice</Text>
+                <TouchableOpacity
+                  style={[styles.aiVoiceRowBtn, isAiThinking && { opacity: 0.35 }]}
+                  onPress={() => setVoicePickerTarget('deep_dive')}
+                  disabled={isAiThinking}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.aiVoiceRowValue}>{getVoiceLabel(deepDiveVoice)}</Text>
+                  <FontAwesome name="chevron-right" size={11} color="rgba(255,255,255,0.45)" />
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <Text style={styles.aiCardDesc}>Optional — tap to pick caption and Rich Narration voices.</Text>
+          )}
         </View>
       </ScrollView>
 
@@ -2511,10 +2804,17 @@ function ReflectionComposerInner({
               style={[
                 styles.sendSlimBtn,
                 styles.sendSlimBtnPrimary,
-                (isSending || sendPreparing || (!caption && !hasRecordedAudio)) && { opacity: 0.4 },
+                (isSending ||
+                  sendPreparing ||
+                  (!caption && !hasRecordedAudio && !narrationUri)) && { opacity: 0.4 },
               ]}
               onPress={handleSendWithThrottle}
-              disabled={isSending || sendPreparing || photoExportBusy || (!caption && !hasRecordedAudio)}
+              disabled={
+                isSending ||
+                sendPreparing ||
+                photoExportBusy ||
+                (!caption && !hasRecordedAudio && !narrationUri)
+              }
               activeOpacity={0.7}
             >
               {isSending || sendPreparing ? (
@@ -2588,8 +2888,16 @@ function ReflectionComposerInner({
       {isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
           <WaitOverlay
-            title="Adding Sparkle to your Reflection..."
-            detail="Please keep the app open while Sparkle prepares your Reflection."
+            title={
+              isProcessingSpoken
+                ? 'Preparing Sparkle from your narration...'
+                : 'Adding Sparkle to your Reflection...'
+            }
+            detail={
+              isProcessingSpoken
+                ? 'Learning from what you said, then opening Sparkle so you can fine-tune.'
+                : 'Please keep the app open while Sparkle prepares your Reflection.'
+            }
             icon={
               <Animated.View style={sparkleIconStyle}>
               <FontAwesome name="magic" size={20} color="#fcd34d" />
@@ -2735,7 +3043,7 @@ function ReflectionComposerInner({
                     {mediaType === 'video'
                       ? `Trim, set a poster, and tap the video to pause or resume. Sparkle is the next stage. X closes to the timeline. Reflections play best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
                       : canNarrate
-                        ? `Frame the photo, then tap the Bring your photo to life banner to tell ${explorerName || 'Explorer'} about this Reflection in your own voice. Sparkle is the next stage. X closes to the timeline.`
+                        ? `Frame the photo, then tap Bring your photo to life to tell ${explorerName || 'Explorer'} about this Reflection in your own voice. That narration is what they hear — and Sparkle uses it for AI context too. Sparkle is the next stage. X closes to the timeline.`
                         : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
                   </Text>
 
@@ -2760,7 +3068,7 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Poster</Text>
                           <Text style={styles.infoDesc}>
-                            The poster is the frame the Explorer sees before video starts and again after it ends (before the caption). Tap Poster, then use the arrows or swipe the video to scrub to your frame — it locks automatically. Confirm saves and exits, Reset clears the custom poster.
+                            The poster is the frame the Explorer sees before video starts and again after it ends (before the caption) — Sparkle’s AI also uses it for captions. Tap Poster, then use the arrows or swipe to scrub. Confirm locks it; Reset clears it. Tap the lightbulb next to Poster anytime to see the short tip again.
                           </Text>
                         </View>
                       </View>
@@ -2786,12 +3094,13 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Bring It to Life</Text>
                           <Text style={styles.infoDesc}>
-                            Optional but powerful. Tap the Bring your photo to life banner to open
-                            the recorder — hold the button and tell {explorerName || 'Explorer'} about
-                            this Reflection. The photo stays full screen while your selfie plays in
-                            the corner. Tap the banner again to preview, redo, or remove it. A narration
-                            replaces the spoken caption (voice intro and AI audio); the caption text
-                            and Rich Narration still work as usual.
+                            Tap the banner to record a selfie narration — hold and tell{' '}
+                            {explorerName || 'Explorer'} about this Reflection. They see the photo full
+                            screen with you in the corner (PiP). Your narration replaces the spoken
+                            caption. Sparkle also listens: names, places, and what’s happening become
+                            AI context for a better caption and Rich Narration. When recording
+                            finishes, you’ll move to Sparkle to fine-tune. Tap the lightbulb on the
+                            banner anytime to see this tip again.
                           </Text>
                         </View>
                       </View>
@@ -2805,6 +3114,13 @@ function ReflectionComposerInner({
                   <Text style={styles.infoProTip}>
                     Top-left chip re-opens where you picked media (Camera, Library, or Search). Top-right is Sparkle and X. X always closes to the timeline. Nothing sends until Preview & Send.
                   </Text>
+                  {canNarrate ? (
+                    <Text style={styles.infoProTip}>
+                      Bring It to Life does double duty: familiar face + voice for{' '}
+                      {explorerName || 'Explorer'}, and spoken context so Sparkle doesn’t guess who’s
+                      in the photo.
+                    </Text>
+                  ) : null}
                   <Text style={styles.infoProTip}>
                     After a Reflection is sent, Companions can like it from the timeline or playback screen. The Explorer can double-tap the video to like back — everyone sees the hearts, and you get a notification when they do.
                   </Text>
@@ -2823,63 +3139,26 @@ function ReflectionComposerInner({
                 <>
                   <Text style={styles.infoTitle}>The Sparkle Stage</Text>
                   <Text style={styles.infoSubtitle}>
-                    Tell AI who and what is in your reflection, pick AI voices, and let Sparkle draft a caption you can preview before sending.
-                    {canNarrate && narrationUri
-                      ? ' Your Workbench narration is attached — preview it from the Brought to Life card.'
-                      : canNarrate
-                        ? ' Optional: go back to Workbench and tap the Bring your photo to life banner first.'
-                        : ' Optionally record your voice, then preview before sending.'}
+                    Speak once — Sparkle turns your words into accurate context, a caption, and Rich
+                    Narration for {explorerName || 'Explorer'}. Uhhs are fine.
                   </Text>
 
                   <View style={styles.infoRow}>
                     <View style={styles.infoIconWrap}>
-                      <FontAwesome name="magic" size={14} color="#f5c842" />
+                      <FontAwesome name="microphone" size={14} color="#f5c842" />
                     </View>
                     <View style={styles.infoTextWrap}>
-                      <Text style={styles.infoLabel}>Reflection Hints</Text>
+                      <Text style={styles.infoLabel}>Tell the story</Text>
                       <Text style={styles.infoDesc}>
-                        Tell Sparkle who is in the photo or video and what is happening. Better hints mean a better caption and Rich Narration. The hints section also points you to AI Voice when you want a different sound.
+                        Tap the mic and describe who and what is in this Reflection. Sparkle cleans
+                        that up for AI context, drafts a short caption, and builds Rich Narration.
+                        After you speak, {explorerName || 'Explorer'} hears a clean AI caption by
+                        default. Switch to My voice only if you want them to hear your recording.
                       </Text>
                     </View>
                   </View>
 
-                  {canNarrate && narrationUri ? (
-                    <View style={styles.infoRow}>
-                      <View style={styles.infoIconWrap}>
-                        <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
-                      </View>
-                      <View style={styles.infoTextWrap}>
-                        <Text style={styles.infoLabel}>Brought to Life</Text>
-                        <Text style={styles.infoDesc}>
-                          Your Workbench narration is attached. It replaces the spoken caption:{' '}
-                          {explorerName || 'Explorer'} sees the photo full screen while your selfie
-                          tells the story. Use the card below to preview, redo, or remove it. The
-                          caption text stays on screen, and Rich Narration still works when they tap
-                          Tell Me More.
-                        </Text>
-                      </View>
-                    </View>
-                  ) : (
-                    <View style={styles.infoRow}>
-                      <View style={styles.infoIconWrap}>
-                        <FontAwesome name="microphone" size={14} color="#2e78b7" />
-                      </View>
-                      <View style={styles.infoTextWrap}>
-                        <Text style={styles.infoLabel}>Voice Intro</Text>
-                        <Text style={styles.infoDesc}>
-                          Optional. Record a short intro in your own voice.
-                          {canNarrate
-                            ? ' For photos, you can also go back to Workbench and use the Bring your photo to life banner for a selfie video instead.'
-                            : ''}{' '}
-                          For videos, the Explorer watches first, then hears your voice as the caption
-                          after playback ends. For photos, they hear it while viewing the image. Your
-                          recording always wins over AI voice.
-                        </Text>
-                      </View>
-                    </View>
-                  )}
-
-                  {canNarrate && !narrationUri ? (
+                  {canNarrate ? (
                     <View style={styles.infoRow}>
                       <View style={styles.infoIconWrap}>
                         <FontAwesome name="video-camera" size={14} color="#4FC3F7" />
@@ -2887,10 +3166,9 @@ function ReflectionComposerInner({
                       <View style={styles.infoTextWrap}>
                         <Text style={styles.infoLabel}>Bring It to Life</Text>
                         <Text style={styles.infoDesc}>
-                          Optional. Tap the top-left arrow to return to Workbench, then tap the
-                          Bring your photo to life banner to record yourself telling {explorerName || 'Explorer'} about this
-                          Reflection. The photo stays full screen while your selfie plays in the
-                          corner — a great alternative to a voice intro.
+                          {narrationUri
+                            ? `Your Workbench selfie narration is attached — ${explorerName || 'Explorer'} sees the photo full screen with you in the corner. That recording is the spoken intro, and Sparkle also learns from it.`
+                            : `Optional. Go back to Workbench and tap Bring your photo to life for a selfie narration (same PiP ${explorerName || 'Explorer'} will see). That also teaches Sparkle.`}
                         </Text>
                       </View>
                     </View>
@@ -2903,22 +3181,9 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Caption</Text>
                       <Text style={styles.infoDesc}>
-                        Sparkle drafts a caption from your hints and media. You can edit or replace
-                        it. Without a narration or voice intro, Sparkle speaks this text after the
-                        video (or while viewing a photo). With a narration, the caption stays as
-                        on-screen text {explorerName || 'Explorer'} can still play by hand.
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.infoRow}>
-                    <View style={styles.infoIconWrap}>
-                      <FontAwesome name="volume-up" size={14} color="#5aadde" />
-                    </View>
-                    <View style={styles.infoTextWrap}>
-                      <Text style={styles.infoLabel}>AI Voice</Text>
-                      <Text style={styles.infoDesc}>
-                        Pick separate voices for the caption intro and Rich Narration. After Sparkle has run once, changing a voice regenerates the audio and plays the updated caption and Rich Narration automatically.
+                        Filled from your story after you speak. Edit anytime. Presence toggles (“I’m
+                        in this”) help Sparkle get identities right. Typed context is available under
+                        Or type context if you can’t speak.
                       </Text>
                     </View>
                   </View>
@@ -2930,9 +3195,9 @@ function ReflectionComposerInner({
                     <View style={styles.infoTextWrap}>
                       <Text style={styles.infoLabel}>Run Sparkle & Play</Text>
                       <Text style={styles.infoDesc}>
-                        {canNarrate && narrationUri
-                          ? 'Run Sparkle drafts caption text and Rich Narration while your Bring-It-to-Life recording remains the spoken intro. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.'
-                          : 'Run Sparkle generates a caption and AI intro audio, then auto-plays caption then Rich Narration. Play re-listens without regenerating. You can run Sparkle again anytime to refresh the draft.'}
+                        Speaking usually runs Sparkle for you and plays the result. Run Sparkle again
+                        to refresh; Play re-listens. AI Voice (collapsed) picks TTS voices for Clean
+                        caption and Rich Narration.
                       </Text>
                     </View>
                   </View>
@@ -2941,20 +3206,17 @@ function ReflectionComposerInner({
 
                   <Text style={styles.infoProTipHeader}>A few things worth knowing</Text>
                   <Text style={styles.infoProTip}>
-                    Fast path: tap Finish (top-right). If Sparkle isn’t up to date, it runs first, then opens Preview & Send.
+                    Fast path: speak → review → Finish (top-right) → Preview & Send. If Sparkle isn’t
+                    current, Finish runs it first.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    While editing the caption, drag the page to dismiss the keyboard or tap the Done editing button under the caption field.
+                    Clean caption (default) uses TTS of the polished caption. My voice sends your
+                    raw recording as the spoken caption instead. Bring-It-to-Life replaces the spoken
+                    caption with your selfie PiP.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    Changing hints, caption, or AI voice stops any Sparkle preview that is playing. Voice changes refresh the audio and play the new version when ready.
-                  </Text>
-                  <Text style={styles.infoProTip}>
-                    A recorded voice intro always takes priority over AI voice — unless you added a
-                    Bring-It-to-Life narration in Workbench, which replaces the spoken caption.
-                  </Text>
-                  <Text style={styles.infoProTip}>
-                    Likes are social warmth: tap a heart on the timeline or preview. The Explorer double-taps the video to like back — you get a notification. Long-press a heart anytime to see who liked.
+                    The lightbulb on Tell the story reopens the tip anytime. How this works is always
+                    here for the full guide.
                   </Text>
                 </>
               ) : (
@@ -3042,7 +3304,9 @@ function ReflectionComposerInner({
           setPreviewEvent(null);
         }}
         isSending={isSending}
-        isSendDisabled={isBlockedByAi || photoExportBusy || (!caption && !hasRecordedAudio)}
+        isSendDisabled={
+          isBlockedByAi || photoExportBusy || (!caption && !hasRecordedAudio && !narrationUri)
+        }
       />
 
       <VoicePickerModal
@@ -3054,6 +3318,28 @@ function ReflectionComposerInner({
         onClose={() => setVoicePickerTarget(null)}
       />
 
+      <TipModal
+        visible={sparkleTip.visible}
+        content={sparkleTip.content}
+        onDismiss={() => {
+          void sparkleTip.dismiss();
+        }}
+      />
+      <TipModal
+        visible={bitlTip.visible}
+        content={bitlTip.content}
+        onDismiss={() => {
+          void bitlTip.dismiss();
+        }}
+      />
+      <TipModal
+        visible={videoPosterTip.visible}
+        content={videoPosterTip.content}
+        onDismiss={() => {
+          void videoPosterTip.dismiss();
+        }}
+      />
+
       {/* SELFIE NARRATION (image reflections) — capture only; upload happens with the reflection send */}
       {canNarrate ? (
         <ReactionSheet
@@ -3061,7 +3347,14 @@ function ReflectionComposerInner({
           mode="narration"
           parentReflectionId=""
           parentMedia={{ mediaType: 'image', imageUrl: mediaUri }}
-          onNarrationComplete={(videoUri) => setNarrationUri(videoUri)}
+          onNarrationComplete={(videoUri) => {
+            setNarrationUri(videoUri);
+            onCaptionSourceChange?.('bitl');
+            // Land on Sparkle immediately so the prepare wait sits on that stage,
+            // then run STT + Sparkle for fine-tuning.
+            onStageChange('ai');
+            onSpokenNarration?.(videoUri);
+          }}
           onClose={() => setIsNarrationSheetOpen(false)}
         />
       ) : null}
@@ -3232,6 +3525,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 4,
+  },
+  narrationGuidanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  narrationGuidanceBannerFlex: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  narrationTipBtn: {
+    marginBottom: 0,
   },
   narrationGuidanceIcon: {
     width: 20,
@@ -3860,9 +4166,100 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 4,
   },
+  aiRecordBtnHero: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#e74c3c',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#e74c3c',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    marginVertical: 8,
+  },
   aiRecordBtnActive: {
     backgroundColor: '#c0392b',
     transform: [{ scale: 1.08 }],
+  },
+  spokenProcessingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+  },
+  spokenProcessingText: {
+    color: '#f5d670',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  captionSourceRow: {
+    marginTop: 14,
+    gap: 8,
+  },
+  captionSourceLabel: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  captionSourceSegment: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    borderRadius: 10,
+    padding: 3,
+    gap: 3,
+  },
+  captionSourceChip: {
+    flex: 1,
+    paddingVertical: 9,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  captionSourceChipActive: {
+    backgroundColor: 'rgba(79, 195, 247, 0.28)',
+  },
+  captionSourceChipText: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  captionSourceChipTextActive: {
+    color: '#e8f6fd',
+  },
+  orTypeContextBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 12,
+    paddingVertical: 6,
+  },
+  orTypeContextText: {
+    color: 'rgba(255,255,255,0.45)',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  typedContextBlock: {
+    marginTop: 4,
+  },
+  cleanedContextPreview: {
+    marginTop: 10,
+    color: 'rgba(245, 214, 112, 0.85)',
+    fontSize: 13,
+    lineHeight: 18,
+    fontStyle: 'italic',
+  },
+  tipReplayBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(245, 200, 66, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   aiVoiceBadgeRow: {
     flexDirection: 'row',

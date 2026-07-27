@@ -8,7 +8,9 @@ import { Tabs, usePathname, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, AppStateStatus, StyleSheet, Text, View } from 'react-native';
 import { OnboardingView } from '../../components/OnboardingView';
+import { TipModal } from '../../components/TipModal';
 import { useDailyReminder } from '../../hooks/useDailyReminder';
+import { useConnectAnnouncements } from '../../hooks/useAppAnnouncements';
 import {
   peekPendingNotificationRoute,
   subscribePendingNotificationRoute,
@@ -48,6 +50,10 @@ export default function TabLayout() {
     focusReflectionsTab();
     return subscribePendingNotificationRoute(focusReflectionsTab);
   }, []);
+
+  const onboardingComplete =
+    !loading && !!activeRelationship && activeRelationship.onboarding_complete === true;
+  const announcement = useConnectAnnouncements(onboardingComplete);
 
   const [explorerAvatarUrl, setExplorerAvatarUrl] = useState<string | null>(null);
   const explorerId = activeRelationship?.explorerId;
@@ -126,7 +132,8 @@ export default function TabLayout() {
   }
 
   return (
-    <Tabs
+    <View style={{ flex: 1 }}>
+      <Tabs
       initialRouteName="index"
       screenOptions={{
         headerShown: useClientOnlyValue(false, true),
@@ -186,7 +193,16 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <TabBarIcon name="cog" color={color} />,
         }}
       />
-    </Tabs>
+      </Tabs>
+      {announcement.content ? (
+        <TipModal
+          visible={announcement.visible}
+          content={announcement.content}
+          onDismiss={announcement.dismiss}
+          variant={announcement.channel === 'system' ? 'system' : 'whats_new'}
+        />
+      ) : null}
+    </View>
   );
 }
 

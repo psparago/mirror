@@ -49,6 +49,19 @@ export interface EventMetadata {
   is_selfie?: boolean;
   /** Free-form people / scene hints (preferred over legacy `people_context` when both exist). */
   people_context_hints?: string;
+  /**
+   * Raw transcript of Companion spoken context (uhhs/umms preserved for debugging).
+   * Cleaned form lives in `people_context` / `people_context_hints`.
+   */
+  spoken_context_transcript?: string;
+  /**
+   * What the Explorer hears as the spoken caption:
+   * - human_voice: Companion mic recording
+   * - clean_text: STT-cleaned / AI caption via TTS
+   * - ai: Sparkle-drafted caption TTS (no human recording)
+   * - bitl: Bring-It-to-Life selfie narration PiP
+   */
+  caption_source?: 'human_voice' | 'clean_text' | 'ai' | 'bitl';
   /** ISO timestamp when a Companion last saved edits to this reflection (metadata and/or media). */
   last_edited_at?: string;
   /** Typed reaction message (display only; spoken via audio_url). */
