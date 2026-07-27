@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -60,6 +61,176 @@ func extractFirstJSONObject(s string) (string, bool) {
 	return "", false
 }
 
+func parseGeminiJSONText(text string, dest any) error {
+	jsonText := strings.TrimSpace(text)
+	jsonText = strings.TrimPrefix(jsonText, "```json")
+	jsonText = strings.TrimPrefix(jsonText, "```")
+	jsonText = strings.TrimSuffix(jsonText, "```")
+	jsonText = strings.TrimSpace(jsonText)
+
+	if err := json.Unmarshal([]byte(jsonText), dest); err == nil {
+		return nil
+	} else {
+		snippet := jsonText
+		if len(snippet) > 500 {
+			snippet = snippet[:500] + "..."
+		}
+		log.Printf("JSON Parse Error: %v. Raw snippet: %q", err, snippet)
+		if extracted, ok := extractFirstJSONObject(jsonText); ok {
+			if err2 := json.Unmarshal([]byte(extracted), dest); err2 != nil {
+				return err2
+			}
+			return nil
+		}
+		return err
+	}
+}
+
+func mimeFromMediaKeyOrURL(keyOrURL, contentTypeHint string) string {
+	ct := strings.TrimSpace(strings.Split(contentTypeHint, ";")[0])
+	if ct != "" && ct != "application/octet-stream" && ct != "binary/octet-stream" {
+		// Normalize common audio container types for Gemini.
+		switch strings.ToLower(ct) {
+		case "audio/m4a", "audio/x-m4a", "audio/mp4":
+			return "audio/mp4"
+		case "audio/mpeg", "audio/mp3":
+			return "audio/mp3"
+		case "video/mp4":
+			return "video/mp4"
+		default:
+			return ct
+		}
+	}
+	cleaned := keyOrURL
+	if i := strings.Index(cleaned, "?"); i >= 0 {
+		cleaned = cleaned[:i]
+	}
+	ext := strings.ToLower(path.Ext(cleaned))
+	switch ext {
+	case ".m4a", ".mp4":
+		// Ambiguous: narration uses .mp4 video; voice intros use .m4a audio.
+		if ext == ".m4a" {
+			return "audio/mp4"
+		}
+		return "video/mp4"
+	case ".mp3":
+		return "audio/mp3"
+	case ".wav":
+		return "audio/wav"
+	case ".aac":
+		return "audio/aac"
+	case ".webm":
+		return "audio/webm"
+	default:
+		return "audio/mp4"
+	}
+}
+
+type spokenContextResult struct {
+	RawTranscript    string `json:"raw_transcript"`
+	CleanedContext   string `json:"cleaned_context"`
+	SuggestedCaption string `json:"suggested_caption"`
+}
+
+func extractSpokenContext(
+	ctx context.Context,
+	model *genai.GenerativeModel,
+	mediaData []byte,
+	mimeType string,
+	explorerName string,
+) (*spokenContextResult, error) {
+	if len(mediaData) == 0 {
+		return nil, fmt.Errorf("empty spoken context media")
+	}
+
+	prompt := fmt.Sprintf(
+		"You are helping a family Companion describe a photo or video for %s, a teen with Angelman Syndrome.\n"+
+			"Listen to the Companion speaking in this recording (uhhs, umms, and false starts are normal).\n\n"+
+			"Return a SINGLE JSON object with:\n"+
+			`- "raw_transcript": faithful transcript including filler words\n`+
+			`- "cleaned_context": concise cleaned facts for an AI captioner — names, pets, places, what is happening. `+
+			`Prefer comma-separated style like "Nona, dog Dalton, at the pool". Remove filler words. Do not invent facts.\n`+
+			`- "suggested_caption": a warm greeting TO %s about what they said (max 10 words). `+
+			`Derive it only from what the Companion said; do not invent people or places.\n\n`+
+			`Return ONLY JSON: {"raw_transcript":"...","cleaned_context":"...","suggested_caption":"..."}`,
+		explorerName, explorerName,
+	)
+
+	parts := []genai.Part{
+		genai.Text(prompt),
+		genai.Blob{MIMEType: mimeType, Data: mediaData},
+	}
+	resp, err := model.GenerateContent(ctx, parts...)
+	if err != nil {
+		return nil, fmt.Errorf("gemini spoken context: %w", err)
+	}
+	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil || len(resp.Candidates[0].Content.Parts) == 0 {
+		return nil, fmt.Errorf("no response from Gemini for spoken context")
+	}
+	part := resp.Candidates[0].Content.Parts[0]
+	text, ok := part.(genai.Text)
+	if !ok {
+		return nil, fmt.Errorf("unexpected spoken context response type")
+	}
+	var out spokenContextResult
+	if err := parseGeminiJSONText(string(text), &out); err != nil {
+		return nil, fmt.Errorf("spoken context JSON: %w", err)
+	}
+	out.RawTranscript = strings.TrimSpace(out.RawTranscript)
+	out.CleanedContext = strings.TrimSpace(out.CleanedContext)
+	out.SuggestedCaption = strings.TrimSpace(out.SuggestedCaption)
+	return &out, nil
+}
+
+func augmentPromptWithSpokenContext(prompt, cleanedContext, suggestedCaption string) string {
+	cleanedContext = strings.TrimSpace(cleanedContext)
+	if cleanedContext == "" {
+		return prompt
+	}
+	var b strings.Builder
+	b.WriteString(prompt)
+	b.WriteString("\n\nSPOKEN CONTEXT FROM COMPANION (cleaned transcript — TRUST THIS over visual guessing when they conflict):\n")
+	b.WriteString(cleanedContext)
+	b.WriteString("\nDo NOT invent people, pets, or places the Companion did not mention.")
+	if sc := strings.TrimSpace(suggestedCaption); sc != "" {
+		b.WriteString("\nPrefer a short_caption close to (max 10 words): ")
+		b.WriteString(sc)
+	}
+	return b.String()
+}
+
+func loadSpokenMedia(ctx context.Context, mediaKey, mediaURL string) (data []byte, mime string, err error) {
+	mediaKey = strings.TrimSpace(mediaKey)
+	mediaURL = strings.TrimSpace(mediaURL)
+	if mediaKey != "" {
+		// Only allow staging keys for safety.
+		if !strings.HasPrefix(mediaKey, "staging/") {
+			return nil, "", fmt.Errorf("context_media_key must be under staging/")
+		}
+		data, ct, dlErr := DownloadFromS3(ctx, mediaKey)
+		if dlErr != nil {
+			return nil, "", dlErr
+		}
+		return data, mimeFromMediaKeyOrURL(mediaKey, ct), nil
+	}
+	if mediaURL == "" {
+		return nil, "", fmt.Errorf("context media not provided")
+	}
+	res, getErr := http.Get(mediaURL)
+	if getErr != nil {
+		return nil, "", getErr
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("failed to fetch context media: HTTP %d", res.StatusCode)
+	}
+	data, err = io.ReadAll(res.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, mimeFromMediaKeyOrURL(mediaURL, res.Header.Get("Content-Type")), nil
+}
+
 func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	// 1. CORS Headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -105,6 +276,10 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	peopleContext := strings.TrimSpace(r.URL.Query().Get("people_context"))
 	captionVoice := r.URL.Query().Get("caption_voice")
 	deepDiveVoice := r.URL.Query().Get("deep_dive_voice")
+	contextMediaKey := strings.TrimSpace(r.URL.Query().Get("context_media_key"))
+	contextAudioURL := strings.TrimSpace(r.URL.Query().Get("context_audio_url"))
+	skipTTS := r.URL.Query().Get("skip_tts") == "true"
+	skipCaptionTTS := skipTTS || r.URL.Query().Get("skip_caption_tts") == "true"
 
 	var result struct {
 		ShortCaption       string `json:"short_caption"`
@@ -114,6 +289,9 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		AudioS3Key         string `json:"audio_s3_key,omitempty"`
 		DeepDiveAudioS3Key string `json:"deep_dive_audio_s3_key,omitempty"`
 		StagingEventID     string `json:"staging_event_id,omitempty"`
+		RawTranscript      string `json:"raw_transcript,omitempty"`
+		CleanedContext     string `json:"cleaned_context,omitempty"`
+		SuggestedCaption   string `json:"suggested_caption,omitempty"`
 	}
 
 	// Extract staging event_id from image URL (e.g. .../staging/1738941234567/image.jpg) for client cleanup
@@ -124,6 +302,43 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 				result.StagingEventID = imageURL[start : start+end]
 			}
 		}
+	}
+	if result.StagingEventID == "" && contextMediaKey != "" {
+		// staging/{eventId}/spoken_context.m4a
+		rest := strings.TrimPrefix(contextMediaKey, "staging/")
+		if slash := strings.Index(rest, "/"); slash > 0 {
+			result.StagingEventID = rest[:slash]
+		}
+	}
+
+	// 2b. Optional spoken context (mic intro or Bring-It-to-Life narration video)
+	if contextMediaKey != "" || contextAudioURL != "" {
+		mediaData, mime, mediaErr := loadSpokenMedia(ctx, contextMediaKey, contextAudioURL)
+		if mediaErr != nil {
+			log.Printf("Spoken context media load failed: %v", mediaErr)
+			http.Error(w, "Failed to load spoken context media: "+mediaErr.Error(), 500)
+			return
+		}
+		log.Printf("Spoken context: loaded %d bytes as %s", len(mediaData), mime)
+		spoken, spokenErr := extractSpokenContext(ctx, model, mediaData, mime, explorerName)
+		if spokenErr != nil {
+			log.Printf("Spoken context extract failed: %v", spokenErr)
+			http.Error(w, "Failed to process spoken context: "+spokenErr.Error(), 500)
+			return
+		}
+		result.RawTranscript = spoken.RawTranscript
+		result.CleanedContext = spoken.CleanedContext
+		result.SuggestedCaption = spoken.SuggestedCaption
+		if peopleContext == "" && spoken.CleanedContext != "" {
+			peopleContext = spoken.CleanedContext
+		}
+		if targetCaption == "" && spoken.SuggestedCaption != "" {
+			targetCaption = spoken.SuggestedCaption
+		}
+		if clientPrompt != "" {
+			clientPrompt = augmentPromptWithSpokenContext(clientPrompt, spoken.CleanedContext, spoken.SuggestedCaption)
+		}
+		log.Printf("Spoken context OK: cleaned=%q suggested=%q", spoken.CleanedContext, spoken.SuggestedCaption)
 	}
 
 	// 3. Logic: If we have both target texts, just do TTS. If missing either, call Gemini for image analysis.
@@ -202,6 +417,9 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 			}
 			promptText = fmt.Sprintf("Analyze this image for a 15-year-old with Angelman Syndrome named %s.\n\nCONTEXT:\n%s\n%s\n\nCONTENT RULES:\n4. short_caption: warm greeting TO %s (max 10 words).\n5. deep_dive: 2-3 sentence story speaking TO %s.\n6. %s\n\nReturn JSON: {\"short_caption\": \"string\", \"deep_dive\": \"string\"}",
 				explorerName, contextBlock, identityRules, explorerName, explorerName, companionRules)
+			if result.CleanedContext != "" {
+				promptText = augmentPromptWithSpokenContext(promptText, result.CleanedContext, result.SuggestedCaption)
+			}
 		}
 
 		parts := []genai.Part{
@@ -229,33 +447,10 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		jsonText := strings.TrimSpace(text)
-		jsonText = strings.TrimPrefix(jsonText, "```json")
-		jsonText = strings.TrimPrefix(jsonText, "```")
-		jsonText = strings.TrimSuffix(jsonText, "```")
-		jsonText = strings.TrimSpace(jsonText)
-
-		if err := json.Unmarshal([]byte(jsonText), &result); err != nil {
-			// Defensive fallback: sometimes the model includes extra text around JSON.
-			// Log the parse error + a small snippet for debugging.
-			snippet := jsonText
-			if len(snippet) > 500 {
-				snippet = snippet[:500] + "..."
-			}
-			log.Printf("JSON Parse Error: %v. Raw snippet: %q", err, snippet)
-
-			if extracted, ok := extractFirstJSONObject(jsonText); ok {
-				if err2 := json.Unmarshal([]byte(extracted), &result); err2 == nil {
-					// Successfully recovered.
-				} else {
-					log.Printf("JSON Parse Error (recovery failed): %v. Extracted snippet: %q", err2, extracted)
-					http.Error(w, "JSON Parse Error", 500)
-					return
-				}
-			} else {
-				http.Error(w, "JSON Parse Error", 500)
-				return
-			}
+		if err := parseGeminiJSONText(text, &result); err != nil {
+			log.Printf("JSON Parse Error (final): %v", err)
+			http.Error(w, "JSON Parse Error", 500)
+			return
 		}
 
 		// Preference: If user provided one but not both, use their text
@@ -265,6 +460,15 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 		if targetDeepDive != "" {
 			result.DeepDive = targetDeepDive
 		}
+	}
+
+	if skipTTS {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(result); err != nil {
+			log.Printf("Error encoding JSON response: %v", err)
+			http.Error(w, "Failed to encode response", 500)
+		}
+		return
 	}
 
 	// Setup AWS Config for TTS storage (shared)
@@ -293,7 +497,7 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Generate speech using Google Cloud TTS (Journey voice)
-	if result.ShortCaption != "" {
+	if result.ShortCaption != "" && !skipCaptionTTS {
 		log.Printf("TTS: Generating speech for caption: %s", result.ShortCaption)
 		speechData := synthesizeSpeechWithRetry("caption", result.ShortCaption, captionVoice)
 		if speechData != nil {
@@ -311,6 +515,8 @@ func GenerateAIDescription(w http.ResponseWriter, r *http.Request) {
 				log.Printf("TTS ERROR (caption): S3 upload failed: %v", err)
 			}
 		}
+	} else if skipCaptionTTS {
+		log.Printf("TTS: Skipping caption TTS (human voice / skip_caption_tts)")
 	}
 
 	// 8. Generate Speech for Deep Dive

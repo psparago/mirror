@@ -74,6 +74,8 @@ const FALLBACK_POSTER_REMOTE_URL =
   'https://dummyimage.com/640x640/1f2937/e5e7eb.jpg&text=Video+Reflection';
 
 type LibrarySourceKind = 'unsplash' | 'camera' | 'gallery';
+type CaptionSource = 'human_voice' | 'clean_text' | 'ai' | 'bitl';
+
 type AiDescriptionResponse = {
   short_caption?: string | null;
   deep_dive?: string | null;
@@ -82,6 +84,9 @@ type AiDescriptionResponse = {
   audio_s3_key?: string | null;
   deep_dive_audio_s3_key?: string | null;
   staging_event_id?: string | null;
+  raw_transcript?: string | null;
+  cleaned_context?: string | null;
+  suggested_caption?: string | null;
   _stagingId?: string | null;
 };
 
@@ -244,6 +249,14 @@ export default function CreationModal({
   const [isExplorerInReflection, setIsExplorerInReflection] = useState(false);
   const [isSelfie, setIsSelfie] = useState(false);
   const [peopleContext, setPeopleContext] = useState('');
+  /** Companion chose spoken destination: raw voice vs cleaned caption TTS. */
+  const [captionSource, setCaptionSource] = useState<CaptionSource>('ai');
+  const [spokenTranscript, setSpokenTranscript] = useState('');
+  const [spokenContextTrusted, setSpokenContextTrusted] = useState(false);
+  const [isProcessingSpoken, setIsProcessingSpoken] = useState(false);
+  /** Avoid re-running STT+Sparkle for the same local media URI. */
+  const lastProcessedSpokenUriRef = useRef<string | null>(null);
+  const captionSourceRef = useRef<CaptionSource>('ai');
   const [searchQueryContext, setSearchQueryContext] = useState<string>('');
   const [searchCanonicalName, setSearchCanonicalName] = useState<string>('');
   const [libraryId, setLibraryId] = useState('');
@@ -1006,8 +1019,12 @@ export default function CreationModal({
       targetCaption?: string;
       targetDeepDive?: string;
       skipTts?: boolean;
+      skipCaptionTts?: boolean;
       captionVoice?: string;
       deepDiveVoice?: string;
+      contextMediaKey?: string;
+      peopleContextOverride?: string;
+      spokenContextTrusted?: boolean;
     } = {}
   ): Promise<AiDescriptionResponse | null> => {
     if (!currentExplorerId || !imageUrl) {
@@ -1020,12 +1037,18 @@ export default function CreationModal({
         setIsAiGenerated(false);
       }
 
+      const effectivePeopleContext =
+        options.peopleContextOverride?.trim() || peopleContext?.trim() || undefined;
+      const trustSpoken =
+        options.spokenContextTrusted ?? spokenContextTrusted;
+
       const prompt = buildReflectionPrompt({
         explorerName: explorerName || 'the Explorer',
         companionName: companionName || undefined,
         companionInReflection: isCompanionInReflection,
         explorerInReflection: isExplorerInReflection,
-        peopleContext: peopleContext?.trim() || undefined,
+        peopleContext: effectivePeopleContext,
+        spokenContextTrusted: trustSpoken && !!effectivePeopleContext,
       });
 
       let fetchUrl = `${API_ENDPOINTS.AI_DESCRIPTION}?image_url=${encodeURIComponent(imageUrl)}&explorer_id=${currentExplorerId}`;
@@ -1033,14 +1056,19 @@ export default function CreationModal({
       if (options.targetCaption) fetchUrl += `&target_caption=${encodeURIComponent(options.targetCaption)}`;
       if (options.targetDeepDive) fetchUrl += `&target_deep_dive=${encodeURIComponent(options.targetDeepDive)}`;
       if (options.skipTts) fetchUrl += `&skip_tts=true`;
+      if (options.skipCaptionTts) fetchUrl += `&skip_caption_tts=true`;
+      if (options.contextMediaKey) {
+        fetchUrl += `&context_media_key=${encodeURIComponent(options.contextMediaKey)}`;
+      }
       const resolvedCaptionVoice = options.captionVoice ?? captionVoice;
       const resolvedDeepDiveVoice = options.deepDiveVoice ?? deepDiveVoice;
       if (resolvedCaptionVoice) fetchUrl += `&caption_voice=${encodeURIComponent(resolvedCaptionVoice)}`;
       if (resolvedDeepDiveVoice) fetchUrl += `&deep_dive_voice=${encodeURIComponent(resolvedDeepDiveVoice)}`;
 
-      // Add timeout to prevent 504 errors (60 seconds for AI generation)
+      // Spoken-context + Sparkle can take longer than a plain image pass.
+      const timeoutMs = options.contextMediaKey ? 90000 : 60000;
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response;
       try {
@@ -1051,7 +1079,7 @@ export default function CreationModal({
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
         if (fetchError?.name === 'AbortError') {
-          throw new Error('AI description request timed out after 60 seconds');
+          throw new Error(`AI description request timed out after ${timeoutMs / 1000} seconds`);
         }
         throw fetchError;
       }
@@ -1066,6 +1094,9 @@ export default function CreationModal({
       const aiResponse = await parseJsonRecord(response);
       const shortCaptionValue = asOptionalString(aiResponse?.short_caption);
       const deepDiveValue = asOptionalString(aiResponse?.deep_dive);
+      const cleanedContextValue = asOptionalString(aiResponse?.cleaned_context);
+      const suggestedCaptionValue = asOptionalString(aiResponse?.suggested_caption);
+      const rawTranscriptValue = asOptionalString(aiResponse?.raw_transcript);
 
       if (shortCaptionValue && deepDiveValue) {
         const result: AiDescriptionResponse = {
@@ -1076,6 +1107,9 @@ export default function CreationModal({
           audio_s3_key: asOptionalString(aiResponse?.audio_s3_key),
           deep_dive_audio_s3_key: asOptionalString(aiResponse?.deep_dive_audio_s3_key),
           staging_event_id: asOptionalString(aiResponse?.staging_event_id),
+          cleaned_context: cleanedContextValue,
+          suggested_caption: suggestedCaptionValue,
+          raw_transcript: rawTranscriptValue,
         };
         setShortCaption(result.short_caption ?? '');
         setDeepDive(result.deep_dive ?? '');
@@ -1087,12 +1121,22 @@ export default function CreationModal({
           setStagingEventId(result.staging_event_id);
           stagingEventIdRef.current = result.staging_event_id;
         }
+        if (cleanedContextValue) {
+          setPeopleContext(cleanedContextValue);
+          setSpokenContextTrusted(true);
+        }
+        if (rawTranscriptValue) {
+          setSpokenTranscript(rawTranscriptValue);
+        }
 
         if (!options.silent) {
+          const captionToUse =
+            suggestedCaptionValue || result.short_caption || '';
           // PROTECTION: Only update the description if the current one is empty
           // OR if it's already an AI generated one (user hasn't manually tweaked it yet)
-          if (!description?.trim() || isAiGenerated) {
-            setDescription(result.short_caption ?? '');
+          // OR we just got a spoken suggested caption (voice-first path owns the draft).
+          if (!description?.trim() || isAiGenerated || !!suggestedCaptionValue) {
+            setDescription(captionToUse);
           } else {
             debugLog('📝 User has custom text, keeping it but updating AI metadata in background');
           }
@@ -1112,9 +1156,203 @@ export default function CreationModal({
     }
   };
 
+  const uploadStagingBinary = async (
+    localUri: string,
+    stagingId: string,
+    filename: string,
+  ): Promise<string> => {
+    if (!currentExplorerId) {
+      throw new Error('Explorer not ready');
+    }
+    const stagingResponse = await fetch(
+      `${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=${encodeURIComponent(filename)}&explorer_id=${currentExplorerId}`,
+    );
+    if (!stagingResponse.ok) {
+      throw new Error(`Failed to get staging upload URL: ${stagingResponse.status}`);
+    }
+    const stagingJson = await parseJsonRecord(stagingResponse);
+    const stagingUrl = asOptionalString(stagingJson?.url);
+    if (!stagingUrl) {
+      throw new Error('Staging upload URL was missing');
+    }
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const contentType =
+      ext === 'mp4'
+        ? 'video/mp4'
+        : ext === 'm4a'
+          ? 'audio/mp4'
+          : ext === 'mp3'
+            ? 'audio/mpeg'
+            : 'application/octet-stream';
+    const uploadResult = await FileSystem.uploadAsync(stagingUrl, localUri, {
+      httpMethod: 'PUT',
+      headers: { 'Content-Type': contentType },
+    });
+    if (uploadResult.status !== 200) {
+      throw new Error(`Staging media upload failed: ${uploadResult.status}`);
+    }
+    return `staging/${stagingId}/${filename}`;
+  };
+
+  const ensureStagingImageReady = async (): Promise<string | null> => {
+    const currentPhotoUri = asOptionalString(photo?.uri);
+    if (!currentExplorerId || !currentPhotoUri) return null;
+
+    let stagingId = stagingEventId || stagingEventIdRef.current;
+    const editingProdId = editSourceEventIdRef.current;
+    if (editingProdId && stagingId === editingProdId) {
+      stagingId = null;
+    }
+    if (!stagingId) {
+      stagingId = Date.now().toString();
+      setStagingEventId(stagingId);
+      stagingEventIdRef.current = stagingId;
+
+      let uriToUpload = currentPhotoUri;
+      let isTempThumbnail = false;
+      if (mediaType === 'video' && videoUri) {
+        const vmAi = composerVideoMetaRef.current;
+        const thumbMs = Math.max(
+          0,
+          vmAi &&
+            typeof vmAi.thumbnail_time_ms === 'number' &&
+            vmAi.thumbnail_time_ms >= 0
+            ? vmAi.thumbnail_time_ms
+            : vmAi?.video_start_ms ?? 0,
+        );
+        const posterFrame = await getVideoPosterFrameAsync(videoUri, thumbMs, 'ai');
+        uriToUpload = posterFrame.uri;
+        isTempThumbnail = posterFrame.temporary;
+      }
+
+      const stagingResponse = await fetch(
+        `${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${currentExplorerId}`,
+      );
+      if (!stagingResponse.ok) {
+        throw new Error(`Failed to get staging upload URL: ${stagingResponse.status}`);
+      }
+      const stagingJson = await parseJsonRecord(stagingResponse);
+      const stagingUrl = asOptionalString(stagingJson?.url);
+      if (!stagingUrl) {
+        throw new Error('Staging upload URL was missing');
+      }
+      let stagingImageUri = uriToUpload;
+      if (mediaType === 'video') {
+        try {
+          stagingImageUri = await prepareImageForUpload(uriToUpload);
+        } catch (gatekeeperError) {
+          console.warn(
+            '[ensureStagingImageReady] image gatekeeper failed; using raw poster image',
+            gatekeeperError,
+          );
+          stagingImageUri = uriToUpload;
+        }
+      }
+      const tempGatekeptStagingUri = stagingImageUri !== uriToUpload ? stagingImageUri : null;
+      await safeUploadToS3(stagingImageUri, stagingUrl);
+      if (tempGatekeptStagingUri) {
+        safeDeleteCacheFile(tempGatekeptStagingUri).catch(() => {});
+      }
+      if (isTempThumbnail) {
+        try {
+          await FileSystem.deleteAsync(uriToUpload, { idempotent: true });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return stagingId;
+  };
+
+  /**
+   * Upload Companion speech (mic or BITL video), run STT+Sparkle, prefill context/caption.
+   */
+  const processSpokenMediaAndSparkle = async (
+    localUri: string,
+    kind: 'audio' | 'video',
+  ): Promise<void> => {
+    if (!localUri || !currentExplorerId) return;
+    if (lastProcessedSpokenUriRef.current === localUri && peopleContext.trim()) {
+      return;
+    }
+
+    setIsProcessingSpoken(true);
+    setIsAiThinking(true);
+    try {
+      const stagingId = await ensureStagingImageReady();
+      if (!stagingId) {
+        throw new Error('Could not prepare staging image');
+      }
+
+      const filename =
+        kind === 'video' ? `spoken_context_${Date.now()}.mp4` : `spoken_context_${Date.now()}.m4a`;
+      const contextMediaKey = await uploadStagingBinary(localUri, stagingId, filename);
+
+      const getStagingUrlResponse = await fetch(
+        `${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`,
+      );
+      if (!getStagingUrlResponse.ok) {
+        throw new Error('Failed to get staging image URL');
+      }
+      const getStagingJson = await parseJsonRecord(getStagingUrlResponse);
+      const getStagingUrl = asOptionalString(getStagingJson?.url);
+      if (!getStagingUrl) {
+        throw new Error('Staging image URL missing');
+      }
+
+      const nextSource: CaptionSource = kind === 'video' ? 'bitl' : 'human_voice';
+      captionSourceRef.current = nextSource;
+      setCaptionSource(nextSource);
+      setSpokenContextTrusted(true);
+
+      const skipCaptionTts = nextSource === 'human_voice' || nextSource === 'bitl';
+      const aiResult = await getAIDescription(getStagingUrl, {
+        silent: false,
+        contextMediaKey,
+        skipCaptionTts,
+        spokenContextTrusted: true,
+      });
+
+      if (aiResult?.cleaned_context) {
+        lastProcessedSpokenUriRef.current = localUri;
+      } else if (!aiResult) {
+        Alert.alert(
+          'Couldn’t understand that yet',
+          'Try speaking again a little more clearly, or type a short context note.',
+        );
+      }
+    } catch (error: any) {
+      console.error('[processSpokenMediaAndSparkle] failed:', error);
+      Alert.alert(
+        'Sparkle Speak failed',
+        error?.message || 'Could not process your recording. You can type context instead.',
+      );
+    } finally {
+      setIsProcessingSpoken(false);
+      setIsAiThinking(false);
+    }
+  };
+
+  const handleCaptionSourceChange = async (next: CaptionSource) => {
+    captionSourceRef.current = next;
+    setCaptionSource(next);
+    if (next === 'clean_text') {
+      // Need caption TTS if we skipped it while on My voice.
+      if (!aiAudioUrl && (shortCaption.trim() || description.trim())) {
+        await generateDeepDiveBackground({
+          silent: false,
+          targetCaption: (description.trim() || shortCaption).trim(),
+          targetDeepDive: deepDive.trim() || undefined,
+          skipCaptionTts: false,
+          preservePeopleContext: true,
+        });
+      }
+    }
+  };
+
   const startRecording = async () => {
     // Prevent multiple simultaneous calls
-    if (isStartingRecording || audioRecorder.isRecording) {
+    if (isStartingRecording || audioRecorder.isRecording || isProcessingSpoken) {
       return;
     }
 
@@ -1122,6 +1360,7 @@ export default function CreationModal({
       setIsStartingRecording(true);
       // Clear previous audio URI when starting a new recording
       setAudioUri(null);
+      lastProcessedSpokenUriRef.current = null;
       // Reset the last processed URI so we can detect the new recording
       lastProcessedUriRef.current = null;
 
@@ -1141,7 +1380,6 @@ export default function CreationModal({
       // Prepare and start recording
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
-      setDescription(''); // Clear text description when starting audio
     } catch (error: any) {
       console.error("Failed to start recording:", error);
       Alert.alert("Error", `Failed to start audio recording: ${error.message || error}`);
@@ -1164,19 +1402,25 @@ export default function CreationModal({
 
       // Persist the recording to a stable location so it won't be cleaned from cache
       const recordingUri = audioRecorder.uri;
+      let persistentUri: string | null = null;
       if (recordingUri && recordingUri !== lastProcessedUriRef.current) {
         try {
           const filename = `caption-${Date.now()}.m4a`;
-          const persistentUri = `${FileSystem.documentDirectory}${filename}`;
+          persistentUri = `${FileSystem.documentDirectory}${filename}`;
           await FileSystem.copyAsync({ from: recordingUri, to: persistentUri });
           setAudioUri(persistentUri);
           lastProcessedUriRef.current = recordingUri;
         } catch (copyError) {
           console.error("Failed to persist audio recording:", copyError);
           // Fallback to the original URI if copy fails
+          persistentUri = recordingUri;
           setAudioUri(recordingUri);
           lastProcessedUriRef.current = recordingUri;
         }
+      }
+
+      if (persistentUri) {
+        await processSpokenMediaAndSparkle(persistentUri, 'audio');
       }
     } catch (error: any) {
       console.error("Failed to stop recording:", error);
@@ -1348,6 +1592,14 @@ export default function CreationModal({
           patch['metadata.people_context'] = deleteField();
           patch['metadata.people_context_hints'] = deleteField();
         }
+        if (spokenTranscript.trim()) {
+          patch['metadata.spoken_context_transcript'] = spokenTranscript.trim();
+        } else {
+          patch['metadata.spoken_context_transcript'] = deleteField();
+        }
+        if (captionSourceRef.current) {
+          patch['metadata.caption_source'] = captionSourceRef.current;
+        }
         if (libIdStored) {
           patch['metadata.library_id'] = libIdStored;
         } else {
@@ -1399,6 +1651,12 @@ export default function CreationModal({
         setIsExplorerInReflection(false);
         setIsSelfie(false);
         setPeopleContext('');
+        setSpokenTranscript('');
+        setSpokenContextTrusted(false);
+        setCaptionSource('ai');
+        captionSourceRef.current = 'ai';
+        lastProcessedSpokenUriRef.current = null;
+        setIsProcessingSpoken(false);
         setSearchQueryContext('');
         setSearchCanonicalName('');
         setLibraryId('');
@@ -1741,6 +1999,12 @@ export default function CreationModal({
         ...(libIdStored ? { library_id: libIdStored } : {}),
         ...(libSearchStored ? { library_search_term: libSearchStored } : {}),
         ...(peopleTrim ? { people_context: peopleTrim, people_context_hints: peopleTrim } : {}),
+        ...(spokenTranscript.trim()
+          ? { spoken_context_transcript: spokenTranscript.trim() }
+          : {}),
+        ...(captionSourceRef.current
+          ? { caption_source: captionSourceRef.current }
+          : {}),
         ...(searchQueryContext?.trim() ? { search_query: searchQueryContext.trim() } : {}),
         ...(searchCanonicalName?.trim() ? { search_canonical_name: searchCanonicalName.trim() } : {}),
         ...(lastEditedAtIso ? { last_edited_at: lastEditedAtIso } : {}),
@@ -1930,18 +2194,24 @@ export default function CreationModal({
       setIsCompanionInReflection(false);
       setIsExplorerInReflection(false);
       setIsSelfie(false);
-      setPeopleContext('');
-      setSearchQueryContext('');
-      setSearchCanonicalName('');
-      setLibraryId('');
-      setLibrarySearchTerm('');
-      setLibrarySourceKind(null);
-      setConfirming(false);
-      editSourceEventIdRef.current = null;
-      pinnedEditEventIdRef.current = null;
-      mediaReplacedDuringEditRef.current = false;
-      setIsEditingExistingReflection(false);
-      composerVideoMetaRef.current = null;
+    setPeopleContext('');
+    setSpokenTranscript('');
+    setSpokenContextTrusted(false);
+    setCaptionSource('ai');
+    captionSourceRef.current = 'ai';
+    lastProcessedSpokenUriRef.current = null;
+    setIsProcessingSpoken(false);
+    setSearchQueryContext('');
+    setSearchCanonicalName('');
+    setLibraryId('');
+    setLibrarySearchTerm('');
+    setLibrarySourceKind(null);
+    setConfirming(false);
+    editSourceEventIdRef.current = null;
+    pinnedEditEventIdRef.current = null;
+    mediaReplacedDuringEditRef.current = false;
+    setIsEditingExistingReflection(false);
+    composerVideoMetaRef.current = null;
       sheetRef.current?.close();
       onClose();
 
@@ -2017,6 +2287,12 @@ export default function CreationModal({
     setIsExplorerInReflection(false);
     setIsSelfie(false);
     setPeopleContext('');
+    setSpokenTranscript('');
+    setSpokenContextTrusted(false);
+    setCaptionSource('ai');
+    captionSourceRef.current = 'ai';
+    lastProcessedSpokenUriRef.current = null;
+    setIsProcessingSpoken(false);
     setSearchQueryContext('');
     setSearchCanonicalName('');
     setLibraryId('');
@@ -2079,8 +2355,12 @@ export default function CreationModal({
       targetCaption?: string;
       targetDeepDive?: string;
       skipTts?: boolean;
+      skipCaptionTts?: boolean;
       captionVoice?: string;
       deepDiveVoice?: string;
+      contextMediaKey?: string;
+      spokenContextTrusted?: boolean;
+      preservePeopleContext?: boolean;
     } = { silent: true }
   ): Promise<AiDescriptionResponse | null> => {
     const currentPhotoUri = asOptionalString(photo?.uri);
@@ -2091,73 +2371,8 @@ export default function CreationModal({
         setIsAiThinking(true);
         setIsAiGenerated(false);
       }
-      // Generate staging event_id and upload image if not already uploaded.
-      // When editing, `stagingEventId` may be the production `event_id` (update key); never use that as an S3 staging prefix.
-      let stagingId = stagingEventId;
-      const editingProdId = editSourceEventIdRef.current;
-      if (editingProdId && stagingId === editingProdId) {
-        stagingId = null;
-      }
-      if (!stagingId) {
-        stagingId = Date.now().toString();
-        setStagingEventId(stagingId);
-        stagingEventIdRef.current = stagingId;
-
-        let uriToUpload = currentPhotoUri;
-        let isTempThumbnail = false;
-
-        // If it's a video, generate a thumbnail to use for AI description
-        if (mediaType === 'video' && videoUri) {
-          const vmAi = composerVideoMetaRef.current;
-          const thumbMs = Math.max(
-            0,
-            vmAi &&
-              typeof vmAi.thumbnail_time_ms === 'number' &&
-              vmAi.thumbnail_time_ms >= 0
-              ? vmAi.thumbnail_time_ms
-              : vmAi?.video_start_ms ?? 0
-          );
-          const posterFrame = await getVideoPosterFrameAsync(videoUri, thumbMs, 'ai');
-          uriToUpload = posterFrame.uri;
-          isTempThumbnail = posterFrame.temporary;
-        }
-
-        // Upload to staging first
-        const stagingResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&explorer_id=${currentExplorerId}`);
-        if (!stagingResponse.ok) {
-          throw new Error(`Failed to get staging upload URL: ${stagingResponse.status}`);
-        }
-        const stagingJson = await parseJsonRecord(stagingResponse);
-        const stagingUrl = asOptionalString(stagingJson?.url);
-        if (!stagingUrl) {
-          throw new Error('Staging upload URL was missing');
-        }
-        // Only gatekeep here when needed: video thumbnail may exceed 1080px.
-        let stagingImageUri = uriToUpload;
-        if (mediaType === 'video') {
-          try {
-            stagingImageUri = await prepareImageForUpload(uriToUpload);
-          } catch (gatekeeperError) {
-            console.warn(
-              '[generateDeepDiveBackground] image gatekeeper failed; using raw poster image',
-              gatekeeperError
-            );
-            stagingImageUri = uriToUpload;
-          }
-        }
-        const tempGatekeptStagingUri = stagingImageUri !== uriToUpload ? stagingImageUri : null;
-        await safeUploadToS3(stagingImageUri, stagingUrl);
-        if (tempGatekeptStagingUri) {
-          safeDeleteCacheFile(tempGatekeptStagingUri).catch(() => { });
-        }
-
-        // Cleanup temp thumbnail
-        if (isTempThumbnail) {
-          try {
-            await FileSystem.deleteAsync(uriToUpload, { idempotent: true });
-          } catch (cleanupError) { }
-        }
-      }
+      const stagingId = await ensureStagingImageReady();
+      if (!stagingId) return null;
 
       // Get presigned GET URL for staging image
       const getStagingUrlResponse = await fetch(`${API_ENDPOINTS.GET_S3_URL}?path=staging&event_id=${stagingId}&filename=image.jpg&method=GET&explorer_id=${currentExplorerId}`);
@@ -2165,7 +2380,17 @@ export default function CreationModal({
         const getStagingJson = await parseJsonRecord(getStagingUrlResponse);
         const getStagingUrl = asOptionalString(getStagingJson?.url);
         if (!getStagingUrl) return { _stagingId: stagingId };
-        const aiResult = await getAIDescription(getStagingUrl, options);
+        const aiResult = await getAIDescription(getStagingUrl, {
+          silent: options.silent,
+          targetCaption: options.targetCaption,
+          targetDeepDive: options.targetDeepDive,
+          skipTts: options.skipTts,
+          skipCaptionTts: options.skipCaptionTts,
+          captionVoice: options.captionVoice,
+          deepDiveVoice: options.deepDiveVoice,
+          contextMediaKey: options.contextMediaKey,
+          spokenContextTrusted: options.spokenContextTrusted ?? spokenContextTrusted,
+        });
         // Always return _stagingId so caller can delete staging even when AI fails
         return aiResult ? { ...aiResult, _stagingId: stagingId } : { _stagingId: stagingId };
       }
@@ -2643,15 +2868,27 @@ export default function CreationModal({
                     setStagingEventId(null);
                     stagingEventIdRef.current = null;
                   }
+                  const skipCaptionTts =
+                    options.skipCaptionTts ??
+                    (captionSourceRef.current === 'human_voice' ||
+                      captionSourceRef.current === 'bitl');
                   await generateDeepDiveBackground({
                     silent: false,
                     targetCaption: options.targetCaption,
                     targetDeepDive: options.targetDeepDive,
                     captionVoice: options.captionVoice,
                     deepDiveVoice: options.deepDiveVoice,
+                    contextMediaKey: options.contextMediaKey,
+                    skipCaptionTts,
+                    spokenContextTrusted:
+                      options.spokenContextTrusted ?? spokenContextTrusted,
                   });
                 }}
                 onSend={(data) => {
+                  if (data.narrationUri) {
+                    captionSourceRef.current = 'bitl';
+                    setCaptionSource('bitl');
+                  }
                   uploadEventBundle({
                     caption: data.caption,
                     audioUri: data.audioUri,
@@ -2669,7 +2906,12 @@ export default function CreationModal({
                 explorerInReflection={isExplorerInReflection}
                 onExplorerInReflectionChange={setIsExplorerInReflection}
                 peopleContext={peopleContext}
-                onPeopleContextChange={setPeopleContext}
+                onPeopleContextChange={(t) => {
+                  setPeopleContext(t);
+                  if (!spokenTranscript.trim()) {
+                    setSpokenContextTrusted(false);
+                  }
+                }}
                 explorerName={explorerName ?? 'Explorer'}
                 stage={composerStage}
                 onStageChange={setComposerStage}
@@ -2680,6 +2922,14 @@ export default function CreationModal({
                 deepDiveVoice={deepDiveVoice}
                 onCaptionVoiceChange={setCaptionVoice}
                 onDeepDiveVoiceChange={setDeepDiveVoice}
+                captionSource={captionSource}
+                onCaptionSourceChange={(next) => {
+                  void handleCaptionSourceChange(next);
+                }}
+                isProcessingSpoken={isProcessingSpoken}
+                onSpokenNarration={(uri) => {
+                  void processSpokenMediaAndSparkle(uri, 'video');
+                }}
               />
             </View>
           ) : (

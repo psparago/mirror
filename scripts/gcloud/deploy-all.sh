@@ -283,6 +283,7 @@ echo ""
 # Function 6: generate-ai-description
 if [ "$SKIP_AI" = false ]; then
   echo -e "${YELLOW}Deploying generate-ai-description...${NC}"
+  # 120s / 512MB: spoken-context STT + image Sparkle + dual TTS
   gcloud functions deploy generate-ai-description \
     --gen2 \
     --runtime=${RUNTIME} \
@@ -291,6 +292,8 @@ if [ "$SKIP_AI" = false ]; then
     --entry-point=GenerateAIDescription \
     --trigger-http \
     --allow-unauthenticated \
+    --timeout=120s \
+    --memory=512MB \
     --set-env-vars ${ENV_VARS},GEMINI_API_KEY=${GEMINI_API_KEY} \
     --quiet
 
