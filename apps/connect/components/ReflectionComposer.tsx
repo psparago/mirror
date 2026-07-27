@@ -296,9 +296,6 @@ function ReflectionComposerInner({
   const [showTypedContext, setShowTypedContext] = useState(false);
   const [showAiVoiceAdvanced, setShowAiVoiceAdvanced] = useState(false);
   const [voicePickerTarget, setVoicePickerTarget] = useState<VoicePickerTarget | null>(null);
-  const sparkleTip = useTip('sparkle_tell_the_story', stage === 'ai', {
-    explorerName: explorerName || undefined,
-  });
   const [videoEnded, setVideoEnded] = useState(false);
   const [videoPaused, setVideoPaused] = useState(false);
   const [videoRangeMs, setVideoRangeMs] = useState<{ start: number; end: number } | null>(null);
@@ -347,7 +344,25 @@ function ReflectionComposerInner({
   const [sendPreparing, setSendPreparing] = useState(false);
 
   const [isAiCancelled, setIsAiCancelled] = useState(false);
-  const isBlockedByAi = isAiThinking && !isAiCancelled;
+  const isBlockedByAi = (isAiThinking || isProcessingSpoken) && !isAiCancelled;
+  const sparkleTip = useTip(
+    'sparkle_tell_the_story',
+    stage === 'ai' && !isProcessingSpoken && !isAiThinking,
+    {
+      explorerName: explorerName || undefined,
+    },
+  );
+  const bitlTip = useTip(
+    'workbench_bring_to_life',
+    stage === 'workbench' && canNarrate && !isBlockedByAi,
+    {
+      explorerName: explorerName || undefined,
+    },
+  );
+  const videoPosterTip = useTip(
+    'workbench_video_poster',
+    stage === 'workbench' && mediaType === 'video' && !isBlockedByAi,
+  );
   const hasRecordedAudio = !!audioUri;
 
   // Sparkle animation: rotating and pulsing star
@@ -954,11 +969,56 @@ function ReflectionComposerInner({
   const trimAppliedRef = useRef(false);
   const trimScrubDepthRef = useRef(0);
   const wasPlayingBeforeTrimScrubRef = useRef(false);
+  /** True while we paused for the first-visit video tip; resume play when tip closes. */
+  const heldPlaybackForVideoTipRef = useRef(false);
 
   useEffect(() => {
     if (mediaType !== 'video') return;
     void configureConnectPlaybackAudioSessionAsync();
   }, [mediaType, mediaUri]);
+
+  // Hold video until the poster tip has either shown+dismissed or been skipped (already seen).
+  useEffect(() => {
+    if (mediaType !== 'video' || !player) return;
+
+    const tipMayAppear = stage === 'workbench' && !isBlockedByAi;
+    const holdForTip =
+      tipMayAppear &&
+      (videoPosterTip.visible ||
+        videoPosterTip.autoShowState === 'idle' ||
+        videoPosterTip.autoShowState === 'checking' ||
+        videoPosterTip.autoShowState === 'will_show');
+
+    if (holdForTip) {
+      heldPlaybackForVideoTipRef.current = true;
+      try {
+        player.pause();
+      } catch {
+        /* ignore */
+      }
+      setVideoPaused(true);
+      return;
+    }
+
+    if (!heldPlaybackForVideoTipRef.current && videoPosterTip.autoShowState !== 'skipped') {
+      return;
+    }
+    heldPlaybackForVideoTipRef.current = false;
+    try {
+      player.play();
+    } catch {
+      /* ignore */
+    }
+    setVideoPaused(false);
+  }, [
+    mediaUri,
+    mediaType,
+    player,
+    stage,
+    isBlockedByAi,
+    videoPosterTip.visible,
+    videoPosterTip.autoShowState,
+  ]);
 
   useEffect(() => {
     if (mediaType !== 'video' || !player) return;
@@ -1421,6 +1481,50 @@ function ReflectionComposerInner({
     onStageChange('ai');
   }, [mediaType, player, onStageChange]);
 
+  /**
+   * Cancel tips + close How-it-works before tearing down the composer.
+   * How-it-works still uses RN Modal — delay dismiss before navigation.
+   * Tips are View overlays (safe), but we still cancel pending auto-show.
+   */
+  const runReplaceMediaSafely = useCallback(() => {
+    const infoWasOpen = isInfoOpen;
+    const tipWasVisible = bitlTip.visible || sparkleTip.visible || videoPosterTip.visible;
+    console.log('[GalleryFlow] replace:tap', {
+      stage,
+      tipWasVisible,
+      infoWasOpen,
+      bitlTip: bitlTip.visible,
+      sparkleTip: sparkleTip.visible,
+      videoPosterTip: videoPosterTip.visible,
+    });
+    bitlTip.hide();
+    sparkleTip.hide();
+    videoPosterTip.hide();
+    if (isInfoOpen) {
+      setIsInfoOpen(false);
+    }
+    const go = () => {
+      console.log('[GalleryFlow] replace:invoke-onReplaceMedia');
+      onReplaceMedia();
+    };
+    // Only How-it-works needs a Modal dismiss beat; tips no longer use RN Modal.
+    if (infoWasOpen) {
+      setTimeout(go, 400);
+    } else {
+      go();
+    }
+  }, [
+    bitlTip.visible,
+    bitlTip.hide,
+    sparkleTip.visible,
+    sparkleTip.hide,
+    videoPosterTip.visible,
+    videoPosterTip.hide,
+    isInfoOpen,
+    onReplaceMedia,
+    stage,
+  ]);
+
   const goToSend = useCallback(() => {
     void stopAiPreviewRef.current?.();
     Keyboard.dismiss();
@@ -1458,8 +1562,21 @@ function ReflectionComposerInner({
   }, []);
 
   useEffect(() => {
-    // Help sheet should never persist across stage/screen transitions.
+    // Help sheet / tips should never persist across stage or preview transitions.
+    // Only hide tips that don't belong on the current stage — otherwise a mount-time
+    // hide() cancels the pending first-visit auto-show (video poster tip never appeared).
     setIsInfoOpen(false);
+    if (isPreviewOpen) {
+      bitlTip.hide();
+      sparkleTip.hide();
+      videoPosterTip.hide();
+      return;
+    }
+    if (stage !== 'ai') sparkleTip.hide();
+    if (stage !== 'workbench') {
+      bitlTip.hide();
+      videoPosterTip.hide();
+    }
   }, [stage, isPreviewOpen]);
 
   // AI audio preview playback — caption → pause → deep dive
@@ -2000,7 +2117,7 @@ function ReflectionComposerInner({
           <View style={styles.photoUtilityRow}>
             <TouchableOpacity
               style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onReplaceMedia}
+              onPress={runReplaceMediaSafely}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
@@ -2044,7 +2161,7 @@ function ReflectionComposerInner({
           <View style={styles.videoUtilityRow}>
           <TouchableOpacity 
               style={[styles.workbenchNavPillBack, isBlockedByAi && { opacity: 0.35 }]}
-              onPress={onReplaceMedia}
+              onPress={runReplaceMediaSafely}
               disabled={isSending || isBlockedByAi}
               activeOpacity={0.7}
               accessibilityRole="button"
@@ -2106,8 +2223,8 @@ function ReflectionComposerInner({
                 <FontAwesome name="repeat" size={16} color="#fff" />
                 <Text style={styles.toolbarChipText}>Replay</Text>
               </TouchableOpacity>
-          <TouchableOpacity 
-            style={[
+              <TouchableOpacity
+                style={[
                   styles.toolbarChip,
                   styles.videoActionChip,
                   thumbnailTimeMs !== null && styles.toolbarChipActive,
@@ -2119,7 +2236,17 @@ function ReflectionComposerInner({
               >
                 <FontAwesome name="image" size={16} color={thumbnailTimeMs !== null ? '#4ade80' : '#fff'} />
                 <Text style={[styles.toolbarChipText, thumbnailTimeMs !== null && { color: '#4ade80' }]}>Poster</Text>
-          </TouchableOpacity>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={videoPosterTip.showAgain}
+                style={[styles.tipReplayBtn, isBlockedByAi && { opacity: 0.35 }]}
+                disabled={isSending || isBlockedByAi}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Show tip about poster and scrubbing"
+              >
+                <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+              </TouchableOpacity>
       </View>
           </View>
         </View>
@@ -2138,45 +2265,62 @@ function ReflectionComposerInner({
         </View>
       ) : null}
       {showNarrationGuidance ? (
-        <TouchableOpacity
-          style={[
-            styles.videoGuidanceBanner,
-            styles.narrationGuidanceBanner,
-            (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
-          ]}
-          onPress={handleNarrationBannerPress}
-          disabled={isSending || isBlockedByAi || photoExportBusy}
-          activeOpacity={0.82}
-          accessibilityRole="button"
-          accessibilityLabel={
-            narrationUri
-              ? 'Narration recorded. Preview, redo, or remove narration'
-              : 'Bring this photo to life with a selfie narration'
-          }
-        >
-          <FontAwesome
-            name={narrationUri ? 'check-circle' : 'video-camera'}
-            size={16}
-            color="#f5c842"
-            style={styles.narrationGuidanceIcon}
-          />
-          <View style={styles.narrationGuidanceTextCol}>
-            <Text style={styles.narrationGuidanceHeadline}>
-              {narrationUri ? 'Your photo is brought to life' : 'Bring your photo to life'}
-            </Text>
-            <Text style={styles.narrationGuidanceSubtext}>
-              {narrationUri
-                ? 'Tap to preview, redo, or remove the selfie narration.'
-                : `Tap here and tell ${explorerName || 'Explorer'} about this Reflection.`}
-            </Text>
-          </View>
-          <View style={styles.narrationGuidanceAction}>
-            <Text style={styles.narrationGuidanceActionText}>
-              {narrationUri ? 'Manage' : 'Start'}
-            </Text>
-            <FontAwesome name="chevron-right" size={10} color="#e0f2fe" />
-          </View>
-        </TouchableOpacity>
+        <View style={styles.narrationGuidanceRow}>
+          <TouchableOpacity
+            style={[
+              styles.videoGuidanceBanner,
+              styles.narrationGuidanceBanner,
+              styles.narrationGuidanceBannerFlex,
+              (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
+            ]}
+            onPress={handleNarrationBannerPress}
+            disabled={isSending || isBlockedByAi || photoExportBusy}
+            activeOpacity={0.82}
+            accessibilityRole="button"
+            accessibilityLabel={
+              narrationUri
+                ? 'Narration recorded. Preview, redo, or remove narration'
+                : 'Bring this photo to life with a selfie narration'
+            }
+          >
+            <FontAwesome
+              name={narrationUri ? 'check-circle' : 'video-camera'}
+              size={16}
+              color="#f5c842"
+              style={styles.narrationGuidanceIcon}
+            />
+            <View style={styles.narrationGuidanceTextCol}>
+              <Text style={styles.narrationGuidanceHeadline}>
+                {narrationUri ? 'Your photo is brought to life' : 'Bring your photo to life'}
+              </Text>
+              <Text style={styles.narrationGuidanceSubtext}>
+                {narrationUri
+                  ? 'Tap to preview, redo, or remove. Sparkle already learned from your narration.'
+                  : `Tell ${explorerName || 'Explorer'} about this — Sparkle listens too.`}
+              </Text>
+            </View>
+            <View style={styles.narrationGuidanceAction}>
+              <Text style={styles.narrationGuidanceActionText}>
+                {narrationUri ? 'Manage' : 'Start'}
+              </Text>
+              <FontAwesome name="chevron-right" size={10} color="#e0f2fe" />
+            </View>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={bitlTip.showAgain}
+            style={[
+              styles.tipReplayBtn,
+              styles.narrationTipBtn,
+              (isSending || isBlockedByAi || photoExportBusy) && { opacity: 0.45 },
+            ]}
+            disabled={isSending || isBlockedByAi || photoExportBusy}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Show tip about Bring your photo to life"
+          >
+            <FontAwesome name="lightbulb-o" size={14} color="#f5c842" />
+          </TouchableOpacity>
+        </View>
       ) : null}
       <TouchableOpacity
         style={styles.infoBtn}
@@ -2844,8 +2988,16 @@ function ReflectionComposerInner({
       {isBlockedByAi && (
         <Animated.View entering={FadeIn.duration(300)} style={styles.sparkleOverlay}>
           <WaitOverlay
-            title="Adding Sparkle to your Reflection..."
-            detail="Please keep the app open while Sparkle prepares your Reflection."
+            title={
+              isProcessingSpoken
+                ? 'Preparing Sparkle from your narration...'
+                : 'Adding Sparkle to your Reflection...'
+            }
+            detail={
+              isProcessingSpoken
+                ? 'Learning from what you said, then opening Sparkle so you can fine-tune.'
+                : 'Please keep the app open while Sparkle prepares your Reflection.'
+            }
             icon={
               <Animated.View style={sparkleIconStyle}>
               <FontAwesome name="magic" size={20} color="#fcd34d" />
@@ -2991,7 +3143,7 @@ function ReflectionComposerInner({
                     {mediaType === 'video'
                       ? `Trim, set a poster, and tap the video to pause or resume. Sparkle is the next stage. X closes to the timeline. Reflections play best under ${SOFT_VIDEO_RECOMMENDED_SECONDS} seconds; ${REFLECTION_MAX_VIDEO_SECONDS} seconds (${Math.round(REFLECTION_MAX_VIDEO_SECONDS / 60)} minutes) is the hard cap.`
                       : canNarrate
-                        ? `Frame the photo, then tap the Bring your photo to life banner to tell ${explorerName || 'Explorer'} about this Reflection in your own voice. Sparkle is the next stage. X closes to the timeline.`
+                        ? `Frame the photo, then tap Bring your photo to life to tell ${explorerName || 'Explorer'} about this Reflection in your own voice. That narration is what they hear — and Sparkle uses it for AI context too. Sparkle is the next stage. X closes to the timeline.`
                         : 'Drag and pinch to frame the photo, rotate with two fingers or the Rotate button, and tap Reset to undo. Sparkle is the next stage. X closes to the timeline.'}
                   </Text>
 
@@ -3016,7 +3168,7 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Poster</Text>
                           <Text style={styles.infoDesc}>
-                            The poster is the frame the Explorer sees before video starts and again after it ends (before the caption). Tap Poster, then use the arrows or swipe the video to scrub to your frame — it locks automatically. Confirm saves and exits, Reset clears the custom poster.
+                            The poster is the frame the Explorer sees before video starts and again after it ends (before the caption) — Sparkle’s AI also uses it for captions. Tap Poster, then use the arrows or swipe to scrub. Confirm locks it; Reset clears it. Tap the lightbulb next to Poster anytime to see the short tip again.
                           </Text>
                         </View>
                       </View>
@@ -3042,12 +3194,13 @@ function ReflectionComposerInner({
                         <View style={styles.infoTextWrap}>
                           <Text style={styles.infoLabel}>Bring It to Life</Text>
                           <Text style={styles.infoDesc}>
-                            Optional but powerful. Tap the Bring your photo to life banner to open
-                            the recorder — hold the button and tell {explorerName || 'Explorer'} about
-                            this Reflection. The photo stays full screen while your selfie plays in
-                            the corner. Tap the banner again to preview, redo, or remove it. A narration
-                            replaces the spoken caption (voice intro and AI audio); the caption text
-                            and Rich Narration still work as usual.
+                            Tap the banner to record a selfie narration — hold and tell{' '}
+                            {explorerName || 'Explorer'} about this Reflection. They see the photo full
+                            screen with you in the corner (PiP). Your narration replaces the spoken
+                            caption. Sparkle also listens: names, places, and what’s happening become
+                            AI context for a better caption and Rich Narration. When recording
+                            finishes, you’ll move to Sparkle to fine-tune. Tap the lightbulb on the
+                            banner anytime to see this tip again.
                           </Text>
                         </View>
                       </View>
@@ -3061,6 +3214,13 @@ function ReflectionComposerInner({
                   <Text style={styles.infoProTip}>
                     Top-left chip re-opens where you picked media (Camera, Library, or Search). Top-right is Sparkle and X. X always closes to the timeline. Nothing sends until Preview & Send.
                   </Text>
+                  {canNarrate ? (
+                    <Text style={styles.infoProTip}>
+                      Bring It to Life does double duty: familiar face + voice for{' '}
+                      {explorerName || 'Explorer'}, and spoken context so Sparkle doesn’t guess who’s
+                      in the photo.
+                    </Text>
+                  ) : null}
                   <Text style={styles.infoProTip}>
                     After a Reflection is sent, Companions can like it from the timeline or playback screen. The Explorer can double-tap the video to like back — everyone sees the hearts, and you get a notification when they do.
                   </Text>
@@ -3092,8 +3252,8 @@ function ReflectionComposerInner({
                       <Text style={styles.infoDesc}>
                         Tap the mic and describe who and what is in this Reflection. Sparkle cleans
                         that up for AI context, drafts a short caption, and builds Rich Narration.
-                        After you speak, choose what {explorerName || 'Explorer'} hears: My voice
-                        (default — your recording) or Clean caption (polished TTS).
+                        After you speak, {explorerName || 'Explorer'} hears a clean AI caption by
+                        default. Switch to My voice only if you want them to hear your recording.
                       </Text>
                     </View>
                   </View>
@@ -3150,9 +3310,9 @@ function ReflectionComposerInner({
                     current, Finish runs it first.
                   </Text>
                   <Text style={styles.infoProTip}>
-                    My voice sends your raw recording as the spoken caption. Clean caption uses TTS of
-                    the caption text instead. Bring-It-to-Life replaces the spoken caption with your
-                    selfie PiP.
+                    Clean caption (default) uses TTS of the polished caption. My voice sends your
+                    raw recording as the spoken caption instead. Bring-It-to-Life replaces the spoken
+                    caption with your selfie PiP.
                   </Text>
                   <Text style={styles.infoProTip}>
                     The lightbulb on Tell the story reopens the tip anytime. How this works is always
@@ -3265,6 +3425,20 @@ function ReflectionComposerInner({
           void sparkleTip.dismiss();
         }}
       />
+      <TipModal
+        visible={bitlTip.visible}
+        content={bitlTip.content}
+        onDismiss={() => {
+          void bitlTip.dismiss();
+        }}
+      />
+      <TipModal
+        visible={videoPosterTip.visible}
+        content={videoPosterTip.content}
+        onDismiss={() => {
+          void videoPosterTip.dismiss();
+        }}
+      />
 
       {/* SELFIE NARRATION (image reflections) — capture only; upload happens with the reflection send */}
       {canNarrate ? (
@@ -3276,6 +3450,9 @@ function ReflectionComposerInner({
           onNarrationComplete={(videoUri) => {
             setNarrationUri(videoUri);
             onCaptionSourceChange?.('bitl');
+            // Land on Sparkle immediately so the prepare wait sits on that stage,
+            // then run STT + Sparkle for fine-tuning.
+            onStageChange('ai');
             onSpokenNarration?.(videoUri);
           }}
           onClose={() => setIsNarrationSheetOpen(false)}
@@ -3448,6 +3625,19 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 4,
+  },
+  narrationGuidanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  narrationGuidanceBannerFlex: {
+    flex: 1,
+    marginBottom: 0,
+  },
+  narrationTipBtn: {
+    marginBottom: 0,
   },
   narrationGuidanceIcon: {
     width: 20,

@@ -173,14 +173,17 @@ export default function GalleryScreen() {
   useEffect(() => {
     if (hasLaunched.current) return;
     hasLaunched.current = true;
+    console.log('[GalleryFlow] GalleryScreen:mounted, waiting transitionEnd/fallback');
 
     const unsubscribe = (
       navigation as { addListener: (event: string, cb: () => void) => () => void }
     ).addListener('transitionEnd', () => {
+      console.log('[GalleryFlow] GalleryScreen:transitionEnd → launchPicker');
       launchPicker();
     });
 
     const fallback = setTimeout(() => {
+      console.log('[GalleryFlow] GalleryScreen:fallback → launchPicker');
       launchPicker();
     }, 600);
 
@@ -195,10 +198,12 @@ export default function GalleryScreen() {
     hasLaunched.current = false;
     cancelledRef.current = false;
     setIsProcessing(true);
+    console.log('[GalleryFlow] launchPicker:start');
 
     try {
       const granted = await ensureAndroidGalleryPermissions();
       if (!granted) {
+        console.log('[GalleryFlow] launchPicker:android-permission-denied');
         closeWithPrompt(
           'Permission Required',
           'Reflections Connect needs access to your photos and videos to pick from the gallery.',
@@ -209,6 +214,7 @@ export default function GalleryScreen() {
 
       const libPerm = await ExpoImagePicker.requestMediaLibraryPermissionsAsync();
       if (!libPerm.granted) {
+        console.log('[GalleryFlow] launchPicker:library-permission-denied');
         closeWithPrompt(
           'Permission Required',
           'We need access to your photo library to choose images and videos for your Reflections.',
@@ -221,10 +227,15 @@ export default function GalleryScreen() {
       setStatusDetail('Thanks for your patience. Larger videos can take a little while to get ready.');
       setPrepStep(1);
       setWaitIcon('folder-open');
+      console.log('[GalleryFlow] launchPicker:launchImageLibraryAsync');
       const result = await ExpoImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
         allowsEditing: false,
         quality: 1,
+      });
+      console.log('[GalleryFlow] launchPicker:result', {
+        canceled: result.canceled,
+        assetCount: result.assets?.length ?? 0,
       });
 
       if (result.canceled || !result.assets?.[0]) {

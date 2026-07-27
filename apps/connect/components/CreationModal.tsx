@@ -284,6 +284,8 @@ export default function CreationModal({
   const suppressPickerRecoveryRef = useRef(false);
   const pickerRecoveryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [transitionUnlockTick, setTransitionUnlockTick] = useState(0);
+  /** Bumped on every beginSourceFlow so router.push re-runs even when phase is already `creating` (Back to Library). */
+  const [sourceFlowTick, setSourceFlowTick] = useState(0);
   const sheetRef = useRef<BottomSheet>(null);
   const detailsSheetRef = useRef<BottomSheet>(null);
   /** Latest video trim / thumbnail choices from ReflectionComposer (ms). */
@@ -297,6 +299,12 @@ export default function CreationModal({
 
   const beginSourceFlow = useCallback(
     (route: '/camera' | '/gallery' | '/search', extras?: { cameraSelfie?: boolean }) => {
+      console.log('[GalleryFlow] beginSourceFlow', {
+        route,
+        selfie: !!extras?.cameraSelfie,
+        hadPendingRoute: !!pendingRouteRef.current,
+        lock: sourceTransitionLockRef.current,
+      });
       if (pickerRecoveryTimerRef.current) {
         clearTimeout(pickerRecoveryTimerRef.current);
         pickerRecoveryTimerRef.current = null;
@@ -315,6 +323,8 @@ export default function CreationModal({
       setConditioningProgress(null);
       sheetRef.current?.close();
       setPhase('creating');
+      // phase may already be `creating` after Workbench — tick forces the push effect to run.
+      setSourceFlowTick((v) => v + 1);
     },
     []
   );
@@ -488,7 +498,10 @@ export default function CreationModal({
   useEffect(() => {
     if (phase !== 'creating') return;
     const route = pendingRouteRef.current;
-    if (!route) return;
+    if (!route) {
+      // Idle creating wait (composer / conditioning) — no pending navigation.
+      return;
+    }
     pendingRouteRef.current = null;
     // Wait one frame for state/UI transition before navigation.
     requestAnimationFrame(() => {
@@ -496,14 +509,16 @@ export default function CreationModal({
       sourceFlowExtrasRef.current = {};
       const path =
         route === '/camera' && extras.cameraSelfie ? (`${route}?selfie=1` as const) : route;
+      console.log('[GalleryFlow] router.push', { path, sourceFlowTick });
       router.push(path as '/camera' | '/gallery' | '/search');
       // Keep lock briefly so sheet close callbacks can't immediately tear down the flow.
       setTimeout(() => {
         sourceTransitionLockRef.current = false;
         setTransitionUnlockTick((v) => v + 1);
+        console.log('[GalleryFlow] sourceTransitionLock released');
       }, 1200);
     });
-  }, [phase, router]);
+  }, [phase, router, sourceFlowTick]);
 
   // If a source screen is dismissed without selected media, do not reopen the source
   // picker automatically. During large-video handoff, pending media can arrive after
@@ -584,6 +599,7 @@ export default function CreationModal({
     );
     setConditioningProgress(null);
     setPhase('creating');
+    setSourceFlowTick((v) => v + 1);
     onActionTriggered?.();
   }, [visible, initialAction, editEvent?.event_id, router, onActionTriggered]);
 
@@ -1300,12 +1316,12 @@ export default function CreationModal({
         throw new Error('Staging image URL missing');
       }
 
-      const nextSource: CaptionSource = kind === 'video' ? 'bitl' : 'human_voice';
+      const nextSource: CaptionSource = kind === 'video' ? 'bitl' : 'clean_text';
       captionSourceRef.current = nextSource;
       setCaptionSource(nextSource);
       setSpokenContextTrusted(true);
 
-      const skipCaptionTts = nextSource === 'human_voice' || nextSource === 'bitl';
+      const skipCaptionTts = nextSource === 'bitl';
       const aiResult = await getAIDescription(getStagingUrl, {
         silent: false,
         contextMediaKey,
@@ -2409,16 +2425,26 @@ export default function CreationModal({
     const replaceReturnSelfie = isSelfie;
     mediaReplacedDuringEditRef.current = true;
     const stagingId = stagingEventId || stagingEventIdRef.current;
-    if (stagingId && stagingId !== editSourceEventIdRef.current) {
-      await deleteStagingArtifacts();
-    } else {
-      const ttsKeys: string[] = [];
-      if (aiAudioS3Key) ttsKeys.push(aiAudioS3Key);
-      if (aiDeepDiveS3Key) ttsKeys.push(aiDeepDiveS3Key);
-      if (ttsKeys.length > 0 && currentExplorerId) {
+    const photoUriToClean = photo?.uri ?? null;
+    const videoUriToClean = videoUri;
+    const ttsKeysSnapshot: string[] = [];
+    if (aiAudioS3Key) ttsKeysSnapshot.push(aiAudioS3Key);
+    if (aiDeepDiveS3Key) ttsKeysSnapshot.push(aiDeepDiveS3Key);
+    const explorerId = currentExplorerId;
+    console.log('[GalleryFlow] handleReplaceMediaInEdit:start', {
+      replaceReturnSrc,
+      stagingId,
+      editSourceId: editSourceEventIdRef.current,
+    });
+
+    const cleanupPromise = (async () => {
+      console.log('[GalleryFlow] handleReplaceMediaInEdit:cleanup-start');
+      if (stagingId && stagingId !== editSourceEventIdRef.current) {
+        await deleteStagingArtifacts();
+      } else if (ttsKeysSnapshot.length > 0 && explorerId) {
         try {
-          const params = new URLSearchParams({ path: 'staging', explorer_id: currentExplorerId });
-          params.set('extra_keys', JSON.stringify(ttsKeys));
+          const params = new URLSearchParams({ path: 'staging', explorer_id: explorerId });
+          params.set('extra_keys', JSON.stringify(ttsKeysSnapshot));
           const res = await fetch(`${API_ENDPOINTS.DELETE_MIRROR_EVENT}?${params.toString()}`, {
             method: 'DELETE',
           });
@@ -2427,15 +2453,11 @@ export default function CreationModal({
           console.warn('TTS staging cleanup failed:', e);
         }
       }
-      setAiAudioS3Key(null);
-      setAiDeepDiveS3Key(null);
-    }
-
-    const photoUriToClean = photo?.uri ?? null;
-    const videoUriToClean = videoUri;
-    await safeDeleteCacheFile(photoUriToClean);
-    await safeDeleteCacheFile(videoUriToClean);
-    await cleanupConditionedScratchFiles();
+      await safeDeleteCacheFile(photoUriToClean);
+      await safeDeleteCacheFile(videoUriToClean);
+      await cleanupConditionedScratchFiles();
+      console.log('[GalleryFlow] handleReplaceMediaInEdit:cleanup-done');
+    })();
 
     setPhoto(null);
     setVideoUri(null);
@@ -2460,6 +2482,8 @@ export default function CreationModal({
     composerVideoMetaRef.current = null;
     setComposerStage('workbench');
     beginReplaceReturnFlow(replaceReturnSrc, replaceReturnSelfie);
+    console.log('[GalleryFlow] handleReplaceMediaInEdit:beginReplaceReturnFlow-done');
+    void cleanupPromise;
   };
 
   const handleReplaceMedia = async () => {
@@ -2471,11 +2495,24 @@ export default function CreationModal({
     const replaceReturnSelfie = isSelfie;
     const photoUriToClean = photo?.uri ?? null;
     const videoUriToClean = videoUri;
-    await deleteStagingArtifacts();
+    console.log('[GalleryFlow] handleReplaceMedia:start', {
+      replaceReturnSrc,
+      replaceReturnSelfie,
+      hasPhoto: !!photoUriToClean,
+      stagingId: stagingEventId || stagingEventIdRef.current,
+    });
 
-    await safeDeleteCacheFile(photoUriToClean);
-    await safeDeleteCacheFile(videoUriToClean);
-    await cleanupConditionedScratchFiles();
+    // Kick off staging/cache cleanup without blocking navigation. Awaiting network
+    // here left the composer mounted long enough for a pending tip to present, which
+    // then raced ImagePicker / unmount and hung iOS on "Waiting for media library…".
+    const cleanupPromise = (async () => {
+      console.log('[GalleryFlow] handleReplaceMedia:cleanup-start');
+      await deleteStagingArtifacts();
+      await safeDeleteCacheFile(photoUriToClean);
+      await safeDeleteCacheFile(videoUriToClean);
+      await cleanupConditionedScratchFiles();
+      console.log('[GalleryFlow] handleReplaceMedia:cleanup-done');
+    })();
 
     setPhoto(null);
     setVideoUri(null);
@@ -2501,6 +2538,8 @@ export default function CreationModal({
     setComposerStage('workbench');
 
     beginReplaceReturnFlow(replaceReturnSrc, replaceReturnSelfie);
+    console.log('[GalleryFlow] handleReplaceMedia:beginReplaceReturnFlow-done');
+    void cleanupPromise;
   };
 
   const handleClose = () => {

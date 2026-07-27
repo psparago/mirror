@@ -4,7 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  * Generic one-shot tips for Reflections Connect.
  * Add new tip IDs here; storage remembers which ones the Companion has dismissed.
  */
-export type TipId = 'sparkle_tell_the_story';
+export type TipId =
+  | 'sparkle_tell_the_story'
+  | 'workbench_bring_to_life'
+  | 'workbench_video_poster';
 
 export type TipContent = {
   title: string;
@@ -30,9 +33,26 @@ const TIP_DEFS: Record<TipId, TipDefinition> = {
       return (
         `Tap the mic and describe this Reflection — names, places, what’s happening. Uhhs are fine.\n\n` +
         `Sparkle cleans up what you say so the caption and Rich Narration stay accurate for ${who} instead of guessing. ` +
-        `Then choose My voice (what they hear) or Clean caption.`
+        `By default they hear a clean AI caption voice; switch to My voice only if you want them to hear your recording.`
       );
     },
+  },
+  workbench_bring_to_life: {
+    title: 'Bring your photo to life',
+    body: (ctx) => {
+      const who = ctx?.explorerName?.trim() || 'the Explorer';
+      return (
+        `Record a short selfie narration — ${who} sees the photo full screen with you in the corner.\n\n` +
+        `Bonus: Sparkle listens to what you say. Names, places, and what’s happening become AI context, ` +
+        `so the caption and Rich Narration stay accurate. When you’re done, you’ll land on Sparkle to fine-tune.`
+      );
+    },
+  },
+  workbench_video_poster: {
+    title: 'Poster & scrubbing',
+    body: () =>
+      `Poster is the still frame before and after the clip — and what Sparkle’s AI looks at for captions.\n\n` +
+      `Drag the gold handles to trim what plays. Tap Poster, then swipe or use the arrows to scrub to a clear frame and Confirm.`,
   },
 };
 
@@ -77,4 +97,9 @@ export async function clearTipSeen(id: TipId): Promise<void> {
   if (!map[id]) return;
   delete map[id];
   await writeSeenMap(map);
+}
+
+/** Clears all one-shot tip flags so Workbench / Sparkle tips auto-show again. */
+export async function clearAllTipsSeen(): Promise<void> {
+  await AsyncStorage.removeItem(STORAGE_KEY);
 }
