@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db, doc, onSnapshot } from '@projectmirror/shared/firebase';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TipContent } from '@/utils/tips';
+import { shouldShowAnnouncement } from '@/utils/announcementGate';
 
 /**
  * Firestore docs under `app_config/`:
@@ -34,12 +35,6 @@ export type AnnouncementPayload = TipContent & {
   channel: AnnouncementChannel;
   version: string;
 };
-
-function normalizeVersion(raw: unknown): string {
-  if (typeof raw === 'string') return raw.trim();
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
-  return '';
-}
 
 async function getSeenVersion(storageKey: string): Promise<string | null> {
   try {
@@ -119,29 +114,21 @@ function useAppAnnouncementChannel(
           return;
         }
         const data = snap.data() as Record<string, unknown>;
-        const enabled = data.enabled === true;
-        const version = normalizeVersion(data.version);
-        const body = typeof data.body === 'string' ? data.body.trim() : '';
-        const title =
-          typeof data.title === 'string' && data.title.trim()
-            ? data.title.trim()
-            : config.defaultTitle;
-
-        if (!enabled || !version || !body) {
-          setPending(null);
-          pendingVersionRef.current = null;
-          return;
-        }
-
         const seen = await getSeenVersion(config.storageKey);
-        if (seen === version) {
+        const decision = shouldShowAnnouncement(data, seen, config.defaultTitle);
+        if (!decision.show) {
           setPending(null);
           pendingVersionRef.current = null;
           return;
         }
 
-        pendingVersionRef.current = version;
-        setPending({ channel: config.channel, version, title, body });
+        pendingVersionRef.current = decision.version;
+        setPending({
+          channel: config.channel,
+          version: decision.version,
+          title: decision.title,
+          body: decision.body,
+        });
       },
       (err) => {
         console.warn(`[Announcement:${config.channel}] snapshot failed`, err);

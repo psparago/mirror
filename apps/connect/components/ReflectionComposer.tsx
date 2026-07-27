@@ -65,134 +65,30 @@ import {
   type VoiceOption,
   type VoicePickerTarget,
 } from '@/utils/ttsVoices';
+import {
+  type CaptionSource,
+  type ComposerSendPayload,
+  type ComposerStage,
+  type ComposerVideoMeta,
+  type ReflectionComposerProps,
+  type TriggerMagicOptions,
+  MAX_PHOTO_SCALE,
+  MIN_PHOTO_SCALE,
+  SOFT_VIDEO_RECOMMENDED_SECONDS,
+} from '@/components/reflectionComposer/types';
+import {
+  clampNumber,
+  clampVideoTrimWindowMs,
+  isNativeMediaInterruption,
+} from '@/components/reflectionComposer/videoTrim';
 
-export type ComposerVideoMeta = {
-  video_start_ms: number;
-  video_end_ms: number;
-  thumbnail_time_ms: number | null;
-  /** Local JPEG from view-shot when native thumbnails fail (e.g. Space Saver / codec quirks). */
-  poster_custom_uri?: string | null;
+export type {
+  CaptionSource,
+  ComposerSendPayload,
+  ComposerStage,
+  ComposerVideoMeta,
+  TriggerMagicOptions,
 };
-
-export type CaptionSource = 'human_voice' | 'clean_text' | 'ai' | 'bitl';
-
-export type TriggerMagicOptions = {
-  targetCaption?: string;
-  targetDeepDive?: string;
-  /** Keep staging media when only regenerating TTS (e.g. voice change). */
-  preserveStaging?: boolean;
-  captionVoice?: string;
-  deepDiveVoice?: string;
-  /** Staging S3 key for Companion spoken context (mic or BITL video). */
-  contextMediaKey?: string;
-  skipCaptionTts?: boolean;
-  spokenContextTrusted?: boolean;
-};
-
-export type ComposerSendPayload = {
-  caption: string;
-  audioUri: string | null;
-  deepDive: string | null;
-  videoMeta?: ComposerVideoMeta | null;
-  /** Final square photo export (framing baked) to upload instead of the raw source photo. */
-  filteredPhotoUri?: string | null;
-  /** Local selfie narration video for image reflections (uploaded as a flagged child reaction). */
-  narrationUri?: string | null;
-};
-
-export type ComposerStage = 'workbench' | 'ai' | 'send';
-
-// --- TYPES ---
-interface ReflectionComposerProps {
-  mediaUri: string;
-  mediaType: 'photo' | 'video';
-  // State from Parent
-  initialCaption?: string;
-  audioUri?: string | null;
-  aiArtifacts?: {
-    caption?: string;
-    deepDive?: string;
-    audioUrl?: string;
-    deepDiveAudioUrl?: string;
-  };
-  isAiThinking: boolean;
-  // Actions
-  onCancel: () => void;
-  onReplaceMedia: () => void;
-  onSend: (data: ComposerSendPayload) => void;
-  /** Hydrate trim / thumbnail when editing an existing video reflection. */
-  initialVideoMeta?: Partial<ComposerVideoMeta> | null;
-  /** Fired whenever trim range or thumbnail frame changes (for upload + thumbnails). */
-  onVideoMetaChange?: (meta: ComposerVideoMeta) => void;
-  onTriggerMagic: (options?: TriggerMagicOptions) => Promise<void>;
-  isSending: boolean;
-  captionVoice?: string;
-  deepDiveVoice?: string;
-  onCaptionVoiceChange?: (voice: string) => void;
-  onDeepDiveVoiceChange?: (voice: string) => void;
-  /** Shown on Replay preview header when editing an existing reflection (CreationModal). */
-  onReplaceMediaFromPreview?: () => void;
-  
-  // Audio Recorder (passed from parent or hook)
-  audioRecorder?: any; 
-  onStartRecording?: () => void;
-  onStopRecording?: () => void | Promise<void>;
-  // AI hint controls (surfaced in Reflection Hints sheet)
-  companionInReflection?: boolean;
-  onCompanionInReflectionChange?: (v: boolean) => void;
-  explorerInReflection?: boolean;
-  onExplorerInReflectionChange?: (v: boolean) => void;
-  peopleContext?: string;
-  onPeopleContextChange?: (v: string) => void;
-  explorerName?: string;
-  stage: ComposerStage;
-  onStageChange: (next: ComposerStage) => void;
-  /** Workbench back: where re-pick media opens (Library, Camera, Search). */
-  replaceMediaBackLabel?: string;
-  /** Overrides send-stage center title (e.g. Companion reaction flow). */
-  composerHeaderTitle?: string;
-  /** Offer selfie narration for image reflections (new, non-reaction sends only). */
-  allowNarration?: boolean;
-  /** What the Explorer should hear as the spoken caption. */
-  captionSource?: CaptionSource;
-  onCaptionSourceChange?: (next: CaptionSource) => void;
-  /** True while STT + Sparkle runs after Speak / BITL. */
-  isProcessingSpoken?: boolean;
-  /** Feed Bring-It-to-Life narration into the spoken-context pipeline. */
-  onSpokenNarration?: (localVideoUri: string) => void;
-}
-
-const MIN_PHOTO_SCALE = 0.35;
-const MAX_PHOTO_SCALE = 4;
-const SOFT_VIDEO_RECOMMENDED_SECONDS = 60;
-
-function clampVideoTrimWindowMs(
-  start: number,
-  end: number,
-  durationMs: number,
-  maxSpanMs: number,
-): { start: number; end: number } {
-  const d = Math.max(0, Math.round(durationMs));
-  let s = Math.max(0, Math.min(Math.round(start), Math.max(0, d - 1)));
-  let e = Math.max(s + 1, Math.min(Math.round(end), d));
-  if (e - s > maxSpanMs) {
-    e = s + maxSpanMs;
-    if (e > d) {
-      e = d;
-      s = Math.max(0, e - maxSpanMs);
-    }
-  }
-  return { start: s, end: Math.max(s + 1, e) };
-}
-
-function clampNumber(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
-function isNativeMediaInterruption(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  return message.includes('Seeking interrupted');
-}
 
 function clampNumberWorklet(value: number, min: number, max: number): number {
   'worklet';
