@@ -157,6 +157,7 @@ function ReflectionComposerInner({
   onDeepDiveVoiceChange,
   onReplaceMediaFromPreview,
   audioRecorder,
+  isSpeakRecording = false,
   onStartRecording,
   onStopRecording,
   initialVideoMeta,
@@ -241,16 +242,18 @@ function ReflectionComposerInner({
 
   const [isAiCancelled, setIsAiCancelled] = useState(false);
   const isBlockedByAi = (isAiThinking || isProcessingSpoken) && !isAiCancelled;
+  // Skip Sparkle mic tip after BITL — they already spoke; showing it when Sparkle
+  // finishes (processing gate clears) feels like a late "voice context" lecture.
   const sparkleTip = useTip(
     'sparkle_tell_the_story',
-    stage === 'ai' && !isProcessingSpoken && !isAiThinking,
+    stage === 'ai' && !isProcessingSpoken && !isAiThinking && !narrationUri,
     {
       explorerName: explorerName || undefined,
     },
   );
   const bitlTip = useTip(
     'workbench_bring_to_life',
-    stage === 'workbench' && canNarrate && !isBlockedByAi,
+    stage === 'workbench' && canNarrate && !narrationUri && !isBlockedByAi,
     {
       explorerName: explorerName || undefined,
     },
@@ -260,6 +263,7 @@ function ReflectionComposerInner({
     stage === 'workbench' && mediaType === 'video' && !isBlockedByAi,
   );
   const hasRecordedAudio = !!audioUri;
+  const isMicRecording = Boolean(isSpeakRecording || audioRecorder?.isRecording);
 
   // Sparkle animation: rotating and pulsing star
   const sparkleRotation = useSharedValue(0);
@@ -1646,10 +1650,10 @@ function ReflectionComposerInner({
   }, [stage]);
 
   useEffect(() => {
-    if (audioRecorder?.isRecording) {
+    if (isMicRecording) {
       void stopAiPreviewRef.current?.();
     }
-  }, [audioRecorder?.isRecording]);
+  }, [isMicRecording]);
 
   const handleRunSparkleAndPlay = useCallback(() => {
     void stopAiPreviewRef.current?.();
@@ -2472,25 +2476,25 @@ function ReflectionComposerInner({
               <TouchableOpacity
                 style={[
                   styles.aiRecordBtnHero,
-                  audioRecorder?.isRecording && styles.aiRecordBtnActive,
+                  isMicRecording && styles.aiRecordBtnActive,
                   (isAiThinking || isProcessingSpoken) && { opacity: 0.45 },
                 ]}
                 onPress={() => {
-                  if (audioRecorder?.isRecording) {
+                  if (isMicRecording) {
                     void onStopRecording?.();
                   } else {
-                    onStartRecording?.();
+                    void onStartRecording?.();
                   }
                 }}
                 disabled={isAiThinking || isProcessingSpoken}
                 activeOpacity={0.7}
                 accessibilityRole="button"
                 accessibilityLabel={
-                  audioRecorder?.isRecording ? 'Stop recording' : 'Tell the story'
+                  isMicRecording ? 'Stop recording' : 'Tell the story'
                 }
               >
                 <FontAwesome
-                  name={audioRecorder?.isRecording ? 'stop' : 'microphone'}
+                  name={isMicRecording ? 'stop' : 'microphone'}
                   size={26}
                   color="#fff"
                 />
@@ -2500,7 +2504,7 @@ function ReflectionComposerInner({
                   <ActivityIndicator size="small" color="#f5c842" />
                   <Text style={styles.spokenProcessingText}>Listening & Sparkling…</Text>
                 </View>
-              ) : hasRecordedAudio && !audioRecorder?.isRecording ? (
+              ) : hasRecordedAudio && !isMicRecording ? (
                 <View style={styles.aiVoiceDoneCol}>
                   <View style={styles.aiVoiceBadgeRow}>
                     <FontAwesome name="check-circle" size={14} color="#27ae60" />
@@ -2510,12 +2514,12 @@ function ReflectionComposerInner({
                 </View>
               ) : (
                 <Text style={styles.aiVoicePrompt}>
-                  {audioRecorder?.isRecording ? 'Recording… tap to stop' : 'Tap to speak'}
+                  {isMicRecording ? 'Recording… tap to stop' : 'Tap to speak'}
                 </Text>
               )}
             </View>
 
-            {hasRecordedAudio && !audioRecorder?.isRecording ? (
+            {hasRecordedAudio && !isMicRecording ? (
               <View style={styles.captionSourceRow}>
                 <Text style={styles.captionSourceLabel}>Explorer hears</Text>
                 <View style={styles.captionSourceSegment}>

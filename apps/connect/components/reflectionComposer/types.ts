@@ -62,6 +62,8 @@ export type ReflectionComposerProps = {
   onDeepDiveVoiceChange?: (voice: string) => void;
   onReplaceMediaFromPreview?: () => void;
   audioRecorder?: any;
+  /** True while Sparkle Speak mic is active (needed on Android where expo-av drives capture). */
+  isSpeakRecording?: boolean;
   onStartRecording?: () => void;
   onStopRecording?: () => void | Promise<void>;
   companionInReflection?: boolean;

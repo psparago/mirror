@@ -1,7 +1,7 @@
 import ReflectionComposer, { type ComposerStage, type ComposerVideoMeta } from '@/components/ReflectionComposer';
 import { CreationModalConfirmationVideo } from '@/components/CreationModalConfirmationVideo';
 import { useReflectionMedia } from '@/context/ReflectionMediaContext';
-import { configureConnectPlaybackAudioSessionAsync } from '@/utils/audioSession';
+import { configureConnectPlaybackAudioSessionAsync, startAndroidExpoAvSpeakRecordingAsync } from '@/utils/audioSession';
 import {
   deleteScratchMediaFile,
   ensureFileUri,
@@ -42,6 +42,7 @@ import {
 } from '@projectmirror/shared';
 import { arrayUnion, collection, db, deleteField, doc, getDoc, serverTimestamp, setDoc, updateDoc } from '@projectmirror/shared/firebase';
 import { RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync, useAudioRecorder } from 'expo-audio';
+import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -215,6 +216,9 @@ export default function CreationModal({
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [audioUri, setAudioUri] = useState<string | null>(null);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
+  /** Android Sparkle Speak uses expo-av; this tracks mic UI independently of expo-audio. */
+  const [isSpeakRecording, setIsSpeakRecording] = useState(false);
+  const androidSpeakRecordingRef = useRef<Audio.Recording | null>(null);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [isAiGenerated, setIsAiGenerated] = useState(false);
   const [shortCaption, setShortCaption] = useState<string>('');
@@ -1372,7 +1376,10 @@ export default function CreationModal({
 
   const startRecording = async () => {
     // Prevent multiple simultaneous calls
-    if (isStartingRecording || audioRecorder.isRecording || isProcessingSpoken) {
+    if (isStartingRecording || isSpeakRecording || isProcessingSpoken) {
+      return;
+    }
+    if (Platform.OS !== 'android' && audioRecorder.isRecording) {
       return;
     }
 
@@ -1384,10 +1391,28 @@ export default function CreationModal({
       // Reset the last processed URI so we can detect the new recording
       lastProcessedUriRef.current = null;
 
+      if (Platform.OS === 'android') {
+        // expo-audio record() often never starts on Android — same workaround as ReactionSheet.
+        const existing = await Audio.getPermissionsAsync();
+        let granted = existing.granted;
+        if (!granted) {
+          const requested = await Audio.requestPermissionsAsync();
+          granted = requested.granted;
+        }
+        if (!granted) {
+          Alert.alert('Permission Required', 'Audio recording permission is required.');
+          return;
+        }
+        const recording = await startAndroidExpoAvSpeakRecordingAsync();
+        androidSpeakRecordingRef.current = recording;
+        setIsSpeakRecording(true);
+        return;
+      }
+
       // Request permissions if needed
       const permission = await requestRecordingPermissionsAsync();
       if (!permission.granted) {
-        Alert.alert("Permission Required", "Audio recording permission is required.");
+        Alert.alert('Permission Required', 'Audio recording permission is required.');
         return;
       }
 
@@ -1401,8 +1426,10 @@ export default function CreationModal({
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
     } catch (error: any) {
-      console.error("Failed to start recording:", error);
-      Alert.alert("Error", `Failed to start audio recording: ${error.message || error}`);
+      console.error('Failed to start recording:', error);
+      androidSpeakRecordingRef.current = null;
+      setIsSpeakRecording(false);
+      Alert.alert('Error', `Failed to start audio recording: ${error.message || error}`);
       // Reset state on error
       setAudioUri(null);
     } finally {
@@ -1411,17 +1438,28 @@ export default function CreationModal({
   };
 
   const stopRecording = async () => {
-    if (!audioRecorder.isRecording) {
+    const androidRecording = androidSpeakRecordingRef.current;
+    const usingAndroidAv = Platform.OS === 'android' && !!androidRecording;
+    if (!usingAndroidAv && !audioRecorder.isRecording && !isSpeakRecording) {
       return;
     }
 
     try {
-      await audioRecorder.stop();
+      let recordingUri: string | null = null;
+
+      if (usingAndroidAv && androidRecording) {
+        androidSpeakRecordingRef.current = null;
+        setIsSpeakRecording(false);
+        await androidRecording.stopAndUnloadAsync();
+        recordingUri = androidRecording.getURI();
+      } else {
+        await audioRecorder.stop();
+        recordingUri = audioRecorder.uri;
+      }
 
       await configureConnectPlaybackAudioSessionAsync();
 
       // Persist the recording to a stable location so it won't be cleaned from cache
-      const recordingUri = audioRecorder.uri;
       let persistentUri: string | null = null;
       if (recordingUri && recordingUri !== lastProcessedUriRef.current) {
         try {
@@ -1431,7 +1469,7 @@ export default function CreationModal({
           setAudioUri(persistentUri);
           lastProcessedUriRef.current = recordingUri;
         } catch (copyError) {
-          console.error("Failed to persist audio recording:", copyError);
+          console.error('Failed to persist audio recording:', copyError);
           // Fallback to the original URI if copy fails
           persistentUri = recordingUri;
           setAudioUri(recordingUri);
@@ -1443,8 +1481,10 @@ export default function CreationModal({
         await processSpokenMediaAndSparkle(persistentUri, 'audio');
       }
     } catch (error: any) {
-      console.error("Failed to stop recording:", error);
-      Alert.alert("Error", "Failed to stop audio recording");
+      console.error('Failed to stop recording:', error);
+      androidSpeakRecordingRef.current = null;
+      setIsSpeakRecording(false);
+      Alert.alert('Error', 'Failed to stop audio recording');
     }
   };
 
@@ -2548,6 +2588,12 @@ export default function CreationModal({
 
   const handleClose = () => {
     suppressPickerRecoveryRef.current = false;
+    if (androidSpeakRecordingRef.current) {
+      const recording = androidSpeakRecordingRef.current;
+      androidSpeakRecordingRef.current = null;
+      setIsSpeakRecording(false);
+      void recording.stopAndUnloadAsync().catch(() => {});
+    }
     if (pickerRecoveryTimerRef.current) {
       clearTimeout(pickerRecoveryTimerRef.current);
       pickerRecoveryTimerRef.current = null;
@@ -2942,6 +2988,7 @@ export default function CreationModal({
                   });
                 }}
                 audioRecorder={audioRecorder}
+                isSpeakRecording={isSpeakRecording}
                 onStartRecording={startRecording}
                 onStopRecording={stopRecording}
                 companionInReflection={isCompanionInReflection}

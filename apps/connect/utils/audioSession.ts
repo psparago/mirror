@@ -206,6 +206,49 @@ export async function configureConnectReactionRecordingAudioSessionAsync(options
 }
 
 /**
+ * Android Sparkle Speak / voice capture: expo-audio's useAudioRecorder often never
+ * flips isRecording after record(). Use expo-av Recording instead (same path as ReactionSheet).
+ */
+export async function startAndroidExpoAvSpeakRecordingAsync(): Promise<Audio.Recording> {
+  await releaseConnectCaptureAudioAsync();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  try {
+    await setIsAudioActiveAsync(false);
+  } catch {
+    /* ignore */
+  }
+  try {
+    await setIsAudioActiveAsync(true);
+  } catch (error) {
+    console.warn('[audioSession] Android speak: setIsAudioActiveAsync failed:', error);
+  }
+  await Audio.setAudioModeAsync({
+    allowsRecordingIOS: true,
+    playsInSilentModeIOS: true,
+    staysActiveInBackground: false,
+    shouldDuckAndroid: true,
+    playThroughEarpieceAndroid: false,
+  });
+
+  const recording = new Audio.Recording();
+  await recording.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+  await recording.startAsync();
+  const status = await recording.getStatusAsync();
+  if (!status.isRecording) {
+    try {
+      await recording.stopAndUnloadAsync();
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      `Android speak did not start (isRecording=${status.isRecording}, canRecord=${status.canRecord})`,
+    );
+  }
+  return recording;
+}
+
+/**
  * Voice-only reaction on a photo parent — expo-audio recorder only (iOS).
  * Avoids putting expo-av into recording mode on Android, which can block the recorder.
  */
