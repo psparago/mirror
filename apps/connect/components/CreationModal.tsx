@@ -18,6 +18,10 @@ import {
   type VideoProcessProgress,
 } from '@/utils/mediaProcessor';
 import { buildReflectionPrompt } from '@/utils/buildReflectionPrompt';
+import {
+  defaultCaptionSourceForSpoken,
+  shouldSkipCaptionTts,
+} from '@/utils/captionSourceDefaults';
 import { uploadReaction } from '@/utils/reactionUpload';
 import {
   DEFAULT_TTS_VOICE,
@@ -1316,12 +1320,12 @@ export default function CreationModal({
         throw new Error('Staging image URL missing');
       }
 
-      const nextSource: CaptionSource = kind === 'video' ? 'bitl' : 'clean_text';
+      const nextSource = defaultCaptionSourceForSpoken(kind);
       captionSourceRef.current = nextSource;
       setCaptionSource(nextSource);
       setSpokenContextTrusted(true);
 
-      const skipCaptionTts = nextSource === 'bitl';
+      const skipCaptionTts = shouldSkipCaptionTts(nextSource);
       const aiResult = await getAIDescription(getStagingUrl, {
         silent: false,
         contextMediaKey,
